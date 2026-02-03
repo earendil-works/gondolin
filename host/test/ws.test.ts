@@ -133,3 +133,68 @@ test("ws fetch hook blocks requests", { timeout: timeoutMs, skip: Boolean(url) }
     await vm.stop();
   }
 });
+
+test("ws isAllowed blocks private ipv4", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+  const isPrivateIPv4 = (ip: string) => {
+    const parts = ip.split(".").map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return false;
+    }
+    if (parts[0] === 10) return true;
+    if (parts[0] === 127) return true;
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    return false;
+  };
+
+  const seenIps: string[] = [];
+  const vm = new VM({
+    token: token ?? undefined,
+    httpHooks: {
+      isAllowed: (info) => {
+        seenIps.push(info.ip);
+        return !isPrivateIPv4(info.ip);
+      },
+    },
+  });
+
+  try {
+    const script = [
+      "import urllib.request, urllib.error",
+      "def fetch(url):",
+      "    try:",
+      "        return urllib.request.urlopen(url, timeout=5).read().decode('utf-8', 'ignore')",
+      "    except urllib.error.HTTPError as e:",
+      "        return f'HTTP {e.code}'",
+      "    except Exception as e:",
+      "        return f'ERROR {type(e).__name__}'",
+      "print('PRIVATE_GW')",
+      "print(fetch('http://192.168.127.1'))",
+      "print('PRIVATE_10')",
+      "print(fetch('http://10.0.0.1'))",
+    ].join("\n");
+
+    const result = await withTimeout(vm.exec(["python3", "-c", script]), timeoutMs);
+
+    const output = result.stdout.toString().trim().split("\n");
+    const stderr = result.stderr.toString();
+
+    assert.equal(
+      result.exitCode,
+      0,
+      stderr.trim() ? `unexpected exit code: ${result.exitCode}\n${stderr.trim()}` : undefined
+    );
+
+    const gwIndex = output.indexOf("PRIVATE_GW");
+    const privateIndex = output.indexOf("PRIVATE_10");
+
+    assert.notEqual(gwIndex, -1, `missing PRIVATE_GW output: ${output.join("\n")}`);
+    assert.notEqual(privateIndex, -1, `missing PRIVATE_10 output: ${output.join("\n")}`);
+    assert.equal(output[gwIndex + 1], "HTTP 403");
+    assert.equal(output[privateIndex + 1], "HTTP 403");
+    assert.ok(seenIps.includes("192.168.127.1"), `missing 192.168.127.1 in isAllowed: ${seenIps.join(", ")}`);
+    assert.ok(seenIps.includes("10.0.0.1"), `missing 10.0.0.1 in isAllowed: ${seenIps.join(", ")}`);
+  } finally {
+    await vm.stop();
+  }
+});
