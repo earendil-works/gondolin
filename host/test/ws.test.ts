@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { VM } from "../src/vm";
+import { HttpRequestBlockedError } from "../src/qemu-net";
 
 const url = process.env.WS_URL;
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 15000);
@@ -67,6 +68,67 @@ test("ws http/https fetch", { timeout: timeoutMs }, async () => {
     );
 
     assertFetchOutput(output, stderr);
+  } finally {
+    await vm.stop();
+  }
+});
+
+test("ws fetch hook blocks requests", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+  const baseFetch = fetch;
+  const vm = new VM({
+    token: token ?? undefined,
+    fetch: async (input, init) => {
+      const target =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const hostname = new URL(target).hostname;
+      if (hostname !== "example.com") {
+        throw new HttpRequestBlockedError("blocked by test", 451, "Blocked");
+      }
+      return baseFetch(input, init);
+    },
+  });
+
+  try {
+    const script = [
+      "import urllib.request, urllib.error",
+      "def fetch(url):",
+      "    try:",
+      "        return urllib.request.urlopen(url, timeout=10).read().decode('utf-8', 'ignore')",
+      "    except urllib.error.HTTPError as e:",
+      "        return f'HTTP {e.code}'",
+      "    except Exception as e:",
+      "        return f'ERROR {type(e).__name__}'",
+      "print('EXAMPLE_COM')",
+      "print('OK' if 'Example Domain' in fetch('http://example.com') else 'BAD')",
+      "print('EXAMPLE_ORG')",
+      "print(fetch('http://example.org'))",
+    ].join("\n");
+
+    const result = await withTimeout(
+      vm.exec(["python3", "-c", script]),
+      timeoutMs
+    );
+
+    const output = result.stdout.toString().trim().split("\n");
+    const stderr = result.stderr.toString();
+
+    assert.equal(
+      result.exitCode,
+      0,
+      stderr.trim() ? `unexpected exit code: ${result.exitCode}\n${stderr.trim()}` : undefined
+    );
+
+    const exampleComIndex = output.indexOf("EXAMPLE_COM");
+    const exampleOrgIndex = output.indexOf("EXAMPLE_ORG");
+
+    assert.notEqual(exampleComIndex, -1, `missing EXAMPLE_COM output: ${output.join("\n")}`);
+    assert.notEqual(exampleOrgIndex, -1, `missing EXAMPLE_ORG output: ${output.join("\n")}`);
+    assert.equal(output[exampleComIndex + 1], "OK");
+    assert.equal(output[exampleOrgIndex + 1], "HTTP 451");
   } finally {
     await vm.stop();
   }

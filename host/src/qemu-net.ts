@@ -7,6 +7,7 @@ import tls from "tls";
 import crypto from "crypto";
 import { Duplex } from "stream";
 import { execFileSync } from "child_process";
+import { lookup } from "dns/promises";
 
 import {
   NetworkStack,
@@ -92,6 +93,8 @@ type TcpSession = {
   tls?: TlsSession;
 };
 
+export type HttpFetch = typeof fetch;
+
 export type HttpHookRequest = {
   method: string;
   url: string;
@@ -106,7 +109,28 @@ export type HttpHookResponse = {
   body: Buffer;
 };
 
+export type HttpAllowInfo = {
+  hostname: string;
+  ip: string;
+  family: 4 | 6;
+  port: number;
+  protocol: "http" | "https";
+};
+
+export class HttpRequestBlockedError extends Error {
+  status: number;
+  statusText: string;
+
+  constructor(message = "request blocked", status = 403, statusText = "Forbidden") {
+    super(message);
+    this.name = "HttpRequestBlockedError";
+    this.status = status;
+    this.statusText = statusText;
+  }
+}
+
 export type HttpHooks = {
+  isAllowed?: (info: HttpAllowInfo) => Promise<boolean> | boolean;
   onRequest?: (request: HttpHookRequest) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
   onResponse?: (
     response: HttpHookResponse,
@@ -121,6 +145,7 @@ export type QemuNetworkOptions = {
   gatewayMac?: Buffer;
   vmMac?: Buffer;
   debug?: boolean;
+  fetch?: HttpFetch;
   httpHooks?: HttpHooks;
   mitmCertDir?: string;
   policy?: SandboxPolicy;
@@ -573,8 +598,16 @@ export class QemuNetworkBackend extends EventEmitter {
     try {
       await this.fetchAndRespond(parsed.request, options.scheme, options.write);
     } catch (err) {
-      this.emit("error", err instanceof Error ? err : new Error(String(err)));
-      this.respondWithError(options.write, 502, "Bad Gateway");
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (error instanceof HttpRequestBlockedError) {
+        if (this.options.debug) {
+          this.emit("log", `[net] http blocked ${error.message}`);
+        }
+        this.respondWithError(options.write, error.status, error.statusText);
+      } else {
+        this.emit("error", error);
+        this.respondWithError(options.write, 502, "Bad Gateway");
+      }
     } finally {
       httpSession.closed = true;
       options.finish();
@@ -711,7 +744,46 @@ export class QemuNetworkBackend extends EventEmitter {
       if (updated) hookRequest = updated;
     }
 
-    const response = await fetch(hookRequest.url, {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(hookRequest.url);
+    } catch {
+      this.respondWithError(write, 400, "Bad Request");
+      return;
+    }
+
+    const protocol = parsedUrl.protocol === "https:" ? "https" : parsedUrl.protocol === "http:" ? "http" : null;
+    if (!protocol) {
+      this.respondWithError(write, 400, "Bad Request");
+      return;
+    }
+
+    const port = parsedUrl.port
+      ? Number(parsedUrl.port)
+      : protocol === "https"
+        ? 443
+        : 80;
+    if (!Number.isFinite(port) || port <= 0) {
+      this.respondWithError(write, 400, "Bad Request");
+      return;
+    }
+
+    if (this.options.httpHooks?.isAllowed) {
+      const { address, family } = await this.resolveHostname(parsedUrl.hostname);
+      const allowed = await this.options.httpHooks.isAllowed({
+        hostname: parsedUrl.hostname,
+        ip: address,
+        family,
+        port,
+        protocol,
+      });
+      if (!allowed) {
+        throw new HttpRequestBlockedError(`blocked by policy: ${parsedUrl.hostname}`);
+      }
+    }
+
+    const fetcher = this.options.fetch ?? fetch;
+    const response = await fetcher(hookRequest.url, {
       method: hookRequest.method,
       headers: hookRequest.headers,
       body: hookRequest.body ? new Uint8Array(hookRequest.body) : undefined,
@@ -775,6 +847,15 @@ export class QemuNetworkBackend extends EventEmitter {
     const host = request.headers["host"];
     if (!host) return null;
     return `${defaultScheme}://${host}${request.target}`;
+  }
+
+  private async resolveHostname(hostname: string): Promise<{ address: string; family: 4 | 6 }> {
+    const ipFamily = net.isIP(hostname);
+    if (ipFamily === 4 || ipFamily === 6) {
+      return { address: hostname, family: ipFamily };
+    }
+    const result = await lookup(hostname);
+    return { address: result.address, family: result.family as 4 | 6 };
   }
 
   private getMitmDir() {

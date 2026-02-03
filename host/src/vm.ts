@@ -11,6 +11,7 @@ import {
 } from "./ws-protocol";
 import { SandboxWsServer, SandboxWsServerOptions } from "./sandbox-ws-server";
 import type { SandboxState } from "./sandbox-controller";
+import type { HttpFetch, HttpHooks } from "./qemu-net";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
@@ -57,6 +58,8 @@ export type VMOptions = {
   server?: SandboxWsServerOptions;
   policy?: SandboxPolicy;
   autoStart?: boolean;
+  fetch?: HttpFetch;
+  httpHooks?: HttpHooks;
 };
 
 type ExecSession = {
@@ -115,6 +118,12 @@ export class VM {
     }
 
     const serverOptions: SandboxWsServerOptions = { ...options.server };
+    if (options.fetch && serverOptions.fetch === undefined) {
+      serverOptions.fetch = options.fetch;
+    }
+    if (options.httpHooks && serverOptions.httpHooks === undefined) {
+      serverOptions.httpHooks = options.httpHooks;
+    }
     if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
     if (serverOptions.port === undefined) serverOptions.port = 0;
     if (this.policy && serverOptions.policy === undefined) {

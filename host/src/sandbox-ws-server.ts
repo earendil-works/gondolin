@@ -24,6 +24,7 @@ import {
 } from "./ws-protocol";
 import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-controller";
 import { QemuNetworkBackend } from "./qemu-net";
+import type { HttpFetch, HttpHooks } from "./qemu-net";
 import type { SandboxPolicy } from "./policy";
 
 const MAX_REQUEST_ID = 0xffffffff;
@@ -53,6 +54,8 @@ export type SandboxWsServerOptions = {
   maxJsonBytes?: number;
   maxStdinBytes?: number;
   policy?: SandboxPolicy;
+  fetch?: HttpFetch;
+  httpHooks?: HttpHooks;
 };
 
 export type SandboxWsServerAddress = {
@@ -84,6 +87,8 @@ type ResolvedServerOptions = {
   maxJsonBytes: number;
   maxStdinBytes: number;
   policy: SandboxPolicy | null;
+  fetch?: HttpFetch;
+  httpHooks?: HttpHooks;
 };
 
 export function resolveSandboxWsServerOptions(
@@ -123,6 +128,8 @@ export function resolveSandboxWsServerOptions(
     maxJsonBytes: options.maxJsonBytes ?? DEFAULT_MAX_JSON_BYTES,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     policy: options.policy ?? null,
+    fetch: options.fetch,
+    httpHooks: options.httpHooks,
   };
 }
 
@@ -440,6 +447,8 @@ export class SandboxWsServer extends EventEmitter {
           vmMac: mac,
           debug: this.options.netDebug,
           policy: this.policy ?? undefined,
+          fetch: this.options.fetch,
+          httpHooks: this.options.httpHooks,
         })
       : null;
 
