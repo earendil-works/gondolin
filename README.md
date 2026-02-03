@@ -1,6 +1,8 @@
-# eRegion Sandbox POC
+# Eregion Sandbox POC
 
-This repo is a proof-of-concept for running a tiny Alpine guest in QEMU, driving it via a virtio-serial RPC, and exposing a host WebSocket API for exec requests.
+This repo is a proof-of-concept for running a tiny Alpine guest in QEMU,
+driving it via a virtio-serial RPC, and exposing a host WebSocket API for exec
+requests.
 
 ## Repository layout
 
