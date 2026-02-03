@@ -151,6 +151,7 @@ class VirtioBridge {
   private pending: Buffer[] = [];
   private pendingBytes = 0;
   private waitingDrain = false;
+  private allowReconnect = true;
 
   constructor(
     private readonly socketPath: string,
@@ -159,6 +160,7 @@ class VirtioBridge {
 
   connect() {
     if (this.server) return;
+    this.allowReconnect = true;
     if (!fs.existsSync(path.dirname(this.socketPath))) {
       fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
     }
@@ -183,6 +185,11 @@ class VirtioBridge {
   }
 
   disconnect() {
+    this.allowReconnect = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.socket) {
       this.socket.end();
       this.socket = null;
@@ -290,10 +297,12 @@ class VirtioBridge {
   }
 
   private scheduleReconnect() {
-    if (this.reconnectTimer) return;
+    if (!this.allowReconnect || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
+      if (this.allowReconnect) {
+        this.connect();
+      }
     }, 500);
   }
 }
@@ -637,8 +646,23 @@ export class SandboxWsServer extends EventEmitter {
     this.network?.stop();
 
     if (this.wss) {
+      for (const client of this.wss.clients) {
+        client.terminate();
+      }
       await new Promise<void>((resolve) => {
-        this.wss?.close(() => resolve());
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          resolve();
+        };
+
+        const timeout = setTimeout(() => {
+          finish();
+        }, 1000);
+
+        this.wss?.close(() => finish());
       });
     }
     this.wss = null;

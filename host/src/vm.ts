@@ -244,11 +244,11 @@ export class VM {
   }
 
   private async stopInternal() {
-    await this.disconnect();
     if (this.server) {
       await this.server.stop();
       this.url = null;
     }
+    await this.disconnect();
   }
 
   private allocateId(): number {
@@ -592,8 +592,29 @@ export class VM {
     const ws = this.ws;
     this.ws = null;
 
+    if (ws.readyState === WebSocket.CLOSED) return;
+
     await new Promise<void>((resolve) => {
-      ws.once("close", () => resolve());
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      const timeout = setTimeout(() => {
+        ws.terminate();
+        finish();
+      }, 1000);
+
+      ws.once("close", finish);
+      ws.once("error", finish);
+
+      if (ws.readyState === WebSocket.CLOSING) {
+        return;
+      }
+
       ws.close();
     });
   }
