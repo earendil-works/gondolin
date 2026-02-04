@@ -9,8 +9,19 @@ import internalModules from './internal-modules';
 const cache = new Map<string, { exports: Record<string, unknown> }>();
 
 // node-vfs is located at host/vendor/node-vfs
-// From dist/src/vfs/node/, we need to go up 4 levels to reach host/, then into vendor/
-const VENDOR_VFS_PATH = path.resolve(__dirname, '..', '..', '..', '..', 'vendor', 'node-vfs', 'lib', 'internal', 'vfs');
+// Handle both source (src/vfs/node) and compiled (dist/src/vfs/node) paths
+function findVendorPath(): string {
+  // Try from compiled location first (dist/src/vfs/node -> host/vendor)
+  const fromDist = path.resolve(__dirname, '..', '..', '..', '..', 'vendor', 'node-vfs', 'lib', 'internal', 'vfs');
+  if (fs.existsSync(fromDist)) {
+    return fromDist;
+  }
+  // Fall back to source location (src/vfs/node -> host/vendor)
+  const fromSrc = path.resolve(__dirname, '..', '..', '..', 'vendor', 'node-vfs', 'lib', 'internal', 'vfs');
+  return fromSrc;
+}
+
+const VENDOR_VFS_PATH = findVendorPath();
 
 function createRequire(parentPath: string) {
   return function vfsRequire(id: string) {

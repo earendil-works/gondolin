@@ -35,11 +35,17 @@ function getAssetDir(): string {
   }
 
   // Check for local development (repo checkout)
-  // From dist/src/assets.js, we need to go up to find guest/
-  const packageRoot = path.resolve(__dirname, "..", "..");
-  const devPath = path.join(packageRoot, "..", "guest", "image", "out");
-  if (fs.existsSync(path.join(devPath, "vmlinuz-virt"))) {
-    return devPath;
+  // Handle both source (src/) and compiled (dist/src/) paths
+  const possibleRoots = [
+    path.resolve(__dirname, "..", ".."),      // from src/: host/ -> ../guest
+    path.resolve(__dirname, "..", "..", ".."), // from dist/src/: host/ -> ../guest
+  ];
+  
+  for (const root of possibleRoots) {
+    const devPath = path.join(root, "..", "guest", "image", "out");
+    if (fs.existsSync(path.join(devPath, "vmlinuz-virt"))) {
+      return devPath;
+    }
   }
 
   // User cache directory

@@ -116,21 +116,26 @@ export type ResolvedServerOptions = {
  * Returns undefined for each path if not found locally.
  */
 function getLocalGuestAssets(): Partial<GuestAssets> {
-  // From dist/src/, we need to go up to host/ then up to repo root
-  const packageRoot = path.resolve(__dirname, "../..");
-  const devPath = path.join(packageRoot, "..", "guest", "image", "out");
+  // Handle both source (src/) and compiled (dist/src/) paths
+  const possibleRoots = [
+    path.resolve(__dirname, "../.."),     // from src/: host/
+    path.resolve(__dirname, "../../.."),  // from dist/src/: host/
+  ];
+  
+  for (const root of possibleRoots) {
+    const devPath = path.join(root, "..", "guest", "image", "out");
+    const kernelPath = path.join(devPath, "vmlinuz-virt");
+    const initrdPath = path.join(devPath, "initramfs.cpio.lz4");
+    const rootfsPath = path.join(devPath, "rootfs.ext4");
 
-  const kernelPath = path.join(devPath, "vmlinuz-virt");
-  const initrdPath = path.join(devPath, "initramfs.cpio.lz4");
-  const rootfsPath = path.join(devPath, "rootfs.ext4");
-
-  // Check if local dev paths exist
-  if (
-    fs.existsSync(kernelPath) &&
-    fs.existsSync(initrdPath) &&
-    fs.existsSync(rootfsPath)
-  ) {
-    return { kernelPath, initrdPath, rootfsPath };
+    // Check if local dev paths exist
+    if (
+      fs.existsSync(kernelPath) &&
+      fs.existsSync(initrdPath) &&
+      fs.existsSync(rootfsPath)
+    ) {
+      return { kernelPath, initrdPath, rootfsPath };
+    }
   }
 
   return {};
