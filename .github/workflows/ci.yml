@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Typecheck host
+        run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
+
+      - name: Build host
+        run: pnpm run build
+
+  build-guest:
+    name: Build Guest (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            qemu: qemu-system-x86
+            artifact: gondolin-guest-x64
+            zig-target: x86_64-linux-musl
+          - arch: aarch64
+            qemu: qemu-system-arm
+            artifact: gondolin-guest-arm64
+            zig-target: aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.qemu }} lz4
+
+      - name: Build guest binaries (cross-compile)
+        run: |
+          cd guest
+          zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.zig-target }}
+
+      - name: Build guest image
+        run: |
+          cd guest
+          ARCH=${{ matrix.arch }} make image
+
+      - name: Package assets
+        run: |
+          cd guest/image/out
+          tar -czvf ../../../${{ matrix.artifact }}.tar.gz \
+            vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          retention-days: 7
+
+  test:
+    name: Test
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm run test
+
+  # Optional: Publish preview package for PRs (uses trusted publishing)
+  # Uncomment to enable publishing test versions from PRs
+  # publish-preview:
+  #   name: Publish Preview
+  #   needs: [check, test, build-guest]
+  #   if: github.event_name == 'pull_request'
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: read
+  #     id-token: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: pnpm/action-setup@v2
+  #       with:
+  #         version: 8
+  #
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '24'
+  #         registry-url: 'https://registry.npmjs.org'
+  #         cache: 'pnpm'
+  #
+  #     - name: Install dependencies
+  #       run: pnpm install
+  #
+  #     - name: Build
+  #       run: pnpm run build
+  #
+  #     - name: Set preview version
+  #       run: |
+  #         cd host
+  #         # Create a preview version like 0.0.0-pr.123.abc1234
+  #         VERSION="0.0.0-pr.${{ github.event.pull_request.number }}.$(git rev-parse --short HEAD)"
+  #         npm version $VERSION --no-git-tag-version
+  #
+  #     - name: Publish preview (with provenance)
+  #       run: |
+  #         cd host
+  #         npm publish --access public --provenance --tag pr-${{ github.event.pull_request.number }}
+  #
+  #     - name: Comment on PR
+  #       uses: actions/github-script@v7
+  #       with:
+  #         script: |
+  #           const version = `0.0.0-pr.${{ github.event.pull_request.number }}.${context.sha.substring(0, 7)}`;
+  #           github.rest.issues.createComment({
+  #             issue_number: context.issue.number,
+  #             owner: context.repo.owner,
+  #             repo: context.repo.repo,
+  #             body: `📦 Preview package published!\n\n\`\`\`bash\nnpm install @earendil-works/gondolin@${version}\n\`\`\`\n\nOr use the PR tag:\n\`\`\`bash\nnpm install @earendil-works/gondolin@pr-${{ github.event.pull_request.number }}\n\`\`\``
+  #           })

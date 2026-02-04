@@ -17,10 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 lz4
+
+      - name: Build guest binaries
+        run: |
+          cd guest
+          zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
 
       - name: Build guest image
         run: |
@@ -46,10 +56,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-arm lz4
+
+      - name: Build guest binaries (arm64 cross-compile)
+        run: |
+          cd guest
+          zig build -Doptimize=ReleaseSmall -Dtarget=aarch64-linux-musl
 
       - name: Build guest image (arm64)
         run: |
@@ -128,6 +148,9 @@ jobs:
     name: Publish to NPM
     needs: [create-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -137,18 +160,43 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Get version from tag
+        id: tag_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          # Strip leading 'v' if present
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: pnpm install
 
+      - name: Verify version matches
+        run: |
+          cd host
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ steps.tag_version.outputs.version }}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch: package.json has $PKG_VERSION but tag is v$TAG_VERSION"
+            echo "   Update host/package.json version to $TAG_VERSION before releasing"
+            exit 1
+          fi
+          echo "✅ Version matches: $PKG_VERSION"
+
       - name: Build
         run: pnpm run build
 
-      - name: Publish to NPM
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Publish to NPM (with provenance)
         run: |
           cd host
-          pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --access public --provenance
