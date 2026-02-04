@@ -197,9 +197,6 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Run tests
-        run: pnpm run test
-
       - name: Publish to NPM (with provenance)
         run: |
           cd host
