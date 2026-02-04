@@ -54,9 +54,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.1
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
 
       - name: Install dependencies
         run: |
