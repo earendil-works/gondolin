@@ -107,6 +107,7 @@ function usage() {
   console.log("  --net-mac MAC        MAC address for virtio-net");
   console.log("  --no-net             Disable QEMU net backend");
   console.log("  --net-debug          Enable net backend debug logging");
+  console.log("                       (or set GONDOLIN_DEBUG=net)");
   console.log("  --machine TYPE       Override QEMU machine type");
   console.log("  --accel TYPE         Override QEMU accel (kvm/hvf/tcg)");
   console.log("  --cpu TYPE           Override QEMU CPU type");

@@ -499,6 +499,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const tlsSocket = new tls.TLSSocket(stream, {
       isServer: true,
       secureContext: this.getTlsContext(session.dstIP),
+      ALPNProtocols: ["http/1.1"],
       SNICallback: (servername, callback) => {
         const sni = servername || session.dstIP;
         try {
@@ -793,10 +794,27 @@ export class QemuNetworkBackend extends EventEmitter {
       this.emit("log", `[net] http bridge response ${response.status} ${response.statusText}`);
     }
 
-    const responseBody = Buffer.from(await response.arrayBuffer());
     let responseHeaders = this.stripHopByHopHeaders(this.headersToRecord(response.headers));
-    responseHeaders["content-length"] = responseBody.length.toString();
+    delete responseHeaders["content-encoding"];
+    delete responseHeaders["content-length"];
     responseHeaders["connection"] = "close";
+
+    const responseBodyStream = response.body;
+    const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
+
+    if (canStream && responseBodyStream) {
+      responseHeaders["transfer-encoding"] = "chunked";
+      this.sendHttpResponseHead(write, {
+        status: response.status,
+        statusText: response.statusText || "OK",
+        headers: responseHeaders,
+      });
+      await this.sendChunkedBody(responseBodyStream, write);
+      return;
+    }
+
+    const responseBody = Buffer.from(await response.arrayBuffer());
+    responseHeaders["content-length"] = responseBody.length.toString();
 
     let hookResponse: HttpHookResponse = {
       status: response.status,
@@ -813,17 +831,42 @@ export class QemuNetworkBackend extends EventEmitter {
     this.sendHttpResponse(write, hookResponse);
   }
 
-  private sendHttpResponse(write: (chunk: Buffer) => void, response: HttpHookResponse) {
+  private sendHttpResponseHead(
+    write: (chunk: Buffer) => void,
+    response: { status: number; statusText: string; headers: Record<string, string> }
+  ) {
     const statusLine = `HTTP/1.1 ${response.status} ${response.statusText}\r\n`;
     const headers = Object.entries(response.headers)
       .map(([name, value]) => `${name}: ${value}`)
       .join("\r\n");
     const headerBlock = `${statusLine}${headers}\r\n\r\n`;
-
     write(Buffer.from(headerBlock));
+  }
+
+  private sendHttpResponse(write: (chunk: Buffer) => void, response: HttpHookResponse) {
+    this.sendHttpResponseHead(write, response);
     if (response.body.length > 0) {
       write(response.body);
     }
+  }
+
+  private async sendChunkedBody(body: ReadableStream<Uint8Array>, write: (chunk: Buffer) => void) {
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.length === 0) continue;
+        const sizeLine = Buffer.from(`${value.length.toString(16)}\r\n`);
+        write(sizeLine);
+        write(Buffer.from(value));
+        write(Buffer.from("\r\n"));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    write(Buffer.from("0\r\n\r\n"));
   }
 
   private respondWithError(write: (chunk: Buffer) => void, status: number, statusText: string) {

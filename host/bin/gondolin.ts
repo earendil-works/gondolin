@@ -252,7 +252,12 @@ function runExec(argv: string[] = process.argv.slice(2)) {
 
 function buildEnv() {
   const env: string[] = [];
-  if (process.env.TERM) env.push(`TERM=${process.env.TERM}`);
+  const term = process.env.TERM;
+  if (!term || term === "xterm-ghostty") {
+    env.push("TERM=xterm-256color");
+  } else {
+    env.push(`TERM=${term}`);
+  }
   return env;
 }
 

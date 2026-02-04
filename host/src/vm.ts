@@ -18,6 +18,7 @@ import {
   VirtualProvider,
   type VfsHooks,
 } from "./vfs";
+import { parseDebugEnv } from "./debug";
 import {
   MountRouterProvider,
   listMountPaths,
@@ -27,6 +28,11 @@ import {
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
+
+function formatLog(message: string) {
+  if (message.endsWith("\n")) return message;
+  return `${message}\n`;
+}
 
 type ExecInput = string | string[];
 
@@ -167,7 +173,22 @@ export class VM {
       serverOptions.policy = this.policy;
     }
 
+    const debugFlags = parseDebugEnv();
+    const netDebug = serverOptions.netDebug ?? debugFlags.has("net");
+    if (netDebug !== undefined) {
+      serverOptions.netDebug = netDebug;
+    }
+
     this.server = new SandboxWsServer(serverOptions);
+    if (netDebug) {
+      this.server.on("log", (message: string) => {
+        process.stderr.write(formatLog(message));
+      });
+      this.server.on("error", (err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(formatLog(message));
+      });
+    }
     this.url = null;
   }
 

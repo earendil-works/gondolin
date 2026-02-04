@@ -57,5 +57,6 @@ Use `fuseMount` in the `vfs` options to change the guest mount point (defaults t
 
 ## Useful commands
 - `pnpm run dev:ws -- --net-debug` to start the WS server with network debug logging.
+- `GONDOLIN_DEBUG=net pnpm run dev:ws` to enable the same logging via env (comma separated).
 - `pnpm run test:ws` to run the guest HTTP/HTTPS fetch test via WS.
 - `pnpm run bash` to launch a quick interactive Bash session against the VM.

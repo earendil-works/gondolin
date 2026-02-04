@@ -30,6 +30,7 @@ import { QemuNetworkBackend } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import type { SandboxPolicy } from "./policy";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
+import { parseDebugEnv } from "./debug";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_JSON_BYTES = 256 * 1024;
@@ -130,6 +131,7 @@ export function resolveSandboxWsServerOptions(
   const hostArch = detectHostArch();
   const defaultQemu = hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultMemory = hostArch === "arm64" ? "512M" : "256M";
+  const debugFlags = parseDebugEnv();
 
   return {
     host: options.host ?? "127.0.0.1",
@@ -144,7 +146,7 @@ export function resolveSandboxWsServerOptions(
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
-    netDebug: options.netDebug ?? false,
+    netDebug: options.netDebug ?? debugFlags.has("net"),
     machineType: options.machineType,
     accel: options.accel,
     cpu: options.cpu,

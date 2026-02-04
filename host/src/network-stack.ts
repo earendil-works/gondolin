@@ -133,7 +133,8 @@ export class NetworkStack extends EventEmitter {
   private readonly MAX_FLOW_SNIFF = 8 * 1024;
 
   private rxBuffer = Buffer.alloc(0);
-  private txBuffer = Buffer.alloc(0);
+  private txQueue: Buffer[] = [];
+  private txQueueSize = 0;
 
   private readonly TX_BUFFER_HIGH_WATER = 16 * 1024;
   private readonly TX_BUFFER_LOW_WATER = 4 * 1024;
@@ -154,12 +155,13 @@ export class NetworkStack extends EventEmitter {
   reset() {
     this.natTable.clear();
     this.rxBuffer = Buffer.alloc(0);
-    this.txBuffer = Buffer.alloc(0);
+    this.txQueue = [];
+    this.txQueueSize = 0;
     this.txPaused.clear();
   }
 
   hasPendingData() {
-    return this.txBuffer.length > 0;
+    return this.txQueueSize > 0;
   }
 
   // Called when QEMU writes data to the network interface
@@ -179,19 +181,40 @@ export class NetworkStack extends EventEmitter {
 
   // Called when QEMU wants to read data from the network interface
   readFromNetwork(maxLen: number): Buffer | null {
-    if (this.txBuffer.length === 0) return null;
+    if (this.txQueueSize === 0) return null;
 
-    const chunk = this.txBuffer.subarray(0, maxLen);
-    this.txBuffer = this.txBuffer.subarray(chunk.length);
+    let remaining = maxLen;
+    let total = 0;
+    const chunks: Buffer[] = [];
 
-    if (this.txBuffer.length < this.TX_BUFFER_LOW_WATER && this.txPaused.size > 0) {
+    while (remaining > 0 && this.txQueue.length > 0) {
+      const chunk = this.txQueue[0];
+      if (chunk.length <= remaining) {
+        chunks.push(chunk);
+        total += chunk.length;
+        remaining -= chunk.length;
+        this.txQueue.shift();
+      } else {
+        chunks.push(chunk.subarray(0, remaining));
+        this.txQueue[0] = chunk.subarray(remaining);
+        total += remaining;
+        remaining = 0;
+      }
+    }
+
+    this.txQueueSize -= total;
+
+    if (this.txQueueSize < this.TX_BUFFER_LOW_WATER && this.txPaused.size > 0) {
       for (const key of this.txPaused) {
         this.callbacks.onTcpResume({ key });
       }
       this.txPaused.clear();
     }
 
-    return chunk;
+    if (chunks.length === 1 && chunks[0].length === total) {
+      return chunks[0];
+    }
+    return Buffer.concat(chunks, total);
   }
 
   send(payload: Buffer, proto: number) {
@@ -203,13 +226,12 @@ export class NetworkStack extends EventEmitter {
     frame.writeUInt16BE(proto, 12);
     payload.copy(frame, 14);
 
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(frame.length, 0);
+    const packet = Buffer.alloc(4 + frame.length);
+    packet.writeUInt32BE(frame.length, 0);
+    frame.copy(packet, 4);
 
     // XXX: cap txBuffer growth or drop frames when QEMU isn't draining.
-    this.txBuffer = Buffer.concat([this.txBuffer, header, frame]);
-
-    this.emit("network-activity");
+    this.enqueueTx(packet);
   }
 
   sendBroadcast(payload: Buffer, proto: number) {
@@ -221,12 +243,18 @@ export class NetworkStack extends EventEmitter {
     frame.writeUInt16BE(proto, 12);
     payload.copy(frame, 14);
 
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(frame.length, 0);
+    const packet = Buffer.alloc(4 + frame.length);
+    packet.writeUInt32BE(frame.length, 0);
+    frame.copy(packet, 4);
 
     // XXX: cap txBuffer growth or drop frames when QEMU isn't draining.
-    this.txBuffer = Buffer.concat([this.txBuffer, header, frame]);
+    this.enqueueTx(packet);
+  }
 
+  private enqueueTx(packet: Buffer) {
+    if (packet.length === 0) return;
+    this.txQueue.push(packet);
+    this.txQueueSize += packet.length;
     this.emit("network-activity");
   }
 
@@ -767,12 +795,11 @@ export class NetworkStack extends EventEmitter {
     frame.writeUInt16BE(ETH_P_IP, 12);
     ipPacket.copy(frame, 14);
 
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(frame.length, 0);
+    const packet = Buffer.alloc(4 + frame.length);
+    packet.writeUInt32BE(frame.length, 0);
+    frame.copy(packet, 4);
 
-    this.txBuffer = Buffer.concat([this.txBuffer, header, frame]);
-
-    this.emit("network-activity");
+    this.enqueueTx(packet);
     this.emit("dhcp", msgType === DHCP_OFFER ? "OFFER" : "ACK", this.vmIP);
   }
 
@@ -847,7 +874,7 @@ export class NetworkStack extends EventEmitter {
       offset += chunkSize;
     }
 
-    if (this.txBuffer.length > this.TX_BUFFER_HIGH_WATER && !this.txPaused.has(message.key)) {
+    if (this.txQueueSize > this.TX_BUFFER_HIGH_WATER && !this.txPaused.has(message.key)) {
       this.txPaused.add(message.key);
       this.callbacks.onTcpPause({ key: message.key });
     }
