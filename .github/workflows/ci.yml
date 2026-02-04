@@ -73,7 +73,7 @@ jobs:
       - name: Build guest image
         run: |
           cd guest
-          ARCH=${{ matrix.arch }} make image
+          ARCH=${{ matrix.arch }} make build
 
       - name: Package assets
         run: |

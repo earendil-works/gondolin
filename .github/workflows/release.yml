@@ -37,7 +37,7 @@ jobs:
       - name: Build guest image
         run: |
           cd guest
-          make image
+          make build
 
       - name: Package x64 assets
         run: |
@@ -78,7 +78,7 @@ jobs:
       - name: Build guest image (arm64)
         run: |
           cd guest
-          ARCH=aarch64 make image
+          ARCH=aarch64 make build
 
       - name: Package arm64 assets
         run: |
