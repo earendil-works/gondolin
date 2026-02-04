@@ -6,10 +6,36 @@ import { pipeline } from "stream/promises";
 import { execSync } from "child_process";
 import { createHash } from "crypto";
 
-// This should match the package version when releasing
-const ASSET_VERSION = "v0.1.0";
 const GITHUB_ORG = "earendil-works";
 const GITHUB_REPO = "gondolin";
+
+let cachedAssetVersion: string | null = null;
+
+function resolveAssetVersion(): string {
+  if (cachedAssetVersion) return cachedAssetVersion;
+
+  const possiblePackageJsons = [
+    path.resolve(__dirname, "..", "package.json"), // src/ (tsx/dev) -> host/package.json
+    path.resolve(__dirname, "..", "..", "package.json"), // dist/src (npm) -> package/package.json
+  ];
+
+  for (const pkgPath of possiblePackageJsons) {
+    try {
+      if (!fs.existsSync(pkgPath)) continue;
+      const raw = fs.readFileSync(pkgPath, "utf8");
+      const pkg = JSON.parse(raw) as { version?: string };
+      if (pkg.version) {
+        cachedAssetVersion = `v${pkg.version}`;
+        return cachedAssetVersion;
+      }
+    } catch {
+      // ignore and fall through
+    }
+  }
+
+  cachedAssetVersion = "v0.0.0";
+  return cachedAssetVersion;
+}
 
 /**
  * Get the platform-specific asset bundle name.
@@ -52,7 +78,7 @@ function getAssetDir(): string {
   // User cache directory
   const cacheBase =
     process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-  return path.join(cacheBase, "gondolin", ASSET_VERSION);
+  return path.join(cacheBase, "gondolin", resolveAssetVersion());
 }
 
 /**
@@ -83,19 +109,20 @@ function assetsExist(dir: string): boolean {
  */
 async function downloadAndExtract(assetDir: string): Promise<void> {
   const bundleName = getAssetBundleName();
-  const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${ASSET_VERSION}/${bundleName}`;
+  const assetVersion = resolveAssetVersion();
+  const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${assetVersion}/${bundleName}`;
 
   fs.mkdirSync(assetDir, { recursive: true });
 
   const tempFile = path.join(assetDir, bundleName);
 
   try {
-    process.stderr.write(`Downloading gondolin guest image (${ASSET_VERSION})...\n`);
+    process.stderr.write(`Downloading gondolin guest image (${assetVersion})...\n`);
     process.stderr.write(`  URL: ${url}\n`);
 
     const response = await fetch(url, {
       headers: {
-        "User-Agent": `gondolin/${ASSET_VERSION}`,
+        "User-Agent": `gondolin/${assetVersion}`,
       },
     });
 
@@ -196,7 +223,7 @@ export async function ensureGuestAssets(): Promise<GuestAssets> {
  * Get the current asset version string.
  */
 export function getAssetVersion(): string {
-  return ASSET_VERSION;
+  return resolveAssetVersion();
 }
 
 /**
