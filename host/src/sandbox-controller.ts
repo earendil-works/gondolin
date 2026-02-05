@@ -188,8 +188,15 @@ function buildQemuArgs(config: SandboxConfig) {
     args.push("-device", `${blkDevice},drive=drive0`);
   }
   if (machineType === "microvm") {
-    // microvm needs explicit ISA serial for kernel console (ttyS0)
-    args.push("-machine", "microvm,isa-serial=on");
+    // microvm has no PCI bus and uses virtio-mmio devices.
+    //
+    // On x86_64, virtio-mmio devices are typically discovered via kernel cmdline
+    // (virtio_mmio.device=...) unless ACPI tables are provided.
+    // QEMU's microvm machine can auto-generate those cmdline entries.
+    //
+    // Ensure this is enabled explicitly as older QEMU versions may default it off.
+    // Also keep ISA serial enabled so the kernel console can use ttyS0.
+    args.push("-machine", "microvm,isa-serial=on,auto-kernel-cmdline=on");
   } else {
     args.push("-machine", machineType);
   }
