@@ -2,12 +2,43 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { VM } from "../src/vm";
 import { MemoryProvider, ReadonlyProvider } from "../src/vfs";
 import { createErrnoError } from "../src/vfs/errors";
+import { closeAllVms, withVm } from "./helpers/vm-fixture";
 
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 15000);
 const { errno: ERRNO } = os.constants;
+
+const rootProvider = new MemoryProvider();
+const emailProvider = new MemoryProvider();
+const roInnerProvider = new MemoryProvider();
+const roProvider = new ReadonlyProvider(roInnerProvider);
+const rwProvider = new MemoryProvider();
+const blockedEntries: string[] = [];
+const sharedVmKey = "vfs-shared";
+const sharedVmOptions = {
+  server: { console: "none" },
+  vfs: {
+    mounts: {
+      "/": rootProvider,
+      "/app": emailProvider,
+      "/ro": roProvider,
+      "/rw": rwProvider,
+    },
+    hooks: {
+      before: (ctx: { op: string; path?: string; flags?: string | number }) => {
+        if (ctx.op === "open" && ctx.path === "/blocked.txt" && typeof ctx.flags === "string") {
+          blockedEntries.push(`${ctx.path}:${ctx.flags}`);
+          if (ctx.flags.includes("w") || ctx.flags.includes("a")) {
+            throw createErrnoError(ERRNO.EACCES, "open", ctx.path);
+          }
+        }
+      },
+    },
+  },
+};
+
+test.after(() => closeAllVms());
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | null = null;
@@ -25,17 +56,11 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 test("vfs roundtrip between host and guest", { timeout: timeoutMs }, async () => {
-  const provider = new MemoryProvider();
-  const handle = await provider.open("/host.txt", "w+");
-  await handle.writeFile("host-data");
-  await handle.close();
+  await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
+    const handle = await rootProvider.open("/host.txt", "w+");
+    await handle.writeFile("host-data");
+    await handle.close();
 
-  const vm = new VM({
-    server: { console: "none" },
-    vfs: { mounts: { "/": provider } },
-  });
-
-  try {
     await vm.waitForReady();
 
     const read = await withTimeout(vm.exec(["sh", "-c", "cat /data/host.txt"]), timeoutMs);
@@ -66,38 +91,18 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs }, async () =>
       );
     }
     assert.equal(append.stdout, "foobar");
-  } finally {
-    await vm.stop();
-  }
 
-  const guestHandle = await provider.open("/guest.txt", "r");
-  const data = await guestHandle.readFile({ encoding: "utf-8" });
-  await guestHandle.close();
-  assert.equal(data, "guest-data");
+    const guestHandle = await rootProvider.open("/guest.txt", "r");
+    const data = await guestHandle.readFile({ encoding: "utf-8" });
+    await guestHandle.close();
+    assert.equal(data, "guest-data");
+  });
 });
 
 test("vfs hooks can block writes", { timeout: timeoutMs }, async () => {
-  const provider = new MemoryProvider();
-  const blocked: string[] = [];
+  blockedEntries.length = 0;
 
-  const vm = new VM({
-    server: { console: "none" },
-    vfs: {
-      mounts: { "/": provider },
-      hooks: {
-        before: (ctx) => {
-          if (ctx.op === "open" && ctx.path === "/blocked.txt" && typeof ctx.flags === "string") {
-            blocked.push(`${ctx.path}:${ctx.flags}`);
-            if (ctx.flags.includes("w") || ctx.flags.includes("a")) {
-              throw createErrnoError(ERRNO.EACCES, "open", ctx.path);
-            }
-          }
-        },
-      },
-    },
-  });
-
-  try {
+  await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
     await vm.waitForReady();
 
     const result = await withTimeout(
@@ -105,21 +110,13 @@ test("vfs hooks can block writes", { timeout: timeoutMs }, async () => {
       timeoutMs
     );
     assert.notEqual(result.exitCode, 0);
-  } finally {
-    await vm.stop();
-  }
+  });
 
-  assert.ok(blocked.length > 0);
-  assert.ok(blocked.some((entry) => entry.startsWith("/blocked.txt:")));
+  assert.ok(blockedEntries.length > 0);
+  assert.ok(blockedEntries.some((entry) => entry.startsWith("/blocked.txt:")));
 });
 
 test("vfs supports read-only email mounts with dynamic content", { timeout: timeoutMs }, async () => {
-  const rootProvider = new MemoryProvider();
-  const rootHandle = await rootProvider.open("/root.txt", "w+");
-  await rootHandle.writeFile("root-data");
-  await rootHandle.close();
-
-  const emailProvider = new MemoryProvider();
   const emailId = "12345";
   const emailBody = "Subject: Hello\nFrom: test@example.com\n\nHi there!";
   const apiCalls: string[] = [];
@@ -130,34 +127,28 @@ test("vfs supports read-only email mounts with dynamic content", { timeout: time
     },
   };
 
-  await emailProvider.mkdir("/email", { recursive: true });
-  const emailPath = `/email/${emailId}.eml`;
-  const emailHandle = await emailProvider.open(emailPath, "w+");
-  await emailHandle.writeFile(emailBody);
-  await emailHandle.close();
+  await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
+    const rootHandle = await rootProvider.open("/root.txt", "w+");
+    await rootHandle.writeFile("root-data");
+    await rootHandle.close();
 
-  const emailEntry = (emailProvider as unknown as {
-    _getEntry: (path: string, syscall: string) => { content: Buffer; contentProvider?: () => string };
-  })._getEntry(emailPath, "vfs-test");
-  emailEntry.contentProvider = () => {
-    const payload = mockApi.fetchEmail(emailId);
-    emailEntry.content = Buffer.from(payload);
-    return payload;
-  };
+    await emailProvider.mkdir("/email", { recursive: true });
+    const emailPath = `/email/${emailId}.eml`;
+    const emailHandle = await emailProvider.open(emailPath, "w+");
+    await emailHandle.writeFile(emailBody);
+    await emailHandle.close();
 
-  emailProvider.setReadOnly();
+    const emailEntry = (emailProvider as unknown as {
+      _getEntry: (path: string, syscall: string) => { content: Buffer; contentProvider?: () => string };
+    })._getEntry(emailPath, "vfs-test");
+    emailEntry.contentProvider = () => {
+      const payload = mockApi.fetchEmail(emailId);
+      emailEntry.content = Buffer.from(payload);
+      return payload;
+    };
 
-  const vm = new VM({
-    server: { console: "none" },
-    vfs: {
-      mounts: {
-        "/": rootProvider,
-        "/app": emailProvider,
-      },
-    },
-  });
+    emailProvider.setReadOnly();
 
-  try {
     await vm.waitForReady();
 
     const rootRead = await withTimeout(vm.exec(["sh", "-c", "cat /data/root.txt"]), timeoutMs);
@@ -180,9 +171,7 @@ test("vfs supports read-only email mounts with dynamic content", { timeout: time
       timeoutMs
     );
     assert.notEqual(writeAttempt.exitCode, 0);
-  } finally {
-    await vm.stop();
-  }
+  });
 
   assert.ok(apiCalls.includes(emailId));
 });
@@ -263,29 +252,11 @@ test("ReadonlyProvider blocks write operations", { timeout: timeoutMs }, async (
 });
 
 test("ReadonlyProvider works in VM guest", { timeout: timeoutMs }, async () => {
-  // Create a provider with initial content
-  const innerProvider = new MemoryProvider();
-  const handle = await innerProvider.open("/host-file.txt", "w+");
-  await handle.writeFile("read-only data from host");
-  await handle.close();
+  await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
+    const handle = await roInnerProvider.open("/host-file.txt", "w+");
+    await handle.writeFile("read-only data from host");
+    await handle.close();
 
-  // Wrap with ReadonlyProvider
-  const roProvider = new ReadonlyProvider(innerProvider);
-
-  // Also have a writable area
-  const rwProvider = new MemoryProvider();
-
-  const vm = new VM({
-    server: { console: "none" },
-    vfs: {
-      mounts: {
-        "/ro": roProvider,
-        "/rw": rwProvider,
-      },
-    },
-  });
-
-  try {
     await vm.waitForReady();
 
     // Reading from read-only mount should work
@@ -325,7 +296,5 @@ test("ReadonlyProvider works in VM guest", { timeout: timeoutMs }, async () => {
       timeoutMs
     );
     assert.equal(verifyResult.stdout.trim(), "writable");
-  } finally {
-    await vm.stop();
-  }
+  });
 });
