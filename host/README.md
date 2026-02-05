@@ -313,17 +313,23 @@ gondolin build --arch aarch64 --output ./arm64-assets
 ### Using Custom Assets Programmatically
 
 ```ts
-import { VM, loadGuestAssets } from "@earendil-works/gondolin";
+import { VM } from "@earendil-works/gondolin";
 
-// Load custom assets
-const assets = loadGuestAssets("./my-assets");
-
-// Create VM with custom assets
+// Create VM with custom assets directory
 const vm = await VM.create({
   server: {
-    kernelPath: assets.kernelPath,
-    initrdPath: assets.initrdPath,
-    rootfsPath: assets.rootfsPath,
+    imagePath: "./my-assets",
+  },
+});
+
+// Or with explicit paths
+const vm = await VM.create({
+  server: {
+    imagePath: {
+      kernelPath: "./my-assets/vmlinuz-virt",
+      initrdPath: "./my-assets/initramfs.cpio.lz4",
+      rootfsPath: "./my-assets/rootfs.ext4",
+    },
   },
 });
 ```

@@ -18,6 +18,7 @@ export {
   SandboxServer,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
+  type ImagePath,
   type SandboxServerOptions,
   type ResolvedSandboxServerOptions,
   type SandboxConnection,

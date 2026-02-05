@@ -31,7 +31,16 @@ import { QemuNetworkBackend, DEFAULT_MAX_HTTP_BODY_BYTES } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
 import { parseDebugEnv } from "./debug";
-import { ensureGuestAssets, hasGuestAssets, type GuestAssets } from "./assets";
+import { ensureGuestAssets, loadGuestAssets, type GuestAssets } from "./assets";
+
+/**
+ * Path to guest image assets.
+ * 
+ * Can be either:
+ * - A string path to a directory containing the assets (vmlinuz-virt, initramfs.cpio.lz4, rootfs.ext4)
+ * - An object with explicit paths to each asset file
+ */
+export type ImagePath = string | GuestAssets;
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
@@ -52,9 +61,17 @@ function resolveEnvNumber(name: string, fallback: number) {
 
 export type SandboxServerOptions = {
   qemuPath?: string;
-  kernelPath?: string;
-  initrdPath?: string;
-  rootfsPath?: string;
+  /**
+   * Path to guest image assets.
+   * 
+   * Can be either:
+   * - A string path to a directory containing the assets
+   * - An object with explicit paths: `{ kernelPath, initrdPath, rootfsPath }`
+   * 
+   * If not provided, assets are resolved from GONDOLIN_GUEST_DIR,
+   * local development paths, or downloaded automatically.
+   */
+  imagePath?: ImagePath;
   memory?: string;
   cpus?: number;
   virtioSocketPath?: string;
@@ -141,6 +158,16 @@ function getLocalGuestAssets(): Partial<GuestAssets> {
 }
 
 /**
+ * Resolve imagePath to GuestAssets.
+ */
+function resolveImagePath(imagePath: ImagePath): GuestAssets {
+  if (typeof imagePath === "string") {
+    return loadGuestAssets(imagePath);
+  }
+  return imagePath;
+}
+
+/**
  * Resolve server options synchronously.
  *
  * This version uses local development paths if available. For production use,
@@ -153,11 +180,19 @@ export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
   assets?: GuestAssets
 ): ResolvedSandboxServerOptions {
-  // Try local dev paths if no assets provided
-  const localAssets = assets ?? getLocalGuestAssets();
-  const defaultKernel = localAssets.kernelPath;
-  const defaultInitrd = localAssets.initrdPath;
-  const defaultRootfs = localAssets.rootfsPath;
+  // Resolve image paths: explicit imagePath > assets parameter > local dev paths
+  let resolvedAssets: Partial<GuestAssets>;
+  if (options.imagePath !== undefined) {
+    resolvedAssets = resolveImagePath(options.imagePath);
+  } else if (assets) {
+    resolvedAssets = assets;
+  } else {
+    resolvedAssets = getLocalGuestAssets();
+  }
+
+  const kernelPath = resolvedAssets.kernelPath;
+  const initrdPath = resolvedAssets.initrdPath;
+  const rootfsPath = resolvedAssets.rootfsPath;
 
   // we are running into length limits on macos on the default temp dir
   const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
@@ -180,17 +215,12 @@ export function resolveSandboxServerOptions(
   const defaultMemory = "1G";
   const debugFlags = parseDebugEnv();
 
-  // If no kernel path can be determined, we'll need to fetch assets later
-  const kernelPath = options.kernelPath ?? defaultKernel;
-  const initrdPath = options.initrdPath ?? defaultInitrd;
-  const rootfsPath = options.rootfsPath ?? defaultRootfs;
-
   if (!kernelPath || !initrdPath || !rootfsPath) {
     throw new Error(
       "Guest assets not found. Either:\n" +
       "  1. Run from the gondolin repository with built guest images\n" +
       "  2. Use SandboxServer.create() to auto-download assets\n" +
-      "  3. Explicitly provide kernelPath, initrdPath, and rootfsPath options\n" +
+      "  3. Provide imagePath option (directory path or explicit paths)\n" +
       "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets"
     );
   }
@@ -231,8 +261,8 @@ export function resolveSandboxServerOptions(
 export async function resolveSandboxServerOptionsAsync(
   options: SandboxServerOptions = {}
 ): Promise<ResolvedSandboxServerOptions> {
-  // If all paths are explicitly provided, use sync version
-  if (options.kernelPath && options.initrdPath && options.rootfsPath) {
+  // If imagePath is explicitly provided, use sync version (no download needed)
+  if (options.imagePath !== undefined) {
     return resolveSandboxServerOptions(options);
   }
 
