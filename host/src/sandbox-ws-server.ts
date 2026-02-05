@@ -38,7 +38,20 @@ import { ensureGuestAssets, hasGuestAssets, type GuestAssets } from "./assets";
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
+const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
+const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
+  "GONDOLIN_VFS_READY_TIMEOUT_MS",
+  DEFAULT_VFS_READY_TIMEOUT_MS
+);
 const { errno: ERRNO } = os.constants;
+
+function resolveEnvNumber(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
 
 export type SandboxWsServerOptions = {
   host?: string;
@@ -566,6 +579,8 @@ export class SandboxWsServer extends EventEmitter {
   private policy: SandboxPolicy | null;
   private qemuLogBuffer = "";
   private status: SandboxState = "stopped";
+  private vfsReady = false;
+  private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
   private activeClient: WebSocket | null = null;
 
@@ -676,7 +691,6 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     this.controller.on("state", (state) => {
-      this.status = state;
       if (state === "running") {
         this.bridge.connect();
         this.fsBridge.connect();
@@ -685,11 +699,25 @@ export class SandboxWsServer extends EventEmitter {
         this.failInflight("sandbox_stopped", "sandbox is not running");
       }
 
-      if (!this.wss) return;
-      for (const client of this.wss.clients) {
-        sendJson(client, { type: "status", state });
+      if (state === "starting") {
+        this.vfsReady = false;
+        this.clearVfsReadyTimer();
+        this.status = "starting";
+      } else if (state === "running") {
+        if (this.vfsReady) {
+          this.clearVfsReadyTimer();
+          this.status = "running";
+        } else {
+          this.startVfsReadyTimer();
+          this.status = "starting";
+        }
+      } else {
+        this.vfsReady = false;
+        this.clearVfsReadyTimer();
+        this.status = "stopped";
       }
-      this.emit("state", state);
+
+      this.broadcastStatus(this.status);
     });
 
     this.controller.on("exit", (info) => {
@@ -754,6 +782,10 @@ export class SandboxWsServer extends EventEmitter {
         }
         this.inflight.delete(message.id);
         this.stdinAllowed.delete(message.id);
+      } else if (message.t === "vfs_ready") {
+        this.handleVfsReady();
+      } else if (message.t === "vfs_error") {
+        this.handleVfsError(message.p.message);
       }
     };
 
@@ -841,6 +873,61 @@ export class SandboxWsServer extends EventEmitter {
     this.policy = policy;
     this.network?.setPolicy(policy);
     this.emit("policy", policy);
+  }
+
+  private broadcastStatus(state: SandboxState) {
+    if (!this.wss) return;
+    for (const client of this.wss.clients) {
+      sendJson(client, { type: "status", state });
+    }
+    this.emit("state", state);
+  }
+
+  private startVfsReadyTimer() {
+    if (VFS_READY_TIMEOUT_MS <= 0 || this.vfsReadyTimer) return;
+    this.vfsReadyTimer = setTimeout(() => {
+      this.vfsReadyTimer = null;
+      this.handleVfsReadyTimeout();
+    }, VFS_READY_TIMEOUT_MS);
+  }
+
+  private clearVfsReadyTimer() {
+    if (!this.vfsReadyTimer) return;
+    clearTimeout(this.vfsReadyTimer);
+    this.vfsReadyTimer = null;
+  }
+
+  private handleVfsReady() {
+    if (this.vfsReady) return;
+    this.vfsReady = true;
+    this.clearVfsReadyTimer();
+    if (this.controller.getState() === "running" && this.status !== "running") {
+      this.status = "running";
+      this.broadcastStatus(this.status);
+    }
+  }
+
+  private handleVfsError(message: string, code = "vfs_error") {
+    this.vfsReady = false;
+    this.clearVfsReadyTimer();
+    const trimmed = message.trim();
+    const detail = trimmed.length > 0 ? trimmed : "vfs not ready";
+    this.emit("error", new Error(`[vfs] ${detail}`));
+    if (this.activeClient) {
+      sendError(this.activeClient, {
+        type: "error",
+        code,
+        message: detail,
+      });
+      this.activeClient.close();
+    }
+  }
+
+  private handleVfsReadyTimeout() {
+    this.handleVfsError(
+      `vfs not ready after ${VFS_READY_TIMEOUT_MS}ms`,
+      "vfs_timeout"
+    );
   }
 
   async start(): Promise<SandboxWsServerAddress> {
@@ -960,7 +1047,7 @@ export class SandboxWsServer extends EventEmitter {
       return;
     }
 
-    if (!sendJson(ws, { type: "status", state: this.controller.getState() })) {
+    if (!sendJson(ws, { type: "status", state: this.status })) {
       ws.close();
       return;
     }
@@ -1088,7 +1175,7 @@ export class SandboxWsServer extends EventEmitter {
       await this.controller.start();
     }
 
-    sendJson(ws, { type: "status", state: this.controller.getState() });
+    sendJson(ws, { type: "status", state: this.status });
   }
 
   private handleExec(ws: WebSocket, message: ExecCommandMessage) {

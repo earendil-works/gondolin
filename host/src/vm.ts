@@ -43,12 +43,31 @@ import {
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
-const VFS_READY_ATTEMPTS = 50;
-const VFS_READY_SLEEP_SECONDS = 0.1;
+const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
+const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
+  "GONDOLIN_VFS_READY_SLEEP_SECONDS",
+  0.1
+);
+const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
+  "GONDOLIN_VFS_READY_TIMEOUT_MS",
+  DEFAULT_VFS_READY_TIMEOUT_MS
+);
+const VFS_READY_ATTEMPTS = Math.max(
+  1,
+  Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000))
+);
 
 function formatLog(message: string) {
   if (message.endsWith("\n")) return message;
   return `${message}\n`;
+}
+
+function resolveEnvNumber(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
 }
 
 type ExecInput = string | string[];

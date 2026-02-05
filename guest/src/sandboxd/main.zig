@@ -26,6 +26,10 @@ pub fn main() !void {
 
     log.info("opened virtio port", .{});
 
+    sendVfsStatus(allocator, virtio_fd) catch |err| {
+        log.err("failed to send vfs status: {s}", .{@errorName(err)});
+    };
+
     var waiting_for_reconnect = false;
 
     while (true) {
@@ -61,6 +65,27 @@ pub fn main() !void {
             _ = protocol.sendError(allocator, virtio_fd, req.id, "exec_failed", "failed to execute") catch {};
         };
     }
+}
+
+fn sendVfsStatus(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t) !void {
+    if (try readVfsErrorMessage(allocator)) |message| {
+        defer allocator.free(message);
+        const trimmed = std.mem.trim(u8, message, " \r\n\t");
+        const detail = if (trimmed.len > 0) trimmed else "vfs mount not ready";
+        try protocol.sendVfsError(allocator, virtio_fd, detail);
+        return;
+    }
+
+    try protocol.sendVfsReady(allocator, virtio_fd);
+}
+
+fn readVfsErrorMessage(allocator: std.mem.Allocator) !?[]u8 {
+    const file = std.fs.openFileAbsolute("/run/sandboxfs.failed", .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close();
+    return try file.readToEndAlloc(allocator, 4096);
 }
 
 fn tryOpenVirtioPath(path: []const u8) !?std.fs.File {

@@ -127,7 +127,7 @@ if [ -r /proc/cmdline ]; then
 fi
 
 wait_for_sandboxfs() {
-  for i in $(seq 1 50); do
+  for i in $(seq 1 300); do
     if grep -q " ${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
       return 0
     fi
@@ -138,6 +138,9 @@ wait_for_sandboxfs() {
 
 mkdir -p "${sandboxfs_mount}"
 
+sandboxfs_ready=0
+sandboxfs_error="sandboxfs mount not ready"
+
 if [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at ${sandboxfs_mount}"
   SANDBOXFS_LOG="${CONSOLE:-/dev/null}"
@@ -146,8 +149,9 @@ if [ -x /usr/bin/sandboxfs ]; then
   fi
   /usr/bin/sandboxfs --mount "${sandboxfs_mount}" --rpc-path /dev/virtio-ports/virtio-fs > "${SANDBOXFS_LOG}" 2>&1 &
 
-  if [ -n "${sandboxfs_binds}" ]; then
-    if wait_for_sandboxfs; then
+  if wait_for_sandboxfs; then
+    sandboxfs_ready=1
+    if [ -n "${sandboxfs_binds}" ]; then
       OLD_IFS="${IFS}"
       IFS=","
       for bind in ${sandboxfs_binds}; do
@@ -164,10 +168,19 @@ if [ -x /usr/bin/sandboxfs ]; then
         log_cmd mount --bind "${bind_source}" "${bind}"
       done
       IFS="${OLD_IFS}"
-    else
-      log "[init] sandboxfs mount not ready for bind mounts"
     fi
+  else
+    log "[init] sandboxfs mount not ready"
   fi
+else
+  log "[init] /usr/bin/sandboxfs missing"
+  sandboxfs_error="sandboxfs binary missing"
+fi
+
+if [ "${sandboxfs_ready}" -eq 1 ]; then
+  printf "ok\n" > /run/sandboxfs.ready
+else
+  printf "%s\n" "${sandboxfs_error}" > /run/sandboxfs.failed
 fi
 
 log "[init] starting sandboxd"

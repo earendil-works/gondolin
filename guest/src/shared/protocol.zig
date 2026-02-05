@@ -14,6 +14,7 @@
 //! ## Message Types
 //! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize
 //! Filesystem: fs_request, fs_response
+//! Status: vfs_ready, vfs_error
 //! Errors: error
 
 const std = @import("std");
@@ -254,6 +255,60 @@ pub fn encodeExecResponse(
     }
 
     return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeVfsReady(allocator: std.mem.Allocator) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "vfs_ready");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, 0);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 0);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeVfsError(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "vfs_error");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, 0);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 1);
+    try cbor.writeText(w, "message");
+    try cbor.writeText(w, message);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn sendVfsReady(allocator: std.mem.Allocator, fd: std.posix.fd_t) !void {
+    const payload = try encodeVfsReady(allocator);
+    defer allocator.free(payload);
+    try writeFrame(fd, payload);
+}
+
+pub fn sendVfsError(
+    allocator: std.mem.Allocator,
+    fd: std.posix.fd_t,
+    message: []const u8,
+) !void {
+    const payload = try encodeVfsError(allocator, message);
+    defer allocator.free(payload);
+    try writeFrame(fd, payload);
 }
 
 pub fn encodeError(

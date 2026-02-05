@@ -54,7 +54,30 @@ export type FsResponse = {
   };
 };
 
-export type IncomingMessage = ExecOutput | ExecResponse | ErrorResponse | FsRequest | FsResponse;
+export type VfsReady = {
+  v: number;
+  t: "vfs_ready";
+  id: number;
+  p: Record<string, never>;
+};
+
+export type VfsError = {
+  v: number;
+  t: "vfs_error";
+  id: number;
+  p: {
+    message: string;
+  };
+};
+
+export type IncomingMessage =
+  | ExecOutput
+  | ExecResponse
+  | ErrorResponse
+  | FsRequest
+  | FsResponse
+  | VfsReady
+  | VfsError;
 
 export type ExecRequest = {
   v: number;
