@@ -931,7 +931,7 @@ sandboxfs_mount="/data"
 sandboxfs_binds=""
 
 if [ -r /proc/cmdline ]; then
-  for arg in \\$(cat /proc/cmdline); do
+  for arg in \$(cat /proc/cmdline); do
     case "\${arg}" in
       sandboxfs.mount=*)
         sandboxfs_mount="\${arg#sandboxfs.mount=}"
@@ -944,7 +944,7 @@ if [ -r /proc/cmdline ]; then
 fi
 
 wait_for_sandboxfs() {
-  for i in \\$(seq 1 300); do
+  for i in \$(seq 1 300); do
     if grep -q " \${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
       return 0
     fi
@@ -1041,7 +1041,7 @@ root_device="/dev/vda"
 root_fstype="ext4"
 
 if [ -r /proc/cmdline ]; then
-  for arg in \\$(cat /proc/cmdline); do
+  for arg in \$(cat /proc/cmdline); do
     case "\${arg}" in
       root=*)
         root_device="\${arg#root=}"
@@ -1056,7 +1056,7 @@ fi
 modprobe virtio_blk > /dev/null 2>&1 || true
 modprobe ext4 > /dev/null 2>&1 || true
 
-for i in \\$(seq 1 50); do
+for i in \$(seq 1 50); do
   if [ -b "\${root_device}" ]; then
     break
   fi
