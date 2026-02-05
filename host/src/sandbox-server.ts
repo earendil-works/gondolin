@@ -6,7 +6,6 @@ import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { EventEmitter } from "events";
 
-import { WebSocketServer, WebSocket } from "ws";
 
 import {
   FrameReader,
@@ -35,7 +34,6 @@ import { parseDebugEnv } from "./debug";
 import { ensureGuestAssets, hasGuestAssets, type GuestAssets } from "./assets";
 
 const MAX_REQUEST_ID = 0xffffffff;
-const DEFAULT_MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
@@ -52,9 +50,7 @@ function resolveEnvNumber(name: string, fallback: number) {
   return parsed;
 }
 
-export type SandboxWsServerOptions = {
-  host?: string;
-  port?: number;
+export type SandboxServerOptions = {
   qemuPath?: string;
   kernelPath?: string;
   initrdPath?: string;
@@ -71,10 +67,8 @@ export type SandboxWsServerOptions = {
   accel?: string;
   cpu?: string;
   console?: "stdio" | "none";
-  token?: string;
   autoRestart?: boolean;
   append?: string;
-  maxJsonBytes?: number;
   maxStdinBytes?: number;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
@@ -83,20 +77,12 @@ export type SandboxWsServerOptions = {
   vfsProvider?: VirtualProvider;
 };
 
-export type SandboxWsServerAddress = {
-  host: string;
-  port: number;
-  url: string;
-};
-
 type SandboxFsConfig = {
   fuseMount: string;
   fuseBinds: string[];
 };
 
-export type ResolvedServerOptions = {
-  host: string;
-  port: number;
+export type ResolvedSandboxServerOptions = {
   qemuPath: string;
   kernelPath: string;
   initrdPath: string;
@@ -113,10 +99,8 @@ export type ResolvedServerOptions = {
   accel?: string;
   cpu?: string;
   console?: "stdio" | "none";
-  token?: string;
   autoRestart: boolean;
   append?: string;
-  maxJsonBytes: number;
   maxStdinBytes: number;
   maxHttpBodyBytes: number;
   fetch?: HttpFetch;
@@ -160,15 +144,15 @@ function getLocalGuestAssets(): Partial<GuestAssets> {
  * Resolve server options synchronously.
  *
  * This version uses local development paths if available. For production use,
- * prefer `resolveSandboxWsServerOptionsAsync` which will download assets if needed.
+ * prefer `resolveSandboxServerOptionsAsync` which will download assets if needed.
  *
  * @param options User-provided options
  * @param assets Optional pre-resolved guest assets (from ensureGuestAssets)
  */
-export function resolveSandboxWsServerOptions(
-  options: SandboxWsServerOptions = {},
+export function resolveSandboxServerOptions(
+  options: SandboxServerOptions = {},
   assets?: GuestAssets
-): ResolvedServerOptions {
+): ResolvedSandboxServerOptions {
   // Try local dev paths if no assets provided
   const localAssets = assets ?? getLocalGuestAssets();
   const defaultKernel = localAssets.kernelPath;
@@ -205,15 +189,13 @@ export function resolveSandboxWsServerOptions(
     throw new Error(
       "Guest assets not found. Either:\n" +
       "  1. Run from the gondolin repository with built guest images\n" +
-      "  2. Use SandboxWsServer.create() to auto-download assets\n" +
+      "  2. Use SandboxServer.create() to auto-download assets\n" +
       "  3. Explicitly provide kernelPath, initrdPath, and rootfsPath options\n" +
       "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets"
     );
   }
 
   return {
-    host: options.host ?? "127.0.0.1",
-    port: options.port ?? 8080,
     qemuPath: options.qemuPath ?? defaultQemu,
     kernelPath,
     initrdPath,
@@ -230,10 +212,8 @@ export function resolveSandboxWsServerOptions(
     accel: options.accel,
     cpu: options.cpu,
     console: options.console,
-    token: options.token ?? process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
-    maxJsonBytes: options.maxJsonBytes ?? DEFAULT_MAX_JSON_BYTES,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     fetch: options.fetch,
@@ -248,23 +228,23 @@ export function resolveSandboxWsServerOptions(
  *
  * This is the recommended way to get resolved options for production use.
  */
-export async function resolveSandboxWsServerOptionsAsync(
-  options: SandboxWsServerOptions = {}
-): Promise<ResolvedServerOptions> {
+export async function resolveSandboxServerOptionsAsync(
+  options: SandboxServerOptions = {}
+): Promise<ResolvedSandboxServerOptions> {
   // If all paths are explicitly provided, use sync version
   if (options.kernelPath && options.initrdPath && options.rootfsPath) {
-    return resolveSandboxWsServerOptions(options);
+    return resolveSandboxServerOptions(options);
   }
 
   // Check for local dev paths first
   const localAssets = getLocalGuestAssets();
   if (localAssets.kernelPath && localAssets.initrdPath && localAssets.rootfsPath) {
-    return resolveSandboxWsServerOptions(options, localAssets as GuestAssets);
+    return resolveSandboxServerOptions(options, localAssets as GuestAssets);
   }
 
   // Download assets if needed
   const assets = await ensureGuestAssets();
-  return resolveSandboxWsServerOptions(options, assets);
+  return resolveSandboxServerOptions(options, assets);
 }
 
 let cachedHostArch: string | null = null;
@@ -497,112 +477,102 @@ function estimateBase64Bytes(value: string) {
   return Math.floor((len * 3) / 4) - padding;
 }
 
-function validateToken(headers: Record<string, string | string[] | undefined>, token?: string) {
-  if (!token) return true;
-  const headerToken = headers["x-elwing-token"] ?? headers["x-sandbox-token"];
-  if (typeof headerToken === "string" && headerToken === token) return true;
-  if (Array.isArray(headerToken) && headerToken.includes(token)) return true;
-  const auth = headers.authorization;
-  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
-    return auth.slice("Bearer ".length) === token;
-  }
-  return false;
-}
+type SandboxClient = {
+  sendJson: (message: ServerMessage) => boolean;
+  sendBinary: (data: Buffer) => boolean;
+  close: () => void;
+};
 
-function safeSend(ws: WebSocket, data: string | Buffer, options?: { binary?: boolean }): boolean {
-  if (ws.readyState !== WebSocket.OPEN) return false;
-  try {
-    if (options) {
-      ws.send(data, options);
-    } else {
-      ws.send(data);
-    }
+export type SandboxConnection = {
+  send: (message: ClientMessage) => void;
+  close: () => void;
+};
+
+class LocalSandboxClient implements SandboxClient {
+  private closed = false;
+
+  constructor(
+    private readonly onMessage: (data: Buffer | string, isBinary: boolean) => void,
+    private readonly onClose?: () => void
+  ) {}
+
+  sendJson(message: ServerMessage): boolean {
+    if (this.closed) return false;
+    this.onMessage(JSON.stringify(message), false);
     return true;
-  } catch {
-    return false;
+  }
+
+  sendBinary(data: Buffer): boolean {
+    if (this.closed) return false;
+    this.onMessage(data, true);
+    return true;
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.onClose?.();
   }
 }
 
-function sendJson(ws: WebSocket, message: ServerMessage): boolean {
-  return safeSend(ws, JSON.stringify(message));
+function sendJson(client: SandboxClient, message: ServerMessage): boolean {
+  return client.sendJson(message);
 }
 
-function sendBinary(ws: WebSocket, data: Buffer): boolean {
-  return safeSend(ws, data, { binary: true });
+function sendBinary(client: SandboxClient, data: Buffer): boolean {
+  return client.sendBinary(data);
 }
 
-function sendError(ws: WebSocket, error: ErrorMessage): boolean {
-  return sendJson(ws, error);
+function sendError(client: SandboxClient, error: ErrorMessage): boolean {
+  return sendJson(client, error);
 }
 
-function formatHost(host: string) {
-  return host.includes(":") ? `[${host}]` : host;
-}
-
-function resolveAddress(host: string, address: net.AddressInfo | string | null): SandboxWsServerAddress {
-  if (!address || typeof address === "string") {
-    const formattedHost = formatHost(host);
-    return {
-      host,
-      port: 0,
-      url: `ws://${formattedHost}`,
-    };
-  }
-
-  const formattedHost = formatHost(host);
-  return {
-    host,
-    port: address.port,
-    url: `ws://${formattedHost}:${address.port}`,
-  };
-}
-
-export class SandboxWsServer extends EventEmitter {
-  private readonly options: ResolvedServerOptions;
+export class SandboxServer extends EventEmitter {
+  private readonly options: ResolvedSandboxServerOptions;
   private readonly controller: SandboxController;
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
   private readonly baseAppend: string;
-  private wss: WebSocketServer | null = null;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
-  private inflight = new Map<number, WebSocket>();
+  private clients = new Set<SandboxClient>();
+  private inflight = new Map<number, SandboxClient>();
   private stdinAllowed = new Set<number>();
-  private startPromise: Promise<SandboxWsServerAddress> | null = null;
+  private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
-  private address: SandboxWsServerAddress | null = null;
+  private started = false;
   private qemuLogBuffer = "";
   private status: SandboxState = "stopped";
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
-  private activeClient: WebSocket | null = null;
+  private activeClient: SandboxClient | null = null;
 
   /**
-   * Create a SandboxWsServer, downloading guest assets if needed.
+   * Create a SandboxServer, downloading guest assets if needed.
    *
    * This is the recommended way to create a server in production, as it will
    * automatically download the guest image if it's not available locally.
    *
    * @param options Server configuration options
-   * @returns A configured SandboxWsServer instance
+   * @returns A configured SandboxServer instance
    */
-  static async create(options: SandboxWsServerOptions = {}): Promise<SandboxWsServer> {
-    const resolvedOptions = await resolveSandboxWsServerOptionsAsync(options);
-    return new SandboxWsServer(resolvedOptions);
+  static async create(options: SandboxServerOptions = {}): Promise<SandboxServer> {
+    const resolvedOptions = await resolveSandboxServerOptionsAsync(options);
+    return new SandboxServer(resolvedOptions);
   }
 
   /**
-   * Create a SandboxWsServer synchronously.
+   * Create a SandboxServer synchronously.
    *
    * This constructor requires that guest assets are available locally (either
    * in a development checkout or via GONDOLIN_GUEST_DIR). For automatic asset
-   * downloading, use the async `SandboxWsServer.create()` factory instead.
+   * downloading, use the async `SandboxServer.create()` factory instead.
    *
    * @param options Server configuration options (or pre-resolved options)
    */
-  constructor(options: SandboxWsServerOptions | ResolvedServerOptions = {}) {
+  constructor(options: SandboxServerOptions | ResolvedSandboxServerOptions = {}) {
     super();
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
@@ -611,15 +581,13 @@ export class SandboxWsServer extends EventEmitter {
     // Detect if we received pre-resolved options (from static create())
     // by checking for a field that's required in resolved but computed in unresolved
     const isResolved =
-      "maxJsonBytes" in options &&
       "maxStdinBytes" in options &&
       "maxHttpBodyBytes" in options &&
-      typeof options.maxJsonBytes === "number" &&
       typeof options.maxStdinBytes === "number" &&
       typeof options.maxHttpBodyBytes === "number";
     this.options = isResolved
-      ? (options as ResolvedServerOptions)
-      : resolveSandboxWsServerOptions(options as SandboxWsServerOptions);
+      ? (options as ResolvedSandboxServerOptions)
+      : resolveSandboxServerOptions(options as SandboxServerOptions);
     this.vfsProvider = this.options.vfsProvider
       ? this.options.vfsProvider instanceof SandboxVfsProvider
         ? this.options.vfsProvider
@@ -835,14 +803,6 @@ export class SandboxWsServer extends EventEmitter {
     };
   }
 
-  getAddress() {
-    return this.address;
-  }
-
-  getUrl() {
-    return this.address?.url ?? null;
-  }
-
   getState() {
     return this.status;
   }
@@ -855,9 +815,20 @@ export class SandboxWsServer extends EventEmitter {
     return this.fsService?.metrics ?? null;
   }
 
+  connect(
+    onMessage: (data: Buffer | string, isBinary: boolean) => void,
+    onClose?: () => void
+  ): SandboxConnection {
+    const client = new LocalSandboxClient(onMessage, onClose);
+    this.attachClient(client);
+    return {
+      send: (message) => this.handleClientMessage(client, message),
+      close: () => this.closeClient(client),
+    };
+  }
+
   private broadcastStatus(state: SandboxState) {
-    if (!this.wss) return;
-    for (const client of this.wss.clients) {
+    for (const client of this.clients) {
       sendJson(client, { type: "status", state });
     }
     this.emit("state", state);
@@ -899,7 +870,7 @@ export class SandboxWsServer extends EventEmitter {
         code,
         message: detail,
       });
-      this.activeClient.close();
+      this.closeClient(this.activeClient);
     }
   }
 
@@ -910,7 +881,7 @@ export class SandboxWsServer extends EventEmitter {
     );
   }
 
-  async start(): Promise<SandboxWsServerAddress> {
+  async start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
 
     this.startPromise = this.startInternal().finally(() => {
@@ -930,204 +901,104 @@ export class SandboxWsServer extends EventEmitter {
     return this.stopPromise;
   }
 
-  private async startInternal(): Promise<SandboxWsServerAddress> {
-    if (this.wss) {
-      return this.address ?? resolveAddress(this.options.host, this.wss.address());
-    }
+  private async startInternal(): Promise<void> {
+    if (this.started) return;
 
-    this.wss = new WebSocketServer({
-      host: this.options.host,
-      port: this.options.port,
-      maxPayload: this.options.maxJsonBytes,
-      verifyClient: (info, done) => {
-        if (!validateToken(info.req.headers, this.options.token)) {
-          done(false, 401, "Unauthorized");
-          return;
-        }
-        done(true);
-      },
-    });
-
-    this.wss.on("connection", (ws) => this.handleConnection(ws));
-
-    this.wss.on("close", () => {
-      this.wss = null;
-      this.address = null;
-    });
-
+    this.started = true;
     this.network?.start();
     this.bridge.connect();
     this.fsBridge.connect();
-
-    const address = await new Promise<SandboxWsServerAddress>((resolve, reject) => {
-      const handleError = (err: Error) => {
-        cleanup();
-        reject(err);
-      };
-
-      const handleListening = () => {
-        cleanup();
-        const resolved = resolveAddress(this.options.host, this.wss?.address() ?? null);
-        this.address = resolved;
-        resolve(resolved);
-      };
-
-      const cleanup = () => {
-        this.wss?.off("error", handleError);
-        this.wss?.off("listening", handleListening);
-      };
-
-      this.wss?.once("error", handleError);
-      this.wss?.once("listening", handleListening);
-    });
-
-    return address;
   }
 
   private async stopInternal() {
     this.failInflight("server_shutdown", "server is shutting down");
+    this.closeAllClients();
     await this.controller.stop();
     this.bridge.disconnect();
     this.fsBridge.disconnect();
     await this.fsService?.close();
     this.network?.stop();
-
-    if (this.wss) {
-      for (const client of this.wss.clients) {
-        client.terminate();
-      }
-      await new Promise<void>((resolve) => {
-        let finished = false;
-        const finish = () => {
-          if (finished) return;
-          finished = true;
-          clearTimeout(timeout);
-          resolve();
-        };
-
-        const timeout = setTimeout(() => {
-          finish();
-        }, 1000);
-
-        this.wss?.close(() => finish());
-      });
-    }
-    this.wss = null;
-    this.address = null;
+    this.started = false;
   }
 
-  private handleConnection(ws: WebSocket) {
-    if (this.activeClient) {
-      sendError(ws, {
+  private attachClient(client: SandboxClient) {
+    if (this.activeClient && this.activeClient !== client) {
+      this.closeClient(this.activeClient);
+    }
+
+    this.clients.add(client);
+    this.activeClient = client;
+    sendJson(client, { type: "status", state: this.status });
+  }
+
+  private closeClient(client: SandboxClient) {
+    this.disconnectClient(client);
+    client.close();
+  }
+
+  private closeAllClients() {
+    for (const client of Array.from(this.clients)) {
+      this.closeClient(client);
+    }
+  }
+
+  private disconnectClient(client: SandboxClient) {
+    if (this.activeClient === client) {
+      this.activeClient = null;
+    }
+
+    this.clients.delete(client);
+    for (const [id, entry] of this.inflight.entries()) {
+      if (entry === client) {
+        this.inflight.delete(id);
+        this.stdinAllowed.delete(id);
+      }
+    }
+  }
+
+  private handleClientMessage(client: SandboxClient, message: ClientMessage) {
+    if (message.type === "boot") {
+      void this.handleBoot(client, message);
+      return;
+    }
+
+    if (!this.bootConfig) {
+      sendError(client, {
         type: "error",
-        code: "client_busy",
-        message: "only one client connection is allowed",
+        code: "missing_boot",
+        message: "boot configuration required before commands",
       });
-      ws.close();
       return;
     }
 
-    if (!sendJson(ws, { type: "status", state: this.status })) {
-      ws.close();
-      return;
+    if (message.type === "exec") {
+      this.handleExec(client, message);
+    } else if (message.type === "stdin") {
+      this.handleStdin(client, message);
+    } else if (message.type === "pty_resize") {
+      this.handlePtyResize(client, message);
+    } else if (message.type === "lifecycle") {
+      if (message.action === "restart") {
+        void this.controller.restart();
+      } else if (message.action === "shutdown") {
+        void this.controller.stop();
+      }
+    } else {
+      sendError(client, {
+        type: "error",
+        code: "unknown_type",
+        message: "unsupported message type",
+      });
     }
-
-    this.activeClient = ws;
-
-    ws.on("message", (data, isBinary) => {
-      if (isBinary) {
-        sendError(ws, {
-          type: "error",
-          code: "invalid_message",
-          message: "binary input frames are not supported",
-        });
-        return;
-      }
-
-      const size =
-        typeof data === "string"
-          ? Buffer.byteLength(data)
-          : Buffer.isBuffer(data)
-            ? data.length
-            : Array.isArray(data)
-              ? data.reduce((total, chunk) => total + chunk.length, 0)
-              : data.byteLength;
-      if (size > this.options.maxJsonBytes) {
-        sendError(ws, {
-          type: "error",
-          code: "payload_too_large",
-          message: "message exceeds size limit",
-        });
-        return;
-      }
-
-      let message: ClientMessage;
-      try {
-        message = JSON.parse(data.toString()) as ClientMessage;
-      } catch {
-        sendError(ws, {
-          type: "error",
-          code: "invalid_json",
-          message: "failed to parse JSON",
-        });
-        return;
-      }
-
-      if (message.type === "boot") {
-        void this.handleBoot(ws, message);
-        return;
-      }
-
-      if (!this.bootConfig) {
-        sendError(ws, {
-          type: "error",
-          code: "missing_boot",
-          message: "boot configuration required before commands",
-        });
-        return;
-      }
-
-      if (message.type === "exec") {
-        this.handleExec(ws, message);
-      } else if (message.type === "stdin") {
-        this.handleStdin(ws, message);
-      } else if (message.type === "pty_resize") {
-        this.handlePtyResize(ws, message);
-      } else if (message.type === "lifecycle") {
-        if (message.action === "restart") {
-          void this.controller.restart();
-        } else if (message.action === "shutdown") {
-          void this.controller.stop();
-        }
-      } else {
-        sendError(ws, {
-          type: "error",
-          code: "unknown_type",
-          message: "unsupported message type",
-        });
-      }
-    });
-
-    ws.on("close", () => {
-      if (this.activeClient === ws) {
-        this.activeClient = null;
-      }
-      for (const [id, client] of this.inflight.entries()) {
-        if (client === ws) {
-          this.inflight.delete(id);
-          this.stdinAllowed.delete(id);
-        }
-      }
-    });
   }
 
-  private async handleBoot(ws: WebSocket, message: BootCommandMessage) {
+  private async handleBoot(client: SandboxClient, message: BootCommandMessage) {
     let config: SandboxFsConfig;
     try {
       config = normalizeSandboxFsConfig(message);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         code: "invalid_request",
         message: error,
@@ -1153,12 +1024,12 @@ export class SandboxWsServer extends EventEmitter {
       await this.controller.start();
     }
 
-    sendJson(ws, { type: "status", state: this.status });
+    sendJson(client, { type: "status", state: this.status });
   }
 
-  private handleExec(ws: WebSocket, message: ExecCommandMessage) {
+  private handleExec(client: SandboxClient, message: ExecCommandMessage) {
     if (!isValidRequestId(message.id) || !message.cmd) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         code: "invalid_request",
         message: "exec requires uint32 id and cmd",
@@ -1167,7 +1038,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (this.inflight.has(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "duplicate_id",
@@ -1176,7 +1047,7 @@ export class SandboxWsServer extends EventEmitter {
       return;
     }
 
-    this.inflight.set(message.id, ws);
+    this.inflight.set(message.id, client);
     if (message.stdin) this.stdinAllowed.add(message.id);
 
     const payload = {
@@ -1191,7 +1062,7 @@ export class SandboxWsServer extends EventEmitter {
     if (!this.bridge.send(buildExecRequest(message.id, payload))) {
       this.inflight.delete(message.id);
       this.stdinAllowed.delete(message.id);
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "queue_full",
@@ -1200,9 +1071,9 @@ export class SandboxWsServer extends EventEmitter {
     }
   }
 
-  private handleStdin(ws: WebSocket, message: StdinCommandMessage) {
+  private handleStdin(client: SandboxClient, message: StdinCommandMessage) {
     if (!isValidRequestId(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         code: "invalid_request",
         message: "stdin requires a uint32 id",
@@ -1211,7 +1082,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (!this.inflight.has(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "unknown_id",
@@ -1221,7 +1092,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (!this.stdinAllowed.has(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "stdin_disabled",
@@ -1232,7 +1103,7 @@ export class SandboxWsServer extends EventEmitter {
 
     const base64 = message.data ?? "";
     if (base64 && estimateBase64Bytes(base64) > this.options.maxStdinBytes) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "payload_too_large",
@@ -1243,7 +1114,7 @@ export class SandboxWsServer extends EventEmitter {
 
     const data = base64 ? Buffer.from(base64, "base64") : Buffer.alloc(0);
     if (data.length > this.options.maxStdinBytes) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "payload_too_large",
@@ -1253,7 +1124,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (!this.bridge.send(buildStdinData(message.id, data, message.eof))) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "queue_full",
@@ -1262,9 +1133,9 @@ export class SandboxWsServer extends EventEmitter {
     }
   }
 
-  private handlePtyResize(ws: WebSocket, message: PtyResizeCommandMessage) {
+  private handlePtyResize(client: SandboxClient, message: PtyResizeCommandMessage) {
     if (!isValidRequestId(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         code: "invalid_request",
         message: "pty_resize requires a uint32 id",
@@ -1273,7 +1144,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (!this.inflight.has(message.id)) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "unknown_id",
@@ -1285,7 +1156,7 @@ export class SandboxWsServer extends EventEmitter {
     const rows = Number(message.rows);
     const cols = Number(message.cols);
     if (!Number.isFinite(rows) || !Number.isFinite(cols) || rows < 1 || cols < 1) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "invalid_request",
@@ -1295,7 +1166,7 @@ export class SandboxWsServer extends EventEmitter {
     }
 
     if (!this.bridge.send(buildPtyResize(message.id, Math.trunc(rows), Math.trunc(cols)))) {
-      sendError(ws, {
+      sendError(client, {
         type: "error",
         id: message.id,
         code: "queue_full",

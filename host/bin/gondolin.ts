@@ -14,11 +14,6 @@ import {
   encodeFrame,
   IncomingMessage,
 } from "../src/virtio-protocol";
-import { SandboxWsServer, resolveSandboxWsServerOptions } from "../src/sandbox-ws-server";
-import type { SandboxWsServerOptions } from "../src/sandbox-ws-server";
-
-const WS_URL = process.env.WS_URL;
-const TOKEN = process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
 
 type Command = {
   cmd: string;
@@ -37,9 +32,8 @@ type ExecArgs = {
 function usage() {
   console.log("Usage: gondolin <command> [options]");
   console.log("Commands:");
-  console.log("  exec         Run a command via the virtio socket or WS");
-  console.log("  ws-server    Start the WebSocket bridge server");
-  console.log("  bash         Start an interactive bash session over WS");
+  console.log("  exec         Run a command via the virtio socket or in-process VM");
+  console.log("  bash         Start an interactive bash session in the VM");
   console.log("  help         Show this help");
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
@@ -73,16 +67,16 @@ function execUsage() {
   console.log(
     "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
   );
-  console.log("  gondolin exec [options] -- CMD [ARGS...]  (WS mode, no --sock)");
+  console.log("  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)");
   console.log();
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
-  console.log("VFS Options (WS mode only):");
+  console.log("VFS Options (VM mode only):");
   console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
   console.log("  --mount-memfs PATH              Create memory-backed mount at path");
   console.log();
-  console.log("Network Options (WS mode only):");
+  console.log("Network Options (VM mode only):");
   console.log("  --allow-host HOST               Allow HTTP requests to host");
   console.log("  --host-secret NAME@HOST[,HOST...][=VALUE]");
   console.log("                                  Add secret for specified hosts");
@@ -412,13 +406,11 @@ function buildCommandPayload(command: Command) {
   return payload;
 }
 
-async function runExecWs(args: ExecArgs) {
+async function runExecVm(args: ExecArgs) {
   const vmOptions = buildVmOptions(args.common);
 
   // Use VM.create() to ensure guest assets are available
   const vm = await VM.create({
-    url: WS_URL ?? undefined,
-    token: TOKEN ?? undefined,
     ...vmOptions,
   });
 
@@ -542,8 +534,8 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
     // Socket mode (direct virtio connection)
     runExecSocket(args);
   } else {
-    // WS mode (via sandbox server)
-    await runExecWs(args);
+    // VM mode (in-process server)
+    await runExecVm(args);
   }
 }
 
@@ -616,8 +608,6 @@ async function runBash(argv: string[]) {
 
   // Use VM.create() to ensure guest assets are available
   const vm = await VM.create({
-    url: WS_URL ?? undefined,
-    token: TOKEN ?? undefined,
     ...vmOptions,
   });
 
@@ -639,162 +629,6 @@ async function runBash(argv: string[]) {
   }
 }
 
-function parseWsServerArgs(argv: string[]): SandboxWsServerOptions {
-  const args: SandboxWsServerOptions = {};
-
-  const fail = (message: string): never => {
-    console.error(message);
-    wsServerUsage();
-    process.exit(1);
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "--") {
-      continue;
-    }
-    switch (arg) {
-      case "--host":
-        args.host = argv[++i] ?? args.host;
-        break;
-      case "--port":
-        args.port = Number(argv[++i]);
-        if (!Number.isFinite(args.port)) fail("--port must be a number");
-        break;
-      case "--qemu":
-        args.qemuPath = argv[++i];
-        break;
-      case "--kernel":
-        args.kernelPath = argv[++i];
-        break;
-      case "--initrd":
-        args.initrdPath = argv[++i];
-        break;
-      case "--rootfs":
-        args.rootfsPath = argv[++i];
-        break;
-      case "--memory":
-        args.memory = argv[++i];
-        break;
-      case "--cpus":
-        args.cpus = Number(argv[++i]);
-        if (!Number.isFinite(args.cpus)) fail("--cpus must be a number");
-        break;
-      case "--virtio-sock":
-        args.virtioSocketPath = argv[++i];
-        break;
-      case "--net-sock":
-        args.netSocketPath = argv[++i];
-        break;
-      case "--virtio-fs-sock":
-        args.virtioFsSocketPath = argv[++i];
-        break;
-      case "--net-mac":
-        args.netMac = argv[++i];
-        break;
-      case "--no-net":
-        args.netEnabled = false;
-        break;
-      case "--net-debug":
-        args.netDebug = true;
-        break;
-      case "--machine":
-        args.machineType = argv[++i];
-        break;
-      case "--accel":
-        args.accel = argv[++i];
-        break;
-      case "--cpu":
-        args.cpu = argv[++i];
-        break;
-      case "--console":
-        args.console = argv[++i] === "none" ? "none" : "stdio";
-        break;
-      case "--token":
-        args.token = argv[++i];
-        break;
-      case "--restart":
-        args.autoRestart = true;
-        break;
-      case "--no-restart":
-        args.autoRestart = false;
-        break;
-      case "--help":
-      case "-h":
-        wsServerUsage();
-        process.exit(0);
-      default:
-        fail(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return args;
-}
-
-function wsServerUsage() {
-  const defaults = resolveSandboxWsServerOptions();
-  console.log("Usage: gondolin ws-server [options]");
-  console.log("Options:");
-  console.log(`  --host HOST          Host to bind (default ${defaults.host})`);
-  console.log(`  --port PORT          Port to bind (default ${defaults.port})`);
-  console.log(`  --qemu PATH          QEMU binary (default ${defaults.qemuPath})`);
-  console.log("  --kernel PATH        Kernel path");
-  console.log("  --initrd PATH        Initrd path");
-  console.log("  --rootfs PATH        Root filesystem image path");
-  console.log(`  --memory SIZE        Memory size (default ${defaults.memory})`);
-  console.log(`  --cpus N             vCPU count (default ${defaults.cpus})`);
-  console.log("  --virtio-sock PATH   Virtio serial socket path");
-  console.log("  --virtio-fs-sock PATH Virtio filesystem socket path");
-  console.log("  --net-sock PATH      QEMU net socket path");
-  console.log("  --net-mac MAC        MAC address for virtio-net");
-  console.log("  --no-net             Disable QEMU net backend");
-  console.log("  --net-debug          Enable net backend debug logging");
-  console.log("                       (or set GONDOLIN_DEBUG=net)");
-  console.log("  --machine TYPE       Override QEMU machine type");
-  console.log("  --accel TYPE         Override QEMU accel (kvm/hvf/tcg)");
-  console.log("  --cpu TYPE           Override QEMU CPU type");
-  console.log("  --console stdio|none Console output");
-  console.log("  --token TOKEN        Require token in Authorization header");
-  console.log("  --restart            Enable auto restart on exit");
-  console.log("  --no-restart         Disable auto restart on exit (default)");
-}
-
-function formatWsServerLog(message: string) {
-  if (message.endsWith("\n")) return message;
-  return `${message}\n`;
-}
-
-async function runWsServer(argv: string[] = process.argv.slice(2)) {
-  const args = parseWsServerArgs(argv);
-  // Use SandboxWsServer.create() to ensure guest assets are available
-  const server = await SandboxWsServer.create(args);
-
-  server.on("log", (message: string) => {
-    process.stdout.write(formatWsServerLog(message));
-  });
-
-  server.on("error", (err) => {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stdout.write(formatWsServerLog(message));
-  });
-
-  const address = await server.start();
-  console.log(`WebSocket server listening on ${address.url}`);
-
-  const shutdown = async () => {
-    await server.stop();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", () => {
-    void shutdown();
-  });
-
-  process.on("SIGTERM", () => {
-    void shutdown();
-  });
-}
-
 async function main() {
   const [command, ...args] = process.argv.slice(2);
 
@@ -806,10 +640,6 @@ async function main() {
   switch (command) {
     case "exec":
       await runExec(args);
-      return;
-    case "ws-server":
-    case "server":
-      await runWsServer(args);
       return;
     case "bash":
       await runBash(args);

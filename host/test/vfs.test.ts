@@ -6,7 +6,6 @@ import { VM } from "../src/vm";
 import { MemoryProvider, ReadonlyProvider } from "../src/vfs";
 import { createErrnoError } from "../src/vfs/errors";
 
-const url = process.env.WS_URL;
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 15000);
 const { errno: ERRNO } = os.constants;
 
@@ -25,7 +24,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
 }
 
-test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+test("vfs roundtrip between host and guest", { timeout: timeoutMs }, async () => {
   const provider = new MemoryProvider();
   const handle = await provider.open("/host.txt", "w+");
   await handle.writeFile("host-data");
@@ -77,7 +76,7 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
   assert.equal(data, "guest-data");
 });
 
-test("vfs hooks can block writes", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+test("vfs hooks can block writes", { timeout: timeoutMs }, async () => {
   const provider = new MemoryProvider();
   const blocked: string[] = [];
 
@@ -114,7 +113,7 @@ test("vfs hooks can block writes", { timeout: timeoutMs, skip: Boolean(url) }, a
   assert.ok(blocked.some((entry) => entry.startsWith("/blocked.txt:")));
 });
 
-test("vfs supports read-only email mounts with dynamic content", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+test("vfs supports read-only email mounts with dynamic content", { timeout: timeoutMs }, async () => {
   const rootProvider = new MemoryProvider();
   const rootHandle = await rootProvider.open("/root.txt", "w+");
   await rootHandle.writeFile("root-data");
@@ -188,7 +187,7 @@ test("vfs supports read-only email mounts with dynamic content", { timeout: time
   assert.ok(apiCalls.includes(emailId));
 });
 
-test("ReadonlyProvider blocks write operations", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+test("ReadonlyProvider blocks write operations", { timeout: timeoutMs }, async () => {
   // Create a memory provider with some initial content
   const innerProvider = new MemoryProvider();
   const handle = await innerProvider.open("/existing.txt", "w+");
@@ -263,7 +262,7 @@ test("ReadonlyProvider blocks write operations", { timeout: timeoutMs, skip: Boo
   );
 });
 
-test("ReadonlyProvider works in VM guest", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+test("ReadonlyProvider works in VM guest", { timeout: timeoutMs }, async () => {
   // Create a provider with initial content
   const innerProvider = new MemoryProvider();
   const handle = await innerProvider.open("/host-file.txt", "w+");

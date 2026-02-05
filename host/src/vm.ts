@@ -1,5 +1,3 @@
-import { WebSocket } from "ws";
-import type { RawData } from "ws";
 import { Readable } from "stream";
 
 import {
@@ -7,13 +5,15 @@ import {
   ExecResponseMessage,
   StatusMessage,
   decodeOutputFrame,
+  type ClientMessage,
 } from "./ws-protocol";
 import {
-  SandboxWsServer,
-  SandboxWsServerOptions,
-  resolveSandboxWsServerOptionsAsync,
-  type ResolvedServerOptions,
-} from "./sandbox-ws-server";
+  SandboxServer,
+  SandboxServerOptions,
+  resolveSandboxServerOptionsAsync,
+  type ResolvedSandboxServerOptions,
+  type SandboxConnection,
+} from "./sandbox-server";
 import type { SandboxState } from "./sandbox-controller";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import {
@@ -82,9 +82,7 @@ export type VmVfsOptions = {
 };
 
 export type VMOptions = {
-  url?: string;
-  token?: string;
-  server?: SandboxWsServerOptions;
+  server?: SandboxServerOptions;
   autoStart?: boolean;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
@@ -119,13 +117,10 @@ export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 export type VMState = SandboxState | "unknown";
 
 export class VM {
-  private readonly token?: string;
   private readonly autoStart: boolean;
-  private server: SandboxWsServer | null;
+  private server: SandboxServer | null;
   private readonly defaultEnv: EnvInput | undefined;
-  private url: string | null;
-  private resolvedServerOptions: ResolvedServerOptions | null = null;
-  private ws: WebSocket | null = null;
+  private connection: SandboxConnection | null = null;
   private connectPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
@@ -156,13 +151,8 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
-    // If connecting to remote URL, no need to resolve assets
-    if (options.url) {
-      return new VM(options);
-    }
-
     // Resolve server options with async asset fetching
-    const serverOptions: SandboxWsServerOptions = { ...options.server };
+    const serverOptions: SandboxServerOptions = { ...options.server };
 
     // Build the combined server options
     if (options.fetch && serverOptions.fetch === undefined) {
@@ -174,8 +164,6 @@ export class VM {
     if (options.maxHttpBodyBytes !== undefined && serverOptions.maxHttpBodyBytes === undefined) {
       serverOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
-    if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
-    if (serverOptions.port === undefined) serverOptions.port = 0;
     if (options.memory && serverOptions.memory === undefined) {
       serverOptions.memory = options.memory;
     }
@@ -184,7 +172,7 @@ export class VM {
     }
 
     // Resolve options with asset fetching
-    const resolvedServerOptions = await resolveSandboxWsServerOptionsAsync(serverOptions);
+    const resolvedServerOptions = await resolveSandboxServerOptionsAsync(serverOptions);
 
     // Create VM with pre-resolved options
     return new VM(options, resolvedServerOptions);
@@ -200,13 +188,7 @@ export class VM {
    * @param options VM configuration options
    * @param resolvedServerOptions Optional pre-resolved server options (from VM.create())
    */
-  constructor(options: VMOptions = {}, resolvedServerOptions?: ResolvedServerOptions) {
-    if (options.url && options.server) {
-      throw new Error("VM cannot specify both url and server options");
-    }
-
-    this.token =
-      options.token ?? process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
+  constructor(options: VMOptions = {}, resolvedServerOptions?: ResolvedSandboxServerOptions) {
     this.autoStart = options.autoStart ?? true;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
@@ -221,13 +203,7 @@ export class VM {
     this.fuseMount = fuseConfig.fuseMount;
     this.fuseBinds = fuseConfig.fuseBinds;
 
-    if (options.url) {
-      this.url = options.url;
-      this.server = null;
-      return;
-    }
-
-    const serverOptions: SandboxWsServerOptions = { ...options.server };
+    const serverOptions: SandboxServerOptions = { ...options.server };
     if (serverOptions.vfsProvider && options.vfs) {
       throw new Error("VM cannot specify both vfs and server.vfsProvider");
     }
@@ -265,8 +241,6 @@ export class VM {
     if (this.vfs && serverOptions.vfsProvider === undefined) {
       serverOptions.vfsProvider = this.vfs;
     }
-    if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
-    if (serverOptions.port === undefined) serverOptions.port = 0;
     if (options.memory && serverOptions.memory === undefined) {
       serverOptions.memory = options.memory;
     }
@@ -286,9 +260,9 @@ export class VM {
       if (this.vfs) {
         (resolvedServerOptions as any).vfsProvider = this.vfs;
       }
-      this.server = new SandboxWsServer(resolvedServerOptions);
+      this.server = new SandboxServer(resolvedServerOptions);
     } else {
-      this.server = new SandboxWsServer(serverOptions);
+      this.server = new SandboxServer(serverOptions);
     }
     if (netDebug) {
       this.server.on("log", (message: string) => {
@@ -299,15 +273,10 @@ export class VM {
         process.stderr.write(formatLog(message));
       });
     }
-    this.url = null;
   }
 
   getState() {
     return this.state;
-  }
-
-  getUrl() {
-    return this.url;
   }
 
   getVfs() {
@@ -497,8 +466,7 @@ export class VM {
 
   private async startInternal() {
     if (this.server) {
-      const address = await this.server.start();
-      this.url = address.url;
+      await this.server.start();
     }
 
     await this.ensureConnection();
@@ -508,7 +476,6 @@ export class VM {
   private async stopInternal() {
     if (this.server) {
       await this.server.stop();
-      this.url = null;
     }
     if (this.vfs) {
       await this.vfs.close();
@@ -628,7 +595,7 @@ export class VM {
   }
 
   private sendPtyResizeNow(id: number, rows: number, cols: number) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.connection) return;
     this.sendJson({
       type: "pty_resize",
       id,
@@ -638,48 +605,26 @@ export class VM {
   }
 
   private async ensureConnection() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    if (this.connection) return;
     if (this.connectPromise) return this.connectPromise;
-    if (!this.url) {
-      throw new Error("WebSocket URL is not available");
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
     }
 
     this.resetConnectionState();
 
-    this.connectPromise = new Promise<void>((resolve, reject) => {
-      const headers: Record<string, string> = {};
-      if (this.token) headers.Authorization = `Bearer ${this.token}`;
-
-      const ws = new WebSocket(this.url!, { headers });
-      this.ws = ws;
-      let opened = false;
-
-      ws.on("open", () => {
-        opened = true;
-        resolve();
-      });
-
-      ws.on("message", (data, isBinary) => {
-        this.handleMessage(data, isBinary);
-      });
-
-      ws.on("close", () => {
-        const error = new Error("WebSocket closed");
-        if (!opened) {
-          reject(error);
+    this.connectPromise = (async () => {
+      await server.start();
+      this.connection = server.connect(
+        (data, isBinary) => {
+          this.handleMessage(data, isBinary);
+        },
+        () => {
+          this.handleDisconnect(new Error("sandbox connection closed"));
         }
-        this.handleDisconnect(error);
-      });
-
-      ws.on("error", (err) => {
-        if (!opened) {
-          reject(err);
-          return;
-        }
-        const error = err instanceof Error ? err : new Error(String(err));
-        this.handleDisconnect(error);
-      });
-    }).finally(() => {
+      );
+    })().finally(() => {
       this.connectPromise = null;
     });
 
@@ -838,9 +783,9 @@ export class VM {
     });
   }
 
-  private handleMessage(data: RawData, isBinary: boolean) {
+  private handleMessage(data: Buffer | string, isBinary: boolean) {
     if (isBinary) {
-      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const frame = decodeOutputFrame(buffer);
       const session = this.sessions.get(frame.id);
       if (!session) return;
@@ -860,7 +805,10 @@ export class VM {
 
     let message: StatusMessage | ExecResponseMessage | ErrorMessage;
     try {
-      message = JSON.parse(data.toString()) as StatusMessage | ExecResponseMessage | ErrorMessage;
+      message = JSON.parse(typeof data === "string" ? data : data.toString()) as
+        | StatusMessage
+        | ExecResponseMessage
+        | ErrorMessage;
     } catch {
       return;
     }
@@ -931,60 +879,36 @@ export class VM {
   }
 
   private handleDisconnect(error?: Error) {
-    this.ws = null;
+    this.connection = null;
+    const disconnectError = error ?? new Error("sandbox connection disconnected");
     if (this.statusReject) {
-      this.statusReject(error ?? new Error("WebSocket disconnected"));
+      this.statusReject(disconnectError);
       this.statusReject = null;
       this.statusResolve = null;
       this.statusPromise = null;
     }
     if (this.stateWaiters.length > 0) {
       for (const waiter of this.stateWaiters) {
-        waiter.reject(error ?? new Error("WebSocket disconnected"));
+        waiter.reject(disconnectError);
       }
       this.stateWaiters = [];
     }
-    this.rejectAll(error ?? new Error("WebSocket disconnected"));
+    this.rejectAll(disconnectError);
   }
 
   private async disconnect() {
-    if (!this.ws) return;
+    if (!this.connection) return;
 
-    const ws = this.ws;
-    this.ws = null;
-
-    if (ws.readyState === WebSocket.CLOSED) return;
-
-    await new Promise<void>((resolve) => {
-      let finished = false;
-      const finish = () => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        resolve();
-      };
-
-      const timeout = setTimeout(() => {
-        ws.terminate();
-        finish();
-      }, 1000);
-
-      ws.once("close", finish);
-      ws.once("error", finish);
-
-      if (ws.readyState === WebSocket.CLOSING) {
-        return;
-      }
-
-      ws.close();
-    });
+    const connection = this.connection;
+    this.connection = null;
+    connection.close();
   }
 
-  private sendJson(message: object) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket is not connected");
+  private sendJson(message: ClientMessage) {
+    if (!this.connection) {
+      throw new Error("sandbox connection is not available");
     }
-    this.ws.send(JSON.stringify(message));
+    this.connection.send(message);
   }
 }
 

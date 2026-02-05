@@ -24,9 +24,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/bin/gondolin.js exec",
     "dev": "tsx bin/gondolin.ts exec",
-    "dev:ws": "tsx bin/gondolin.ts ws-server",
     "test": "tsx --test test/*.test.ts",
-    "test:ws": "tsx --test test/ws.test.ts",
     "bash": "tsx bin/gondolin.ts bash",
     "gondolin": "tsx bin/gondolin.ts"
   },
@@ -48,13 +46,11 @@
   "dependencies": {
     "cbor": "^10.0.4",
     "node-forge": "^1.3.3",
-    "undici": "^6.21.0",
-    "ws": "^8.18.0"
+    "undici": "^6.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "@types/node-forge": "^1.3.14",
-    "@types/ws": "^8.5.12",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   },

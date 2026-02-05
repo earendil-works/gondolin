@@ -78,7 +78,7 @@ await vm.close();
 ## Features
 
 - **QEMU micro-VM** with virtio-serial control channel and virtio-net device
-- **WebSocket API** for exec (stdin/pty + streaming stdout/stderr)
+- **In-process control API** for exec (stdin/pty + streaming stdout/stderr)
 - **TypeScript network stack** implementing Ethernet, ARP, IPv4, ICMP, DHCP, TCP, UDP
 - **HTTP/HTTPS interception** with request/response hooks and DNS-rebind-safe allowlists
 - **TLS MITM** with auto-generated CA and per-host leaf certificates
@@ -134,23 +134,6 @@ gondolin exec -- ls -la /
 gondolin exec --mount-hostfs ~/project:/workspace -- npm test
 ```
 
-### gondolin ws-server
-
-Start the WebSocket bridge server:
-
-```bash
-gondolin ws-server [options]
-```
-
-Options:
-- `--host HOST` - Host to bind (default: 127.0.0.1)
-- `--port PORT` - Port to bind (default: 8080)
-- `--kernel PATH` - Custom kernel path
-- `--initrd PATH` - Custom initrd path
-- `--rootfs PATH` - Custom rootfs path
-- `--memory SIZE` - Memory size (default: 1G)
-- `--cpus N` - CPU count (default: 2)
-
 ## Network Policy
 
 The network stack only allows HTTP and TLS traffic. TCP flows are classified and
@@ -173,6 +156,20 @@ const { httpHooks, env } = createHttpHooks({
   onResponse: async (req, res) => { console.log(res.status); return res; },
 });
 ```
+
+This also has some other consequences that are notable:
+
+* ICMP echo requests in the guest just work.  But they are total lies.  You can
+  ping any address and you get a response back, it's not actually ever sending
+  a request there.
+* HTTP redirects are resolved on the host, and hidden form the guest.  When the
+  guest does an HTTP request, it only gets the final redirect response, not any
+  request in the chain.  This is done for security reasons because it means that
+  the host can ensure that no redirect is going somewhere, where the policy does
+  not permit it (we never trust the IP the client resolves).
+* Even though the guest does DNS resolutions, they are for the most part
+  disregarded as the actual HTTP request is done by the host based on the `Host`
+  header in the request.
 
 ## VFS Providers
 

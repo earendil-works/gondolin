@@ -15,12 +15,13 @@ export {
 
 // Server for running the sandbox
 export {
-  SandboxWsServer,
-  resolveSandboxWsServerOptions,
-  resolveSandboxWsServerOptionsAsync,
-  type SandboxWsServerOptions,
-  type SandboxWsServerAddress,
-} from "./sandbox-ws-server";
+  SandboxServer,
+  resolveSandboxServerOptions,
+  resolveSandboxServerOptionsAsync,
+  type SandboxServerOptions,
+  type ResolvedSandboxServerOptions,
+  type SandboxConnection,
+} from "./sandbox-server";
 
 // VFS (Virtual File System) providers
 export {

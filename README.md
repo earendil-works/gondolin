@@ -106,11 +106,9 @@ See [`host/README.md`](host/README.md) for full API details.
   times.  There might be better choices and this is something we should experiment with.
   In particular using nixOS is very appealing for agentic use.
 * **Host bridge:** the host spawns a process that manages the QEMU lifecycle and
-  plumbing for the sandbox to work (it's the endpoint for the virtio protocol).  The
-  communication from that host process to the TypeScript library currently happens via
-  WebSocket which allows you to create a network indirection between where the sandbox
-  runs and where your code lives.  That choice is probably not optimal and we might want
-  to revisit this.
+  plumbing for the sandbox to work (it's the endpoint for the virtio protocol). The
+  TypeScript library talks to that host controller in-process (same Node runtime),
+  keeping the control path local and synchronous.
 * **Programming languages:** the sandbox is written in Zig because it produces small
   binaries and allows trivial cross compilation.  The host is written in TypeScript
   because it allows plugging in custom behavior trivially for the VM.
@@ -118,4 +116,4 @@ See [`host/README.md`](host/README.md) for full API details.
 ## Components
 
 - [`guest/`](guest/) — Zig-based `sandboxd` daemon, Alpine initramfs build, and QEMU helpers.
-- [`host/`](host/) — TypeScript host controller + WebSocket server that works with the guest.
+- [`host/`](host/) — TypeScript host controller and in-process control plane for the guest.

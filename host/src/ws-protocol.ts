@@ -1,9 +1,9 @@
 /**
- * WebSocket exec protocol.
+ * Sandbox control protocol.
  *
  * Transport:
- * - Text frames carry JSON control messages typed in this module.
- * - Binary frames stream stdout/stderr chunks.
+ * - JSON control messages typed in this module.
+ * - Binary output frames stream stdout/stderr chunks.
  *
  * Client → Server:
  * - exec { type: "exec", id, cmd, argv?, env?, cwd?, stdin?, pty? }

@@ -9,8 +9,6 @@ import { ReadonlyProvider, RealFSProvider, VirtualProvider as VirtualProviderBas
 import type { VirtualProvider, VirtualFileHandle } from "../src/vfs";
 import { createErrnoError } from "../src/vfs/errors";
 
-const WS_URL = process.env.WS_URL;
-const TOKEN = process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
 const ALLOWED_HOSTS = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
 
 const { errno: ERRNO } = os.constants;
@@ -352,8 +350,6 @@ async function main() {
 
   const { httpHooks } = createHttpHooks({ allowedHosts: ALLOWED_HOSTS });
   const vm = new VM({
-    url: WS_URL ?? undefined,
-    token: TOKEN ?? undefined,
     httpHooks,
     vfs: { mounts: { "/git": new MagicGitProvider() } },
   });

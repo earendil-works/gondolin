@@ -5,9 +5,9 @@ set -euo pipefail
 # (uses @earendil-works/gondolin from node resolution)
 
 eval "$(node -e '
-const { resolveSandboxWsServerOptionsAsync } = require("@earendil-works/gondolin");
+const { resolveSandboxServerOptionsAsync } = require("@earendil-works/gondolin");
 (async () => {
-  const o = await resolveSandboxWsServerOptionsAsync({ console: "stdio" });
+  const o = await resolveSandboxServerOptionsAsync({ console: "stdio" });
   const platform = process.platform;
   const arch = process.arch;
   const defaultMachine = (o.machineType ?? (
