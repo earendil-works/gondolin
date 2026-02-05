@@ -154,6 +154,7 @@ jobs:
         run: make test
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          WS_TIMEOUT: "120000"
 
   # Optional: Publish preview package for PRs (uses trusted publishing)
   # Uncomment to enable publishing test versions from PRs
