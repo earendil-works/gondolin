@@ -13,9 +13,9 @@ import { createHash } from "crypto";
 
 import type {
   BuildConfig,
-  AssetManifest,
   Architecture,
 } from "./build-config";
+import { MANIFEST_FILENAME, loadAssetManifest, type AssetManifest } from "./assets";
 import {
   buildAlpineImages,
   downloadFile,
@@ -29,7 +29,6 @@ import {
 const KERNEL_FILENAME = "vmlinuz-virt";
 const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 const ROOTFS_FILENAME = "rootfs.ext4";
-const MANIFEST_FILENAME = "manifest.json";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {
@@ -777,23 +776,6 @@ function computeFileHash(filePath: string): string {
   }
 
   return hash.digest("hex");
-}
-
-/**
- * Load an asset manifest from a directory.
- */
-export function loadAssetManifest(assetDir: string): AssetManifest | null {
-  const manifestPath = path.join(assetDir, MANIFEST_FILENAME);
-  if (!fs.existsSync(manifestPath)) {
-    return null;
-  }
-
-  try {
-    const content = fs.readFileSync(manifestPath, "utf8");
-    return JSON.parse(content) as AssetManifest;
-  } catch {
-    return null;
-  }
 }
 
 /**

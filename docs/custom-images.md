@@ -179,16 +179,14 @@ GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 
 ### Programmatic API
 
-```typescript
-import { VM, loadGuestAssets } from "@earendil-works/gondolin";
+Point `imagePath` at the asset directory (it will use `manifest.json` when present):
 
-const assets = loadGuestAssets("./my-assets");
+```typescript
+import { VM } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
   server: {
-    kernelPath: assets.kernelPath,
-    initrdPath: assets.initrdPath,
-    rootfsPath: assets.rootfsPath,
+    imagePath: "./my-assets",
   },
 });
 

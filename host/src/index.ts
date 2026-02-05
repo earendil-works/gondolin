@@ -63,7 +63,9 @@ export {
   getAssetDirectory,
   hasGuestAssets,
   loadGuestAssets,
+  loadAssetManifest,
   type GuestAssets,
+  type AssetManifest,
 } from "./assets";
 
 // Build configuration and builder
@@ -76,7 +78,6 @@ export {
   type ContainerConfig,
   type RootfsConfig,
   type InitConfig,
-  type AssetManifest,
   getDefaultBuildConfig,
   getDefaultArch,
   validateBuildConfig,
@@ -86,7 +87,6 @@ export {
 
 export {
   buildAssets,
-  loadAssetManifest,
   verifyAssets,
   type BuildOptions,
   type BuildResult,

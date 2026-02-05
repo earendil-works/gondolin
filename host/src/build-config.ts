@@ -106,37 +106,6 @@ export interface BuildConfig {
 }
 
 /**
- * Manifest describing the built assets.
- */
-export interface AssetManifest {
-  /** Manifest version for future compatibility */
-  version: 1;
-
-  /** Build configuration used */
-  config: BuildConfig;
-
-  /** Timestamp of the build */
-  buildTime: string;
-
-  /** Asset file information */
-  assets: {
-    /** Kernel image filename */
-    kernel: string;
-    /** Initramfs filename */
-    initramfs: string;
-    /** Root filesystem filename */
-    rootfs: string;
-  };
-
-  /** Checksums for verification */
-  checksums: {
-    kernel: string;
-    initramfs: string;
-    rootfs: string;
-  };
-}
-
-/**
  * Get the default build configuration for the current system.
  */
 export function getDefaultBuildConfig(): BuildConfig {

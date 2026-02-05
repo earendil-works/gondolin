@@ -5,6 +5,7 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { execSync } from "child_process";
 import { createHash } from "crypto";
+import type { BuildConfig } from "./build-config";
 
 const GITHUB_ORG = "earendil-works";
 const GITHUB_REPO = "gondolin";
@@ -81,6 +82,39 @@ function getAssetDir(): string {
   return path.join(cacheBase, "gondolin", resolveAssetVersion());
 }
 
+export const MANIFEST_FILENAME = "manifest.json";
+
+/**
+ * Manifest describing the built assets.
+ */
+export interface AssetManifest {
+  /** Manifest version for future compatibility */
+  version: 1;
+
+  /** Build configuration used */
+  config: BuildConfig;
+
+  /** Timestamp of the build */
+  buildTime: string;
+
+  /** Asset file information */
+  assets: {
+    /** Kernel image filename */
+    kernel: string;
+    /** Initramfs filename */
+    initramfs: string;
+    /** Root filesystem filename */
+    rootfs: string;
+  };
+
+  /** Checksums for verification */
+  checksums: {
+    kernel: string;
+    initramfs: string;
+    rootfs: string;
+  };
+}
+
 /**
  * Guest image asset paths.
  */
@@ -94,10 +128,28 @@ export interface GuestAssets {
 }
 
 /**
+ * Load an asset manifest from a directory.
+ */
+export function loadAssetManifest(assetDir: string): AssetManifest | null {
+  const manifestPath = path.join(assetDir, MANIFEST_FILENAME);
+  if (!fs.existsSync(manifestPath)) {
+    return null;
+  }
+
+  try {
+    const content = fs.readFileSync(manifestPath, "utf8");
+    return JSON.parse(content) as AssetManifest;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Load guest assets from a custom directory.
  *
  * This is useful when you've built custom assets using `gondolin build`.
- * The directory should contain vmlinuz-virt, initramfs.cpio.lz4, and rootfs.ext4.
+ * The directory should contain manifest.json or the default filenames
+ * (vmlinuz-virt, initramfs.cpio.lz4, and rootfs.ext4).
  *
  * @param assetDir Path to the directory containing the assets
  * @returns Paths to the guest assets
@@ -105,18 +157,30 @@ export interface GuestAssets {
  */
 export function loadGuestAssets(assetDir: string): GuestAssets {
   const resolvedDir = path.resolve(assetDir);
+  const manifest = loadAssetManifest(resolvedDir);
+  const assetFiles = manifest?.assets ?? {
+    kernel: "vmlinuz-virt",
+    initramfs: "initramfs.cpio.lz4",
+    rootfs: "rootfs.ext4",
+  };
 
-  if (!assetsExist(resolvedDir)) {
-    const missing: string[] = [];
-    if (!fs.existsSync(path.join(resolvedDir, "vmlinuz-virt"))) {
-      missing.push("vmlinuz-virt");
-    }
-    if (!fs.existsSync(path.join(resolvedDir, "initramfs.cpio.lz4"))) {
-      missing.push("initramfs.cpio.lz4");
-    }
-    if (!fs.existsSync(path.join(resolvedDir, "rootfs.ext4"))) {
-      missing.push("rootfs.ext4");
-    }
+  const kernelPath = path.join(resolvedDir, assetFiles.kernel);
+  const initrdPath = path.join(resolvedDir, assetFiles.initramfs);
+  const rootfsPath = path.join(resolvedDir, assetFiles.rootfs);
+
+  const missing: string[] = [];
+
+  if (!fs.existsSync(kernelPath)) {
+    missing.push(assetFiles.kernel);
+  }
+  if (!fs.existsSync(initrdPath)) {
+    missing.push(assetFiles.initramfs);
+  }
+  if (!fs.existsSync(rootfsPath)) {
+    missing.push(assetFiles.rootfs);
+  }
+
+  if (missing.length > 0) {
     throw new Error(
       `Missing guest assets in ${resolvedDir}: ${missing.join(", ")}\n` +
         `Run 'gondolin build' to create custom assets, or ensure the directory contains all required files.`
@@ -124,9 +188,9 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
   }
 
   return {
-    kernelPath: path.join(resolvedDir, "vmlinuz-virt"),
-    initrdPath: path.join(resolvedDir, "initramfs.cpio.lz4"),
-    rootfsPath: path.join(resolvedDir, "rootfs.ext4"),
+    kernelPath,
+    initrdPath,
+    rootfsPath,
   };
 }
 

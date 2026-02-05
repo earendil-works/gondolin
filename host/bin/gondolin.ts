@@ -20,7 +20,8 @@ import {
   parseBuildConfig,
   type BuildConfig,
 } from "../src/build-config";
-import { buildAssets, verifyAssets, loadAssetManifest } from "../src/builder";
+import { buildAssets, verifyAssets } from "../src/builder";
+import { loadAssetManifest } from "../src/assets";
 
 type Command = {
   cmd: string;
