@@ -390,8 +390,6 @@ export class NetworkStack extends EventEmitter {
     const ck = this.calculateChecksum(reply);
     reply.writeUInt16BE(ck, 2);
 
-    this.sendIP(reply, IP_PROTO_ICMP, dstIP, srcIP);
-
     if (wantsDebug && canParse) {
       const replyTime = performance.now();
       this.emit("icmp", {
@@ -404,6 +402,8 @@ export class NetworkStack extends EventEmitter {
         size: data.length,
       });
     }
+
+    this.sendIP(reply, IP_PROTO_ICMP, dstIP, srcIP);
   }
 
   sendIP(payload: Buffer, protocol: number, srcIP: Buffer, dstIP: Buffer) {
