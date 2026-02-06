@@ -86,9 +86,14 @@ async function main() {
     }
   }
 
+  const consoleMode =
+    process.env.GONDOLIN_VM_CONSOLE === "stdio" || process.env.CI
+      ? "stdio"
+      : "none";
+
   const vm = new VM({
     server: {
-      console: "none",
+      console: consoleMode,
       maxStdinBytes: MAX_STDIN_BYTES,
     },
   });

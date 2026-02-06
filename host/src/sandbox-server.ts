@@ -716,7 +716,17 @@ export class SandboxServer extends EventEmitter {
     };
 
     this.controller = new SandboxController(sandboxConfig);
-    this.bridge = new VirtioBridge(this.options.virtioSocketPath);
+
+    // The virtio control channel can briefly accumulate a lot of data (notably
+    // when streaming large stdin payloads). The default 8MiB buffer is too
+    // small for our guest-tests (which can push multi-megabyte binaries), and
+    // can cause spurious queue_full errors under slower virtio transport.
+    const maxPendingBytes = Math.max(
+      8 * 1024 * 1024,
+      (this.options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES) * 2
+    );
+
+    this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
@@ -760,13 +770,13 @@ export class SandboxServer extends EventEmitter {
         this.clearVfsReadyTimer();
         this.status = "starting";
       } else if (state === "running") {
-        if (this.vfsReady) {
-          this.clearVfsReadyTimer();
-          this.status = "running";
-        } else {
-          this.startVfsReadyTimer();
-          this.status = "starting";
-        }
+        // Consider the sandbox "running" once QEMU has spawned.
+        //
+        // VFS readiness is verified separately (e.g. via VM.waitForReady()).
+        // Relying on the guest's one-shot vfs_ready message can lead to
+        // deadlocks/timeouts if it is missed.
+        this.clearVfsReadyTimer();
+        this.status = "running";
       } else {
         this.vfsReady = false;
         this.clearVfsReadyTimer();
