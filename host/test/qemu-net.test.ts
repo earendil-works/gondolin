@@ -521,6 +521,61 @@ test("qemu-net: fetchAndRespond streams chunked body when length unknown/encoded
   assert.ok(bodyText.includes("0\r\n\r\n"));
 });
 
+test("qemu-net: fetchAndRespond handles HTTP/1.0 clients correctly (no chunked)", async () => {
+  const writes: Buffer[] = [];
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("one"));
+      controller.enqueue(new TextEncoder().encode("two"));
+      controller.close();
+    },
+  });
+
+  const fetchMock = async () => {
+    return new Response(body, {
+      status: 200,
+      statusText: "OK",
+      headers: {
+        // triggers the unknown-length/encoded streaming path
+        "content-encoding": "gzip",
+      },
+    });
+  };
+
+  const backend = makeBackend({
+    fetch: fetchMock as any,
+    httpHooks: {
+      isAllowed: () => true,
+    },
+  });
+  (backend as any).resolveHostname = async () => ({ address: "203.0.113.20", family: 4 });
+
+  const request = {
+    method: "GET",
+    target: "/",
+    version: "HTTP/1.0",
+    headers: { host: "example.com" },
+    body: Buffer.alloc(0),
+  };
+
+  await (backend as any).fetchAndRespond(request, "http", (chunk: Buffer) => {
+    writes.push(Buffer.from(chunk));
+  });
+
+  const raw = Buffer.concat(writes).toString("utf8");
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  assert.notEqual(headerEnd, -1);
+
+  const head = raw.slice(0, headerEnd);
+  const bodyText = raw.slice(headerEnd + 4);
+
+  assert.match(raw, /^HTTP\/1\.0 200 /);
+  assert.ok(!head.toLowerCase().includes("transfer-encoding"));
+  assert.ok(!head.toLowerCase().includes("content-encoding"));
+  assert.equal(bodyText, "onetwo");
+});
+
 test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering for onResponse (known length)", async () => {
   let cancelled = false;
   let hookCalls = 0;

@@ -842,14 +842,17 @@ export class QemuNetworkBackend extends EventEmitter {
       await this.fetchAndRespond(parsed.request, options.scheme, options.write);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+        parsed.request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
           this.emit("log", `[net] http blocked ${error.message}`);
         }
-        this.respondWithError(options.write, error.status, error.statusText);
+        this.respondWithError(options.write, error.status, error.statusText, httpVersion);
       } else {
         this.emit("error", error);
-        this.respondWithError(options.write, 502, "Bad Gateway");
+        this.respondWithError(options.write, 502, "Bad Gateway", httpVersion);
       }
     } finally {
       httpSession.closed = true;
@@ -1162,9 +1165,12 @@ export class QemuNetworkBackend extends EventEmitter {
     defaultScheme: "http" | "https",
     write: (chunk: Buffer) => void
   ) {
+    const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+      request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+
     // Asterisk-form (OPTIONS *) is valid HTTP but does not map to a URL fetch.
     if (request.method === "OPTIONS" && request.target === "*") {
-      this.respondWithError(write, 501, "Not Implemented");
+      this.respondWithError(write, 501, "Not Implemented", httpVersion);
       return;
     }
 
@@ -1182,13 +1188,13 @@ export class QemuNetworkBackend extends EventEmitter {
       Boolean(request.headers["sec-websocket-version"]);
 
     if (hasUpgrade) {
-      this.respondWithError(write, 501, "Not Implemented");
+      this.respondWithError(write, 501, "Not Implemented", httpVersion);
       return;
     }
 
     const url = this.buildFetchUrl(request, defaultScheme);
     if (!url) {
-      this.respondWithError(write, 400, "Bad Request");
+      this.respondWithError(write, 400, "Bad Request", httpVersion);
       return;
     }
 
@@ -1214,19 +1220,19 @@ export class QemuNetworkBackend extends EventEmitter {
       try {
         currentUrl = new URL(currentRequest.url);
       } catch {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
       const protocol = getUrlProtocol(currentUrl);
       if (!protocol) {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
       const port = getUrlPort(currentUrl, protocol);
       if (!Number.isFinite(port) || port <= 0) {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
@@ -1320,31 +1326,61 @@ export class QemuNetworkBackend extends EventEmitter {
             if (updated) hookResponse = updated;
           }
 
-          this.sendHttpResponse(write, hookResponse);
+          this.sendHttpResponse(write, hookResponse, httpVersion);
           return;
         }
 
         const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
 
         if (canStream && responseBodyStream) {
+          const allowChunked = httpVersion === "HTTP/1.1";
+
           if (contentEncoding || !hasValidLength) {
+            // When the upstream response was encoded (undici may have decoded it for us)
+            // or the length is unknown, we cannot safely forward Content-Length.
             delete responseHeaders["content-length"];
-            responseHeaders["transfer-encoding"] = "chunked";
-            this.sendHttpResponseHead(write, {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            });
-            await this.sendChunkedBody(responseBodyStream, write);
+
+            if (allowChunked) {
+              responseHeaders["transfer-encoding"] = "chunked";
+              this.sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion
+              );
+              await this.sendChunkedBody(responseBodyStream, write);
+            } else {
+              // HTTP/1.0 does not support Transfer-Encoding: chunked.
+              delete responseHeaders["transfer-encoding"];
+              this.sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion
+              );
+              await this.sendStreamBody(responseBodyStream, write);
+            }
           } else {
-            responseHeaders["content-length"] = parsedLength.toString();
-            this.sendHttpResponseHead(write, {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            });
+            responseHeaders["content-length"] = parsedLength!.toString();
+            delete responseHeaders["transfer-encoding"];
+            this.sendHttpResponseHead(
+              write,
+              {
+                status: response.status,
+                statusText: response.statusText || "OK",
+                headers: responseHeaders,
+              },
+              httpVersion
+            );
             await this.sendStreamBody(responseBodyStream, write);
           }
+
           return;
         }
 
@@ -1393,7 +1429,7 @@ export class QemuNetworkBackend extends EventEmitter {
           if (updated) hookResponse = updated;
         }
 
-        this.sendHttpResponse(write, hookResponse);
+        this.sendHttpResponse(write, hookResponse, httpVersion);
         return;
       } finally {
         if (dispatcher) {
@@ -1406,9 +1442,10 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private sendHttpResponseHead(
     write: (chunk: Buffer) => void,
-    response: { status: number; statusText: string; headers: Record<string, string> }
+    response: { status: number; statusText: string; headers: Record<string, string> },
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
   ) {
-    const statusLine = `HTTP/1.1 ${response.status} ${response.statusText}\r\n`;
+    const statusLine = `${httpVersion} ${response.status} ${response.statusText}\r\n`;
     const headers = Object.entries(response.headers)
       .map(([name, value]) => `${name}: ${value}`)
       .join("\r\n");
@@ -1416,8 +1453,12 @@ export class QemuNetworkBackend extends EventEmitter {
     write(Buffer.from(headerBlock));
   }
 
-  private sendHttpResponse(write: (chunk: Buffer) => void, response: HttpHookResponse) {
-    this.sendHttpResponseHead(write, response);
+  private sendHttpResponse(
+    write: (chunk: Buffer) => void,
+    response: HttpHookResponse,
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  ) {
+    this.sendHttpResponseHead(write, response, httpVersion);
     if (response.body.length > 0) {
       write(response.body);
     }
@@ -1493,18 +1534,27 @@ export class QemuNetworkBackend extends EventEmitter {
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks, total);
   }
 
-  private respondWithError(write: (chunk: Buffer) => void, status: number, statusText: string) {
+  private respondWithError(
+    write: (chunk: Buffer) => void,
+    status: number,
+    statusText: string,
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  ) {
     const body = Buffer.from(`${status} ${statusText}\n`);
-    this.sendHttpResponse(write, {
-      status,
-      statusText,
-      headers: {
-        "content-length": body.length.toString(),
-        "content-type": "text/plain",
-        connection: "close",
+    this.sendHttpResponse(
+      write,
+      {
+        status,
+        statusText,
+        headers: {
+          "content-length": body.length.toString(),
+          "content-type": "text/plain",
+          connection: "close",
+        },
+        body,
       },
-      body,
-    });
+      httpVersion
+    );
   }
 
   private buildFetchUrl(request: HttpRequestData, defaultScheme: "http" | "https") {
