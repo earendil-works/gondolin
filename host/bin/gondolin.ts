@@ -2,6 +2,7 @@
 import fs from "fs";
 import net from "net";
 import path from "path";
+import { spawnSync } from "child_process";
 
 import { VM } from "../src/vm";
 import type { VirtualProvider } from "../src/vfs";
@@ -36,6 +37,22 @@ type ExecArgs = {
   commands: Command[];
   common: CommonOptions;
 };
+
+function checkQemu() {
+  const binary = process.arch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  const result = spawnSync(binary, ["--version"], { stdio: "ignore" });
+
+  if (result.error) {
+    console.error(`Error: QEMU binary '${binary}' not found.`);
+    console.error("Please install QEMU to run the sandbox.");
+    if (process.platform === "darwin") {
+      console.error("  brew install qemu");
+    } else {
+      console.error("  sudo apt install qemu-system (or equivalent for your distro)");
+    }
+    process.exit(1);
+  }
+}
 
 function usage() {
   console.log("Usage: gondolin <command> [options]");
@@ -416,6 +433,7 @@ function buildCommandPayload(command: Command) {
 }
 
 async function runExecVm(args: ExecArgs) {
+  checkQemu();
   const vmOptions = buildVmOptions(args.common);
 
   // Use VM.create() to ensure guest assets are available
@@ -615,6 +633,7 @@ function parseBashArgs(argv: string[]): BashArgs {
 }
 
 async function runBash(argv: string[]) {
+  checkQemu();
   const args = parseBashArgs(argv);
   const vmOptions = buildVmOptions(args);
 
