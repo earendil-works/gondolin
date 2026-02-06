@@ -423,6 +423,9 @@ async function runExecVm(args: ExecArgs) {
     ...vmOptions,
   });
 
+  console.error("Booting guest kernel...");
+  await vm.start();
+
   let exitCode = 0;
 
   try {
@@ -619,6 +622,10 @@ async function runBash(argv: string[]) {
   const vm = await VM.create({
     ...vmOptions,
   });
+
+  console.error("Booting guest kernel...");
+  await vm.start();
+  console.error("Guest ready, starting shell...");
 
   try {
     // shell() automatically attaches to stdin/stdout/stderr in TTY mode
