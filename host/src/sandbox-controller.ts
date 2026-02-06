@@ -1,21 +1,26 @@
 import { EventEmitter } from "events";
-import { spawn, ChildProcess } from "child_process";
+import * as child_process from "child_process";
+import type { ChildProcess } from "child_process";
 import fs from "fs";
 
 const activeChildren = new Set<ChildProcess>();
 let exitHookRegistered = false;
 
+function killActiveChildren() {
+  for (const child of activeChildren) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function registerExitHook() {
   if (exitHookRegistered) return;
   exitHookRegistered = true;
   process.once("exit", () => {
-    for (const child of activeChildren) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }
+    killActiveChildren();
   });
 }
 
@@ -91,7 +96,7 @@ export class SandboxController extends EventEmitter {
     this.setState("starting");
 
     const args = buildQemuArgs(this.config);
-    this.child = spawn(this.config.qemuPath, args, {
+    this.child = child_process.spawn(this.config.qemuPath, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
     trackChild(this.child);
@@ -330,3 +335,15 @@ function selectCpu(targetArch: string) {
   }
   return "max";
 }
+
+/** @internal */
+// Expose internal helpers for unit tests. Not part of the public API.
+export const __test = {
+  buildQemuArgs,
+  detectTargetArch,
+  selectMachineType,
+  selectAccel,
+  selectCpu,
+  killActiveChildren,
+  getActiveChildrenCount: () => activeChildren.size,
+};
