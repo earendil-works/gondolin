@@ -275,14 +275,11 @@ export class VM {
     }
   }
 
-  getState() {
-    return this.state;
-  }
-
-  getVfs() {
-    return this.vfs;
-  }
-
+  /**
+   * Start the VM.
+   *
+   * If VFS is configured, this also waits for the VFS mount(s) to be ready.
+   */
   async start() {
     if (this.startPromise) return this.startPromise;
 
@@ -304,11 +301,6 @@ export class VM {
     });
 
     return this.closePromise;
-  }
-
-  async waitForReady(): Promise<void> {
-    await this.start();
-    await this.ensureVfsReady();
   }
 
   /**
@@ -439,7 +431,6 @@ export class VM {
   ) {
     try {
       await this.start();
-      await this.ensureVfsReady();
 
       const mergedEnv = mergeEnvInputs(this.defaultEnv, options.env);
 
@@ -475,6 +466,8 @@ export class VM {
 
     await this.ensureConnection();
     await this.ensureRunning();
+    // If VFS is configured, also wait for mounts to be ready.
+    await this.ensureVfsReady();
   }
 
   private async closeInternal() {

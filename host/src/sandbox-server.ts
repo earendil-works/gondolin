@@ -772,7 +772,7 @@ export class SandboxServer extends EventEmitter {
       } else if (state === "running") {
         // Consider the sandbox "running" once QEMU has spawned.
         //
-        // VFS readiness is verified separately (e.g. via VM.waitForReady()).
+        // VFS readiness is verified separately (e.g. via `await VM.start()`).
         // Relying on the guest's one-shot vfs_ready message can lead to
         // deadlocks/timeouts if it is missed.
         this.clearVfsReadyTimer();

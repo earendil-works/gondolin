@@ -19,7 +19,7 @@ test.after(async () => {
 
 test("exec merges env inputs", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const result = await vm.exec(["sh", "-c", "echo $BASE_ENV $EXTRA_ENV"], {
       env: { EXTRA_ENV: "extra" },
     });
@@ -34,7 +34,7 @@ test("exec supports async iterable stdin", { skip: skipVmTests, timeout: timeout
   }
 
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const result = await vm.exec(["cat"], { stdin: input() });
     assert.equal(result.stdout, "hello world");
   });
@@ -44,7 +44,7 @@ test("exec supports readable stdin", { skip: skipVmTests, timeout: timeoutMs }, 
   const stream = Readable.from(["foo", "bar"]);
 
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const result = await vm.exec(["cat"], { stdin: stream });
     assert.equal(result.stdout, "foobar");
   });
@@ -52,7 +52,7 @@ test("exec supports readable stdin", { skip: skipVmTests, timeout: timeoutMs }, 
 
 test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const proc = vm.exec(["sh", "-c", "echo out; echo err 1>&2"]);
     const chunks: string[] = [];
 
@@ -69,7 +69,7 @@ test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeo
 
 test("exec lines iterator yields stdout lines", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const proc = vm.exec(["sh", "-c", "printf 'one\ntwo\nthree'"]);
     const lines: string[] = [];
 
@@ -84,7 +84,7 @@ test("exec lines iterator yields stdout lines", { skip: skipVmTests, timeout: ti
 
 test("shell runs commands without attaching", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const result = await vm.shell({ command: ["sh", "-c", "echo shell-ok"], attach: false });
     assert.equal(result.stdout.trim(), "shell-ok");
   });
@@ -92,7 +92,7 @@ test("shell runs commands without attaching", { skip: skipVmTests, timeout: time
 
 test("exec aborts with signal", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
     const controller = new AbortController();
     const proc = vm.exec(["sh", "-c", "sleep 5"], { signal: controller.signal });
 

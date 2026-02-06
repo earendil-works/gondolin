@@ -88,7 +88,7 @@ test("vfs roundtrip between host and guest", { skip: skipVmTests, timeout: timeo
     await handle.writeFile("host-data");
     await handle.close();
 
-    await vm.waitForReady();
+    await vm.start();
 
     const read = await withTimeout(vm.exec(["sh", "-c", "cat /data/host.txt"]), timeoutMs);
     if (read.exitCode !== 0) {
@@ -130,7 +130,7 @@ test("vfs hooks can block writes", { skip: skipVmTests, timeout: timeoutMs }, as
   blockedEntries.length = 0;
 
   await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
 
     const result = await withTimeout(
       vm.exec(["sh", "-c", "echo nope > /data/blocked.txt"]),
@@ -147,7 +147,7 @@ test("fuse-backed /data triggers hooks for guest file operations", { skip: skipV
   fuseHookEvents.length = 0;
 
   await withVm(fuseVmKey, fuseVmOptions, async (vm) => {
-    await vm.waitForReady();
+    await vm.start();
 
     const mounts = await withTimeout(
       vm.exec(["sh", "-c", "grep ' /data ' /proc/mounts"]),
@@ -223,7 +223,7 @@ test("vfs supports read-only email mounts with dynamic content", { skip: skipVmT
 
     emailProvider.setReadOnly();
 
-    await vm.waitForReady();
+    await vm.start();
 
     const rootRead = await withTimeout(vm.exec(["sh", "-c", "cat /data/root.txt"]), timeoutMs);
     if (rootRead.exitCode !== 0) {
@@ -331,7 +331,7 @@ test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeout
     await handle.writeFile("read-only data from host");
     await handle.close();
 
-    await vm.waitForReady();
+    await vm.start();
 
     // Reading from read-only mount should work
     const readResult = await withTimeout(
