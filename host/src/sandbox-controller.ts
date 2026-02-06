@@ -208,7 +208,9 @@ function buildQemuArgs(config: SandboxConfig) {
   if (cpu) args.push("-cpu", cpu);
 
   if (config.console === "none") {
-    args.push("-serial", "none");
+    // Keep the serial device (needed for e.g. microvm ttyS0 console) but
+    // discard output.
+    args.push("-serial", "null");
   } else {
     args.push("-serial", "stdio");
   }
