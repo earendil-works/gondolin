@@ -5,6 +5,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { EventEmitter } from "events";
+import { Duplex } from "stream";
 
 
 import {
@@ -27,10 +28,22 @@ import {
   ServerMessage,
 } from "./control-protocol";
 import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-controller";
-import { QemuNetworkBackend, DEFAULT_MAX_HTTP_BODY_BYTES } from "./qemu-net";
+import {
+  QemuNetworkBackend,
+  DEFAULT_MAX_HTTP_BODY_BYTES,
+  DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+} from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
-import { parseDebugEnv } from "./debug";
+import {
+  debugFlagsToArray,
+  parseDebugEnv,
+  resolveDebugFlags,
+  stripTrailingNewline,
+  type DebugComponent,
+  type DebugConfig,
+  type DebugFlag,
+} from "./debug";
 import { ensureGuestAssets, loadAssetManifest, loadGuestAssets, type GuestAssets } from "./assets";
 
 /**
@@ -79,14 +92,25 @@ export type SandboxServerOptions = {
   virtioSocketPath?: string;
   /** virtiofs/vfs socket path */
   virtioFsSocketPath?: string;
+  /** virtio-serial ssh socket path */
+  virtioSshSocketPath?: string;
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
   netMac?: string;
   /** whether to enable networking */
   netEnabled?: boolean;
-  /** whether to enable network debug logging */
-  netDebug?: boolean;
+
+  /**
+   * Debug configuration
+   *
+   * - `true`: enable all debug components
+   * - `false`: disable all debug components
+   * - `string[]`: enable selected components (e.g. `["net", "exec"]`)
+   *
+   * If omitted, defaults to `GONDOLIN_DEBUG`.
+   */
+  debug?: DebugConfig;
   /** qemu machine type */
   machineType?: string;
   /** qemu acceleration backend (e.g. kvm, hvf) */
@@ -105,8 +129,10 @@ export type SandboxServerOptions = {
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
-  /** max intercepted http body size in `bytes` */
+  /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes?: number;
   /** mitm ca directory path */
   mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
@@ -135,14 +161,17 @@ export type ResolvedSandboxServerOptions = {
   virtioSocketPath: string;
   /** virtiofs/vfs socket path */
   virtioFsSocketPath: string;
+  /** virtio-serial ssh socket path */
+  virtioSshSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
   /** guest mac address */
   netMac: string;
   /** whether networking is enabled */
   netEnabled: boolean;
-  /** whether network debug logging is enabled */
-  netDebug: boolean;
+
+  /** enabled debug components */
+  debug: DebugFlag[];
   /** qemu machine type */
   machineType?: string;
   /** qemu acceleration backend (e.g. kvm, hvf) */
@@ -157,8 +186,10 @@ export type ResolvedSandboxServerOptions = {
   append?: string;
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
-  /** max intercepted http body size in `bytes` */
+  /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
@@ -286,6 +317,10 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`
   );
+  const defaultVirtioSsh = path.resolve(
+    tmpDir,
+    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetSock = path.resolve(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`
@@ -295,7 +330,9 @@ export function resolveSandboxServerOptions(
   const hostArch = detectHostArch();
   const defaultQemu = hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultMemory = "1G";
-  const debugFlags = parseDebugEnv();
+  const envDebugFlags = parseDebugEnv();
+  const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
+  const debug = debugFlagsToArray(resolvedDebugFlags);
 
   if (!kernelPath || !initrdPath || !rootfsPath) {
     throw new Error(
@@ -339,10 +376,11 @@ export function resolveSandboxServerOptions(
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
+    virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
-    netDebug: options.netDebug ?? debugFlags.has("net"),
+    debug,
     machineType: options.machineType,
     accel: options.accel,
     cpu: options.cpu,
@@ -351,6 +389,8 @@ export function resolveSandboxServerOptions(
     append: options.append,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
+    maxHttpResponseBodyBytes:
+      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
     fetch: options.fetch,
     httpHooks: options.httpHooks,
     mitmCertDir: options.mitmCertDir,
@@ -595,6 +635,84 @@ class VirtioBridge {
   }
 }
 
+class TcpForwardStream extends Duplex {
+  private closedByRemote = false;
+  private closeSent = false;
+
+  constructor(
+    readonly id: number,
+    private readonly sendFrame: (message: object) => boolean,
+    private readonly onDispose: () => void
+  ) {
+    super();
+    this.on("close", () => {
+      this.onDispose();
+    });
+  }
+
+  _read(_size: number): void {
+    // no-op; data is pushed from the virtio handler
+  }
+
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    if (this.closedByRemote) {
+      callback(new Error("tcp stream closed"));
+      return;
+    }
+
+    const ok = this.sendFrame({
+      v: 1,
+      t: "tcp_data",
+      id: this.id,
+      p: { data: chunk },
+    });
+
+    if (!ok) {
+      callback(new Error("virtio tcp queue exceeded"));
+      return;
+    }
+
+    callback();
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    if (this.closedByRemote) {
+      callback();
+      return;
+    }
+
+    // half-close
+    this.sendFrame({ v: 1, t: "tcp_eof", id: this.id, p: {} });
+    callback();
+  }
+
+  _destroy(_error: Error | null, callback: (error?: Error | null) => void): void {
+    if (!this.closedByRemote && !this.closeSent) {
+      this.closeSent = true;
+      this.sendFrame({ v: 1, t: "tcp_close", id: this.id, p: {} });
+    }
+    callback();
+  }
+
+  pushRemote(data: Buffer): void {
+    if (this.closedByRemote) return;
+    this.push(data);
+  }
+
+  remoteClose(): void {
+    if (this.closedByRemote) return;
+    this.closedByRemote = true;
+    this.push(null);
+    // Don't send tcp_close back; remote already closed.
+    this.destroy();
+  }
+
+  openFailed(message: string): void {
+    this.closedByRemote = true;
+    this.destroy(new Error(message));
+  }
+}
+
 function parseMac(value: string): Buffer | null {
   const parts = value.split(":");
   if (parts.length !== 6) return null;
@@ -671,11 +789,29 @@ function sendError(client: SandboxClient, error: ErrorMessage): boolean {
 }
 
 export class SandboxServer extends EventEmitter {
+  private emitDebug(component: DebugComponent, message: string) {
+    const normalized = stripTrailingNewline(message);
+    this.emit("debug", component, normalized);
+    // Legacy string log event
+    this.emit("log", `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""));
+  }
+
+  private readonly debugFlags: ReadonlySet<DebugFlag>;
+
+  private hasDebug(flag: DebugFlag) {
+    return this.debugFlags.has(flag);
+  }
+
   private readonly options: ResolvedSandboxServerOptions;
   private readonly controller: SandboxController;
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
+  private readonly sshBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
+
+  private tcpStreams = new Map<number, TcpForwardStream>();
+  private tcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+  private nextTcpStreamId = 1;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -724,18 +860,22 @@ export class SandboxServer extends EventEmitter {
     super();
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      this.emit("log", `[error] ${message}`);
+      this.emitDebug("error", message);
     });
     // Detect if we received pre-resolved options (from static create())
     // by checking for a field that's required in resolved but computed in unresolved
     const isResolved =
       "maxStdinBytes" in options &&
       "maxHttpBodyBytes" in options &&
+      "maxHttpResponseBodyBytes" in options &&
       typeof options.maxStdinBytes === "number" &&
-      typeof options.maxHttpBodyBytes === "number";
+      typeof options.maxHttpBodyBytes === "number" &&
+      typeof (options as any).maxHttpResponseBodyBytes === "number";
     this.options = isResolved
       ? (options as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(options as SandboxServerOptions);
+
+    this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
       ? this.options.vfsProvider instanceof SandboxVfsProvider
         ? this.options.vfsProvider
@@ -755,6 +895,7 @@ export class SandboxServer extends EventEmitter {
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,
       virtioFsSocketPath: this.options.virtioFsSocketPath,
+      virtioSshSocketPath: this.options.virtioSshSocketPath,
       netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
       append: this.baseAppend,
@@ -778,9 +919,11 @@ export class SandboxServer extends EventEmitter {
 
     this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
+    // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
+    this.sshBridge = new VirtioBridge(this.options.virtioSshSocketPath, Math.max(maxPendingBytes, 64 * 1024 * 1024));
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
-          logger: (message) => this.emit("log", message),
+          logger: this.hasDebug("vfs") ? (message) => this.emitDebug("vfs", message) : undefined,
         })
       : null;
 
@@ -789,17 +932,18 @@ export class SandboxServer extends EventEmitter {
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,
           vmMac: mac,
-          debug: this.options.netDebug,
+          debug: this.hasDebug("net"),
           fetch: this.options.fetch,
           httpHooks: this.options.httpHooks,
           mitmCertDir: this.options.mitmCertDir,
           maxHttpBodyBytes: this.options.maxHttpBodyBytes,
+          maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,
         })
       : null;
 
     if (this.network) {
-      this.network.on("log", (message: string) => {
-        this.emit("log", message);
+      this.network.on("debug", (component: DebugComponent, message: string) => {
+        this.emitDebug(component, message);
       });
       this.network.on("error", (err) => {
         this.emit("error", err);
@@ -810,6 +954,7 @@ export class SandboxServer extends EventEmitter {
       if (state === "running") {
         this.bridge.connect();
         this.fsBridge.connect();
+        this.sshBridge.connect();
       }
       if (state === "stopped") {
         this.failInflight("sandbox_stopped", "sandbox is not running");
@@ -838,7 +983,9 @@ export class SandboxServer extends EventEmitter {
 
     this.controller.on("exit", (info) => {
       if (this.qemuLogBuffer.length > 0) {
-        this.emit("log", `[qemu] ${this.qemuLogBuffer}`);
+        if (this.hasDebug("protocol")) {
+          this.emitDebug("qemu", this.qemuLogBuffer);
+        }
         this.qemuLogBuffer = "";
       }
       this.failInflight("sandbox_stopped", "sandbox exited");
@@ -851,12 +998,24 @@ export class SandboxServer extends EventEmitter {
       while (newlineIndex !== -1) {
         const line = this.qemuLogBuffer.slice(0, newlineIndex + 1);
         this.qemuLogBuffer = this.qemuLogBuffer.slice(newlineIndex + 1);
-        this.emit("log", `[qemu] ${line}`);
+        if (this.hasDebug("protocol")) {
+          this.emitDebug("qemu", line);
+        }
         newlineIndex = this.qemuLogBuffer.indexOf("\n");
       }
     });
 
     this.bridge.onMessage = (message) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "exec_output"
+            ? ` stream=${(message as any).p?.stream} bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : message.t === "exec_response"
+              ? ` exit=${(message as any).p?.exit_code}`
+              : "";
+        this.emitDebug("protocol", `virtio rx t=${message.t} id=${id}${extra}`);
+      }
       if (!isValidRequestId(message.id)) {
         return;
       }
@@ -875,6 +1034,12 @@ export class SandboxServer extends EventEmitter {
           this.stdinAllowed.delete(message.id);
         }
       } else if (message.t === "exec_response") {
+        if (this.hasDebug("exec")) {
+          this.emitDebug(
+            "exec",
+            `exec done id=${message.id} exit=${message.p.exit_code}${message.p.signal ? ` signal=${message.p.signal}` : ""}`
+          );
+        }
         const client = this.inflight.get(message.id);
         if (client) {
           sendJson(client, {
@@ -906,6 +1071,11 @@ export class SandboxServer extends EventEmitter {
     };
 
     this.fsBridge.onMessage = (message) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra = message.t === "fs_request" ? ` op=${(message as any).p?.op}` : "";
+        this.emitDebug("protocol", `virtiofs rx t=${message.t} id=${id}${extra}`);
+      }
       if (!isValidRequestId(message.id)) {
         return;
       }
@@ -949,6 +1119,76 @@ export class SandboxServer extends EventEmitter {
         });
     };
 
+    this.sshBridge.onMessage = (message: any) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "tcp_data"
+            ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : message.t === "tcp_opened"
+              ? ` ok=${Boolean((message as any).p?.ok)}`
+              : "";
+        this.emitDebug("protocol", `virtiossh rx t=${message.t} id=${id}${extra}`);
+      }
+
+      if (!isValidRequestId(message.id)) return;
+
+      if (message.t === "tcp_opened") {
+        const waiter = this.tcpOpenWaiters.get(message.id);
+        if (!waiter) return;
+        this.tcpOpenWaiters.delete(message.id);
+
+        const ok = Boolean((message as any).p?.ok);
+        const msg = typeof (message as any).p?.message === "string" ? (message as any).p.message : "tcp_open failed";
+
+        if (ok) {
+          waiter.resolve();
+        } else {
+          const stream = this.tcpStreams.get(message.id);
+          stream?.openFailed(msg);
+          this.tcpStreams.delete(message.id);
+          waiter.reject(new Error(msg));
+        }
+        return;
+      }
+
+      if (message.t === "tcp_data") {
+        const stream = this.tcpStreams.get(message.id);
+        if (!stream) return;
+        const data = (message as any).p?.data;
+        if (!Buffer.isBuffer(data)) return;
+        stream.pushRemote(data);
+        return;
+      }
+
+      if (message.t === "tcp_close") {
+        const stream = this.tcpStreams.get(message.id);
+        if (!stream) return;
+        this.tcpStreams.delete(message.id);
+        const waiter = this.tcpOpenWaiters.get(message.id);
+        if (waiter) {
+          this.tcpOpenWaiters.delete(message.id);
+          waiter.reject(new Error("tcp stream closed"));
+        }
+        stream.remoteClose();
+        return;
+      }
+    };
+
+    this.sshBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[ssh] virtio decode error: ${message}`));
+      // Fail any pending opens.
+      for (const [id, waiter] of this.tcpOpenWaiters.entries()) {
+        waiter.reject(new Error("ssh virtio bridge error"));
+        this.tcpOpenWaiters.delete(id);
+      }
+      for (const stream of this.tcpStreams.values()) {
+        stream.destroy(new Error("ssh virtio bridge error"));
+      }
+      this.tcpStreams.clear();
+    };
+
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
       this.emit("error", new Error(`[virtio] decode error: ${message}`));
@@ -985,6 +1225,80 @@ export class SandboxServer extends EventEmitter {
     };
   }
 
+  /**
+   * Open a TCP stream to a loopback service inside the guest.
+   *
+   * This is implemented via a dedicated virtio-serial port and does not use the
+   * guest network stack.
+   */
+  async openTcpStream(target: { host: string; port: number; timeoutMs?: number }): Promise<Duplex> {
+    const host = target.host;
+    const port = target.port;
+    const timeoutMs = target.timeoutMs ?? 5000;
+
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error(`invalid guest port: ${port}`);
+    }
+
+    // Allocate stream id
+    let id = this.nextTcpStreamId;
+    for (let i = 0; i < 0xffffffff; i++) {
+      if (!this.tcpStreams.has(id) && !this.tcpOpenWaiters.has(id)) break;
+      id = (id + 1) >>> 0;
+      if (id === 0) id = 1;
+    }
+    this.nextTcpStreamId = (id + 1) >>> 0;
+    if (this.nextTcpStreamId === 0) this.nextTcpStreamId = 1;
+
+    const stream = new TcpForwardStream(id, (m) => this.sshBridge.send(m), () => {
+      this.tcpStreams.delete(id);
+      const waiter = this.tcpOpenWaiters.get(id);
+      if (waiter) {
+        this.tcpOpenWaiters.delete(id);
+        waiter.reject(new Error("tcp stream closed"));
+      }
+    });
+
+    this.tcpStreams.set(id, stream);
+
+    const openedPromise = new Promise<void>((resolve, reject) => {
+      this.tcpOpenWaiters.set(id, { resolve, reject });
+    });
+
+    const ok = this.sshBridge.send({
+      v: 1,
+      t: "tcp_open",
+      id,
+      p: {
+        host,
+        port,
+      },
+    });
+
+    if (!ok) {
+      this.tcpStreams.delete(id);
+      this.tcpOpenWaiters.delete(id);
+      stream.destroy();
+      throw new Error("virtio tcp queue exceeded");
+    }
+
+    let timeout: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        openedPromise,
+        new Promise<void>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("tcp_open timeout")), timeoutMs);
+        }),
+      ]);
+      return stream;
+    } catch (err) {
+      stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   private broadcastStatus(state: SandboxState) {
     for (const client of this.clients) {
       sendJson(client, { type: "status", state });
@@ -1007,6 +1321,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleVfsReady() {
+    if (this.hasDebug("vfs")) {
+      this.emitDebug("vfs", "vfs_ready");
+    }
     if (this.vfsReady) return;
     this.vfsReady = true;
     this.clearVfsReadyTimer();
@@ -1017,6 +1334,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleVfsError(message: string, code = "vfs_error") {
+    if (this.hasDebug("vfs")) {
+      this.emitDebug("vfs", `vfs_error code=${code} message=${stripTrailingNewline(message)}`);
+    }
     this.vfsReady = false;
     this.clearVfsReadyTimer();
     const trimmed = message.trim();
@@ -1066,6 +1386,7 @@ export class SandboxServer extends EventEmitter {
     this.network?.start();
     this.bridge.connect();
     this.fsBridge.connect();
+    this.sshBridge.connect();
   }
 
   private async closeInternal() {
@@ -1074,6 +1395,12 @@ export class SandboxServer extends EventEmitter {
     await this.controller.close();
     this.bridge.disconnect();
     this.fsBridge.disconnect();
+    this.sshBridge.disconnect();
+    for (const stream of this.tcpStreams.values()) {
+      stream.destroy();
+    }
+    this.tcpStreams.clear();
+    this.tcpOpenWaiters.clear();
     await this.fsService?.close();
     this.network?.close();
     this.started = false;
@@ -1115,6 +1442,21 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleClientMessage(client: SandboxClient, message: ClientMessage) {
+    if (this.hasDebug("protocol")) {
+      const extra =
+        message.type === "exec"
+          ? ` id=${message.id} cmd=${message.cmd}`
+          : message.type === "stdin"
+            ? ` id=${message.id} bytes=${message.data ? Math.floor((message.data.length * 3) / 4) : 0}${message.eof ? " eof" : ""}`
+            : message.type === "pty_resize"
+              ? ` id=${message.id} rows=${message.rows} cols=${message.cols}`
+              : message.type === "boot"
+                ? ` fuseMount=${(message as any).fuseMount ?? ""} binds=${Array.isArray((message as any).fuseBinds) ? (message as any).fuseBinds.length : 0}`
+                : message.type === "lifecycle"
+                  ? ` action=${(message as any).action}`
+                  : "";
+      this.emitDebug("protocol", `client rx type=${message.type}${extra}`);
+    }
     if (message.type === "boot") {
       void this.handleBoot(client, message);
       return;
@@ -1186,6 +1528,17 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleExec(client: SandboxClient, message: ExecCommandMessage) {
+    if (this.hasDebug("exec")) {
+      const envKeys = (message.env ?? [])
+        .map((entry) => String(entry).split("=", 1)[0])
+        .filter((k) => k && k.length > 0);
+      const cwd = message.cwd ? ` cwd=${message.cwd}` : "";
+      const argv = (message.argv ?? []).length > 0 ? ` argv=${JSON.stringify(message.argv)}` : "";
+      const env = envKeys.length > 0 ? ` envKeys=${JSON.stringify(envKeys)}` : "";
+      const stdin = message.stdin ? " stdin" : "";
+      const pty = message.pty ? " pty" : "";
+      this.emitDebug("exec", `exec start id=${message.id} cmd=${message.cmd}${cwd}${argv}${env}${stdin}${pty}`);
+    }
     if (!isValidRequestId(message.id) || !message.cmd) {
       sendError(client, {
         type: "error",
@@ -1230,6 +1583,10 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleStdin(client: SandboxClient, message: StdinCommandMessage) {
+    if (this.hasDebug("exec")) {
+      const bytes = message.data ? estimateBase64Bytes(message.data) : 0;
+      this.emitDebug("exec", `stdin id=${message.id} bytes=${bytes}${message.eof ? " eof" : ""}`);
+    }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
         type: "error",
@@ -1292,6 +1649,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handlePtyResize(client: SandboxClient, message: PtyResizeCommandMessage) {
+    if (this.hasDebug("exec")) {
+      this.emitDebug("exec", `pty_resize id=${message.id} rows=${message.rows} cols=${message.cols}`);
+    }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
         type: "error",

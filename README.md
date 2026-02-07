@@ -9,10 +9,10 @@ to control network egress and protect secrets from exfiltration.  You also
 want to be able to tighly control the file system, for convenience of the agent
 and to control persistence.
 
-Gondolin gives you that.  Lightweight QEMU micro-VMs boot in seconds on your Mac
-or Linux machine.  The network stack and virtual filesystem are implemented
-entirely in JavaScript, giving you complete programmatic control over what the
-sandbox can access and what secrets it can use.
+Gondolin gives you that.  Lightweight QEMU micro-VMs boot in under a second on
+your Mac or Linux machine.  The network stack and virtual filesystem are
+implemented entirely in JavaScript, giving you complete programmatic control
+over what the sandbox can access and what secrets it can use.
 
 ```ts
 import { VM, createHttpHooks } from "@earendil-works/gondolin";
@@ -52,51 +52,37 @@ QEMU and Node installed:
 
 > **Note:** Only ARM64 (Apple Silicon, Linux aarch64) is currently tested.
 
+## Documentation
+
+Documentation: [earendil-works.github.io/gondolin](https://earendil-works.github.io/gondolin/)
+
+Guides:
+- [CLI](https://earendil-works.github.io/gondolin/cli/)
+- [SDK (TypeScript)](https://earendil-works.github.io/gondolin/sdk/)
+- [SSH](https://earendil-works.github.io/gondolin/ssh/)
+- [Debug logging](https://earendil-works.github.io/gondolin/debug/)
+- [Custom images](https://earendil-works.github.io/gondolin/custom-images/)
+
+Architecture:
+- [Security design](https://earendil-works.github.io/gondolin/security/)
+- [Network stack](https://earendil-works.github.io/gondolin/network/)
+- [QEMU](https://earendil-works.github.io/gondolin/qemu/)
+
 ## Why Gondolin?
 
 - **Runs locally.** Same behavior on macOS and Linux without a specific cloud dependency.
-- **Secrets that can't be stolen.** Credentials are injected at the network layer, never visible inside the VM (implemented as a hook that can be changed)
-- **Programmable network policy.** Allowlist hosts, hook requests/responses, block internal ranges—all in JavaScript.
-- **Programmable filesystem.** Mount in-memory filesystems, proxy to remote storage, or hook every operation.
-- **Fast.** Boots quickly, optimized for LLM workflows that spin up, execute, and tear down frequently.
+- **Secrets that can't easily be stolen.** Credentials are injected at the
+  network layer, never visible inside the VM (implemented as a hook that can be
+  changed)
+- **Programmable network policy.** Allowlist hosts, hook requests/responses,
+  block internal ranges—all in JavaScript.
+- **Programmable filesystem.** Mount in-memory filesystems, proxy to remote
+  storage, or hook every operation.
+- **Fast.** Boots quickly, optimized for LLM workflows that spin up, execute,
+  and tear down frequently.
 - **Familiar environment.** A real Linux VM that LLMs know how to use.
 
-## Programmable Filesystem
-
-The VFS layer lets you control what the guest sees. Mount in-memory filesystems,
-expose host directories (read-only or read-write), or implement custom providers
-that proxy to remote storage:
-
-```ts
-import { VM, MemoryProvider, RealFSProvider, ReadonlyProvider } from "@earendil-works/gondolin";
-
-const vm = await VM.create({
-  vfs: {
-    mounts: {
-      "/workspace": new MemoryProvider(),
-      "/data": new ReadonlyProvider(new RealFSProvider("/host/data")),
-    },
-  },
-});
-```
-
-See [`host/README.md`](host/README.md) for full API details.
-
-## Custom Images
-
-Build custom guest images with your own packages, kernel, and init scripts:
-
-```bash
-gondolin build --init-config > build-config.json
-# Edit build-config.json to add packages (rust, go, etc.)
-gondolin build --config build-config.json --output ./my-assets
-GONDOLIN_GUEST_DIR=./my-assets gondolin bash
-```
-
-See [`docs/custom-images.md`](docs/custom-images.md) for the full configuration
-reference and recipes.
-
-## Choices
+In the design of Gondolin we made various architectural choices that require elaboration:
 
 * **VM:** we looked at Firecracker and QEMU and went with the latter.  A key motivation
   here is that firecracker cannot run on Macs which makes it harder to achieve
@@ -127,7 +113,57 @@ reference and recipes.
   binaries and allows trivial cross compilation.  The host is written in TypeScript
   because it allows plugging in custom behavior trivially for the VM.
 
+## Repository guides
+
+- [Host package](host/README.md) — installation, CLI quick start, and a TypeScript example
+- [Guest sandbox](guest/README.md) — Zig build, initramfs/image pipeline, and development notes
+
+## Programmable Filesystem
+
+The VFS layer lets you control what the guest sees. Mount in-memory filesystems,
+expose host directories (read-only or read-write), or implement custom providers
+that proxy to remote storage:
+
+```ts
+import { VM, MemoryProvider, RealFSProvider, ReadonlyProvider } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  vfs: {
+    mounts: {
+      "/workspace": new MemoryProvider(),
+      "/data": new ReadonlyProvider(new RealFSProvider("/host/data")),
+    },
+  },
+});
+```
+
+See the [SDK (TypeScript) reference](https://earendil-works.github.io/gondolin/sdk/) for full API details.
+
+## Custom Images
+
+Build custom guest images with your own packages, kernel, and init scripts:
+
+```bash
+gondolin build --init-config > build-config.json
+# Edit build-config.json to add packages (rust, go, etc.)
+gondolin build --config build-config.json --output ./my-assets
+GONDOLIN_GUEST_DIR=./my-assets gondolin bash
+```
+
+See [Custom images](https://earendil-works.github.io/gondolin/custom-images/) for the full configuration
+reference and recipes.
+
 ## Components
 
 - [`guest/`](guest/) — Zig-based `sandboxd` daemon and Alpine initramfs build.
 - [`host/`](host/) — TypeScript host controller and in-process control plane for the guest.
+
+## AI Use Disclaimer
+
+This codebase has been built with the support of coding agents.
+
+## License and Links
+
+- [Documentation](https://earendil-works.github.io/gondolin/)
+- [Issue Tracker](https://github.com/earendil-works/gondolin/issues)
+- License: [Apache-2.0](https://github.com/earendil-works/gondolin/blob/main/LICENSE)

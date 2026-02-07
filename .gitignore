@@ -12,3 +12,6 @@ node_modules/
 host/node_modules/
 host/dist/
 host/var/
+
+# Zensical docs output
+site/

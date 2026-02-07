@@ -14,6 +14,7 @@
 //! ## Message Types
 //! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize
 //! Filesystem: fs_request, fs_response
+//! TCP: tcp_open, tcp_opened, tcp_data, tcp_eof, tcp_close
 //! Status: vfs_ready, vfs_error
 //! Errors: error
 
@@ -61,6 +62,31 @@ pub const PtyResize = struct {
 pub const InputMessage = union(enum) {
     stdin: StdinData,
     resize: PtyResize,
+};
+
+pub const TcpOpen = struct {
+    /// stream id
+    id: u32,
+    /// target host (must be loopback)
+    host: []const u8,
+    /// target port
+    port: u16,
+};
+
+pub const TcpData = struct {
+    /// stream id
+    id: u32,
+    /// data chunk
+    data: []const u8,
+};
+
+pub const TcpMessage = union(enum) {
+    open: TcpOpen,
+    data: TcpData,
+    /// host half-close
+    eof: u32,
+    /// either direction close
+    close: u32,
 };
 
 pub const FrameReader = struct {
@@ -219,6 +245,13 @@ pub fn decodeInputMessage(allocator: std.mem.Allocator, frame: []const u8, expec
     return parseInputMessage(root, expected_id);
 }
 
+pub fn decodeTcpMessage(allocator: std.mem.Allocator, frame: []const u8) !TcpMessage {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+    return parseTcpMessage(allocator, root);
+}
+
 pub fn encodeExecOutput(
     allocator: std.mem.Allocator,
     id: u32,
@@ -311,6 +344,78 @@ pub fn encodeVfsError(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
     try cbor.writeMapStart(w, 1);
     try cbor.writeText(w, "message");
     try cbor.writeText(w, message);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeTcpOpened(
+    allocator: std.mem.Allocator,
+    id: u32,
+    ok: bool,
+    message: ?[]const u8,
+) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "tcp_opened");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    const map_len: usize = if (message == null) 1 else 2;
+    try cbor.writeMapStart(w, map_len);
+    try cbor.writeText(w, "ok");
+    try cbor.writeBool(w, ok);
+    if (message) |m| {
+        try cbor.writeText(w, "message");
+        try cbor.writeText(w, m);
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeTcpData(
+    allocator: std.mem.Allocator,
+    id: u32,
+    data: []const u8,
+) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "tcp_data");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 1);
+    try cbor.writeText(w, "data");
+    try cbor.writeBytes(w, data);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeTcpClose(allocator: std.mem.Allocator, id: u32) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "tcp_close");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 0);
 
     return try buf.toOwnedSlice(allocator);
 }
@@ -523,6 +628,43 @@ fn parseInputMessage(root: cbor.Value, expected_id: u32) !InputMessage {
     }
     if (std.mem.eql(u8, msg_type, "pty_resize")) {
         return .{ .resize = try parsePtyResize(root, expected_id) };
+    }
+
+    return ProtocolError.UnexpectedType;
+}
+
+fn parseTcpMessage(allocator: std.mem.Allocator, root: cbor.Value) !TcpMessage {
+    _ = allocator;
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    if (std.mem.eql(u8, msg_type, "tcp_open")) {
+        const host_val = cbor.getMapValue(payload, "host") orelse return ProtocolError.MissingField;
+        const port_val = cbor.getMapValue(payload, "port") orelse return ProtocolError.MissingField;
+        const host = try expectText(host_val);
+        const port_u32 = try expectU32(port_val);
+        if (port_u32 > std.math.maxInt(u16)) return ProtocolError.InvalidValue;
+        return .{ .open = .{ .id = id, .host = host, .port = @as(u16, @intCast(port_u32)) } };
+    }
+
+    if (std.mem.eql(u8, msg_type, "tcp_data")) {
+        const data_val = cbor.getMapValue(payload, "data") orelse return ProtocolError.MissingField;
+        const data = try expectBytes(data_val);
+        return .{ .data = .{ .id = id, .data = data } };
+    }
+
+    if (std.mem.eql(u8, msg_type, "tcp_eof")) {
+        return .{ .eof = id };
+    }
+
+    if (std.mem.eql(u8, msg_type, "tcp_close")) {
+        return .{ .close = id };
     }
 
     return ProtocolError.UnexpectedType;

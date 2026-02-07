@@ -41,6 +41,8 @@ export interface AlpineBuildOptions {
   sandboxdBin: string;
   /** path to the sandboxfs binary */
   sandboxfsBin: string;
+  /** path to the sandboxssh binary */
+  sandboxsshBin: string;
   /** volume label for the rootfs ext4 image */
   rootfsLabel: string;
   /** fixed rootfs image size in `mb` (auto when undefined) */
@@ -78,6 +80,7 @@ export async function buildAlpineImages(
     initramfsPackages,
     sandboxdBin,
     sandboxfsBin,
+    sandboxsshBin,
     rootfsLabel,
     rootfsSizeMb,
     workDir,
@@ -127,9 +130,10 @@ export async function buildAlpineImages(
     await installPackages(initramfsDir, initramfsPackages, arch, cacheDir, log);
   }
 
-  // Step 4 — install sandboxd, sandboxfs, init scripts
+  // Step 4 — install sandboxd, sandboxfs, sandboxssh, init scripts
   copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"));
   copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"));
+  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"));
 
   const rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
   const initramfsInitContent = opts.initramfsInit ?? INITRAMFS_INIT_SCRIPT;
@@ -863,6 +867,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 mkdir -p /tmp /var/tmp /var/cache /var/log /root /home
 mount -t tmpfs tmpfs /tmp || log "[init] mount tmpfs /tmp failed"
 mount -t tmpfs tmpfs /root || log "[init] mount tmpfs /root failed"
+chmod 700 /root || true
 mount -t tmpfs tmpfs /var/tmp || log "[init] mount tmpfs /var/tmp failed"
 mount -t tmpfs tmpfs /var/cache || log "[init] mount tmpfs /var/cache failed"
 mount -t tmpfs tmpfs /var/log || log "[init] mount tmpfs /var/log failed"
@@ -911,8 +916,10 @@ if modprobe virtio_net > /dev/null 2>&1; then
 fi
 
 if command -v ip > /dev/null 2>&1; then
+  ip link set lo up || true
   ip link set eth0 up || true
 else
+  ifconfig lo up || true
   ifconfig eth0 up || true
 fi
 
@@ -1003,6 +1010,13 @@ if [ "\${sandboxfs_ready}" -eq 1 ]; then
   printf "ok\\n" > /run/sandboxfs.ready
 else
   printf "%s\\n" "\${sandboxfs_error}" > /run/sandboxfs.failed
+fi
+
+if [ -x /usr/bin/sandboxssh ]; then
+  log "[init] starting sandboxssh"
+  /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
+else
+  log "[init] /usr/bin/sandboxssh missing"
 fi
 
 log "[init] starting sandboxd"

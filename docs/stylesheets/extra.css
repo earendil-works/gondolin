@@ -1,0 +1,82 @@
+/* Site-wide overrides (Zensical / Material theme)
+ * - Commit Mono everywhere
+ * - Slightly smaller type
+ * - Grayscale UI (background stays white)
+ * - Remove default "book" logo icon
+ */
+
+:root {
+  /* Zensical/Material uses CSS variables for font selection */
+  --md-text-font: "Commit Mono";
+  --md-code-font: "Commit Mono";
+}
+
+/* Typography sizing */
+/*
+ * The modern theme ships with a very small base for prose. With Commit Mono it
+ * ends up feeling tiny, so bump the main sizes back up.
+ */
+.md-typeset {
+  font-size: 0.65rem!important;
+  line-height: 1.65;
+}
+
+.md-typeset code {
+  font-size: 1em;
+}
+
+.md-nav {
+  font-size: 0.65rem;
+}
+
+/* Grayscale palette tweaks (keep background white) */
+:root,
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #fff;
+  --md-default-fg-color: rgba(28, 27, 26, 0.92);
+  --md-default-fg-color--light: rgba(28, 27, 26, 0.65);
+  --md-default-fg-color--lighter: rgba(28, 27, 26, 0.40);
+  --md-default-fg-color--lightest: rgba(28, 27, 26, 0.10);
+
+  /* Links / interactive elements */
+  --md-primary-fg-color: rgba(28, 27, 26, 0.86);
+  --md-accent-fg-color: rgba(28, 27, 26, 0.92);
+  --md-accent-fg-color--transparent: rgba(28, 27, 26, 0.10);
+
+  /* Main link color (body text links) */
+  --md-typeset-a-color: rgba(28, 27, 26, 0.78);
+
+  /* Subtle surfaces */
+  --md-code-bg-color: rgb(245, 245, 245);
+  --md-typeset-table-color: rgba(28, 27, 26, 0.12);
+}
+
+/* Make links feel more "document"-like */
+.md-typeset a {
+  color: var(--md-typeset-a-color);
+  text-decoration: underline;
+  text-decoration-color: rgba(28, 27, 26, 0.25);
+  text-underline-offset: 0.12em;
+}
+
+.md-typeset a:hover {
+  color: var(--md-accent-fg-color);
+  text-decoration-color: rgba(28, 27, 26, 0.55);
+}
+
+/* Sidebar link colors */
+.md-nav__link {
+  color: rgba(28, 27, 26, 0.72);
+}
+
+.md-nav__link:hover,
+.md-nav__link--active {
+  color: rgba(28, 27, 26, 0.92);
+}
+
+/* Remove the default top-left book icon */
+.md-header__button.md-logo,
+.md-nav__button.md-logo,
+.md-nav__title .md-logo {
+  display: none;
+}

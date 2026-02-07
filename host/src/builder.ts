@@ -195,9 +195,10 @@ async function buildNative(
 ): Promise<BuildResult> {
   const outputDir = path.resolve(options.outputDir);
 
-  // Step 1: Build or locate sandboxd and sandboxfs binaries
+  // Step 1: Build or locate sandboxd, sandboxfs, and sandboxssh binaries
   let sandboxdPath = config.sandboxdPath;
   let sandboxfsPath = config.sandboxfsPath;
+  let sandboxsshPath = config.sandboxsshPath;
 
   if (!options.skipBinaries && !sandboxdPath && !sandboxfsPath) {
     const guestDir = findGuestDir();
@@ -214,11 +215,13 @@ async function buildNative(
     await buildGuestBinaries(guestDir, config.arch, log);
     sandboxdPath = path.join(guestDir, "zig-out", "bin", "sandboxd");
     sandboxfsPath = path.join(guestDir, "zig-out", "bin", "sandboxfs");
+    sandboxsshPath = path.join(guestDir, "zig-out", "bin", "sandboxssh");
   } else {
-    if (!sandboxdPath || !sandboxfsPath) {
+    if (!sandboxdPath || !sandboxfsPath || !sandboxsshPath) {
       const guestDir = findGuestDir();
       sandboxdPath = sandboxdPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxd");
       sandboxfsPath = sandboxfsPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxfs");
+      sandboxsshPath = sandboxsshPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxssh");
     }
   }
 
@@ -227,6 +230,9 @@ async function buildNative(
   }
   if (!fs.existsSync(sandboxfsPath)) {
     throw new Error(`sandboxfs binary not found: ${sandboxfsPath}`);
+  }
+  if (!fs.existsSync(sandboxsshPath)) {
+    throw new Error(`sandboxssh binary not found: ${sandboxsshPath}`);
   }
 
   // Step 2: Build the images using the TypeScript builder
@@ -267,6 +273,7 @@ async function buildNative(
     initramfsPackages: alpineConfig.initramfsPackages,
     sandboxdBin: sandboxdPath,
     sandboxfsBin: sandboxfsPath,
+    sandboxsshBin: sandboxsshPath,
     rootfsLabel: config.rootfs?.label ?? "gondolin-root",
     rootfsSizeMb: config.rootfs?.sizeMb,
     rootfsInit,
@@ -415,6 +422,10 @@ async function buildInContainer(
     copyExecutable(path.resolve(config.sandboxfsPath), "sandboxfs");
     envVars.SANDBOXFS_BIN = "/work/sandboxfs";
   }
+  if (config.sandboxsshPath) {
+    copyExecutable(path.resolve(config.sandboxsshPath), "sandboxssh");
+    envVars.SANDBOXSSH_BIN = "/work/sandboxssh";
+  }
 
   const containerScript = `#!/bin/sh
 set -eu
@@ -440,6 +451,7 @@ ROOTFS_INIT="\${ROOTFS_INIT:-}" \
 INITRAMFS_INIT="\${INITRAMFS_INIT:-}" \
 SANDBOXD_BIN="\${SANDBOXD_BIN:-}" \
 SANDBOXFS_BIN="\${SANDBOXFS_BIN:-}" \
+SANDBOXSSH_BIN="\${SANDBOXSSH_BIN:-}" \
 OUT_DIR="\${OUT_DIR}" \
 ./build.sh
 

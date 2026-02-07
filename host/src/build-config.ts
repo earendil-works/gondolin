@@ -103,6 +103,9 @@ export interface BuildConfig {
 
   /** custom sandboxfs binary path (built-in when undefined) */
   sandboxfsPath?: string;
+
+  /** custom sandboxssh binary path (built-in when undefined) */
+  sandboxsshPath?: string;
 }
 
 /**
@@ -128,6 +131,7 @@ export function getDefaultBuildConfig(): BuildConfig {
         "npm",
         "uv",
         "python3",
+        "openssh",
       ],
       initramfsPackages: [],
     },
@@ -237,6 +241,10 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
   }
 
   if (!isOptionalString(cfg.sandboxfsPath)) {
+    return false;
+  }
+
+  if (!isOptionalString(cfg.sandboxsshPath)) {
     return false;
   }
 

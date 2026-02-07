@@ -31,7 +31,7 @@ function makeTempResolvedServerOptions() {
       netSocketPath: path.join(dir, "net.sock"),
       netMac: "02:00:00:00:00:01",
       netEnabled: false,
-      netDebug: false,
+      debug: [],
       machineType: "virt",
       accel: "tcg",
       cpu: "max",

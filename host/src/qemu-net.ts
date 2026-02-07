@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { stripTrailingNewline } from "./debug";
 import net from "net";
 import fs from "fs";
 import fsp from "fs/promises";
@@ -17,7 +18,21 @@ import { lookup } from "dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const MAX_HTTP_REDIRECTS = 10;
+const MAX_HTTP_HEADER_BYTES = 64 * 1024;
+const MAX_HTTP_PIPELINE_BYTES = 64 * 1024;
+// Chunked framing (chunk-size lines + trailers) can add overhead on top of the decoded body.
+// Keep this bounded separately from maxHttpBodyBytes.
+const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
+
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
+// Default cap for buffering upstream HTTP *responses* (not streaming).
+// This primarily applies when httpHooks.onResponse is installed.
+export const DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES = DEFAULT_MAX_HTTP_BODY_BYTES;
+
+const DEFAULT_MAX_TCP_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
+
+const DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES = 256;
+const DEFAULT_TLS_CONTEXT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
@@ -68,10 +83,298 @@ type HttpRequestData = {
   body: Buffer;
 };
 
+class HttpReceiveBuffer {
+  private readonly chunks: Buffer[] = [];
+  private totalBytes = 0;
+
+  get length() {
+    return this.totalBytes;
+  }
+
+  append(chunk: Buffer) {
+    if (chunk.length === 0) return;
+    this.chunks.push(chunk);
+    this.totalBytes += chunk.length;
+  }
+
+  resetTo(buffer: Buffer) {
+    this.chunks.length = 0;
+    this.totalBytes = 0;
+    this.append(buffer);
+  }
+
+  /**
+   * Find the start offset of the first "\r\n\r\n" sequence or -1 if missing
+   */
+  findHeaderEnd(maxSearchBytes: number): number {
+    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
+    let matched = 0;
+    let index = 0;
+
+    for (const chunk of this.chunks) {
+      for (let i = 0; i < chunk.length; i += 1) {
+        if (index >= maxSearchBytes) return -1;
+        const b = chunk[i]!;
+
+        if (b === pattern[matched]) {
+          matched += 1;
+          if (matched === pattern.length) {
+            return index - (pattern.length - 1);
+          }
+        } else {
+          // Only possible overlap is a new '\r'.
+          matched = b === pattern[0] ? 1 : 0;
+        }
+
+        index += 1;
+      }
+    }
+
+    return -1;
+  }
+
+  /**
+   * Copies the first `n` bytes into a contiguous Buffer
+   */
+  prefix(n: number): Buffer {
+    if (n <= 0) return Buffer.alloc(0);
+    if (n >= this.totalBytes) return this.toBuffer();
+
+    const out = Buffer.allocUnsafe(n);
+    let written = 0;
+
+    for (const chunk of this.chunks) {
+      if (written >= n) break;
+      const remaining = n - written;
+      const take = Math.min(remaining, chunk.length);
+      chunk.copy(out, written, 0, take);
+      written += take;
+    }
+
+    return out;
+  }
+
+  /**
+   * Copies the bytes from `start` (inclusive) to the end into a contiguous Buffer
+   */
+  suffix(start: number): Buffer {
+    if (start <= 0) return this.toBuffer();
+    if (start >= this.totalBytes) return Buffer.alloc(0);
+
+    const outLen = this.totalBytes - start;
+    const out = Buffer.allocUnsafe(outLen);
+    let written = 0;
+    let skipped = 0;
+
+    for (const chunk of this.chunks) {
+      if (skipped + chunk.length <= start) {
+        skipped += chunk.length;
+        continue;
+      }
+
+      const chunkStart = Math.max(0, start - skipped);
+      const take = chunk.length - chunkStart;
+      chunk.copy(out, written, chunkStart, chunkStart + take);
+      written += take;
+      skipped += chunk.length;
+    }
+
+    return out;
+  }
+
+  cursor(start = 0): HttpReceiveCursor {
+    return new HttpReceiveCursor(this.chunks, this.totalBytes, start);
+  }
+
+  toBuffer(): Buffer {
+    if (this.chunks.length === 0) return Buffer.alloc(0);
+    if (this.chunks.length === 1) return this.chunks[0]!;
+    return Buffer.concat(this.chunks, this.totalBytes);
+  }
+}
+
+class HttpReceiveCursor {
+  private chunkIndex = 0;
+  private chunkOffset = 0;
+  offset: number;
+
+  constructor(
+    private readonly chunks: Buffer[],
+    private readonly totalBytes: number,
+    startOffset: number
+  ) {
+    this.offset = startOffset;
+
+    let remaining = startOffset;
+    while (this.chunkIndex < this.chunks.length) {
+      const chunk = this.chunks[this.chunkIndex]!;
+      if (remaining < chunk.length) {
+        this.chunkOffset = remaining;
+        break;
+      }
+      remaining -= chunk.length;
+      this.chunkIndex += 1;
+    }
+
+    if (this.chunkIndex >= this.chunks.length && remaining !== 0) {
+      // Clamp: cursor can start at end, but never beyond.
+      this.offset = this.totalBytes;
+      this.chunkIndex = this.chunks.length;
+      this.chunkOffset = 0;
+    }
+  }
+
+  private cloneState() {
+    return {
+      chunkIndex: this.chunkIndex,
+      chunkOffset: this.chunkOffset,
+      offset: this.offset,
+    };
+  }
+
+  private commitState(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
+    this.chunkIndex = state.chunkIndex;
+    this.chunkOffset = state.chunkOffset;
+    this.offset = state.offset;
+  }
+
+  private readByteFrom(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
+    if (state.offset >= this.totalBytes) return null;
+
+    while (state.chunkIndex < this.chunks.length) {
+      const chunk = this.chunks[state.chunkIndex]!;
+      if (state.chunkOffset < chunk.length) {
+        const b = chunk[state.chunkOffset]!;
+        state.chunkOffset += 1;
+        state.offset += 1;
+        return b;
+      }
+      state.chunkIndex += 1;
+      state.chunkOffset = 0;
+    }
+
+    return null;
+  }
+
+  remaining() {
+    return Math.max(0, this.totalBytes - this.offset);
+  }
+
+  tryConsumeSequenceIfPresent(sequence: number[]): boolean | null {
+    const state = this.cloneState();
+
+    for (const expected of sequence) {
+      const b = this.readByteFrom(state);
+      if (b === null) return null;
+      if (b !== expected) return false;
+    }
+
+    this.commitState(state);
+    return true;
+  }
+
+  tryConsumeExactSequence(sequence: number[]): boolean | null {
+    const consumed = this.tryConsumeSequenceIfPresent(sequence);
+    if (consumed === null) return null;
+    if (!consumed) {
+      throw new Error("invalid chunk terminator");
+    }
+    return true;
+  }
+
+  tryReadLineAscii(maxBytes: number): string | null {
+    const state = this.cloneState();
+    const bytes: number[] = [];
+
+    while (true) {
+      const b = this.readByteFrom(state);
+      if (b === null) return null;
+
+      if (b === 0x0d) {
+        const b2 = this.readByteFrom(state);
+        if (b2 === null) return null;
+        if (b2 !== 0x0a) {
+          throw new Error("invalid line terminator");
+        }
+
+        this.commitState(state);
+        return Buffer.from(bytes).toString("ascii");
+      }
+
+      bytes.push(b);
+      if (bytes.length > maxBytes) {
+        throw new Error("chunk size line too large");
+      }
+    }
+  }
+
+  tryReadBytes(n: number): Buffer | null {
+    if (n === 0) return Buffer.alloc(0);
+    if (this.remaining() < n) return null;
+
+    const state = this.cloneState();
+    const firstChunk = this.chunks[state.chunkIndex];
+    if (firstChunk && state.chunkOffset + n <= firstChunk.length) {
+      const slice = firstChunk.subarray(state.chunkOffset, state.chunkOffset + n);
+      state.chunkOffset += n;
+      state.offset += n;
+      this.commitState(state);
+      return slice;
+    }
+
+    const out = Buffer.allocUnsafe(n);
+    let written = 0;
+
+    while (written < n) {
+      const chunk = this.chunks[state.chunkIndex];
+      if (!chunk) return null;
+
+      if (state.chunkOffset >= chunk.length) {
+        state.chunkIndex += 1;
+        state.chunkOffset = 0;
+        continue;
+      }
+
+      const available = chunk.length - state.chunkOffset;
+      const take = Math.min(available, n - written);
+      chunk.copy(out, written, state.chunkOffset, state.chunkOffset + take);
+      state.chunkOffset += take;
+      state.offset += take;
+      written += take;
+    }
+
+    this.commitState(state);
+    return out;
+  }
+
+  tryConsumeUntilDoubleCrlf(): boolean | null {
+    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
+    const state = this.cloneState();
+    let matched = 0;
+
+    while (true) {
+      const b = this.readByteFrom(state);
+      if (b === null) return null;
+
+      if (b === pattern[matched]) {
+        matched += 1;
+        if (matched === pattern.length) {
+          this.commitState(state);
+          return true;
+        }
+      } else {
+        matched = b === pattern[0] ? 1 : 0;
+      }
+    }
+  }
+}
+
 type HttpSession = {
-  buffer: Buffer;
+  buffer: HttpReceiveBuffer;
   processing: boolean;
   closed: boolean;
+  /** whether we already sent an interim 100-continue response */
+  sentContinue?: boolean;
 };
 
 class GuestTlsStream extends Duplex {
@@ -110,6 +413,8 @@ type TcpSession = {
   protocol: TcpFlowProtocol | null;
   connected: boolean;
   pendingWrites: Buffer[];
+  /** bytes currently queued in `pendingWrites` in `bytes` (does not include Node's socket buffer) */
+  pendingWriteBytes: number;
   http?: HttpSession;
   tls?: TlsSession;
 };
@@ -127,13 +432,16 @@ export type HttpHookRequest = {
   body: Buffer | null;
 };
 
+export type HeaderValue = string | string[];
+export type HttpResponseHeaders = Record<string, HeaderValue>;
+
 export type HttpHookResponse = {
   /** http status code */
   status: number;
   /** http status text */
   statusText: string;
   /** response headers */
-  headers: Record<string, string>;
+  headers: HttpResponseHeaders;
   /** response body */
   body: Buffer;
 };
@@ -194,8 +502,19 @@ export type QemuNetworkOptions = {
   httpHooks?: HttpHooks;
   /** mitm ca directory path */
   mitmCertDir?: string;
-  /** max intercepted http body size in `bytes` */
+  /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes?: number;
+
+  /** max buffered guest->upstream tcp write bytes per session in `bytes` */
+  maxTcpPendingWriteBytes?: number;
+
+  /** tls MITM context cache max entries */
+  tlsContextCacheMaxEntries?: number;
+
+  /** tls MITM context cache ttl in `ms` (<=0 disables caching) */
+  tlsContextCacheTtlMs?: number;
 };
 
 type CaCert = {
@@ -204,7 +523,18 @@ type CaCert = {
   certPem: string;
 };
 
+type TlsContextCacheEntry = {
+  context: tls.SecureContext;
+  lastAccessAt: number;
+};
+
 export class QemuNetworkBackend extends EventEmitter {
+  private emitDebug(message: string) {
+    // Structured event for consumers (VM / SandboxServer)
+    this.emit("debug", "net", stripTrailingNewline(message));
+    // Legacy string log event
+    this.emit("log", `[net] ${stripTrailingNewline(message)}`);
+  }
   private server: net.Server | null = null;
   private socket: net.Socket | null = null;
   private waitingDrain = false;
@@ -213,13 +543,17 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly tcpSessions = new Map<string, TcpSession>();
   private readonly mitmDir: string;
   private caPromise: Promise<CaCert> | null = null;
-  private tlsContexts = new Map<string, tls.SecureContext>();
+  private tlsContexts = new Map<string, TlsContextCacheEntry>();
   private tlsContextPromises = new Map<string, Promise<tls.SecureContext>>();
   private readonly icmpTimings = new Map<string, IcmpTiming>();
   private icmpDebugBuffer = Buffer.alloc(0);
   private icmpRxBuffer = Buffer.alloc(0);
   private eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | null = null;
   private readonly maxHttpBodyBytes: number;
+  private readonly maxHttpResponseBodyBytes: number;
+  private readonly maxTcpPendingWriteBytes: number;
+  private readonly tlsContextCacheMaxEntries: number;
+  private readonly tlsContextCacheTtlMs: number;
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
@@ -229,6 +563,15 @@ export class QemuNetworkBackend extends EventEmitter {
     }
     this.mitmDir = resolveMitmCertDir(options.mitmCertDir);
     this.maxHttpBodyBytes = options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES;
+    this.maxHttpResponseBodyBytes =
+      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES;
+
+    this.maxTcpPendingWriteBytes =
+      options.maxTcpPendingWriteBytes ?? DEFAULT_MAX_TCP_PENDING_WRITE_BYTES;
+
+    this.tlsContextCacheMaxEntries =
+      options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
+    this.tlsContextCacheTtlMs = options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
   }
 
   start() {
@@ -312,9 +655,8 @@ export class QemuNetworkBackend extends EventEmitter {
       allowTcpFlow: (info) => {
         if (info.protocol !== "http" && info.protocol !== "tls") {
           if (this.options.debug) {
-            this.emit(
-              "log",
-              `[net] tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+            this.emitDebug(
+              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
             );
           }
           return false;
@@ -325,9 +667,10 @@ export class QemuNetworkBackend extends EventEmitter {
           session.protocol = info.protocol;
           if (info.protocol === "http" || info.protocol === "tls") {
             session.http = session.http ?? {
-              buffer: Buffer.alloc(0),
+              buffer: new HttpReceiveBuffer(),
               processing: false,
               closed: false,
+              sentContinue: false,
             };
           }
         }
@@ -342,7 +685,7 @@ export class QemuNetworkBackend extends EventEmitter {
       this.icmpDebugBuffer = Buffer.alloc(0);
       this.icmpRxBuffer = Buffer.alloc(0);
       this.stack.on("dhcp", (state, ip) => {
-        this.emit("log", `[net] dhcp ${state} ${ip}`);
+        this.emitDebug(`dhcp ${state} ${ip}`);
       });
       this.stack.on("icmp", (info) => {
         this.recordIcmpTiming(info as IcmpTiming);
@@ -358,7 +701,7 @@ export class QemuNetworkBackend extends EventEmitter {
       if (this.options.debug) {
         const now = performance.now();
         this.trackIcmpReplies(chunk, now);
-        this.emit("log", `[net] tx ${chunk.length} bytes to qemu`);
+        this.emitDebug(`tx ${chunk.length} bytes to qemu`);
       }
       const ok = this.socket.write(chunk);
       if (!ok) {
@@ -506,9 +849,8 @@ export class QemuNetworkBackend extends EventEmitter {
       ? `guest_to_host=${guestToHostMs.toFixed(3)}ms `
       : "";
 
-    this.emit(
-      "log",
-      `[net] icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
+    this.emitDebug(
+      `icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
         `${guestToHostLabel}processing=${processingMs.toFixed(3)}ms ` +
         `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`
     );
@@ -537,7 +879,9 @@ export class QemuNetworkBackend extends EventEmitter {
   private handleUdpSend(message: UdpSendMessage) {
     if (message.dstPort !== 53) {
       if (this.options.debug) {
-        this.emit("log", `[net] udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`);
+        this.emitDebug(
+          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`
+        );
       }
       return;
     }
@@ -556,7 +900,9 @@ export class QemuNetworkBackend extends EventEmitter {
 
       socket.on("message", (data, rinfo) => {
         if (this.options.debug) {
-          this.emit("log", `[net] udp recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)`);
+          this.emitDebug(
+            `udp recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)`
+          );
         }
         this.stack?.handleUdpResponse({
           data: Buffer.from(data),
@@ -574,7 +920,9 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     if (this.options.debug) {
-      this.emit("log", `[net] udp send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`);
+      this.emitDebug(
+        `udp send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+      );
     }
     session.socket.send(message.payload, message.dstPort, message.dstIP);
   }
@@ -594,11 +942,48 @@ export class QemuNetworkBackend extends EventEmitter {
       protocol: null,
       connected: false,
       pendingWrites: [],
+      pendingWriteBytes: 0,
     };
     this.tcpSessions.set(message.key, session);
 
     this.stack?.handleTcpConnected({ key: message.key });
     this.flush();
+  }
+
+  private abortTcpSession(key: string, session: TcpSession, reason: string) {
+    if (this.options.debug) {
+      this.emitDebug(
+        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+      );
+    }
+
+    try {
+      session.socket?.destroy();
+    } catch {
+      // ignore
+    }
+
+    session.pendingWrites = [];
+    session.pendingWriteBytes = 0;
+
+    this.stack?.handleTcpError({ key });
+    this.tcpSessions.delete(key);
+  }
+
+  private queueTcpPendingWrite(key: string, session: TcpSession, data: Buffer): boolean {
+    const nextBytes = session.pendingWriteBytes + data.length;
+    if (nextBytes > this.maxTcpPendingWriteBytes) {
+      this.abortTcpSession(
+        key,
+        session,
+        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
+      );
+      return false;
+    }
+
+    session.pendingWrites.push(data);
+    session.pendingWriteBytes = nextBytes;
+    return true;
   }
 
   private handleTcpSend(message: TcpSendMessage) {
@@ -616,17 +1001,33 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     this.ensureTcpSocket(message.key, session);
+
     if (session.socket && session.connected && session.socket.writable) {
+      // Keep the cap strict: check how much is already queued in Node's socket buffer
+      // before adding more.
+      const nextWritable = session.socket.writableLength + message.data.length;
+      if (nextWritable > this.maxTcpPendingWriteBytes) {
+        this.abortTcpSession(
+          message.key,
+          session,
+          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
+        );
+        return;
+      }
+
       session.socket.write(message.data);
-    } else {
-      session.pendingWrites.push(message.data);
+      return;
     }
+
+    this.queueTcpPendingWrite(message.key, session, message.data);
   }
 
   private handleTcpClose(message: TcpCloseMessage) {
     const session = this.tcpSessions.get(message.key);
     if (session) {
       session.http = undefined;
+      session.pendingWrites = [];
+      session.pendingWriteBytes = 0;
       if (session.tls) {
         if (message.destroy) {
           session.tls.socket.destroy();
@@ -675,6 +1076,7 @@ export class QemuNetworkBackend extends EventEmitter {
         socket.write(pending);
       }
       session.pendingWrites = [];
+      session.pendingWriteBytes = 0;
     });
 
     socket.on("data", (data) => {
@@ -714,7 +1116,7 @@ export class QemuNetworkBackend extends EventEmitter {
         this.getTlsContextAsync(sni)
           .then((context) => {
             if (this.options.debug) {
-              this.emit("log", `[net] tls sni ${sni}`);
+              this.emitDebug(`tls sni ${sni}`);
             }
             callback(null, context);
           })
@@ -745,7 +1147,7 @@ export class QemuNetworkBackend extends EventEmitter {
     };
 
     if (this.options.debug) {
-      this.emit("log", `[net] tls mitm start ${session.dstIP}:${session.dstPort}`);
+      this.emitDebug(`tls mitm start ${session.dstIP}:${session.dstPort}`);
     }
 
     return session.tls;
@@ -782,6 +1184,53 @@ export class QemuNetworkBackend extends EventEmitter {
     });
   }
 
+  private maybeSend100ContinueFromHead(
+    httpSession: HttpSession,
+    head: { version: string; headers: Record<string, string>; bodyOffset: number },
+    bufferedBodyBytes: number,
+    write: (chunk: Buffer) => void
+  ) {
+    if (httpSession.sentContinue) return;
+    if (head.version !== "HTTP/1.1") return;
+
+    const expect = head.headers["expect"]?.toLowerCase();
+    if (!expect) return;
+
+    const expectations = expect
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    if (!expectations.includes("100-continue")) return;
+
+    // For Content-Length, only send Continue if the body is not fully buffered yet.
+    const contentLengthRaw = head.headers["content-length"];
+    const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
+    if (Number.isFinite(contentLength) && contentLength > bufferedBodyBytes) {
+      write(Buffer.from("HTTP/1.1 100 Continue\r\n\r\n"));
+      httpSession.sentContinue = true;
+      return;
+    }
+
+    // For chunked bodies, we don't know completeness without parsing. If the client used
+    // Expect: 100-continue, reply as soon as we see a supported chunked request head.
+    const transferEncodingHeader = head.headers["transfer-encoding"];
+    const encodings = transferEncodingHeader
+      ?.split(",")
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean);
+
+    const supportedChunked =
+      Boolean(encodings?.length) &&
+      encodings![encodings!.length - 1] === "chunked" &&
+      encodings!.every((encoding) => encoding === "chunked");
+
+    if (supportedChunked) {
+      write(Buffer.from("HTTP/1.1 100 Continue\r\n\r\n"));
+      httpSession.sentContinue = true;
+    }
+  }
+
   private async handleHttpDataWithWriter(
     key: string,
     session: TcpSession,
@@ -789,25 +1238,178 @@ export class QemuNetworkBackend extends EventEmitter {
     options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void }
   ) {
     const httpSession = session.http ?? {
-      buffer: Buffer.alloc(0),
+      buffer: new HttpReceiveBuffer(),
       processing: false,
       closed: false,
+      sentContinue: false,
     };
     session.http = httpSession;
 
     if (httpSession.closed) return;
 
-    httpSession.buffer = Buffer.concat([httpSession.buffer, data]);
+    httpSession.buffer.append(data);
     if (httpSession.processing) return;
 
     let parsed: { request: HttpRequestData; remaining: Buffer } | null = null;
     try {
-      parsed = this.parseHttpRequest(httpSession.buffer);
+      const headerEnd = httpSession.buffer.findHeaderEnd(MAX_HTTP_HEADER_BYTES + 4);
+      if (headerEnd === -1) {
+        // No header terminator yet.
+        if (httpSession.buffer.length > MAX_HTTP_HEADER_BYTES) {
+          throw new HttpRequestBlockedError(
+            `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
+            431,
+            "Request Header Fields Too Large"
+          );
+        }
+        return;
+      }
+
+      if (headerEnd > MAX_HTTP_HEADER_BYTES) {
+        throw new HttpRequestBlockedError(
+          `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
+          431,
+          "Request Header Fields Too Large"
+        );
+      }
+
+      // Parse headers using only the header region (avoid concatenating the full buffer).
+      const headBuf = httpSession.buffer.prefix(headerEnd + 4);
+      const head = this.parseHttpHead(headBuf);
+      if (!head) return;
+
+      const bufferedBodyBytes = Math.max(0, httpSession.buffer.length - head.bodyOffset);
+
+      // Validate Expect early so we don't send 100-continue for requests we must reject.
+      this.validateExpectHeader(head.version, head.headers);
+
+      const transferEncodingHeader = head.headers["transfer-encoding"];
+      if (transferEncodingHeader) {
+        const encodings = transferEncodingHeader
+          .split(",")
+          .map((value) => value.trim().toLowerCase())
+          .filter(Boolean);
+
+        // Only support TE: chunked (no other transfer-codings).
+        if (
+          encodings.length === 0 ||
+          encodings[encodings.length - 1] !== "chunked" ||
+          !encodings.every((encoding) => encoding === "chunked")
+        ) {
+          throw new HttpRequestBlockedError(
+            `unsupported transfer-encoding: ${transferEncodingHeader}`,
+            501,
+            "Not Implemented"
+          );
+        }
+
+        // Enforce a strict cap on the raw buffered request bytes.
+        const maxBuffered =
+          head.bodyOffset +
+          this.maxHttpBodyBytes +
+          MAX_HTTP_CHUNKED_OVERHEAD_BYTES +
+          MAX_HTTP_PIPELINE_BYTES;
+        if (httpSession.buffer.length > maxBuffered) {
+          throw new HttpRequestBlockedError(
+            `request body exceeds ${this.maxHttpBodyBytes} bytes`,
+            413,
+            "Payload Too Large"
+          );
+        }
+
+        const chunked = this.decodeChunkedBodyFromReceiveBuffer(
+          httpSession.buffer,
+          head.bodyOffset,
+          this.maxHttpBodyBytes
+        );
+        if (!chunked.complete) {
+          this.maybeSend100ContinueFromHead(httpSession, head, bufferedBodyBytes, options.write);
+          return;
+        }
+
+        const sanitizedHeaders = { ...head.headers };
+        delete sanitizedHeaders["transfer-encoding"];
+        delete sanitizedHeaders["content-length"];
+        sanitizedHeaders["content-length"] = chunked.body.length.toString();
+
+        const remainingStart = head.bodyOffset + chunked.bytesConsumed;
+
+        // Now that we know the exact end of the chunked body, strictly enforce how many
+        // bytes we allow to be buffered past the chunked terminator.
+        if (httpSession.buffer.length - remainingStart > MAX_HTTP_PIPELINE_BYTES) {
+          throw new HttpRequestBlockedError(
+            `request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`,
+            413,
+            "Payload Too Large"
+          );
+        }
+
+        parsed = {
+          request: {
+            method: head.method,
+            target: head.target,
+            version: head.version,
+            headers: sanitizedHeaders,
+            body: chunked.body,
+          },
+          remaining: httpSession.buffer.suffix(remainingStart),
+        };
+      } else {
+        const contentLengthRaw = head.headers["content-length"];
+        let contentLength = 0;
+        if (contentLengthRaw) {
+          if (contentLengthRaw.includes(",")) {
+            throw new Error("multiple content-length headers");
+          }
+          contentLength = Number(contentLengthRaw);
+          if (
+            !Number.isFinite(contentLength) ||
+            !Number.isInteger(contentLength) ||
+            contentLength < 0
+          ) {
+            throw new Error("invalid content-length");
+          }
+        }
+
+        if (Number.isFinite(this.maxHttpBodyBytes) && contentLength > this.maxHttpBodyBytes) {
+          throw new HttpRequestBlockedError(
+            `request body exceeds ${this.maxHttpBodyBytes} bytes`,
+            413,
+            "Payload Too Large"
+          );
+        }
+
+        const maxBuffered = head.bodyOffset + contentLength + MAX_HTTP_PIPELINE_BYTES;
+        if (httpSession.buffer.length > maxBuffered) {
+          throw new HttpRequestBlockedError(
+            `request exceeds ${contentLength} bytes`,
+            413,
+            "Payload Too Large"
+          );
+        }
+
+        // If we know exactly how much body to expect, avoid attempting parse until complete.
+        if (bufferedBodyBytes < contentLength) {
+          this.maybeSend100ContinueFromHead(httpSession, head, bufferedBodyBytes, options.write);
+          return;
+        }
+
+        this.maybeSend100ContinueFromHead(httpSession, head, bufferedBodyBytes, options.write);
+
+        const fullBuffer = httpSession.buffer.toBuffer();
+        const result = this.parseHttpRequest(fullBuffer);
+        parsed = result
+          ? {
+              request: result.request,
+              remaining: Buffer.from(result.remaining),
+            }
+          : null;
+      }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
-          this.emit("log", `[net] http blocked ${error.message}`);
+          this.emitDebug(`http blocked ${error.message}`);
         }
         this.respondWithError(options.write, error.status, error.statusText);
       } else {
@@ -823,20 +1425,23 @@ export class QemuNetworkBackend extends EventEmitter {
     if (!parsed) return;
 
     httpSession.processing = true;
-    httpSession.buffer = parsed.remaining;
+    httpSession.buffer.resetTo(parsed.remaining);
 
     try {
       await this.fetchAndRespond(parsed.request, options.scheme, options.write);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+        parsed.request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
-          this.emit("log", `[net] http blocked ${error.message}`);
+          this.emitDebug(`http blocked ${error.message}`);
         }
-        this.respondWithError(options.write, error.status, error.statusText);
+        this.respondWithError(options.write, error.status, error.statusText, httpVersion);
       } else {
         this.emit("error", error);
-        this.respondWithError(options.write, 502, "Bad Gateway");
+        this.respondWithError(options.write, 502, "Bad Gateway", httpVersion);
       }
     } finally {
       httpSession.closed = true;
@@ -851,16 +1456,45 @@ export class QemuNetworkBackend extends EventEmitter {
     tlsSession.stream.pushEncrypted(data);
   }
 
-  private parseHttpRequest(buffer: Buffer): { request: HttpRequestData; remaining: Buffer } | null {
+  private parseHttpHead(buffer: Buffer): {
+    method: string;
+    target: string;
+    version: string;
+    headers: Record<string, string>;
+    bodyOffset: number;
+  } | null {
     const headerEnd = buffer.indexOf("\r\n\r\n");
-    if (headerEnd === -1) return null;
+    if (headerEnd === -1) {
+      // Fail fast if we buffered more than the maximum header size without
+      // encountering the header terminator (avoid hanging/slowloris).
+      if (buffer.length > MAX_HTTP_HEADER_BYTES) {
+        throw new HttpRequestBlockedError(
+          `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
+          431,
+          "Request Header Fields Too Large"
+        );
+      }
+      return null;
+    }
 
-    const headerBlock = buffer.subarray(0, headerEnd).toString("utf8");
+    if (headerEnd > MAX_HTTP_HEADER_BYTES) {
+      throw new HttpRequestBlockedError(
+        `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
+        431,
+        "Request Header Fields Too Large"
+      );
+    }
+
+    const headerBlock = buffer.subarray(0, headerEnd).toString("latin1");
     const lines = headerBlock.split("\r\n");
-    if (lines.length === 0) return null;
+    if (lines.length === 0) {
+      throw new Error("invalid request");
+    }
 
     const [method, target, version] = lines[0].split(" ");
-    if (!method || !target || !version) return null;
+    if (!method || !target || !version || !version.startsWith("HTTP/")) {
+      throw new Error("invalid request line");
+    }
 
     const headers: Record<string, string> = {};
     for (let i = 1; i < lines.length; i += 1) {
@@ -870,36 +1504,117 @@ export class QemuNetworkBackend extends EventEmitter {
       const key = line.slice(0, idx).trim().toLowerCase();
       const value = line.slice(idx + 1).trim();
       if (!key) continue;
+
       if (headers[key]) {
+        if (key === "content-length") {
+          if (headers[key] !== value) {
+            throw new Error("multiple content-length headers");
+          }
+          continue;
+        }
         headers[key] = `${headers[key]}, ${value}`;
       } else {
         headers[key] = value;
       }
     }
 
-    const bodyOffset = headerEnd + 4;
+    return {
+      method,
+      target,
+      version,
+      headers,
+      bodyOffset: headerEnd + 4,
+    };
+  }
+
+  private validateExpectHeader(version: string, headers: Record<string, string>) {
+    // RFC 9110: unknown expectations MUST be rejected with 417.
+    if (version !== "HTTP/1.1") return;
+
+    const expect = headers["expect"]?.toLowerCase();
+    if (!expect) return;
+
+    const tokens = expect
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    const unsupported = tokens.filter((t) => t !== "100-continue");
+    if (unsupported.length > 0) {
+      throw new HttpRequestBlockedError(
+        `unsupported expect token(s): ${unsupported.join(", ")}`,
+        417,
+        "Expectation Failed"
+      );
+    }
+  }
+
+  private parseHttpRequest(buffer: Buffer): { request: HttpRequestData; remaining: Buffer } | null {
+    const head = this.parseHttpHead(buffer);
+    if (!head) return null;
+
+    const { method, target, version, headers, bodyOffset } = head;
+
+    this.validateExpectHeader(version, headers);
+
     const bodyBuffer = buffer.subarray(bodyOffset);
     const maxBodyBytes = this.maxHttpBodyBytes;
 
     // XXX: cap request body size to avoid unbounded buffering (Content-Length/chunked).
-    const transferEncoding = headers["transfer-encoding"]?.toLowerCase();
-    if (transferEncoding === "chunked") {
+    const transferEncodingHeader = headers["transfer-encoding"];
+    if (transferEncodingHeader) {
+      const encodings = transferEncodingHeader
+        .split(",")
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean);
+
+      // Only support TE: chunked (no other transfer-codings).
+      if (
+        encodings.length === 0 ||
+        encodings[encodings.length - 1] !== "chunked" ||
+        !encodings.every((encoding) => encoding === "chunked")
+      ) {
+        throw new HttpRequestBlockedError(
+          `unsupported transfer-encoding: ${transferEncodingHeader}`,
+          501,
+          "Not Implemented"
+        );
+      }
+
       const chunked = this.decodeChunkedBody(bodyBuffer, maxBodyBytes);
       if (!chunked.complete) return null;
+
+      // We decoded the body, so sanitize framing-related request headers.
+      // (Hop-by-hop headers are stripped later, but Content-Length must also be correct.)
+      const sanitizedHeaders = { ...headers };
+      delete sanitizedHeaders["transfer-encoding"];
+      delete sanitizedHeaders["content-length"];
+      sanitizedHeaders["content-length"] = chunked.body.length.toString();
+
       return {
         request: {
           method,
           target,
           version,
-          headers,
+          headers: sanitizedHeaders,
           body: chunked.body,
         },
         remaining: bodyBuffer.subarray(chunked.bytesConsumed),
       };
     }
 
-    const contentLength = headers["content-length"] ? Number(headers["content-length"]) : 0;
-    if (!Number.isFinite(contentLength) || contentLength < 0) return null;
+    const contentLengthRaw = headers["content-length"];
+    let contentLength = 0;
+
+    if (contentLengthRaw) {
+      if (contentLengthRaw.includes(",")) {
+        throw new Error("multiple content-length headers");
+      }
+      contentLength = Number(contentLengthRaw);
+      if (!Number.isFinite(contentLength) || !Number.isInteger(contentLength) || contentLength < 0) {
+        throw new Error("invalid content-length");
+      }
+    }
 
     if (Number.isFinite(maxBodyBytes) && contentLength > maxBodyBytes) {
       throw new HttpRequestBlockedError(
@@ -923,6 +1638,80 @@ export class QemuNetworkBackend extends EventEmitter {
     };
   }
 
+  private decodeChunkedBodyFromReceiveBuffer(
+    receiveBuffer: HttpReceiveBuffer,
+    bodyOffset: number,
+    maxBodyBytes: number
+  ): { complete: boolean; body: Buffer; bytesConsumed: number } {
+    const cursor = receiveBuffer.cursor(bodyOffset);
+    const chunks: Buffer[] = [];
+    const enforceLimit = Number.isFinite(maxBodyBytes) && maxBodyBytes >= 0;
+
+    let totalBytes = 0;
+    const startOffset = cursor.offset;
+
+    while (true) {
+      const sizeLineRaw = cursor.tryReadLineAscii(1024);
+      if (sizeLineRaw === null) {
+        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+      }
+
+      const sizeLine = sizeLineRaw.split(";")[0]!.trim();
+      const size = parseInt(sizeLine, 16);
+      if (!Number.isFinite(size) || size < 0) {
+        throw new Error("invalid chunk size");
+      }
+
+      // last-chunk + trailer-section
+      if (size === 0) {
+        const emptyTrailers = cursor.tryConsumeSequenceIfPresent([0x0d, 0x0a]);
+        if (emptyTrailers === null) {
+          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+        }
+
+        if (emptyTrailers) {
+          return {
+            complete: true,
+            body: Buffer.concat(chunks, totalBytes),
+            bytesConsumed: cursor.offset - startOffset,
+          };
+        }
+
+        const consumedTrailers = cursor.tryConsumeUntilDoubleCrlf();
+        if (consumedTrailers === null) {
+          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+        }
+
+        return {
+          complete: true,
+          body: Buffer.concat(chunks, totalBytes),
+          bytesConsumed: cursor.offset - startOffset,
+        };
+      }
+
+      if (enforceLimit && totalBytes + size > maxBodyBytes) {
+        throw new HttpRequestBlockedError(
+          `request body exceeds ${maxBodyBytes} bytes`,
+          413,
+          "Payload Too Large"
+        );
+      }
+
+      const chunkData = cursor.tryReadBytes(size);
+      if (chunkData === null) {
+        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+      }
+
+      totalBytes += size;
+      chunks.push(chunkData);
+
+      const terminator = cursor.tryConsumeExactSequence([0x0d, 0x0a]);
+      if (terminator === null) {
+        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+      }
+    }
+  }
+
   private decodeChunkedBody(
     buffer: Buffer,
     maxBodyBytes: number
@@ -938,32 +1727,60 @@ export class QemuNetworkBackend extends EventEmitter {
 
       const sizeLine = buffer.subarray(offset, lineEnd).toString("ascii").split(";")[0].trim();
       const size = parseInt(sizeLine, 16);
-      if (!Number.isFinite(size)) return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-
-      const chunkStart = lineEnd + 2;
-      const chunkEnd = chunkStart + size;
-      if (buffer.length < chunkEnd + 2) return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-
-      if (size > 0) {
-        if (enforceLimit && totalBytes + size > maxBodyBytes) {
-          throw new HttpRequestBlockedError(
-            `request body exceeds ${maxBodyBytes} bytes`,
-            413,
-            "Payload Too Large"
-          );
-        }
-        totalBytes += size;
-        chunks.push(buffer.subarray(chunkStart, chunkEnd));
+      if (!Number.isFinite(size) || size < 0) {
+        throw new Error("invalid chunk size");
       }
 
-      if (buffer[chunkEnd] !== 0x0d || buffer[chunkEnd + 1] !== 0x0a) {
+      const chunkStart = lineEnd + 2;
+
+      // last-chunk + trailer-section
+      if (size === 0) {
+        // Empty trailer-section is a single CRLF.
+        if (buffer.length < chunkStart + 2) {
+          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+        }
+
+        if (buffer[chunkStart] === 0x0d && buffer[chunkStart + 1] === 0x0a) {
+          return {
+            complete: true,
+            body: Buffer.concat(chunks, totalBytes),
+            bytesConsumed: chunkStart + 2,
+          };
+        }
+
+        const trailerEnd = buffer.indexOf("\r\n\r\n", chunkStart);
+        if (trailerEnd === -1) {
+          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
+        }
+
+        return {
+          complete: true,
+          body: Buffer.concat(chunks, totalBytes),
+          bytesConsumed: trailerEnd + 4,
+        };
+      }
+
+      const chunkEnd = chunkStart + size;
+      if (buffer.length < chunkEnd + 2) {
         return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
       }
 
-      offset = chunkEnd + 2;
-      if (size === 0) {
-        return { complete: true, body: Buffer.concat(chunks), bytesConsumed: offset };
+      if (enforceLimit && totalBytes + size > maxBodyBytes) {
+        throw new HttpRequestBlockedError(
+          `request body exceeds ${maxBodyBytes} bytes`,
+          413,
+          "Payload Too Large"
+        );
       }
+
+      totalBytes += size;
+      chunks.push(buffer.subarray(chunkStart, chunkEnd));
+
+      if (buffer[chunkEnd] !== 0x0d || buffer[chunkEnd + 1] !== 0x0a) {
+        throw new Error("invalid chunk terminator");
+      }
+
+      offset = chunkEnd + 2;
     }
   }
 
@@ -972,15 +1789,42 @@ export class QemuNetworkBackend extends EventEmitter {
     defaultScheme: "http" | "https",
     write: (chunk: Buffer) => void
   ) {
+    const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+      request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+
+    // Asterisk-form (OPTIONS *) is valid HTTP but does not map to a URL fetch.
+    if (request.method === "OPTIONS" && request.target === "*") {
+      this.respondWithError(write, 501, "Not Implemented", httpVersion);
+      return;
+    }
+
+    // Explicitly reject Upgrade/WebSocket requests: the HTTP fetch bridge cannot
+    // tunnel upgraded connections.
+    const connection = request.headers["connection"]?.toLowerCase() ?? "";
+    const hasUpgrade =
+      Boolean(request.headers["upgrade"]) ||
+      connection
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .includes("upgrade") ||
+      Boolean(request.headers["sec-websocket-key"]) ||
+      Boolean(request.headers["sec-websocket-version"]);
+
+    if (hasUpgrade) {
+      this.respondWithError(write, 501, "Not Implemented", httpVersion);
+      return;
+    }
+
     const url = this.buildFetchUrl(request, defaultScheme);
     if (!url) {
-      this.respondWithError(write, 400, "Bad Request");
+      this.respondWithError(write, 400, "Bad Request", httpVersion);
       return;
     }
 
     // XXX: validate URL + DNS/IP to block localhost/private ranges before fetch().
     if (this.options.debug) {
-      this.emit("log", `[net] http bridge ${request.method} ${url}`);
+      this.emitDebug(`http bridge ${request.method} ${url}`);
     }
 
     let hookRequest: HttpHookRequest = {
@@ -1000,19 +1844,19 @@ export class QemuNetworkBackend extends EventEmitter {
       try {
         currentUrl = new URL(currentRequest.url);
       } catch {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
       const protocol = getUrlProtocol(currentUrl);
       if (!protocol) {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
       const port = getUrlPort(currentUrl, protocol);
       if (!Number.isFinite(port) || port <= 0) {
-        this.respondWithError(write, 400, "Bad Request");
+        this.respondWithError(write, 400, "Bad Request", httpVersion);
         return;
       }
 
@@ -1053,12 +1897,20 @@ export class QemuNetworkBackend extends EventEmitter {
         }
 
         if (this.options.debug) {
-          this.emit("log", `[net] http bridge response ${response.status} ${response.statusText}`);
+          this.emitDebug(`http bridge response ${response.status} ${response.statusText}`);
         }
 
         let responseHeaders = this.stripHopByHopHeaders(this.headersToRecord(response.headers));
-        const contentEncoding = responseHeaders["content-encoding"];
-        const contentLength = responseHeaders["content-length"];
+        const contentEncodingValue = responseHeaders["content-encoding"];
+        const contentEncoding = Array.isArray(contentEncodingValue)
+          ? contentEncodingValue[0]
+          : contentEncodingValue;
+
+        const contentLengthValue = responseHeaders["content-length"];
+        const contentLength = Array.isArray(contentLengthValue)
+          ? contentLengthValue[0]
+          : contentLengthValue;
+
         const parsedLength = contentLength ? Number(contentLength) : null;
         const hasValidLength =
           parsedLength !== null && Number.isFinite(parsedLength) && parsedLength >= 0;
@@ -1070,31 +1922,131 @@ export class QemuNetworkBackend extends EventEmitter {
         responseHeaders["connection"] = "close";
 
         const responseBodyStream = response.body as WebReadableStream<Uint8Array> | null;
-        const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
 
-        if (canStream && responseBodyStream) {
-          if (contentEncoding || !hasValidLength) {
-            delete responseHeaders["content-length"];
-            responseHeaders["transfer-encoding"] = "chunked";
-            this.sendHttpResponseHead(write, {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            });
-            await this.sendChunkedBody(responseBodyStream, write);
-          } else {
-            responseHeaders["content-length"] = parsedLength.toString();
-            this.sendHttpResponseHead(write, {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            });
-            await this.sendStreamBody(responseBodyStream, write);
+        const suppressBody =
+          currentRequest.method === "HEAD" || response.status === 204 || response.status === 304;
+
+        if (suppressBody) {
+          if (responseBodyStream) {
+            try {
+              await responseBodyStream.cancel();
+            } catch {
+              // ignore cancellation failures
+            }
           }
+
+          // No message body is allowed for these responses.
+          delete responseHeaders["transfer-encoding"];
+
+          if (response.status === 204 || response.status === 304) {
+            delete responseHeaders["content-encoding"];
+            responseHeaders["content-length"] = "0";
+          } else {
+            // HEAD: preserve Content-Length if present, otherwise be explicit.
+            if (!responseHeaders["content-length"]) responseHeaders["content-length"] = "0";
+          }
+
+          let hookResponse: HttpHookResponse = {
+            status: response.status,
+            statusText: response.statusText || "OK",
+            headers: responseHeaders,
+            body: Buffer.alloc(0),
+          };
+
+          if (this.options.httpHooks?.onResponse) {
+            const updated = await this.options.httpHooks.onResponse(hookResponse, currentRequest);
+            if (updated) hookResponse = updated;
+          }
+
+          this.sendHttpResponse(write, hookResponse, httpVersion);
           return;
         }
 
-        const responseBody = Buffer.from(await response.arrayBuffer());
+        const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
+
+        if (canStream && responseBodyStream) {
+          const allowChunked = httpVersion === "HTTP/1.1";
+
+          if (contentEncoding || !hasValidLength) {
+            // When the upstream response was encoded (undici may have decoded it for us)
+            // or the length is unknown, we cannot safely forward Content-Length.
+            delete responseHeaders["content-length"];
+
+            if (allowChunked) {
+              responseHeaders["transfer-encoding"] = "chunked";
+              this.sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion
+              );
+              await this.sendChunkedBody(responseBodyStream, write);
+            } else {
+              // HTTP/1.0 does not support Transfer-Encoding: chunked.
+              delete responseHeaders["transfer-encoding"];
+              this.sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion
+              );
+              await this.sendStreamBody(responseBodyStream, write);
+            }
+          } else {
+            responseHeaders["content-length"] = parsedLength!.toString();
+            delete responseHeaders["transfer-encoding"];
+            this.sendHttpResponseHead(
+              write,
+              {
+                status: response.status,
+                statusText: response.statusText || "OK",
+                headers: responseHeaders,
+              },
+              httpVersion
+            );
+            await this.sendStreamBody(responseBodyStream, write);
+          }
+
+          return;
+        }
+
+        const maxResponseBytes = this.maxHttpResponseBodyBytes;
+
+        // Fast-path rejection when the upstream response declares a length that
+        // is already beyond what we're willing to buffer.
+        if (hasValidLength && !contentEncoding && parsedLength! > maxResponseBytes) {
+          if (responseBodyStream) {
+            try {
+              await responseBodyStream.cancel();
+            } catch {
+              // ignore cancellation failures
+            }
+          }
+          throw new HttpRequestBlockedError(
+            `response body exceeds ${maxResponseBytes} bytes`,
+            502,
+            "Bad Gateway"
+          );
+        }
+
+        const responseBody = responseBodyStream
+          ? await this.bufferResponseBodyWithLimit(responseBodyStream, maxResponseBytes)
+          : Buffer.from(await response.arrayBuffer());
+
+        if (responseBody.length > maxResponseBytes) {
+          throw new HttpRequestBlockedError(
+            `response body exceeds ${maxResponseBytes} bytes`,
+            502,
+            "Bad Gateway"
+          );
+        }
+
         responseHeaders["content-length"] = responseBody.length.toString();
 
         let hookResponse: HttpHookResponse = {
@@ -1109,7 +2061,7 @@ export class QemuNetworkBackend extends EventEmitter {
           if (updated) hookResponse = updated;
         }
 
-        this.sendHttpResponse(write, hookResponse);
+        this.sendHttpResponse(write, hookResponse, httpVersion);
         return;
       } finally {
         if (dispatcher) {
@@ -1122,18 +2074,37 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private sendHttpResponseHead(
     write: (chunk: Buffer) => void,
-    response: { status: number; statusText: string; headers: Record<string, string> }
+    response: { status: number; statusText: string; headers: HttpResponseHeaders },
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
   ) {
-    const statusLine = `HTTP/1.1 ${response.status} ${response.statusText}\r\n`;
-    const headers = Object.entries(response.headers)
-      .map(([name, value]) => `${name}: ${value}`)
-      .join("\r\n");
-    const headerBlock = `${statusLine}${headers}\r\n\r\n`;
+    const statusLine = `${httpVersion} ${response.status} ${response.statusText}\r\n`;
+
+    const headerLines: string[] = [];
+    for (const [rawName, rawValue] of Object.entries(response.headers)) {
+      const name = rawName.replace(/[\r\n:]+/g, "");
+      if (!name) continue;
+
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+      for (const v of values) {
+        const value = String(v).replace(/[\r\n]+/g, " ");
+        headerLines.push(`${name}: ${value}`);
+      }
+    }
+
+    let headerBlock = statusLine;
+    if (headerLines.length > 0) {
+      headerBlock += headerLines.join("\r\n") + "\r\n";
+    }
+    headerBlock += "\r\n";
     write(Buffer.from(headerBlock));
   }
 
-  private sendHttpResponse(write: (chunk: Buffer) => void, response: HttpHookResponse) {
-    this.sendHttpResponseHead(write, response);
+  private sendHttpResponse(
+    write: (chunk: Buffer) => void,
+    response: HttpHookResponse,
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  ) {
+    this.sendHttpResponseHead(write, response, httpVersion);
     if (response.body.length > 0) {
       write(response.body);
     }
@@ -1172,18 +2143,64 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private respondWithError(write: (chunk: Buffer) => void, status: number, statusText: string) {
+  private async bufferResponseBodyWithLimit(
+    body: WebReadableStream<Uint8Array>,
+    maxBytes: number
+  ): Promise<Buffer> {
+    const reader = body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.length === 0) continue;
+
+        if (total + value.length > maxBytes) {
+          try {
+            await reader.cancel();
+          } catch {
+            // ignore cancellation failures
+          }
+          throw new HttpRequestBlockedError(
+            `response body exceeds ${maxBytes} bytes`,
+            502,
+            "Bad Gateway"
+          );
+        }
+
+        total += value.length;
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks, total);
+  }
+
+  private respondWithError(
+    write: (chunk: Buffer) => void,
+    status: number,
+    statusText: string,
+    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  ) {
     const body = Buffer.from(`${status} ${statusText}\n`);
-    this.sendHttpResponse(write, {
-      status,
-      statusText,
-      headers: {
-        "content-length": body.length.toString(),
-        "content-type": "text/plain",
-        connection: "close",
+    this.sendHttpResponse(
+      write,
+      {
+        status,
+        statusText,
+        headers: {
+          "content-length": body.length.toString(),
+          "content-type": "text/plain",
+          connection: "close",
+        },
+        body,
       },
-      body,
-    });
+      httpVersion
+    );
   }
 
   private buildFetchUrl(request: HttpRequestData, defaultScheme: "http" | "https") {
@@ -1270,24 +2287,66 @@ export class QemuNetworkBackend extends EventEmitter {
     };
   }
 
+  private pruneTlsContextCache(now = Date.now()) {
+    if (this.tlsContexts.size === 0) return;
+
+    const ttlMs = this.tlsContextCacheTtlMs;
+    if (!Number.isFinite(ttlMs)) return;
+
+    // A ttl <= 0 means "no caching": clear any cached contexts so we don't accumulate entries.
+    if (ttlMs <= 0) {
+      this.tlsContexts.clear();
+      return;
+    }
+
+    for (const [key, entry] of this.tlsContexts) {
+      if (now - entry.lastAccessAt <= ttlMs) continue;
+      this.tlsContexts.delete(key);
+    }
+  }
+
+  private evictTlsContextCacheIfNeeded() {
+    const maxEntries = this.tlsContextCacheMaxEntries;
+    if (!Number.isFinite(maxEntries) || maxEntries <= 0) {
+      this.tlsContexts.clear();
+      return;
+    }
+
+    while (this.tlsContexts.size > maxEntries) {
+      const oldestKey = this.tlsContexts.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.tlsContexts.delete(oldestKey);
+    }
+  }
+
   private async getTlsContextAsync(servername: string): Promise<tls.SecureContext> {
     const normalized = servername.trim() || "unknown";
+    const now = Date.now();
 
-    // Return cached context if available
+    this.pruneTlsContextCache(now);
+
     const cached = this.tlsContexts.get(normalized);
-    if (cached) return cached;
+    if (cached) {
+      cached.lastAccessAt = now;
+      // LRU: move to the end.
+      this.tlsContexts.delete(normalized);
+      this.tlsContexts.set(normalized, cached);
+      return cached.context;
+    }
 
-    // Return pending promise if already loading
     const pending = this.tlsContextPromises.get(normalized);
     if (pending) return pending;
 
-    // Start loading and cache the promise
     const promise = this.createTlsContext(normalized);
     this.tlsContextPromises.set(normalized, promise);
 
     try {
       const context = await promise;
-      this.tlsContexts.set(normalized, context);
+      this.tlsContexts.set(normalized, {
+        context,
+        lastAccessAt: Date.now(),
+      });
+      this.evictTlsContextCacheIfNeeded();
       return context;
     } finally {
       this.tlsContextPromises.delete(normalized);
@@ -1371,21 +2430,50 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private stripHopByHopHeaders(headers: Record<string, string>) {
-    const output: Record<string, string> = {};
-    for (const [name, value] of Object.entries(headers)) {
-      if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
-        output[name.toLowerCase()] = value;
+  private stripHopByHopHeaders(headers: Record<string, string>): Record<string, string>;
+  private stripHopByHopHeaders(headers: HttpResponseHeaders): HttpResponseHeaders;
+  private stripHopByHopHeaders(headers: Record<string, HeaderValue>): any {
+    const connectionValue = headers["connection"];
+    const connection = Array.isArray(connectionValue)
+      ? connectionValue.join(",")
+      : connectionValue ?? "";
+
+    const connectionTokens = new Set<string>();
+    if (connection) {
+      for (const token of connection.split(",")) {
+        const normalized = token.trim().toLowerCase();
+        if (normalized) connectionTokens.add(normalized);
       }
+    }
+
+    const output: Record<string, HeaderValue> = {};
+    for (const [name, value] of Object.entries(headers)) {
+      const normalizedName = name.toLowerCase();
+      if (HOP_BY_HOP_HEADERS.has(normalizedName)) continue;
+      if (connectionTokens.has(normalizedName)) continue;
+      output[normalizedName] = value;
     }
     return output;
   }
 
-  private headersToRecord(headers: Headers) {
-    const record: Record<string, string> = {};
+  private headersToRecord(headers: Headers): HttpResponseHeaders {
+    const record: HttpResponseHeaders = {};
+
     headers.forEach((value, key) => {
       record[key.toLowerCase()] = value;
     });
+
+    // undici/Node fetch supports multiple Set-Cookie values via getSetCookie().
+    const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
+    if (typeof anyHeaders.getSetCookie === "function") {
+      const cookies = anyHeaders.getSetCookie();
+      if (cookies.length === 1) {
+        record["set-cookie"] = cookies[0]!;
+      } else if (cookies.length > 1) {
+        record["set-cookie"] = cookies;
+      }
+    }
+
     return record;
   }
 }
@@ -1573,4 +2661,5 @@ export const __test = {
   normalizeLookupFailure,
   getRedirectUrl,
   applyRedirectRequest,
+  MAX_HTTP_PIPELINE_BYTES,
 };

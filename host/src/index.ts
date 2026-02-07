@@ -6,7 +6,7 @@
  */
 
 // Main VM interface
-export { VM, type VMOptions, type VMState } from "./vm";
+export { VM, type VMOptions, type VMState, type EnableSshOptions, type SshAccess } from "./vm";
 export {
   type ExecOptions,
   type ExecResult,
@@ -55,6 +55,14 @@ export {
 // Network types
 export type { HttpHooks, HttpHookRequest, HttpFetch } from "./qemu-net";
 export { HttpRequestBlockedError } from "./qemu-net";
+
+// Debug helpers
+export {
+  type DebugFlag,
+  type DebugConfig,
+  type DebugComponent,
+  type DebugLogFn,
+} from "./debug";
 
 // Asset management
 export {

@@ -41,6 +41,20 @@ pub fn build(b: *std.Build) void {
     fs_exe.linkLibC();
     b.installArtifact(fs_exe);
 
+    const ssh_exe = b.addExecutable(.{
+        .name = "sandboxssh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sandboxssh/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sandboxd", .module = mod },
+            },
+        }),
+    });
+    ssh_exe.linkLibC();
+    b.installArtifact(ssh_exe);
+
     const mod_tests = b.addTest(.{
         .name = "sandboxd-mod-tests",
         .root_module = mod,

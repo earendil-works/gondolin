@@ -82,11 +82,18 @@ function bashUsage() {
   console.log("                                  Add secret for specified hosts");
   console.log("                                  If =VALUE is omitted, reads from $NAME");
   console.log();
+  console.log("Debugging:");
+  console.log("  --ssh                           Enable SSH access via a localhost port forward");
+  console.log("  --ssh-user USER                 SSH username (default: root)");
+  console.log("  --ssh-port PORT                 Local listen port (default: 0 = ephemeral)");
+  console.log("  --ssh-listen HOST               Local listen host (default: 127.0.0.1)");
+  console.log();
   console.log("Examples:");
   console.log("  gondolin bash --mount-hostfs /home/user/project:/workspace");
   console.log("  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp");
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
+  console.log("  gondolin bash --ssh");
 }
 
 function execUsage() {
@@ -127,6 +134,15 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+
+  /** enable ssh (bash command only) */
+  ssh?: boolean;
+  /** ssh user (bash command only) */
+  sshUser?: string;
+  /** local ssh listen port (bash command only) */
+  sshPort?: number;
+  /** local ssh listen host (bash command only) */
+  sshListen?: string;
 };
 
 function parseMount(spec: string): MountSpec {
@@ -580,6 +596,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     memoryMounts: [],
     allowedHosts: [],
     secrets: [],
+    ssh: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -621,6 +638,41 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.secrets.push(parseHostSecret(spec));
         break;
       }
+      case "--ssh":
+        args.ssh = true;
+        break;
+      case "--ssh-user": {
+        const user = argv[++i];
+        if (!user) {
+          console.error("--ssh-user requires an argument");
+          process.exit(1);
+        }
+        args.sshUser = user;
+        break;
+      }
+      case "--ssh-port": {
+        const raw = argv[++i];
+        if (!raw) {
+          console.error("--ssh-port requires an argument");
+          process.exit(1);
+        }
+        const port = Number(raw);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+          console.error("--ssh-port must be an integer between 0 and 65535");
+          process.exit(1);
+        }
+        args.sshPort = port;
+        break;
+      }
+      case "--ssh-listen": {
+        const host = argv[++i];
+        if (!host) {
+          console.error("--ssh-listen requires an argument");
+          process.exit(1);
+        }
+        args.sshListen = host;
+        break;
+      }
       case "--help":
       case "-h":
         bashUsage();
@@ -646,6 +698,15 @@ async function runBash(argv: string[]) {
     vm = await VM.create({
       ...vmOptions,
     });
+
+    if (args.ssh) {
+      const access = await vm.enableSsh({
+        user: args.sshUser,
+        listenHost: args.sshListen,
+        listenPort: args.sshPort,
+      });
+      process.stderr.write(`SSH enabled: ${access.command}\n`);
+    }
 
     // shell() automatically attaches to stdin/stdout/stderr in TTY mode
     const result = await vm.shell();

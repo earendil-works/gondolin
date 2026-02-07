@@ -33,10 +33,11 @@ ROOTFS_LABEL=${ROOTFS_LABEL:-"gondolin-root"}
 
 SANDBOXD_BIN=${SANDBOXD_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxd"}
 SANDBOXFS_BIN=${SANDBOXFS_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxfs"}
+SANDBOXSSH_BIN=${SANDBOXSSH_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxssh"}
 
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
 ALPINE_URL=${ALPINE_URL:-"https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${ARCH}/${ALPINE_TARBALL}"}
-ROOTFS_PACKAGES=${ROOTFS_PACKAGES:-${EXTRA_PACKAGES:-linux-virt rng-tools bash ca-certificates curl nodejs npm uv python3}}
+ROOTFS_PACKAGES=${ROOTFS_PACKAGES:-${EXTRA_PACKAGES:-linux-virt rng-tools bash ca-certificates curl nodejs npm uv python3 openssh}}
 INITRAMFS_PACKAGES=${INITRAMFS_PACKAGES:-}
 
 require_cmd() {
@@ -79,7 +80,7 @@ fi
 
 mkdir -p "${CACHE_DIR}" "${OUT_DIR}"
 
-if [[ ! -f "${SANDBOXD_BIN}" || ! -f "${SANDBOXFS_BIN}" ]]; then
+if [[ ! -f "${SANDBOXD_BIN}" || ! -f "${SANDBOXFS_BIN}" || ! -f "${SANDBOXSSH_BIN}" ]]; then
     echo "guest binaries not found, building..." >&2
     (cd "${GUEST_DIR}" && ${ZIG:-zig} build -Doptimize=ReleaseSmall)
 fi
@@ -274,6 +275,7 @@ install_packages "${INITRAMFS_DIR}" "${INITRAMFS_PACKAGES}"
 
 install -m 0755 "${SANDBOXD_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxd"
 install -m 0755 "${SANDBOXFS_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxfs"
+install -m 0755 "${SANDBOXSSH_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxssh"
 install -m 0755 "${ROOTFS_INIT}" "${ROOTFS_DIR}/init"
 install -m 0755 "${INITRAMFS_INIT}" "${INITRAMFS_DIR}/init"
 

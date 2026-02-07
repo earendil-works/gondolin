@@ -1,3 +1,7 @@
+import fs from "fs";
+import net from "net";
+import os from "os";
+import path from "path";
 import { execFileSync } from "child_process";
 import { Readable } from "stream";
 
@@ -24,7 +28,7 @@ import {
   type VfsHooks,
 } from "./vfs";
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
-import { parseDebugEnv } from "./debug";
+import { defaultDebugLog, resolveDebugFlags, type DebugComponent, type DebugLogFn } from "./debug";
 import {
   MountRouterProvider,
   listMountPaths,
@@ -57,10 +61,6 @@ const VFS_READY_ATTEMPTS = Math.max(
   Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000))
 );
 
-function formatLog(message: string) {
-  if (message.endsWith("\n")) return message;
-  return `${message}\n`;
-}
 
 function resolveEnvNumber(name: string, fallback: number) {
   const raw = process.env[name];
@@ -86,16 +86,18 @@ export type VmVfsOptions = {
 };
 
 export type VMOptions = {
-  /** sandbox server options */
-  server?: SandboxServerOptions;
+  /** sandbox controller options */
+  sandbox?: SandboxServerOptions;
   /** whether to boot the vm immediately (default: true) */
   autoStart?: boolean;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
-  /** max intercepted http body size in `bytes` */
+  /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes?: number;
   /** vfs configuration (null disables vfs integration) */
   vfs?: VmVfsOptions | null;
   /** default environment variables */
@@ -104,6 +106,17 @@ export type VMOptions = {
   memory?: string;
   /** vm cpu count (default: 2) */
   cpus?: number;
+
+  /**
+   * Debug log callback.
+   *
+   * If any debug mode is enabled (via `sandbox.debug` or `GONDOLIN_DEBUG`),
+   * debug messages are delivered here.
+   *
+   * - `undefined`: defaults to `console.log` with `[component]` prefix
+   * - `null`: disable debug output even if debug modes are enabled
+   */
+  debugLog?: DebugLogFn | null;
 };
 
 export type ShellOptions = {
@@ -119,12 +132,44 @@ export type ShellOptions = {
   attach?: boolean;
 };
 
+export type EnableSshOptions = {
+  /** ssh username (default: "root") */
+  user?: string;
+  /** local listen host (default: 127.0.0.1) */
+  listenHost?: string;
+  /** local listen port (0 picks an ephemeral port) */
+  listenPort?: number;
+};
+
+export type SshAccess = {
+  /** local host to connect to */
+  host: string;
+  /** local port to connect to */
+  port: number;
+  /** ssh username */
+  user: string;
+  /** path to a temporary private key file */
+  identityFile: string;
+  /** ready-to-run ssh command */
+  command: string;
+  /** close the local forwarder and remove temporary key material */
+  close(): Promise<void>;
+};
+
 // Re-export types from exec.ts
 export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
 export type VMState = SandboxState | "unknown";
 
 export class VM {
+  /**
+   * Replace the debug log callback.
+   *
+   * Passing `null` disables debug output.
+   */
+  setDebugLog(callback: DebugLogFn | null) {
+    this.debugLog = callback;
+  }
   private readonly autoStart: boolean;
   private server: SandboxServer | null;
   private readonly defaultEnv: EnvInput | undefined;
@@ -149,6 +194,9 @@ export class VM {
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
   private qemuChecked = false;
+  private debugLog: DebugLogFn | null = null;
+  private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
+  private sshAccess: SshAccess | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -160,31 +208,37 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
-    // Resolve server options with async asset fetching
-    const serverOptions: SandboxServerOptions = { ...options.server };
+    // Resolve sandbox options with async asset fetching
+    const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
 
-    // Build the combined server options
-    if (options.fetch && serverOptions.fetch === undefined) {
-      serverOptions.fetch = options.fetch;
+    // Build the combined sandbox options
+    if (options.fetch && sandboxOptions.fetch === undefined) {
+      sandboxOptions.fetch = options.fetch;
     }
-    if (options.httpHooks && serverOptions.httpHooks === undefined) {
-      serverOptions.httpHooks = options.httpHooks;
+    if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
+      sandboxOptions.httpHooks = options.httpHooks;
     }
-    if (options.maxHttpBodyBytes !== undefined && serverOptions.maxHttpBodyBytes === undefined) {
-      serverOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
+    if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
+      sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
-    if (options.memory && serverOptions.memory === undefined) {
-      serverOptions.memory = options.memory;
+    if (
+      options.maxHttpResponseBodyBytes !== undefined &&
+      (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
+    ) {
+      (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
     }
-    if (options.cpus && serverOptions.cpus === undefined) {
-      serverOptions.cpus = options.cpus;
+    if (options.memory && sandboxOptions.memory === undefined) {
+      sandboxOptions.memory = options.memory;
+    }
+    if (options.cpus && sandboxOptions.cpus === undefined) {
+      sandboxOptions.cpus = options.cpus;
     }
 
     // Resolve options with asset fetching
-    const resolvedServerOptions = await resolveSandboxServerOptionsAsync(serverOptions);
+    const resolvedSandboxOptions = await resolveSandboxServerOptionsAsync(sandboxOptions);
 
     // Create VM with pre-resolved options
-    return new VM(options, resolvedServerOptions);
+    return new VM(options, resolvedSandboxOptions);
   }
 
   /**
@@ -195,14 +249,14 @@ export class VM {
    * downloading, use the async `VM.create()` factory instead.
    *
    * @param options VM configuration options
-   * @param resolvedServerOptions Optional pre-resolved server options (from VM.create())
+   * @param resolvedSandboxOptions Optional pre-resolved sandbox options (from VM.create())
    */
-  constructor(options: VMOptions = {}, resolvedServerOptions?: ResolvedSandboxServerOptions) {
+  constructor(options: VMOptions = {}, resolvedSandboxOptions?: ResolvedSandboxServerOptions) {
     this.autoStart = options.autoStart ?? true;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
-      options.server?.mitmCertDir,
-      options.server?.netEnabled ?? true
+      options.sandbox?.mitmCertDir,
+      options.sandbox?.netEnabled ?? true
     );
     const resolvedVfs = resolveVmVfs(options.vfs, mitmMounts);
     this.vfs = resolvedVfs.provider;
@@ -212,75 +266,89 @@ export class VM {
     this.fuseMount = fuseConfig.fuseMount;
     this.fuseBinds = fuseConfig.fuseBinds;
 
-    const serverOptions: SandboxServerOptions = { ...options.server };
-    if (serverOptions.vfsProvider && options.vfs) {
-      throw new Error("VM cannot specify both vfs and server.vfsProvider");
+    const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
+    if (sandboxOptions.vfsProvider && options.vfs) {
+      throw new Error("VM cannot specify both vfs and sandbox.vfsProvider");
     }
-    if (serverOptions.vfsProvider) {
+    if (sandboxOptions.vfsProvider) {
       const injectedMounts = resolveMitmMounts(
         undefined,
-        serverOptions.mitmCertDir,
-        serverOptions.netEnabled ?? true
+        sandboxOptions.mitmCertDir,
+        sandboxOptions.netEnabled ?? true
       );
       if (Object.keys(injectedMounts).length > 0) {
         const normalized = normalizeMountMap({
-          "/": serverOptions.vfsProvider,
+          "/": sandboxOptions.vfsProvider,
           ...injectedMounts,
         });
         this.vfs = wrapProvider(new MountRouterProvider(normalized), {});
-        fuseMounts = { "/": serverOptions.vfsProvider, ...injectedMounts };
+        fuseMounts = { "/": sandboxOptions.vfsProvider, ...injectedMounts };
       } else {
-        this.vfs = wrapProvider(serverOptions.vfsProvider, {});
-        fuseMounts = { "/": serverOptions.vfsProvider };
+        this.vfs = wrapProvider(sandboxOptions.vfsProvider, {});
+        fuseMounts = { "/": sandboxOptions.vfsProvider };
       }
       fuseConfig = resolveFuseConfig(options.vfs, fuseMounts);
       this.fuseMount = fuseConfig.fuseMount;
       this.fuseBinds = fuseConfig.fuseBinds;
-      serverOptions.vfsProvider = this.vfs;
+      sandboxOptions.vfsProvider = this.vfs;
     }
-    if (options.fetch && serverOptions.fetch === undefined) {
-      serverOptions.fetch = options.fetch;
+    if (options.fetch && sandboxOptions.fetch === undefined) {
+      sandboxOptions.fetch = options.fetch;
     }
-    if (options.httpHooks && serverOptions.httpHooks === undefined) {
-      serverOptions.httpHooks = options.httpHooks;
+    if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
+      sandboxOptions.httpHooks = options.httpHooks;
     }
-    if (options.maxHttpBodyBytes !== undefined && serverOptions.maxHttpBodyBytes === undefined) {
-      serverOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
+    if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
+      sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
-    if (this.vfs && serverOptions.vfsProvider === undefined) {
-      serverOptions.vfsProvider = this.vfs;
+    if (
+      options.maxHttpResponseBodyBytes !== undefined &&
+      (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
+    ) {
+      (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
     }
-    if (options.memory && serverOptions.memory === undefined) {
-      serverOptions.memory = options.memory;
+    if (this.vfs && sandboxOptions.vfsProvider === undefined) {
+      sandboxOptions.vfsProvider = this.vfs;
     }
-    if (options.cpus && serverOptions.cpus === undefined) {
-      serverOptions.cpus = options.cpus;
+    if (options.memory && sandboxOptions.memory === undefined) {
+      sandboxOptions.memory = options.memory;
     }
-
-    const debugFlags = parseDebugEnv();
-    const netDebug = serverOptions.netDebug ?? debugFlags.has("net");
-    if (netDebug !== undefined) {
-      serverOptions.netDebug = netDebug;
+    if (options.cpus && sandboxOptions.cpus === undefined) {
+      sandboxOptions.cpus = options.cpus;
     }
 
     // Handle VFS in resolved options
-    if (resolvedServerOptions) {
+    if (resolvedSandboxOptions) {
       // Merge VFS provider into resolved options
       if (this.vfs) {
-        (resolvedServerOptions as any).vfsProvider = this.vfs;
+        (resolvedSandboxOptions as any).vfsProvider = this.vfs;
       }
-      this.server = new SandboxServer(resolvedServerOptions);
+      this.server = new SandboxServer(resolvedSandboxOptions);
     } else {
-      this.server = new SandboxServer(serverOptions);
+      this.server = new SandboxServer(sandboxOptions);
     }
-    if (netDebug) {
-      this.server.on("log", (message: string) => {
-        process.stderr.write(formatLog(message));
-      });
-      this.server.on("error", (err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(formatLog(message));
-      });
+
+    const effectiveDebugFlags = resolvedSandboxOptions
+      ? new Set(resolvedSandboxOptions.debug ?? [])
+      : resolveDebugFlags(sandboxOptions.debug);
+
+    const anyDebug = effectiveDebugFlags.size > 0;
+
+    if (anyDebug) {
+      // If the user didn't provide a debug sink, default to console.log
+      this.debugLog = options.debugLog === undefined ? defaultDebugLog : options.debugLog;
+
+      // Always attach the listener so `vm.setDebugLog()` can enable logging later.
+      this.debugListener = (component, message) => {
+        const logger = this.debugLog;
+        if (!logger) return;
+        try {
+          logger(component, message);
+        } catch {
+          // ignore logger errors
+        }
+      };
+      this.server.on("debug", this.debugListener);
     }
   }
 
@@ -390,6 +458,256 @@ export class VM {
     return proc;
   }
 
+  /**
+   * Enable SSH access to the VM by starting `sshd` in the guest (bound to loopback)
+   * and creating a host-local TCP forwarder.
+   */
+  async enableSsh(options: EnableSshOptions = {}): Promise<SshAccess> {
+    if (this.sshAccess) return this.sshAccess;
+
+    await this.start();
+
+    const user = options.user ?? "root";
+    const listenHost = options.listenHost ?? "127.0.0.1";
+    const listenPort = options.listenPort ?? 0;
+
+    // Generate ephemeral client keypair
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-ssh-"));
+    const keyPath = path.join(tmpDir, "id_ed25519");
+
+    try {
+      execFileSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", keyPath], {
+        stdio: "ignore",
+      });
+    } catch (err) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+      throw new Error(
+        `failed to run ssh-keygen (needed for vm.enableSsh): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const pubKey = fs.readFileSync(keyPath + ".pub", "utf8").trim();
+
+    const shQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    const sshUser = shQuote(user);
+
+    // Install authorized_keys + start sandboxssh + start sshd
+    const setupScript = `set -eu
+SSH_USER=${sshUser}
+if ! command -v sshd >/dev/null 2>&1; then
+  echo "sshd not found in guest image" 1>&2
+  exit 127
+fi
+
+if ! command -v sandboxssh >/dev/null 2>&1; then
+  echo "sandboxssh not found in guest image" 1>&2
+  exit 126
+fi
+
+if ! id "$SSH_USER" >/dev/null 2>&1; then
+  echo "ssh user '$SSH_USER' does not exist in guest image" 1>&2
+  exit 125
+fi
+
+SSH_UID=$(id -u "$SSH_USER")
+SSH_GID=$(id -g "$SSH_USER")
+
+SSH_HOME=""
+if command -v getent >/dev/null 2>&1; then
+  SSH_HOME=$(getent passwd "$SSH_USER" | cut -d: -f6 || true)
+fi
+if [ -z "$SSH_HOME" ] && [ -r /etc/passwd ]; then
+  SSH_HOME=$(awk -F: -v u="$SSH_USER" '$1==u{print $6;exit}' /etc/passwd || true)
+fi
+if [ -z "$SSH_HOME" ]; then
+  if [ "$SSH_UID" = "0" ]; then
+    SSH_HOME=/root
+  else
+    SSH_HOME="/home/$SSH_USER"
+  fi
+fi
+
+# Ensure loopback is up (needed for ListenAddress=127.0.0.1 and tcp forwarding)
+if command -v ip >/dev/null 2>&1; then
+  ip link set lo up || true
+else
+  ifconfig lo up || true
+fi
+
+# sshd on Alpine wants /var/empty to be root-owned
+mkdir -p /var/empty
+chown root:root /var/empty || true
+chmod 755 /var/empty || true
+
+mkdir -p "$SSH_HOME" "$SSH_HOME/.ssh" /run/sshd /etc/ssh
+
+chown "$SSH_UID:$SSH_GID" "$SSH_HOME" "$SSH_HOME/.ssh" || true
+if [ "$SSH_UID" = "0" ]; then
+  chmod 700 "$SSH_HOME" || true
+else
+  chmod 755 "$SSH_HOME" || true
+fi
+chmod 700 "$SSH_HOME/.ssh" || true
+
+cat > "$SSH_HOME/.ssh/authorized_keys" <<'EOF'
+${pubKey}
+EOF
+chown "$SSH_UID:$SSH_GID" "$SSH_HOME/.ssh/authorized_keys" || true
+chmod 600 "$SSH_HOME/.ssh/authorized_keys"
+
+# Generate host keys if missing
+ssh-keygen -A >/dev/null 2>&1 || true
+
+# Start sandboxssh if it's not already running (required for host-side TCP forwarding)
+if ! ps | grep -q '[s]andboxssh'; then
+  sandboxssh >/tmp/sandboxssh.log 2>&1 &
+fi
+
+# Start sshd bound to loopback only
+#
+# Don't try to be clever about whether it's already running; it's easy to
+# accidentally match our own command line. Starting twice is harmless (it will fail
+# to bind), and we validate by probing the port from the host.
+/usr/sbin/sshd -D -e -p 22 \
+  -o ListenAddress=127.0.0.1 \
+  -o PasswordAuthentication=no \
+  -o KbdInteractiveAuthentication=no \
+  -o ChallengeResponseAuthentication=no \
+  -o PubkeyAuthentication=yes \
+  -o AllowUsers=$SSH_USER \
+  -o AllowAgentForwarding=no \
+  -o AllowTcpForwarding=no \
+  -o X11Forwarding=no \
+  -o PermitTunnel=no \
+  -o PermitRootLogin=prohibit-password \
+  -o PidFile=/run/sshd.pid \
+  >/tmp/sshd.log 2>&1 &
+`;
+
+    const setupResult = await this.exec(["sh", "-lc", setupScript]);
+    if (
+      setupResult.exitCode !== 0 &&
+      setupResult.exitCode !== 127 &&
+      setupResult.exitCode !== 126 &&
+      setupResult.exitCode !== 125
+    ) {
+      throw new Error(
+        `failed to configure ssh in guest (exit ${setupResult.exitCode}): ${setupResult.stderr.trim()}`
+      );
+    }
+    if (setupResult.exitCode === 127) {
+      throw new Error(
+        "sshd not available in guest image. Rebuild guest assets with openssh installed (default images should include it)."
+      );
+    }
+    if (setupResult.exitCode === 126) {
+      throw new Error(
+        "sandboxssh not available in guest image. Rebuild guest assets to include sandboxssh."
+      );
+    }
+    if (setupResult.exitCode === 125) {
+      throw new Error(
+        `ssh user '${user}' does not exist in guest image (vm.enableSsh({ user }))`
+      );
+    }
+
+    // Verify that the virtio tcp-forwarder is working and that sshd is reachable.
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    const deadline = Date.now() + 3000;
+    let lastErr: unknown = null;
+    while (Date.now() < deadline) {
+      try {
+        const probe = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 750 });
+        probe.destroy();
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    if (lastErr) {
+      const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      throw new Error(`ssh port-forward is not available: ${detail}`);
+    }
+
+    // Create local forwarder
+    const forwardServer = net.createServer((socket) => {
+      socket.setNoDelay(true);
+      // Ensure we always have an error handler; otherwise socket.destroy(err)
+      // can turn into an uncaught exception.
+      socket.on("error", () => {
+        // ignore
+      });
+
+      void (async () => {
+        const server = this.server;
+        if (!server) {
+          socket.destroy();
+          return;
+        }
+        try {
+          const tunnel = await server.openTcpStream({ host: "127.0.0.1", port: 22 });
+          tunnel.on("error", () => socket.destroy());
+          socket.on("error", (err) => tunnel.destroy(err));
+          socket.pipe(tunnel).pipe(socket);
+        } catch {
+          socket.destroy();
+        }
+      })();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      forwardServer.once("error", reject);
+      forwardServer.listen({ host: listenHost, port: listenPort }, () => {
+        forwardServer.off("error", reject);
+        resolve();
+      });
+    });
+
+    const addr = forwardServer.address();
+    if (!addr || typeof addr === "string") {
+      forwardServer.close();
+      throw new Error("unexpected local forward server address");
+    }
+
+    const host = listenHost;
+    const port = addr.port;
+
+    const access: SshAccess = {
+      host,
+      port,
+      user,
+      identityFile: keyPath,
+      command:
+        `ssh -p ${port} -i ${keyPath} ` +
+        `-o ForwardAgent=no -o ClearAllForwardings=yes -o IdentitiesOnly=yes ` +
+        `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${user}@${host}`,
+      close: async () => {
+        await new Promise<void>((resolve) => forwardServer.close(() => resolve()));
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+        if (this.sshAccess === access) {
+          this.sshAccess = null;
+        }
+      },
+    };
+
+    this.sshAccess = access;
+    return access;
+  }
+
   private execInternal(command: ExecInput, options: ExecOptions): ExecProcess {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
@@ -494,6 +812,13 @@ export class VM {
   }
 
   private async closeInternal() {
+    if (this.sshAccess) {
+      try {
+        await this.sshAccess.close();
+      } catch {
+        // ignore
+      }
+    }
     if (this.server) {
       await this.server.close();
     }

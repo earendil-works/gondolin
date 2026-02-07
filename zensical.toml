@@ -1,0 +1,56 @@
+# Zensical configuration
+#
+# Docs: https://zensical.org/docs/get-started/
+
+[project]
+site_name = "Gondolin"
+# docs_dir defaults to "docs" and site_dir defaults to "site".
+# We set them explicitly to make the intended layout obvious.
+docs_dir = "docs"
+site_dir = "site"
+
+# Extra stylesheets (loaded from ./docs)
+extra_css = [
+    "stylesheets/commit-mono.css",
+    "stylesheets/extra.css",
+]
+
+# GitHub repository integration (repo link + optional edit/view buttons)
+repo_url = "https://github.com/earendil-works/gondolin"
+
+# Sidebar navigation
+nav = [
+    {"Home" = "index.md"},
+    {"Guides" = [
+        {"CLI" = "cli.md"},
+        {"SDK (TypeScript)" = "sdk.md"},
+        {"SSH" = "ssh.md"},
+        {"Debug logging" = "debug.md"},
+        {"Custom images" = "custom-images.md"},
+    ]},
+    {"Architecture" = [
+        {"Security design" = "security.md"},
+        {"Network stack" = "network.md"},
+        {"QEMU" = "qemu.md"},
+    ]},
+]
+
+[project.theme]
+# Commit Mono is not available on Google Fonts, so we disable automatic font
+# loading and self-host it from ./docs/assets/fonts/commit-mono.
+font = false
+
+# Earendil favicon
+favicon = "images/favicon/favicon.ico"
+
+# Enable repository "view" / "edit" buttons on each page
+features = [
+    "content.action.view",
+    "content.action.edit",
+]
+
+[project.theme.palette]
+# Force light scheme and use grayscale accents
+scheme = "default"
+primary = "grey"
+accent = "grey"

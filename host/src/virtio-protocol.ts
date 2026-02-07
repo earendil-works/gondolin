@@ -111,6 +111,74 @@ export type VfsError = {
   };
 };
 
+export type TcpOpen = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "tcp_open";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: {
+    /** target host (must be loopback) */
+    host: string;
+    /** target port */
+    port: number;
+  };
+};
+
+export type TcpOpened = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "tcp_opened";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: {
+    /** whether the connection was established */
+    ok: boolean;
+    /** error message when ok=false */
+    message?: string;
+  };
+};
+
+export type TcpData = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "tcp_data";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: {
+    /** raw data bytes */
+    data: Buffer;
+  };
+};
+
+export type TcpEof = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "tcp_eof";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: Record<string, never>;
+};
+
+export type TcpClose = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "tcp_close";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: Record<string, never>;
+};
+
 export type IncomingMessage =
   | ExecOutput
   | ExecResponse
@@ -118,7 +186,12 @@ export type IncomingMessage =
   | FsRequest
   | FsResponse
   | VfsReady
-  | VfsError;
+  | VfsError
+  | TcpOpen
+  | TcpOpened
+  | TcpData
+  | TcpEof
+  | TcpClose;
 
 export type ExecRequest = {
   /** protocol version */

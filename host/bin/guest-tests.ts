@@ -92,7 +92,7 @@ async function main() {
       : "none";
 
   const vm = new VM({
-    server: {
+    sandbox: {
       console: consoleMode,
       maxStdinBytes: MAX_STDIN_BYTES,
     },

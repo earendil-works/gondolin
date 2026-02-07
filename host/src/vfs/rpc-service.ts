@@ -387,7 +387,7 @@ export class FsRpcService {
         : op === "write" && typeof res?.size === "number"
           ? ` bytes=${res.size}`
           : "";
-      this.logger(`[fs] op=${op} err=${err} dur=${durationMs}ms${extra}`);
+      this.logger(`op=${op} err=${err} dur=${durationMs}ms${extra}`);
     }
   }
 
