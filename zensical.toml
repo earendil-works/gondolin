@@ -22,6 +22,8 @@ extra_javascript = [
 
 # GitHub repository integration (repo link + optional edit/view buttons)
 repo_url = "https://github.com/earendil-works/gondolin"
+# Zensical defaults to `edit/master/<docs_dir>` which breaks for repos whose default branch is `main`
+edit_uri = "edit/main/docs"
 
 # Sidebar navigation
 nav = [
