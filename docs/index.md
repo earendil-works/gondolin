@@ -71,6 +71,7 @@ await vm.close();
 
 ## Architecture
 
+- [Overview](./architecture.md): high-level component overview and data flow
 - [Security Design](./security.md): Threat model, guarantees, and safe operating envelope
 - [Network Stack](./network.md): how networking works (HTTP/TLS mediation, policy enforcement, DNS)
 - [QEMU](./qemu.md): how Gondolin runs QEMU and how this stays consistent on macOS and Linux
