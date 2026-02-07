@@ -82,7 +82,7 @@ export class ExecResult {
  * Options for exec/execStream.
  */
 export type ExecOptions = {
-  /** additional argv entries (when cmd is a string) */
+  /** extra argv entries passed as shell positional parameters when `command` is a string */
   argv?: string[];
   /** environment variables */
   env?: string[] | Record<string, string>;
@@ -139,17 +139,18 @@ export type ExecProcessCallbacks = {
  * Usage:
  * ```typescript
  * // Await for buffered result (strings)
- * const result = await vm.exec(['echo', 'hello']);
+ * // NOTE: `vm.exec([cmd, ...argv])` does not search `$PATH`
+ * const result = await vm.exec(["/bin/echo", "hello"]);
  * console.log(result.stdout);
  * 
  * // Iterate for streaming output
- * for await (const chunk of vm.exec(['tail', '-f', 'log'])) {
+ * for await (const chunk of vm.exec(["/bin/tail", "-f", "/var/log/syslog"])) {
  *   console.log(chunk);
  * }
  * 
  * // Interactive with stdin
- * const proc = vm.exec(['bash'], { stdin: true, pty: true });
- * proc.write('ls\n');
+ * const proc = vm.exec(["/bin/sh"], { stdin: true, pty: true });
+ * proc.write("ls\n");
  * for await (const chunk of proc) {
  *   process.stdout.write(chunk);
  * }

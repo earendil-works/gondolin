@@ -190,7 +190,11 @@ const vm = await VM.create({
   },
 });
 
-await vm.exec("rustc --version");
+const result = await vm.exec("rustc --version");
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
 await vm.close();
 ```
 

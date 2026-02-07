@@ -120,7 +120,7 @@ export type VMOptions = {
 };
 
 export type ShellOptions = {
-  /** command to run (default: bash) */
+  /** command to run (default: /bin/bash) */
   command?: string | string[];
   /** environment variables */
   env?: EnvInput;
@@ -390,18 +390,22 @@ export class VM {
    * 
    * @example
    * ```typescript
-   * // Simple command - await for result
-   * const result = await vm.exec(['echo', 'hello']);
-   * console.log(result.stdout); // 'hello\n'
+   * // String form runs via `/bin/sh -lc "..."`
+   * const r1 = await vm.exec("echo hello");
+   * console.log(r1.stdout); // 'hello\n'
+   *
+   * // Array form executes an executable directly (does not search `$PATH`)
+   * const r2 = await vm.exec(["/bin/echo", "hello"]);
+   * console.log(r2.stdout); // 'hello\n'
    * 
    * // Streaming output
-   * for await (const line of vm.exec(['tail', '-f', '/var/log/syslog'])) {
+   * for await (const line of vm.exec(["/bin/tail", "-f", "/var/log/syslog"])) {
    *   console.log(line);
    * }
    * 
    * // Interactive with stdin
-   * const proc = vm.exec(['cat'], { stdin: true });
-   * proc.write('hello\n');
+   * const proc = vm.exec(["/bin/cat"], { stdin: true });
+   * proc.write("hello\n");
    * proc.end();
    * const result = await proc;
    * ```
@@ -422,8 +426,8 @@ export class VM {
    * const result = await vm.shell();
    * process.exit(result.exitCode);
    * 
-   * // Custom command
-   * const result = await vm.shell({ command: 'python3' });
+   * // Custom command (absolute path required)
+   * const result = await vm.shell({ command: "/bin/sh" });
    * 
    * // Manual control
    * const proc = vm.shell({ attach: false });
@@ -434,7 +438,7 @@ export class VM {
    * ```
    */
   shell(options: ShellOptions = {}): ExecProcess {
-    const command = options.command ?? ["bash", "-i"];
+    const command = options.command ?? ["/bin/bash", "-i"];
     const shouldAttach = options.attach ?? process.stdin.isTTY;
 
     const env = buildShellEnv(this.defaultEnv, options.env);
@@ -588,7 +592,7 @@ fi
   >/tmp/sshd.log 2>&1 &
 `;
 
-    const setupResult = await this.exec(["sh", "-lc", setupScript]);
+    const setupResult = await this.exec(["/bin/sh", "-lc", setupScript]);
     if (
       setupResult.exitCode !== 0 &&
       setupResult.exitCode !== 127 &&
@@ -1041,7 +1045,7 @@ fi
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     // Use internal exec that bypasses VFS check
-    const result = await this.execInternalNoVfsWait(["sh", "-c", script, "sh", mountPoint]);
+    const result = await this.execInternalNoVfsWait(["/bin/sh", "-c", script, "sh", mountPoint]);
     if (result.exitCode !== 0) {
       throw new Error(
         `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
@@ -1060,7 +1064,7 @@ fi
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     const result = await this.execInternalNoVfsWait([
-      "sh",
+      "/bin/sh",
       "-c",
       script,
       "sh",
@@ -1076,7 +1080,7 @@ fi
 
   private async waitForPath(entryPath: string) {
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do [ -e "$1" ] && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-    const result = await this.execInternalNoVfsWait(["sh", "-c", script, "sh", entryPath]);
+    const result = await this.execInternalNoVfsWait(["/bin/sh", "-c", script, "sh", entryPath]);
     if (result.exitCode !== 0) {
       throw new Error(
         `vfs path ${entryPath} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
@@ -1261,6 +1265,8 @@ function normalizeCommand(command: ExecInput, options: ExecOptions): {
   cmd: string;
   argv: string[];
 } {
+  // Array form: execute an executable directly
+  // NOTE: the guest does not search `$PATH` for this.
   if (Array.isArray(command)) {
     if (command.length === 0) {
       throw new Error("command array must include the executable");
@@ -1268,7 +1274,18 @@ function normalizeCommand(command: ExecInput, options: ExecOptions): {
     return { cmd: command[0], argv: command.slice(1) };
   }
 
-  return { cmd: command, argv: options.argv ?? [] };
+  // String form: run through a login shell
+  // Equivalent to: vm.exec(["/bin/sh", "-lc", command])
+  const extraArgv = options.argv ?? [];
+  const argv = ["-lc", command];
+
+  // If the caller provides extra argv entries, pass them as positional params
+  // to the shell script (requires an explicit $0 parameter).
+  if (extraArgv.length) {
+    argv.push("sh", ...extraArgv);
+  }
+
+  return { cmd: "/bin/sh", argv };
 }
 
 type ResolvedVfs = {

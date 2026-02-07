@@ -90,7 +90,7 @@ test("vfs roundtrip between host and guest", { skip: skipVmTests, timeout: timeo
 
     await vm.start();
 
-    const read = await withTimeout(vm.exec(["sh", "-c", "cat /data/host.txt"]), timeoutMs);
+    const read = await withTimeout(vm.exec(["/bin/sh", "-c", "cat /data/host.txt"]), timeoutMs);
     if (read.exitCode !== 0) {
       throw new Error(
         `cat failed (exit ${read.exitCode}): ${read.stderr.trim()}`
@@ -99,7 +99,7 @@ test("vfs roundtrip between host and guest", { skip: skipVmTests, timeout: timeo
     assert.equal(read.stdout.trim(), "host-data");
 
     const write = await withTimeout(
-      vm.exec(["sh", "-c", "echo -n guest-data > /data/guest.txt"]),
+      vm.exec(["/bin/sh", "-c", "echo -n guest-data > /data/guest.txt"]),
       timeoutMs
     );
     if (write.exitCode !== 0) {
@@ -109,7 +109,7 @@ test("vfs roundtrip between host and guest", { skip: skipVmTests, timeout: timeo
     }
 
     const append = await withTimeout(
-      vm.exec(["sh", "-c", "printf foo > /data/append.txt; printf bar >> /data/append.txt; cat /data/append.txt"]),
+      vm.exec(["/bin/sh", "-c", "printf foo > /data/append.txt; printf bar >> /data/append.txt; cat /data/append.txt"]),
       timeoutMs
     );
     if (append.exitCode !== 0) {
@@ -133,7 +133,7 @@ test("vfs hooks can block writes", { skip: skipVmTests, timeout: timeoutMs }, as
     await vm.start();
 
     const result = await withTimeout(
-      vm.exec(["sh", "-c", "echo nope > /data/blocked.txt"]),
+      vm.exec(["/bin/sh", "-c", "echo nope > /data/blocked.txt"]),
       timeoutMs
     );
     assert.notEqual(result.exitCode, 0);
@@ -150,7 +150,7 @@ test("fuse-backed /data triggers hooks for guest file operations", { skip: skipV
     await vm.start();
 
     const mounts = await withTimeout(
-      vm.exec(["sh", "-c", "grep ' /data ' /proc/mounts"]),
+      vm.exec(["/bin/sh", "-c", "grep ' /data ' /proc/mounts"]),
       timeoutMs
     );
     if (mounts.exitCode !== 0) {
@@ -169,7 +169,7 @@ test("fuse-backed /data triggers hooks for guest file operations", { skip: skipV
       "rm /data/fuse-e2e/hello-renamed.txt",
     ].join("; ");
 
-    const result = await withTimeout(vm.exec(["sh", "-c", script]), timeoutMs);
+    const result = await withTimeout(vm.exec(["/bin/sh", "-c", script]), timeoutMs);
     if (result.exitCode !== 0) {
       throw new Error(`fuse operations failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
     }
@@ -225,14 +225,14 @@ test("vfs supports read-only email mounts with dynamic content", { skip: skipVmT
 
     await vm.start();
 
-    const rootRead = await withTimeout(vm.exec(["sh", "-c", "cat /data/root.txt"]), timeoutMs);
+    const rootRead = await withTimeout(vm.exec(["/bin/sh", "-c", "cat /data/root.txt"]), timeoutMs);
     if (rootRead.exitCode !== 0) {
       throw new Error(`cat root failed (exit ${rootRead.exitCode}): ${rootRead.stderr.trim()}`);
     }
     assert.equal(rootRead.stdout.trim(), "root-data");
 
     const emailRead = await withTimeout(
-      vm.exec(["sh", "-c", `cat /app/email/${emailId}.eml`]),
+      vm.exec(["/bin/sh", "-c", `cat /app/email/${emailId}.eml`]),
       timeoutMs
     );
     if (emailRead.exitCode !== 0) {
@@ -241,7 +241,7 @@ test("vfs supports read-only email mounts with dynamic content", { skip: skipVmT
     assert.equal(emailRead.stdout.trim(), emailBody);
 
     const writeAttempt = await withTimeout(
-      vm.exec(["sh", "-c", `echo nope > /app/email/${emailId}-new.eml`]),
+      vm.exec(["/bin/sh", "-c", `echo nope > /app/email/${emailId}-new.eml`]),
       timeoutMs
     );
     assert.notEqual(writeAttempt.exitCode, 0);
@@ -335,7 +335,7 @@ test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeout
 
     // Reading from read-only mount should work
     const readResult = await withTimeout(
-      vm.exec(["sh", "-c", "cat /ro/host-file.txt"]),
+      vm.exec(["/bin/sh", "-c", "cat /ro/host-file.txt"]),
       timeoutMs
     );
     if (readResult.exitCode !== 0) {
@@ -345,7 +345,7 @@ test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeout
 
     // Writing to read-only mount should fail
     const writeRoResult = await withTimeout(
-      vm.exec(["sh", "-c", "echo 'nope' > /ro/new-file.txt 2>&1; echo exit=$?"]),
+      vm.exec(["/bin/sh", "-c", "echo 'nope' > /ro/new-file.txt 2>&1; echo exit=$?"]),
       timeoutMs
     );
     // The exit code should be non-zero or the output should indicate failure
@@ -357,7 +357,7 @@ test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeout
 
     // Writing to writable mount should work
     const writeRwResult = await withTimeout(
-      vm.exec(["sh", "-c", "echo 'writable' > /rw/new-file.txt"]),
+      vm.exec(["/bin/sh", "-c", "echo 'writable' > /rw/new-file.txt"]),
       timeoutMs
     );
     if (writeRwResult.exitCode !== 0) {
@@ -366,7 +366,7 @@ test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeout
 
     // Verify written content
     const verifyResult = await withTimeout(
-      vm.exec(["sh", "-c", "cat /rw/new-file.txt"]),
+      vm.exec(["/bin/sh", "-c", "cat /rw/new-file.txt"]),
       timeoutMs
     );
     assert.equal(verifyResult.stdout.trim(), "writable");

@@ -20,10 +20,18 @@ test.after(async () => {
 test("exec merges env inputs", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const result = await vm.exec(["sh", "-c", "echo $BASE_ENV $EXTRA_ENV"], {
+    const result = await vm.exec(["/bin/sh", "-c", "echo $BASE_ENV $EXTRA_ENV"], {
       env: { EXTRA_ENV: "extra" },
     });
     assert.equal(result.stdout.trim(), "base extra");
+  });
+});
+
+test("exec string form runs in /bin/sh -lc", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const result = await vm.exec("echo $BASE_ENV", { env: { BASE_ENV: "from-options" } });
+    assert.equal(result.stdout.trim(), "from-options");
   });
 });
 
@@ -35,7 +43,7 @@ test("exec supports async iterable stdin", { skip: skipVmTests, timeout: timeout
 
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const result = await vm.exec(["cat"], { stdin: input() });
+    const result = await vm.exec(["/bin/cat"], { stdin: input() });
     assert.equal(result.stdout, "hello world");
   });
 });
@@ -45,7 +53,7 @@ test("exec supports readable stdin", { skip: skipVmTests, timeout: timeoutMs }, 
 
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const result = await vm.exec(["cat"], { stdin: stream });
+    const result = await vm.exec(["/bin/cat"], { stdin: stream });
     assert.equal(result.stdout, "foobar");
   });
 });
@@ -53,7 +61,7 @@ test("exec supports readable stdin", { skip: skipVmTests, timeout: timeoutMs }, 
 test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const proc = vm.exec(["sh", "-c", "echo out; echo err 1>&2"]);
+    const proc = vm.exec(["/bin/sh", "-c", "echo out; echo err 1>&2"]);
     const chunks: string[] = [];
 
     for await (const chunk of proc.output()) {
@@ -70,7 +78,7 @@ test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeo
 test("exec lines iterator yields stdout lines", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const proc = vm.exec(["sh", "-c", "printf 'one\ntwo\nthree'"]);
+    const proc = vm.exec(["/bin/sh", "-c", "printf 'one\ntwo\nthree'"]);
     const lines: string[] = [];
 
     for await (const line of proc.lines()) {
@@ -94,7 +102,7 @@ test("exec aborts with signal", { skip: skipVmTests, timeout: timeoutMs }, async
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
     const controller = new AbortController();
-    const proc = vm.exec(["sh", "-c", "sleep 5"], { signal: controller.signal });
+    const proc = vm.exec(["/bin/sh", "-c", "sleep 5"], { signal: controller.signal });
 
     setTimeout(() => controller.abort(), 100);
 

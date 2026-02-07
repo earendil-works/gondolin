@@ -68,7 +68,12 @@ const vm = await VM.create({
 });
 
 await vm.start();
-await vm.exec(["sh", "-c", "echo hello"]);
+
+const result = await vm.exec("echo hello");
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
 await vm.close();
 ```
 

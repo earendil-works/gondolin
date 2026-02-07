@@ -10,7 +10,14 @@ The most basic example involves spawning a VM and executing commands:
 import { VM } from "@earendil-works/gondolin";
 
 const vm = await VM.create();
-const result = await vm.exec("curl https://example.com/");
+
+// String form runs via `/bin/sh -lc "..."`
+const result = await vm.exec("curl -sS -f https://example.com/");
+
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
 await vm.close();
 ```
 ## VM Lifecycle & Command Execution
@@ -46,15 +53,30 @@ command handle) which is both:
 - **Promise-like**: `await vm.exec(...)` yields an `ExecResult`
 - **Stream-like**: it is an `AsyncIterable` for stdout, and exposes `stdout`/`stderr` streams
 
+There are two forms:
+
+- `vm.exec("...")` (string): runs the command via a login shell, equivalent to:
+  `vm.exec(["/bin/sh", "-lc", "..."])`
+- `vm.exec([cmd, ...argv])` (array): executes an executable directly. **It does not search `$PATH`**, so `cmd` must be an **absolute path**.
+
+If you want shell features (pipelines, `$VARS`, globbing, `$(...)`, etc.), use the string form (or call `/bin/sh` explicitly):
+
+```ts
+const result = await vm.exec("echo $HOME | wc -c");
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+```
+
 Buffered usage (most common):
 
 ```ts
-const result = await vm.exec(["sh", "-lc", "echo hello; echo err >&2; exit 7"]);
+const result = await vm.exec("echo hello; echo err >&2; exit 7");
 
-console.log(result.exitCode); // 7
-console.log(result.ok);       // false
-console.log(result.stdout);   // "hello\n"
-console.log(result.stderr);   // "err\n"
+console.log("exitCode:", result.exitCode); // 7
+console.log("ok:", result.ok);             // false
+console.log("stdout:\n", result.stdout);  // "hello\n"
+console.log("stderr:\n", result.stderr);  // "err\n"
 ```
 
 #### What Is in `ExecResult`
@@ -74,7 +96,7 @@ exit codes do *not* throw).  You typically check:
 You can stream output while the command runs:
 
 ```ts
-const proc = vm.exec(["sh", "-lc", "for i in 1 2 3; do echo $i; sleep 1; done"]);
+const proc = vm.exec("for i in 1 2 3; do echo $i; sleep 1; done");
 
 for await (const chunk of proc) {
   // default async iteration yields stdout chunks as strings
@@ -94,7 +116,7 @@ If you need both streaming *and* to keep a copy of output, capture it yourself
 from the streams:
 
 ```ts
-const proc = vm.exec(["echo", "hello"]);
+const proc = vm.exec(["/bin/echo", "hello"]);
 let stdout = "";
 proc.stdout.on("data", (b) => (stdout += b.toString("utf-8")));
 
@@ -105,7 +127,7 @@ console.log(stdout);
 To stream both stdout and stderr with labels, use `proc.output()`:
 
 ```ts
-for await (const { stream, text } of vm.exec(["sh", "-lc", "echo out; echo err >&2"]).output()) {
+for await (const { stream, text } of vm.exec("echo out; echo err >&2").output()) {
   process.stdout.write(`[${stream}] ${text}`);
 }
 ```
@@ -115,7 +137,8 @@ for await (const { stream, text } of vm.exec(["sh", "-lc", "echo out; echo err >
 For commands that may produce a lot of output, set `buffer: false`:
 
 ```ts
-await vm.exec(["cat", "/some/huge/file"], { buffer: false });
+const result = await vm.exec(["/bin/cat", "/some/huge/file"], { buffer: false });
+console.log("exitCode:", result.exitCode);
 ```
 
 You can still stream output, but the resulting `ExecResult` will not include
@@ -129,7 +152,13 @@ buffered stdout/stderr.
 const ac = new AbortController();
 setTimeout(() => ac.abort(), 1000);
 
-await vm.exec(["sleep", "10"], { signal: ac.signal }); // rejects with "exec aborted"
+try {
+  const result = await vm.exec(["/bin/sleep", "10"], { signal: ac.signal });
+  console.log("exitCode:", result.exitCode);
+} catch (err) {
+  // aborting rejects with "exec aborted"
+  console.error(String(err));
+}
 ```
 
 Note: aborting currently rejects the local promise; it does not (yet) guarantee
@@ -270,7 +299,11 @@ const vm = await VM.create({
   },
 });
 
-await vm.exec("uname -a");
+const result = await vm.exec("uname -a");
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
 await vm.close();
 ```
 

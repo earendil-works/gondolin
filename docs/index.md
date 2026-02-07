@@ -38,9 +38,25 @@ const { httpHooks, env } = createHttpHooks({
 });
 
 const vm = await VM.create({ httpHooks, env });
-const result = await vm.exec("\
-  curl -H \"Authorization: Bearer $GITHUB_TOKEN\" \
-  https://api.github.com/user");
+
+// NOTE:
+// - `vm.exec("...")` runs via `/bin/sh -lc "..."` (shell features work)
+// - `vm.exec([cmd, ...argv])` executes `cmd` directly and does not search `$PATH`
+//   so `cmd` must be an absolute path
+const cmd = `
+  curl -sS -f \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    https://api.github.com/user
+`;
+
+// You can pass a string to `vm.exec(...)` as shorthand for `/bin/sh -lc "..."`.
+const result = await vm.exec(cmd);
+
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
 await vm.close();
 ```
 
