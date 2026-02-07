@@ -692,6 +692,11 @@ export class SandboxServer extends EventEmitter {
   private bootConfig: SandboxFsConfig | null = null;
   private activeClient: SandboxClient | null = null;
 
+  /** @internal resolved qemu binary path */
+  getQemuPath(): string {
+    return this.options.qemuPath;
+  }
+
   /**
    * Create a SandboxServer, downloading guest assets if needed.
    *

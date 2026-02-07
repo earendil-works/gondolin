@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import { Readable } from "stream";
 
 import {
@@ -147,6 +148,7 @@ export class VM {
   private readonly fuseBinds: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
+  private qemuChecked = false;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -466,7 +468,21 @@ export class VM {
     }
   }
 
+  private ensureQemuAvailable() {
+    if (this.qemuChecked) return;
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    execFileSync(server.getQemuPath(), ["--version"], { stdio: "ignore" });
+    this.qemuChecked = true;
+  }
+
   private async startInternal() {
+    this.ensureQemuAvailable();
+
     if (this.server) {
       await this.server.start();
     }
