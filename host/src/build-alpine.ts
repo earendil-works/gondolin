@@ -710,6 +710,10 @@ function findMke2fs(): string {
       "/opt/homebrew/opt/e2fsprogs/bin/mke2fs",
       "/opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4",
       "/opt/homebrew/opt/e2fsprogs/bin/mkfs.ext4",
+      "/usr/local/opt/e2fsprogs/sbin/mke2fs",
+      "/usr/local/opt/e2fsprogs/bin/mke2fs",
+      "/usr/local/opt/e2fsprogs/sbin/mkfs.ext4",
+      "/usr/local/opt/e2fsprogs/bin/mkfs.ext4",
     ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {

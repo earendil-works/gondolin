@@ -63,7 +63,11 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
         /opt/homebrew/opt/e2fsprogs/sbin/mke2fs \
         /opt/homebrew/opt/e2fsprogs/bin/mke2fs \
         /opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4 \
-        /opt/homebrew/opt/e2fsprogs/bin/mkfs.ext4; do
+        /opt/homebrew/opt/e2fsprogs/bin/mkfs.ext4 \
+        /usr/local/opt/e2fsprogs/sbin/mke2fs \
+        /usr/local/opt/e2fsprogs/bin/mke2fs \
+        /usr/local/opt/e2fsprogs/sbin/mkfs.ext4 \
+        /usr/local/opt/e2fsprogs/bin/mkfs.ext4; do
         if [[ -x "${candidate}" ]]; then
             MKFS_EXT4="${candidate}"
             break
