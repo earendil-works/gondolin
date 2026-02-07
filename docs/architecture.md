@@ -4,7 +4,7 @@ This document answers the question: **"what is Gondolin?"**
 
 Gondolin is not a single binary. It is a small system made of:
 
-- **A host-side library + CLI**: for TypeScript / Node.js, also called the control plan
+- **A host-side library + CLI**: for TypeScript / Node.js, also called the control plane
 - **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
 - **QEMU**: that is our VM
 
