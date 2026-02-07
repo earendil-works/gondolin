@@ -67,6 +67,7 @@ await vm.close();
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): documents the debug logging facility
 - [Custom Images](./custom-images.md): how to build custom guest images (kernel/initramfs/rootfs) and configure packages/init scripts
+- [Overlay Root](./root-overlay.md): boot the guest with an overlayfs root (capture guest writes)
 
 ## Architecture
 

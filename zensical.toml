@@ -32,6 +32,7 @@ nav = [
         {"SSH" = "ssh.md"},
         {"Debug Logging" = "debug.md"},
         {"Custom Images" = "custom-images.md"},
+        {"Overlay Root" = "root-overlay.md"},
     ]},
     {"Architecture" = [
         {"Security Design" = "security.md"},

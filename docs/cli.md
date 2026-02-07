@@ -210,6 +210,11 @@ For a full configuration reference and build requirements, see:
 - `GONDOLIN_DEBUG`
   - Enable debug logging (see [Debug Logging](./debug.md))
 
+- `GONDOLIN_ROOT_OVERLAY`
+  - If set to `1`, `true`, or `tmpfs`, boot the guest with an overlayfs root
+  - The base rootfs is mounted read-only and writes go to a tmpfs upper layer
+  - See [Overlay Root](./root-overlay.md)
+
 ## Help
 
 - `gondolin help`

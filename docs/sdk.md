@@ -41,7 +41,7 @@ const vm = await VM.create({
 // Optional: explicit start (VM.create defaults to autoStart: true)
 await vm.start();
 
-// …use the VM…
+// ...use the VM...
 await vm.close();
 ```
 
@@ -107,7 +107,7 @@ const result = await proc;
 console.log(result.exitCode);
 ```
 
-Important detail: when you start streaming via `for await (const … of proc)` (or
+Important detail: when you start streaming via `for await (const chunk of proc)` (or
 `proc.lines()` / `proc.output()`), Gondolin disables stdout/stderr buffering for
 that exec session to avoid unbounded memory growth.  That means the final
 `ExecResult.stdout` / `stderr` will typically be **empty** in streaming mode.
@@ -286,6 +286,26 @@ console.log("Kernel:", assets.kernelPath);
 ```
 
 To build custom image see the documentation is here: [Building Custom Images](./custom-images.md).
+
+## Overlay root filesystem
+
+Gondolin can boot the guest with an overlayfs root so that the base rootfs image
+is mounted read-only and guest writes go to a tmpfs upper layer.
+
+Enable it with `sandbox.rootOverlay`:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  sandbox: {
+    rootOverlay: true,
+  },
+});
+```
+
+For details (including where the upper layer is mounted and how to archive it),
+see [Overlay Root](./root-overlay.md).
 
 Use the custom assets programmatically by pointing `sandbox.imagePath` at the
 asset directory:
