@@ -57,16 +57,9 @@ function parseName(packet: Buffer, offset: number): { name: string; nextOffset: 
 
     // Compression pointer
     if ((len & 0xc0) === 0xc0) {
-      // Queries from libc typically don't use this, but handle defensively.
-      if (off >= packet.length) return null;
-      const ptr = ((len & 0x3f) << 8) | packet[off++]!;
-      if (ptr >= packet.length) return null;
-      // Prevent loops
-      if (++seen > 8) return null;
-      const rec = parseName(packet, ptr);
-      if (!rec) return null;
-      labels.push(rec.name);
-      break;
+      // We intentionally do NOT support compression pointers for queries.
+      // Reject them outright to avoid recursion/cycle hazards on untrusted input.
+      return null;
     }
 
     if (len > 63) return null;

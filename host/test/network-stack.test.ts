@@ -372,6 +372,88 @@ test("network-stack: writeToNetwork parses qemu framing (partial writes)", () =>
   assert.deepEqual([...events[0].payload], [1, 2, 3]);
 });
 
+test("network-stack: DHCP does not advertise loopback dns servers", () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  const stack = new NetworkStack({
+    gatewayIP: "192.168.127.1",
+    vmIP: "192.168.127.3",
+    gatewayMac,
+    vmMac,
+    dnsServers: ["127.0.0.53"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: () => {},
+      onTcpSend: () => {},
+      onTcpClose: () => {},
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const xid = 0x0a0b0c0d;
+
+  const bootp = Buffer.alloc(240);
+  bootp[0] = 1; // BOOTREQUEST
+  bootp[1] = 1; // ethernet
+  bootp[2] = 6;
+  bootp[3] = 0;
+  bootp.writeUInt32BE(xid, 4);
+  bootp.writeUInt16BE(0, 8);
+  bootp.writeUInt16BE(0x8000, 10);
+  vmMac.copy(bootp, 28);
+  bootp.writeUInt32BE(0x63825363, 236);
+
+  const discoverOpts = Buffer.from([53, 1, 1 /* discover */, 255]);
+  const dhcp = Buffer.concat([bootp, discoverOpts]);
+
+  const udp = buildUdpDatagram({ srcPort: 68, dstPort: 67, payload: dhcp });
+  const ipPacket = buildIPv4Packet({
+    srcIP: ip([0, 0, 0, 0]),
+    dstIP: ip([255, 255, 255, 255]),
+    protocol: 17,
+    payload: udp,
+  });
+  const frame = buildEthernetFrame({
+    dstMac: mac([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+    srcMac: vmMac,
+    etherType: 0x0800,
+    payload: ipPacket,
+  });
+
+  stack.receive(frame);
+
+  const tx = drainAllQemuTx(stack);
+  const frames = decodeFramesFromQemuData(tx);
+  assert.equal(frames.length, 1);
+
+  const eth = parseEthernet(frames[0]);
+  const ipOut = parseIPv4(eth.payload);
+  const udpOut = ipOut.payload;
+  const dhcpOut = udpOut.subarray(8);
+
+  // Find DHCP option 6 (DNS)
+  const opts = dhcpOut.subarray(240);
+  let off = 0;
+  let dns: Buffer | null = null;
+  while (off < opts.length) {
+    const code = opts[off++]!;
+    if (code === 255) break;
+    if (code === 0) continue;
+    const len = opts[off++]!;
+    const val = opts.subarray(off, off + len);
+    off += len;
+    if (code === 6) {
+      dns = val;
+      break;
+    }
+  }
+
+  assert.ok(dns, "expected DHCP DNS option");
+  assert.equal(dns!.length, 4);
+  assert.deepEqual([...dns!], [8, 8, 8, 8], "expected loopback DNS to be filtered out");
+});
+
 test("network-stack: DHCP discover -> OFFER and request -> ACK", () => {
   const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
   const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);

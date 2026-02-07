@@ -222,7 +222,7 @@ Notable consequences:
   sees the final response), so redirects cannot escape the allowlist.
 - DNS is available in multiple modes:
   - `synthetic` (default): no upstream DNS, returns synthetic answers
-  - `trusted`: forwards queries only to trusted host resolvers (prevents DNS-as-UDP-tunnel)
+  - `trusted`: forwards queries only to trusted host resolvers (prevents using UDP/53 as arbitrary UDP transport to arbitrary destination IPs)
   - `open`: forwards UDP/53 to the destination IP the guest targeted
 - Even though the guest does DNS resolutions, they're largely disregarded for
   policy; the host enforces policy against the HTTP `Host` header and does its own

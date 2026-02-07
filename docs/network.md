@@ -77,10 +77,11 @@ DNS exists because it is useful for HTTP clients, but it is intentionally constr
 - Only UDP destination port **53** is handled.
 - DNS behavior is configurable via a **DNS mode**:
   - `synthetic` (default): no upstream DNS; the host replies with synthetic answers
-  - `trusted`: the guest may send DNS to any IP, but the host forwards queries only to the host's trusted resolvers
+  - `trusted`: the guest may send DNS to any IP, but the host forwards queries only to the host's trusted resolvers (prevents using UDP/53 as arbitrary UDP transport to arbitrary destination IPs)
   - `open`: DNS is forwarded to the destination IP the guest targeted (UDP/53), which allows DNS-like UDP tunneling
 - There is no goal of being a full-featured recursive resolver (for example,
   caching is not required for correctness).
+- Note: `trusted` mode does not prevent data exfiltration via *legitimate* DNS queries to attacker-controlled domains (classic DNS tunneling over real DNS semantics); it only restricts where UDP/53 can be sent.
 
 ### DNS and Policy
 

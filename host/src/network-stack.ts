@@ -46,7 +46,10 @@ const DHCP_OPT_END = 255;
 function normalizeDnsServers(servers?: string[]): string[] {
   const candidates = (servers && servers.length > 0 ? servers : dns.getServers())
     .map((server) => server.split("%")[0])
-    .filter((server) => net.isIP(server) === 4);
+    .filter((server) => net.isIP(server) === 4)
+    // Guest resolvers must be reachable over the virtual NIC; loopback resolvers are not.
+    .filter((server) => !server.startsWith("127."))
+    .filter((server) => server !== "0.0.0.0" && server !== "255.255.255.255");
 
   const unique: string[] = [];
   const seen = new Set<string>();
