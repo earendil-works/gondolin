@@ -44,7 +44,13 @@ import {
   type DebugConfig,
   type DebugFlag,
 } from "./debug";
-import { ensureGuestAssets, loadAssetManifest, loadGuestAssets, type GuestAssets } from "./assets";
+import {
+  ensureGuestAssets,
+  loadAssetManifest,
+  loadGuestAssets,
+  resolveGuestAssetsSync,
+  type GuestAssets,
+} from "./assets";
 
 /**
  * Path to guest image assets.
@@ -102,6 +108,27 @@ export type SandboxServerOptions = {
   netEnabled?: boolean;
 
   /**
+   * Root disk image path (attached as `/dev/vda`)
+   *
+   * If omitted, uses the base rootfs image from the guest assets.
+   */
+  rootDiskPath?: string;
+
+  /** root disk image format */
+  rootDiskFormat?: "raw" | "qcow2";
+
+  /** qemu snapshot mode for the root disk (discard writes) */
+  rootDiskSnapshot?: boolean;
+
+  /**
+   * Delete the root disk image on VM close
+   *
+   * This is a host-side lifecycle hint. It is currently only honored by the
+   * higher-level {@link VM} wrapper.
+   */
+  rootDiskDeleteOnClose?: boolean;
+
+  /**
    * Debug configuration
    *
    * - `true`: enable all debug components
@@ -124,12 +151,6 @@ export type SandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-  /**
-   * Enable overlayfs for the guest root (writes go to a tmpfs upperdir)
-   *
-   * If omitted, defaults to `GONDOLIN_ROOT_OVERLAY`.
-   */
-  rootOverlay?: boolean | "tmpfs";
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
@@ -165,6 +186,14 @@ export type ResolvedSandboxServerOptions = {
   initrdPath: string;
   /** rootfs image path */
   rootfsPath: string;
+
+  /** root disk image path (attached as `/dev/vda`) */
+  rootDiskPath: string;
+  /** root disk image format */
+  rootDiskFormat: "raw" | "qcow2";
+  /** qemu snapshot mode for the root disk (discard writes) */
+  rootDiskSnapshot: boolean;
+
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
   /** vm cpu count */
@@ -197,8 +226,6 @@ export type ResolvedSandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-  /** enable overlayfs for the guest root (writes go to a tmpfs upperdir) */
-  rootOverlay?: "tmpfs";
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
@@ -220,36 +247,6 @@ export type ResolvedSandboxServerOptions = {
   vfsProvider: VirtualProvider | null;
 };
 
-/**
- * Get default guest asset paths from local development checkout.
- * Returns undefined for each path if not found locally.
- */
-function getLocalGuestAssets(): Partial<GuestAssets> {
-  // Handle both source (src/) and compiled (dist/src/) paths
-  // We need to find the repo root where guest/ lives
-  const possibleRepoRoots = [
-    path.resolve(__dirname, "../.."),      // from src/: -> host/ -> gondolin/
-    path.resolve(__dirname, "../../.."),   // from dist/src/: -> dist/ -> host/ -> gondolin/
-  ];
-  
-  for (const repoRoot of possibleRepoRoots) {
-    const devPath = path.join(repoRoot, "guest", "image", "out");
-    const kernelPath = path.join(devPath, "vmlinuz-virt");
-    const initrdPath = path.join(devPath, "initramfs.cpio.lz4");
-    const rootfsPath = path.join(devPath, "rootfs.ext4");
-
-    // Check if local dev paths exist
-    if (
-      fs.existsSync(kernelPath) &&
-      fs.existsSync(initrdPath) &&
-      fs.existsSync(rootfsPath)
-    ) {
-      return { kernelPath, initrdPath, rootfsPath };
-    }
-  }
-
-  return {};
-}
 
 /**
  * Resolve imagePath to GuestAssets.
@@ -276,17 +273,6 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   return null;
 }
 
-function normalizeRootOverlay(value: SandboxServerOptions["rootOverlay"]): "tmpfs" | undefined {
-  if (value === true || value === "tmpfs") return "tmpfs";
-  if (value === false) return undefined;
-
-  const env = process.env.GONDOLIN_ROOT_OVERLAY;
-  if (!env) return undefined;
-
-  const lower = env.toLowerCase().trim();
-  if (lower === "1" || lower === "true" || lower === "tmpfs") return "tmpfs";
-  return undefined;
-}
 
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
   const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
@@ -332,7 +318,7 @@ export function resolveSandboxServerOptions(
   } else if (assets) {
     resolvedAssets = assets;
   } else {
-    resolvedAssets = getLocalGuestAssets();
+    resolvedAssets = resolveGuestAssetsSync() ?? {};
   }
 
   const kernelPath = resolvedAssets.kernelPath;
@@ -399,11 +385,18 @@ export function resolveSandboxServerOptions(
     );
   }
 
+  const rootDiskPath = options.rootDiskPath ?? rootfsPath;
+  const rootDiskFormat = options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
+  const rootDiskSnapshot = options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
+
   return {
     qemuPath,
     kernelPath,
     initrdPath,
     rootfsPath,
+    rootDiskPath,
+    rootDiskFormat,
+    rootDiskSnapshot,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
@@ -419,7 +412,6 @@ export function resolveSandboxServerOptions(
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
-    rootOverlay: normalizeRootOverlay(options.rootOverlay),
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
@@ -445,19 +437,6 @@ export async function resolveSandboxServerOptionsAsync(
     return resolveSandboxServerOptions(options);
   }
 
-  // If GONDOLIN_GUEST_DIR is set, use it (don't fall back to local dev paths)
-  if (process.env.GONDOLIN_GUEST_DIR) {
-    const assets = await ensureGuestAssets();
-    return resolveSandboxServerOptions(options, assets);
-  }
-
-  // Check for local dev paths
-  const localAssets = getLocalGuestAssets();
-  if (localAssets.kernelPath && localAssets.initrdPath && localAssets.rootfsPath) {
-    return resolveSandboxServerOptions(options, localAssets as GuestAssets);
-  }
-
-  // Download assets if needed
   const assets = await ensureGuestAssets();
   return resolveSandboxServerOptions(options, assets);
 }
@@ -919,20 +898,16 @@ export class SandboxServer extends EventEmitter {
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
-    let baseAppend = this.options.append ?? `console=${consoleDevice} initramfs_async=1`;
-    if (this.options.rootOverlay === "tmpfs") {
-      // Don't add a duplicate root.overlay if the user already provided one.
-      if (!baseAppend.split(/\s+/).some((part) => part.startsWith("root.overlay="))) {
-        baseAppend = `${baseAppend} root.overlay=tmpfs`;
-      }
-    }
-    this.baseAppend = baseAppend.trim();
+    const baseAppend = (this.options.append ?? `console=${consoleDevice} initramfs_async=1`).trim();
+    this.baseAppend = baseAppend;
 
     const sandboxConfig: SandboxConfig = {
       qemuPath: this.options.qemuPath,
       kernelPath: this.options.kernelPath,
       initrdPath: this.options.initrdPath,
-      rootfsPath: this.options.rootfsPath,
+      rootDiskPath: this.options.rootDiskPath,
+      rootDiskFormat: this.options.rootDiskFormat,
+      rootDiskSnapshot: this.options.rootDiskSnapshot,
       memory: this.options.memory,
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,

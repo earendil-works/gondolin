@@ -297,25 +297,50 @@ console.log("Kernel:", assets.kernelPath);
 
 To build custom image see the documentation is here: [Building Custom Images](./custom-images.md).
 
-## Overlay root filesystem
+## Disk checkpoints (qcow2)
 
-Gondolin can boot the guest with an overlayfs root so that the base rootfs image
-is mounted read-only and guest writes go to a tmpfs upper layer.
+Gondolin supports **disk-only checkpoints** of the VM root filesystem.
 
-Enable it with `sandbox.rootOverlay`:
+A checkpoint captures the VM's writable disk state and can be resumed cheaply
+using qcow2 backing files.
+
+See also: [Snapshots](./snapshots.md).
+
 
 ```ts
+import path from "node:path";
+
 import { VM } from "@earendil-works/gondolin";
 
-const vm = await VM.create({
-  sandbox: {
-    rootOverlay: true,
-  },
-});
+const base = await VM.create();
+
+// Install packages / write to the root filesystem...
+await base.exec("apk add git");
+await base.exec("echo hello > /etc/my-base-marker");
+
+// Note: must be an absolute path
+const checkpointPath = path.resolve("./dev-base.qcow2");
+const checkpoint = await base.checkpoint(checkpointPath);
+
+const task1 = await checkpoint.resume();
+const task2 = await checkpoint.resume();
+
+// Both VMs start from the same disk state and diverge independently
+await task1.close();
+await task2.close();
+
+checkpoint.delete();
 ```
 
-For details (including where the upper layer is mounted and how to archive it),
-see [Overlay Root](./root-overlay.md).
+Notes:
+
+- This is **disk-only** (no in-VM RAM/process restore)
+- The checkpoint is a single `.qcow2` file; metadata is stored as a JSON trailer
+  (reload with `VmCheckpoint.load(checkpointPath)`)
+- Checkpoints require guest assets with a `manifest.json` that includes a
+  deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
+- Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`);
+  writes under those paths are not part of disk checkpoints
 
 Use the custom assets programmatically by pointing `sandbox.imagePath` at the
 asset directory:

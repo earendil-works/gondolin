@@ -3,7 +3,12 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
-import { Readable } from "stream";
+import { Duplex, Readable } from "stream";
+import { randomUUID } from "crypto";
+
+import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
+import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
+import { loadAssetManifest } from "./assets";
 
 import {
   ErrorMessage,
@@ -15,6 +20,7 @@ import {
 import {
   SandboxServer,
   SandboxServerOptions,
+  resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
   type ResolvedSandboxServerOptions,
   type SandboxConnection,
@@ -164,6 +170,23 @@ export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
 export type VMState = SandboxState | "unknown";
 
+type RootDiskState = {
+  /** root disk image path */
+  path: string;
+  /** qemu disk format */
+  format: "raw" | "qcow2";
+  /** qemu snapshot mode (discard writes) */
+  snapshot: boolean;
+  /** delete the disk file on vm.close() */
+  deleteOnClose: boolean;
+};
+
+function inferDiskFormatFromPath(diskPath: string): "raw" | "qcow2" {
+  const lower = diskPath.toLowerCase();
+  if (lower.endsWith(".qcow2") || lower.endsWith(".qcow")) return "qcow2";
+  return "raw";
+}
+
 export class VM {
   /**
    * Replace the debug log callback.
@@ -175,6 +198,10 @@ export class VM {
   }
   private readonly autoStart: boolean;
   private server: SandboxServer | null;
+  private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
+  private rootDisk: RootDiskState | null = null;
+  private checkpointed = false;
+  private readonly baseOptionsForClone: VMOptions;
   private readonly defaultEnv: EnvInput | undefined;
   private connection: SandboxConnection | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -258,6 +285,7 @@ export class VM {
    * @param resolvedSandboxOptions Optional pre-resolved sandbox options (from VM.create())
    */
   constructor(options: VMOptions = {}, resolvedSandboxOptions?: ResolvedSandboxServerOptions) {
+    this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
@@ -326,16 +354,54 @@ export class VM {
       sandboxOptions.cpus = options.cpus;
     }
 
-    // Handle VFS in resolved options
-    if (resolvedSandboxOptions) {
-      // Merge VFS provider into resolved options
-      if (this.vfs) {
-        (resolvedSandboxOptions as any).vfsProvider = this.vfs;
-      }
-      this.server = new SandboxServer(resolvedSandboxOptions);
-    } else {
-      this.server = new SandboxServer(sandboxOptions);
+    // Resolve sandbox options (sync) if needed so we can prepare the root disk.
+    const resolved = resolvedSandboxOptions
+      ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
+      : resolveSandboxServerOptions(sandboxOptions);
+
+    // Merge VFS provider into resolved options
+    if (this.vfs) {
+      (resolved as any).vfsProvider = this.vfs;
     }
+
+    // Prepare root disk:
+    // - If the caller provided sandbox.rootDiskPath, use it as-is.
+    // - Otherwise create an ephemeral qcow2 overlay backed by the base rootfs.
+    const userRootDiskPath = sandboxOptions.rootDiskPath;
+    if (userRootDiskPath) {
+      const format = sandboxOptions.rootDiskFormat ?? resolved.rootDiskFormat ?? inferDiskFormatFromPath(userRootDiskPath);
+      const snapshot = sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
+      const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
+
+      resolved.rootDiskPath = userRootDiskPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskSnapshot = snapshot;
+
+      this.rootDisk = {
+        path: userRootDiskPath,
+        format,
+        snapshot,
+        deleteOnClose,
+      };
+    } else {
+      ensureQemuImgAvailable();
+      const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
+      const overlayPath = createTempQcow2Overlay(resolved.rootfsPath, backingFormat);
+
+      resolved.rootDiskPath = overlayPath;
+      resolved.rootDiskFormat = "qcow2";
+      resolved.rootDiskSnapshot = false;
+
+      this.rootDisk = {
+        path: overlayPath,
+        format: "qcow2",
+        snapshot: false,
+        deleteOnClose: true,
+      };
+    }
+
+    this.resolvedSandboxOptions = resolved;
+    this.server = new SandboxServer(resolved);
 
     const effectiveDebugFlags = resolvedSandboxOptions
       ? new Set(resolvedSandboxOptions.debug ?? [])
@@ -634,19 +700,55 @@ fi
       throw new Error("sandbox server is not available");
     }
 
-    const deadline = Date.now() + 3000;
+    const deadline = Date.now() + 10_000;
     let lastErr: unknown = null;
+
     while (Date.now() < deadline) {
+      let probe: Duplex | null = null;
       try {
-        const probe = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 750 });
-        probe.destroy();
+        const stream = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 2000 });
+        probe = stream;
+
+        // sshd sends its banner immediately after accepting a TCP connection.
+        // Waiting for it makes enableSsh more reliable on slow boots.
+        const banner = await new Promise<string>((resolve, reject) => {
+          const onData = (chunk: Buffer) => {
+            cleanup();
+            resolve(chunk.toString("utf8"));
+          };
+          const onError = (err: Error) => {
+            cleanup();
+            reject(err);
+          };
+          const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error("ssh banner timeout"));
+          }, 1000);
+
+          const cleanup = () => {
+            clearTimeout(timeout);
+            stream.off("data", onData);
+            stream.off("error", onError);
+          };
+
+          stream.on("data", onData);
+          stream.on("error", onError);
+        });
+
+        if (!banner.startsWith("SSH-")) {
+          throw new Error(`unexpected ssh banner: ${JSON.stringify(banner.slice(0, 32))}`);
+        }
+
         lastErr = null;
         break;
       } catch (err) {
         lastErr = err;
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 150));
+      } finally {
+        probe?.destroy();
       }
     }
+
     if (lastErr) {
       const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
       throw new Error(`ssh port-forward is not available: ${detail}`);
@@ -812,6 +914,10 @@ fi
   }
 
   private async startInternal() {
+    if (this.checkpointed) {
+      throw new Error("vm was checkpointed and cannot be restarted; resume the checkpoint instead");
+    }
+
     this.ensureQemuAvailable();
 
     if (this.server) {
@@ -840,6 +946,15 @@ fi
     }
     await this.disconnect();
     this.vfsReadyPromise = null;
+
+    // Cleanup ephemeral root disk
+    if (this.rootDisk && this.rootDisk.deleteOnClose) {
+      try {
+        fs.rmSync(this.rootDisk.path, { force: true });
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private allocateId(): number {
@@ -1262,7 +1377,97 @@ fi
     connection.close();
   }
 
-  private sendJson(message: ClientMessage) {
+  /**
+   * Create a disk-only checkpoint of the VM root disk.
+   *
+   * This stops the VM and materializes its writable qcow2 overlay at
+   * `checkpointPath`.
+   *
+   * The checkpoint metadata is stored as a JSON trailer appended to the qcow2
+   * file so the checkpoint is a single file.
+   */
+  async checkpoint(checkpointPath: string): Promise<VmCheckpoint> {
+    if (!checkpointPath) {
+      throw new Error("checkpointPath is required");
+    }
+    if (!path.isAbsolute(checkpointPath)) {
+      throw new Error(`checkpointPath must be an absolute path (got: ${checkpointPath})`);
+    }
+
+    const rootDisk = this.rootDisk;
+    if (!rootDisk) {
+      throw new Error("vm has no root disk");
+    }
+    if (rootDisk.snapshot) {
+      throw new Error("cannot checkpoint: root disk is running in qemu snapshot mode");
+    }
+    if (rootDisk.format !== "qcow2") {
+      throw new Error(`cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`);
+    }
+
+    // Ensure the disk isn't deleted by close().
+    rootDisk.deleteOnClose = false;
+
+    // Best-effort flush of guest filesystem buffers so the checkpoint captures
+    // recent writes even though we currently stop QEMU abruptly.
+    if (this.server && this.server.getState() === "running") {
+      try {
+        await this.exec(["/bin/sh", "-c", "sync; sync"]);
+      } catch {
+        // ignore
+      }
+    }
+
+    await this.close();
+
+    const resolvedCheckpointPath = path.resolve(checkpointPath);
+    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
+    fs.rmSync(resolvedCheckpointPath, { force: true });
+
+    moveFile(rootDisk.path, resolvedCheckpointPath);
+
+    const checkpointName = path.basename(resolvedCheckpointPath, path.extname(resolvedCheckpointPath));
+
+    const guestAssets = {
+      kernelPath: this.resolvedSandboxOptions.kernelPath,
+      initrdPath: this.resolvedSandboxOptions.initrdPath,
+      rootfsPath: this.resolvedSandboxOptions.rootfsPath,
+    };
+
+    const commonDir =
+      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.initrdPath) &&
+      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.rootfsPath)
+        ? path.dirname(guestAssets.kernelPath)
+        : null;
+
+    const manifest = commonDir ? loadAssetManifest(commonDir) : null;
+    const guestAssetBuildId = manifest?.buildId;
+
+    if (!guestAssetBuildId) {
+      throw new Error(
+        "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)"
+      );
+    }
+
+    const data: VmCheckpointData = {
+      version: 1,
+      name: checkpointName,
+      createdAt: new Date().toISOString(),
+      // Kept for schema compatibility (ignored for single-file checkpoints)
+      diskFile: path.basename(resolvedCheckpointPath),
+      guestAssetBuildId,
+    };
+
+    VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
+
+    // Mark this VM as consumed.
+    this.rootDisk = null;
+    this.checkpointed = true;
+
+    return new VmCheckpoint(resolvedCheckpointPath, data, this.baseOptionsForClone, { isDirectory: false });
+  }
+
+  private sendJson(message: ClientMessage) { 
     if (!this.connection) {
       throw new Error("sandbox connection is not available");
     }

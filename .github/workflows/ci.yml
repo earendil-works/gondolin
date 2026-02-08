@@ -89,7 +89,7 @@ jobs:
         run: |
           cd guest/image/out
           tar -czvf ../../../${{ matrix.artifact }}.tar.gz \
-            vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -3,18 +3,20 @@
 This page tracks the current limitations of Gondolin.  If you are evaluating
 Gondolin for a production workflow, treat this as a "known gaps" checklist.
 
-## No Snapshotting / Restore
+## No Full VM Save/Restore (Memory Snapshots)
 
-Gondolin does not currently provide VM snapshotting (save/restore) for things
-like:
+Gondolin does not provide full VM save/restore (capturing in-VM process state +
+RAM) today.
 
-* Capturing and restoring in-VM process state
-* Saving a fully materialized disk/memory snapshot and resuming it later
+However, Gondolin *does* support **disk-only checkpoints** (qcow2-backed) via
+`vm.checkpoint(<absolute qcow2 path>)` and `checkpoint.resume()`.
 
-Tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8)
+See also: [Snapshots](./snapshots.md).
 
-**Note:** Gondolin can boot with an overlay root filesystem to avoid persisting
-writes to the base image, but this is not a snapshot/restore mechanism.
+Tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8).
+
+**Note:** Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`,
+`/var/log`). Writes under those paths are not part of disk checkpoints.
 
 ## Adding Extra Packages Requires Building a New Image
 

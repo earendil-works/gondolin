@@ -7,6 +7,7 @@
 
 // Main VM interface
 export { VM, type VMOptions, type VMState, type EnableSshOptions, type SshAccess } from "./vm";
+export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 export {
   type ExecOptions,
   type ExecResult,

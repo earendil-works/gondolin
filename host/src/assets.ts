@@ -48,11 +48,27 @@ function getAssetBundleName(): string {
 }
 
 /**
+ * Walk upwards from a starting directory until the filesystem root.
+ */
+function findUpwards<T>(startDir: string, probe: (dir: string) => T | null): T | null {
+  let dir = path.resolve(startDir);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const found = probe(dir);
+    if (found !== null) return found;
+
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
  * Determine where to look for / store guest assets.
  *
  * Priority:
  * 1. GONDOLIN_GUEST_DIR environment variable (explicit override)
- * 2. Local development checkout (guest/image/out relative to package)
+ * 2. Local repo checkout (searches upwards for guest/image/out)
  * 3. User cache directory (~/.cache/gondolin/<version>)
  */
 function getAssetDir(): string {
@@ -61,28 +77,94 @@ function getAssetDir(): string {
     return process.env.GONDOLIN_GUEST_DIR;
   }
 
-  // Check for local development (repo checkout)
-  // Handle both source (src/) and compiled (dist/src/) paths
-  // We need to find the repo root where guest/ lives
-  const possibleRepoRoots = [
-    path.resolve(__dirname, "..", ".."),       // from src/: -> host/ -> gondolin/
-    path.resolve(__dirname, "..", "..", ".."), // from dist/src/: -> dist/ -> host/ -> gondolin/
-  ];
-  
-  for (const repoRoot of possibleRepoRoots) {
-    const devPath = path.join(repoRoot, "guest", "image", "out");
-    if (fs.existsSync(path.join(devPath, "vmlinuz-virt"))) {
-      return devPath;
-    }
-  }
+  const tryFindRepoAssetsFrom = (anchor: string): string | null =>
+    findUpwards(anchor, (dir) => {
+      const candidate = path.join(dir, "guest", "image", "out");
+      return assetsExist(candidate) ? candidate : null;
+    });
+
+  // Prefer whatever directory the caller is operating in, but also check the
+  // module location (works even when invoked from a different cwd).
+  const repoDir = tryFindRepoAssetsFrom(process.cwd()) ?? tryFindRepoAssetsFrom(__dirname);
+  if (repoDir) return repoDir;
 
   // User cache directory
-  const cacheBase =
-    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+  const cacheBase = process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
   return path.join(cacheBase, "gondolin", resolveAssetVersion());
 }
 
 export const MANIFEST_FILENAME = "manifest.json";
+
+// Fixed namespace UUID used for deriving deterministic guest asset build IDs.
+//
+// This must never change, otherwise the same asset checksums would produce
+// different IDs across versions.
+const GUEST_ASSET_BUILD_ID_NAMESPACE = "7b6ed0c0-7e7f-4c2a-8b2d-0bf3d5be9d52";
+
+function uuidToBytes(uuid: string): Buffer {
+  const hex = uuid.replace(/-/g, "");
+  if (hex.length !== 32) throw new Error(`invalid uuid: ${uuid}`);
+  return Buffer.from(hex, "hex");
+}
+
+function bytesToUuid(bytes: Uint8Array): string {
+  const hex = Buffer.from(bytes).toString("hex");
+  return (
+    hex.slice(0, 8) +
+    "-" +
+    hex.slice(8, 12) +
+    "-" +
+    hex.slice(12, 16) +
+    "-" +
+    hex.slice(16, 20) +
+    "-" +
+    hex.slice(20)
+  );
+}
+
+function uuidv5(name: string, namespace: string): string {
+  const ns = uuidToBytes(namespace);
+  const hash = createHash("sha1");
+  hash.update(ns);
+  hash.update(Buffer.from(name, "utf8"));
+  const digest = hash.digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+
+  // Set version to 5 (0101)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  // Set variant to RFC 4122 (10xx)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  return bytesToUuid(bytes);
+}
+
+export type AssetBuildIdInput = {
+  /** sha256 checksums (hex) */
+  checksums: { kernel: string; initramfs: string; rootfs: string };
+  /** guest architecture identifier (e.g. "aarch64") */
+  arch?: string;
+};
+
+/**
+ * Compute a deterministic guest asset build ID.
+ *
+ * This is intentionally derived from *content* (checksums), not host paths.
+ */
+export function computeAssetBuildId(input: AssetBuildIdInput): string {
+  const arch = input.arch ?? "unknown";
+  const name =
+    "gondolin-asset-build" +
+    "\n" +
+    `kernel=${input.checksums.kernel}` +
+    "\n" +
+    `initramfs=${input.checksums.initramfs}` +
+    "\n" +
+    `rootfs=${input.checksums.rootfs}` +
+    "\n" +
+    `arch=${arch}`;
+
+  return uuidv5(name, GUEST_ASSET_BUILD_ID_NAMESPACE);
+}
 
 /**
  * Manifest describing the built assets.
@@ -90,6 +172,9 @@ export const MANIFEST_FILENAME = "manifest.json";
 export interface AssetManifest {
   /** manifest schema version */
   version: 1;
+
+  /** deterministic content-derived build identifier (uuid) */
+  buildId?: string;
 
   /** build configuration */
   config: BuildConfig;
@@ -141,7 +226,13 @@ export function loadAssetManifest(assetDir: string): AssetManifest | null {
 
   try {
     const content = fs.readFileSync(manifestPath, "utf8");
-    return JSON.parse(content) as AssetManifest;
+    const raw = JSON.parse(content) as any;
+
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+
+    return raw as AssetManifest;
   } catch {
     return null;
   }
@@ -201,10 +292,17 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
  * Check if all guest assets are present in a directory.
  */
 function assetsExist(dir: string): boolean {
+  const manifest = loadAssetManifest(dir);
+  const assetFiles = manifest?.assets ?? {
+    kernel: "vmlinuz-virt",
+    initramfs: "initramfs.cpio.lz4",
+    rootfs: "rootfs.ext4",
+  };
+
   return (
-    fs.existsSync(path.join(dir, "vmlinuz-virt")) &&
-    fs.existsSync(path.join(dir, "initramfs.cpio.lz4")) &&
-    fs.existsSync(path.join(dir, "rootfs.ext4"))
+    fs.existsSync(path.join(dir, assetFiles.kernel)) &&
+    fs.existsSync(path.join(dir, assetFiles.initramfs)) &&
+    fs.existsSync(path.join(dir, assetFiles.rootfs))
   );
 }
 
@@ -317,16 +415,12 @@ export async function ensureGuestAssets(): Promise<GuestAssets> {
     return loadGuestAssets(assetDir);
   }
 
-  // Check if already present
+  // Check if already present (repo checkout or cache)
   if (!assetsExist(assetDir)) {
     await downloadAndExtract(assetDir);
   }
 
-  return {
-    kernelPath: path.join(assetDir, "vmlinuz-virt"),
-    initrdPath: path.join(assetDir, "initramfs.cpio.lz4"),
-    rootfsPath: path.join(assetDir, "rootfs.ext4"),
-  };
+  return loadGuestAssets(assetDir);
 }
 
 /**
@@ -349,6 +443,26 @@ export function getAssetDirectory(): string {
  */
 export function hasGuestAssets(): boolean {
   return assetsExist(getAssetDir());
+}
+
+/**
+ * Resolve guest assets synchronously without downloading.
+ *
+ * Resolution priority:
+ * 1. GONDOLIN_GUEST_DIR (explicit override)
+ * 2. Repo checkout (guest/image/out)
+ * 3. Cache directory (if already populated)
+ */
+export function resolveGuestAssetsSync(): GuestAssets | null {
+  // Explicit override must be respected (and should error if broken)
+  if (process.env.GONDOLIN_GUEST_DIR) {
+    return loadGuestAssets(process.env.GONDOLIN_GUEST_DIR);
+  }
+
+  // getAssetDir() picks repo assets when available, otherwise the cache location
+  const dir = getAssetDir();
+  if (!assetsExist(dir)) return null;
+  return loadGuestAssets(dir);
 }
 
 /** @internal */

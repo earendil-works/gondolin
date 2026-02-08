@@ -62,15 +62,16 @@ await vm.close();
 
 ## Using Gondolin
 
+- [Workloads](./workloads.md): typical workloads and lifecycles
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
+- [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
 
 ## Images & Filesystem
 
 - [Custom Images](./custom-images.md): build custom guest images (kernel/initramfs/rootfs) and configure packages/init scripts
-- [Overlay Root](./root-overlay.md): boot with an overlayfs root to capture guest writes
 
 ## Design & Internals
 

@@ -7,6 +7,7 @@ import * as child_process from "child_process";
 
 import {
   MANIFEST_FILENAME,
+  computeAssetBuildId,
   ensureGuestAssets,
   getAssetDirectory,
   getAssetVersion,
@@ -42,22 +43,43 @@ test("assets: loadAssetManifest returns null for missing/invalid manifest", () =
 test("assets: loadAssetManifest parses valid manifest", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-assets-manifest-"));
   try {
+    const checksums = { kernel: "", initramfs: "", rootfs: "" };
     const manifest = {
       version: 1,
+      buildId: computeAssetBuildId({ checksums, arch: "aarch64" }),
       config: { arch: "aarch64", distro: "alpine", alpine: { version: "3.23.0" } },
       buildTime: new Date().toISOString(),
       assets: { kernel: "k", initramfs: "i", rootfs: "r" },
-      checksums: { kernel: "", initramfs: "", rootfs: "" },
+      checksums,
     };
     fs.writeFileSync(path.join(dir, MANIFEST_FILENAME), JSON.stringify(manifest));
 
     const parsed = loadAssetManifest(dir);
     assert.ok(parsed);
     assert.equal(parsed.version, 1);
+    assert.equal(parsed.buildId, manifest.buildId);
     assert.equal(parsed.assets.kernel, "k");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("assets: computeAssetBuildId is deterministic", () => {
+  const id1 = computeAssetBuildId({
+    checksums: { kernel: "a", initramfs: "b", rootfs: "c" },
+    arch: "aarch64",
+  });
+  const id2 = computeAssetBuildId({
+    checksums: { kernel: "a", initramfs: "b", rootfs: "c" },
+    arch: "aarch64",
+  });
+  const id3 = computeAssetBuildId({
+    checksums: { kernel: "a", initramfs: "b", rootfs: "d" },
+    arch: "aarch64",
+  });
+
+  assert.equal(id1, id2);
+  assert.notEqual(id1, id3);
 });
 
 test("assets: loadGuestAssets uses manifest filenames and validates existence", () => {
@@ -148,6 +170,9 @@ test("assets: downloadAndExtract downloads to temp file and cleans it up", async
   try {
     const bundleName = __test.getAssetBundleName();
 
+    // Suppress progress output from downloadAndExtract.
+    mock.method(process.stderr, "write", () => true);
+
     // Mock fetch to stream a few bytes.
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -187,6 +212,9 @@ test("assets: downloadAndExtract downloads to temp file and cleans it up", async
 test("assets: downloadAndExtract throws on non-ok response", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-assets-download-"));
   try {
+    // Suppress progress output from downloadAndExtract.
+    mock.method(process.stderr, "write", () => true);
+
     (globalThis as any).fetch = mock.fn(async () => {
       return new Response("no", { status: 404, statusText: "Not Found" });
     });

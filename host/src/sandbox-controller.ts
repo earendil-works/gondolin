@@ -41,8 +41,18 @@ export type SandboxConfig = {
   kernelPath: string;
   /** initrd/initramfs image path */
   initrdPath: string;
-  /** optional rootfs image path */
-  rootfsPath?: string;
+
+  /**
+   * Root disk image path (attached as `/dev/vda`)
+   *
+   * If omitted, no root disk is attached.
+   */
+  rootDiskPath?: string;
+  /** root disk image format */
+  rootDiskFormat?: "raw" | "qcow2";
+  /** qemu snapshot mode for the root disk (discard writes) */
+  rootDiskSnapshot?: boolean;
+
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
   /** vm cpu count */
@@ -200,10 +210,13 @@ function buildQemuArgs(config: SandboxConfig) {
   const targetArch = detectTargetArch(config);
   const machineType = config.machineType ?? selectMachineType(targetArch);
 
-  if (config.rootfsPath) {
+  if (config.rootDiskPath) {
+    const format = config.rootDiskFormat ?? "raw";
+    const snapshot = config.rootDiskSnapshot ?? false;
+
     args.push(
       "-drive",
-      `file=${config.rootfsPath},format=raw,if=none,id=drive0,snapshot=on`
+      `file=${config.rootDiskPath},format=${format},if=none,id=drive0${snapshot ? ",snapshot=on" : ""}`
     );
     // microvm has no PCI bus; use virtio-blk-device (MMIO) instead
     const blkDevice =

@@ -33,15 +33,16 @@ nav = [
     {"Home" = "index.md"},
 
     {"Using Gondolin" = [
+        {"Workloads" = "workloads.md"},
         {"CLI" = "cli.md"},
         {"TypeScript SDK" = "sdk.md"},
+        {"Snapshots" = "snapshots.md"},
         {"SSH" = "ssh.md"},
         {"Debug Logging" = "debug.md"},
     ]},
 
     {"Images & Filesystem" = [
         {"Custom Images" = "custom-images.md"},
-        {"Overlay Root" = "root-overlay.md"},
     ]},
 
 
