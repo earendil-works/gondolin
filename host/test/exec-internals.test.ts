@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import { applyOutputChunk, createExecSession, resolveOutputMode } from "../src/exec";
+import {
+  applyOutputChunk,
+  createExecSession,
+  ExecProcess,
+  finishExecSession,
+  resolveOutputMode,
+} from "../src/exec";
 
 test("resolveOutputMode only treats objects with write() as writable", () => {
   const buf = Buffer.from("x");
@@ -76,4 +84,90 @@ test("applyOutputChunk rejects exec on writable write() throw and switches to ig
 
   // Credits should be granted back to avoid deadlocks
   assert.ok(events.some((e) => e.stdout === 4096));
+});
+
+test("attach forwards stdout when only stdout is piped", async () => {
+  const session = createExecSession(1, {
+    stdinEnabled: true,
+    stdout: { mode: "pipe" },
+    stderr: { mode: "ignore" },
+    windowBytes: 4096,
+  });
+
+  const proc = new ExecProcess(session, {
+    sendStdin: () => {
+      // unused
+    },
+    sendStdinEof: () => {
+      // unused
+    },
+    cleanup: () => {
+      // unused
+    },
+  });
+
+  const stdin = new PassThrough() as any;
+  stdin.isTTY = false;
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+
+  const stdoutData = once(stdout, "data") as Promise<[Buffer]>;
+
+  proc.attach(stdin, stdout as any, stderr as any);
+
+  applyOutputChunk(session, "stdout", Buffer.from("hello\n"));
+  applyOutputChunk(session, "stderr", Buffer.from("ignored\n"));
+
+  finishExecSession(session, 0);
+  await proc;
+
+  const [chunk] = await stdoutData;
+  assert.equal(chunk.toString("utf8"), "hello\n");
+
+  // stderr is ignore, should not be forwarded
+  assert.equal(stderr.readableLength, 0);
+});
+
+test("attach forwards stderr when only stderr is piped", async () => {
+  const session = createExecSession(1, {
+    stdinEnabled: true,
+    stdout: { mode: "ignore" },
+    stderr: { mode: "pipe" },
+    windowBytes: 4096,
+  });
+
+  const proc = new ExecProcess(session, {
+    sendStdin: () => {
+      // unused
+    },
+    sendStdinEof: () => {
+      // unused
+    },
+    cleanup: () => {
+      // unused
+    },
+  });
+
+  const stdin = new PassThrough() as any;
+  stdin.isTTY = false;
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+
+  const stderrData = once(stderr, "data") as Promise<[Buffer]>;
+
+  proc.attach(stdin, stdout as any, stderr as any);
+
+  applyOutputChunk(session, "stdout", Buffer.from("ignored\n"));
+  applyOutputChunk(session, "stderr", Buffer.from("oops\n"));
+
+  finishExecSession(session, 0);
+  await proc;
+
+  const [chunk] = await stderrData;
+  assert.equal(chunk.toString("utf8"), "oops\n");
+
+  // stdout is ignore, should not be forwarded
+  assert.equal(stdout.readableLength, 0);
 });
