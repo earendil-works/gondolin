@@ -145,12 +145,6 @@ export type SandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-  /**
-   * Enable overlayfs for the guest root (writes go to a tmpfs upperdir)
-   *
-   * If omitted, defaults to `GONDOLIN_ROOT_OVERLAY`.
-   */
-  rootOverlay?: boolean | "tmpfs";
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
@@ -226,8 +220,6 @@ export type ResolvedSandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-  /** enable overlayfs for the guest root (writes go to a tmpfs upperdir) */
-  rootOverlay?: "tmpfs";
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
@@ -305,17 +297,6 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   return null;
 }
 
-function normalizeRootOverlay(value: SandboxServerOptions["rootOverlay"]): "tmpfs" | undefined {
-  if (value === true || value === "tmpfs") return "tmpfs";
-  if (value === false) return undefined;
-
-  const env = process.env.GONDOLIN_ROOT_OVERLAY;
-  if (!env) return undefined;
-
-  const lower = env.toLowerCase().trim();
-  if (lower === "1" || lower === "true" || lower === "tmpfs") return "tmpfs";
-  return undefined;
-}
 
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
   const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
@@ -455,7 +436,6 @@ export function resolveSandboxServerOptions(
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
-    rootOverlay: normalizeRootOverlay(options.rootOverlay),
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
@@ -955,14 +935,8 @@ export class SandboxServer extends EventEmitter {
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
-    let baseAppend = this.options.append ?? `console=${consoleDevice} initramfs_async=1`;
-    if (this.options.rootOverlay === "tmpfs") {
-      // Don't add a duplicate root.overlay if the user already provided one.
-      if (!baseAppend.split(/\s+/).some((part) => part.startsWith("root.overlay="))) {
-        baseAppend = `${baseAppend} root.overlay=tmpfs`;
-      }
-    }
-    this.baseAppend = baseAppend.trim();
+    const baseAppend = (this.options.append ?? `console=${consoleDevice} initramfs_async=1`).trim();
+    this.baseAppend = baseAppend;
 
     const sandboxConfig: SandboxConfig = {
       qemuPath: this.options.qemuPath,

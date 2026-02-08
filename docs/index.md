@@ -70,7 +70,6 @@ await vm.close();
 ## Images & Filesystem
 
 - [Custom Images](./custom-images.md): build custom guest images (kernel/initramfs/rootfs) and configure packages/init scripts
-- [Overlay Root](./root-overlay.md): boot with an overlayfs root to capture guest writes
 
 ## Design & Internals
 

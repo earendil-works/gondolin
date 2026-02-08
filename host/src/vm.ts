@@ -1357,11 +1357,6 @@ fi
     if (rootDisk.format !== "qcow2") {
       throw new Error(`cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`);
     }
-    if (this.resolvedSandboxOptions.rootOverlay === "tmpfs") {
-      throw new Error(
-        "cannot checkpoint: sandbox.rootOverlay is enabled (guest writes are redirected to tmpfs and not captured by disk checkpoints)"
-      );
-    }
 
     // Ensure the disk isn't deleted by close().
     rootDisk.deleteOnClose = false;

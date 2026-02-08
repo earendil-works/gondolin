@@ -41,7 +41,6 @@ nav = [
 
     {"Images & Filesystem" = [
         {"Custom Images" = "custom-images.md"},
-        {"Overlay Root" = "root-overlay.md"},
     ]},
 
 

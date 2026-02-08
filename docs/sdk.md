@@ -297,26 +297,6 @@ console.log("Kernel:", assets.kernelPath);
 
 To build custom image see the documentation is here: [Building Custom Images](./custom-images.md).
 
-## Overlay root filesystem
-
-Gondolin can boot the guest with an overlayfs root so that the base rootfs image
-is mounted read-only and guest writes go to a tmpfs upper layer.
-
-Enable it with `sandbox.rootOverlay`:
-
-```ts
-import { VM } from "@earendil-works/gondolin";
-
-const vm = await VM.create({
-  sandbox: {
-    rootOverlay: true,
-  },
-});
-```
-
-For details (including where the upper layer is mounted and how to archive it),
-see [Overlay Root](./root-overlay.md).
-
 ## Disk checkpoints (qcow2)
 
 Gondolin supports **disk-only checkpoints** of the VM root filesystem.
@@ -348,7 +328,6 @@ checkpoint.delete();
 Notes:
 
 - This is **disk-only** (no in-VM RAM/process restore)
-- `sandbox.rootOverlay` is not compatible with disk checkpoints (it redirects root writes to tmpfs)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`);
   writes under those paths are not part of disk checkpoints
 

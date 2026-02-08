@@ -1043,15 +1043,6 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 root_device="/dev/vda"
 root_fstype="ext4"
 
-# Optional overlayfs root mode.
-#
-# When enabled, the real root device is mounted read-only as the overlay
-# lowerdir and a writable upper/work is provided by tmpfs (or a block device).
-# This makes it easy to snapshot all guest writes by archiving the upperdir.
-root_overlay=""
-root_overlay_fstype="ext4"
-root_overlay_tmpfs_opts=""
-
 if [ -r /proc/cmdline ]; then
   for arg in \$(cat /proc/cmdline); do
     case "\${arg}" in
@@ -1060,16 +1051,6 @@ if [ -r /proc/cmdline ]; then
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
-        ;;
-      root.overlay=*)
-        root_overlay="\${arg#root.overlay=}"
-        ;;
-      root.overlayfstype=*)
-        root_overlay_fstype="\${arg#root.overlayfstype=}"
-        ;;
-      root.overlaysize=*)
-        # tmpfs mount option value, e.g. "256M"
-        root_overlay_tmpfs_opts="size=\${arg#root.overlaysize=}"
         ;;
     esac
   done
@@ -1094,73 +1075,10 @@ if ! wait_for_block "\${root_device}"; then
   exec sh
 fi
 
-# Default: mount the root filesystem directly.
-if [ -z "\${root_overlay}" ]; then
-  mkdir -p /newroot
-  if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
-    log "[initramfs] failed to mount \${root_device}"
-    exec sh
-  fi
-else
-  modprobe overlay > /dev/null 2>&1 || true
-
-  # Prepare overlay mount tree under /overlayfs so we can move it under the new
-  # root before switch_root.
-  mkdir -p /overlayfs/lower /overlayfs/upperfs /newroot
-
-  if ! mount -o ro -t "\${root_fstype}" "\${root_device}" /overlayfs/lower; then
-    log "[initramfs] failed to mount lower root \${root_device}"
-    exec sh
-  fi
-
-  if [ "\${root_overlay}" = "tmpfs" ]; then
-    if [ -n "\${root_overlay_tmpfs_opts}" ]; then
-      if ! mount -t tmpfs -o "\${root_overlay_tmpfs_opts}" tmpfs /overlayfs/upperfs; then
-        log "[initramfs] failed to mount tmpfs upper"
-        exec sh
-      fi
-    else
-      if ! mount -t tmpfs tmpfs /overlayfs/upperfs; then
-        log "[initramfs] failed to mount tmpfs upper"
-        exec sh
-      fi
-    fi
-  else
-    # Treat root.overlay as a block device path (eg. /dev/vdb)
-    overlay_dev="\${root_overlay}"
-    if ! wait_for_block "\${overlay_dev}"; then
-      log "[initramfs] overlay device \${overlay_dev} not found"
-      exec sh
-    fi
-    mkdir -p /overlayfs/upperfs
-    if ! mount -t "\${root_overlay_fstype}" "\${overlay_dev}" /overlayfs/upperfs; then
-      log "[initramfs] failed to mount overlay device \${overlay_dev}"
-      exec sh
-    fi
-  fi
-
-  mkdir -p /overlayfs/upperfs/upper
-  rm -rf /overlayfs/upperfs/work
-  mkdir -p /overlayfs/upperfs/work
-
-  if ! mount -t overlay overlay \
-    -o "lowerdir=/overlayfs/lower,upperdir=/overlayfs/upperfs/upper,workdir=/overlayfs/upperfs/work" \
-    /newroot; then
-    log "[initramfs] overlayfs mount failed"
-    exec sh
-  fi
-
-  # Keep the overlay backing mounts accessible after switch_root and allow the
-  # initramfs root to be unmounted.
-  mkdir -p /newroot/.overlayfs/lower /newroot/.overlayfs/upperfs
-  if ! mount --move /overlayfs/lower /newroot/.overlayfs/lower; then
-    log "[initramfs] failed to move overlay lower mount"
-    exec sh
-  fi
-  if ! mount --move /overlayfs/upperfs /newroot/.overlayfs/upperfs; then
-    log "[initramfs] failed to move overlay upper mount"
-    exec sh
-  fi
+mkdir -p /newroot
+if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
+  log "[initramfs] failed to mount \${root_device}"
+  exec sh
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
