@@ -118,7 +118,9 @@ test("applyOutputChunk rejects exec on writable write() throw and switches to ig
 
   const badWritable = {
     write(_data: any) {
-      throw new Error("boom");
+      const err: any = new Error("boom");
+      err.code = "EPIPE";
+      throw err;
     },
     once(_event: string, _cb: (...args: any[]) => void) {
       // unused in this test
@@ -141,8 +143,15 @@ test("applyOutputChunk rejects exec on writable write() throw and switches to ig
 
   assert.equal(session.stdoutMode.mode, "ignore");
   assert.ok(session.outputWriteError);
+  assert.equal((session.outputWriteError as any).code, "EPIPE");
 
-  await assert.rejects(session.resultPromise, /stdout output write failed: boom/);
+  await assert.rejects(session.resultPromise, (err: any) => {
+    assert.match(String(err?.message ?? ""), /stdout output write failed: boom/);
+    assert.equal(err?.code, "EPIPE");
+    assert.ok(err?.cause);
+    assert.match(String(err.cause?.message ?? ""), /boom/);
+    return true;
+  });
 
   // Credits should be granted back to avoid deadlocks
   assert.ok(events.some((e) => e.stdout === 4096));

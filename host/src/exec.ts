@@ -131,7 +131,6 @@ export type ResolvedExecOutputMode =
   | { mode: "buffer" }
   | { mode: "ignore" }
   | { mode: "pipe" }
-  | { mode: "inherit" }
   | { mode: "writable"; stream: NodeJS.WritableStream };
 
 function asWritableStream(value: unknown): NodeJS.WritableStream | null {
@@ -601,22 +600,10 @@ export function createExecSession(
 
   const windowBytes = resolveWindowBytes(options.windowBytes);
 
-  // Normalize inherit here so ExecSession never needs to handle it specially.
-  // This also makes attach() behavior consistent even when createExecSession()
-  // is called directly in tests or internal tooling.
-  const stdoutMode: ResolvedExecOutputMode =
-    options.stdout.mode === "inherit"
-      ? { mode: "writable", stream: process.stdout }
-      : options.stdout;
-  const stderrMode: ResolvedExecOutputMode =
-    options.stderr.mode === "inherit"
-      ? { mode: "writable", stream: process.stderr }
-      : options.stderr;
-
   const session: ExecSession = {
     id,
-    stdoutMode,
-    stderrMode,
+    stdoutMode: options.stdout,
+    stderrMode: options.stderr,
     stdoutPipe: null,
     stderrPipe: null,
     stdoutChunks: [],
@@ -778,7 +765,18 @@ function failWritableOutput(
   const error = err instanceof Error ? err : new Error(String(err));
   if (!session.outputWriteError) {
     session.outputWriteError = error;
-    rejectExecSession(session, new Error(`${stream} output write failed: ${error.message}`));
+
+    const wrapped: any = new Error(`${stream} output write failed: ${error.message}`);
+    wrapped.cause = error;
+
+    // Preserve stable identifiers on common Node.js system errors (EPIPE, etc.)
+    const src: any = error as any;
+    const dst: any = wrapped as any;
+    for (const key of ["code", "errno", "syscall", "path", "address", "port", "dest"]) {
+      if (src && src[key] !== undefined) dst[key] = src[key];
+    }
+
+    rejectExecSession(session, wrapped);
   }
 }
 
@@ -906,5 +904,5 @@ export function applyOutputChunk(session: ExecSession, stream: "stdout" | "stder
     return;
   }
 
-  // inherit should not reach here (resolved to writable by VM)
+  // Unreachable: all output modes are normalized to buffer/ignore/pipe/writable.
 }

@@ -841,18 +841,8 @@ fi
     const stdinSetting = options.stdin;
     const stdinEnabled = stdinSetting !== undefined && stdinSetting !== false;
 
-    const resolvedStdout = resolveOutputMode(options.stdout, options.buffer, "stdout");
-    const resolvedStderr = resolveOutputMode(options.stderr, options.buffer, "stderr");
-
-    // Resolve inherit streams here (requires process stdout/stderr)
-    const stdout =
-      resolvedStdout.mode === "inherit"
-        ? ({ mode: "writable", stream: process.stdout } as const)
-        : resolvedStdout;
-    const stderr =
-      resolvedStderr.mode === "inherit"
-        ? ({ mode: "writable", stream: process.stderr } as const)
-        : resolvedStderr;
+    const stdout = resolveOutputMode(options.stdout, options.buffer, "stdout");
+    const stderr = resolveOutputMode(options.stderr, options.buffer, "stderr");
 
     const session = createExecSession(id, {
       stdinEnabled,

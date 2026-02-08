@@ -577,9 +577,11 @@ fn parseExecRequest(allocator: std.mem.Allocator, root: cbor.Value) !ExecRequest
     var stderr_window: u32 = 256 * 1024;
     if (cbor.getMapValue(payload, "stdout_window")) |val| {
         stdout_window = try expectU32(val);
+        if (stdout_window == 0) stdout_window = 256 * 1024;
     }
     if (cbor.getMapValue(payload, "stderr_window")) |val| {
         stderr_window = try expectU32(val);
+        if (stderr_window == 0) stderr_window = 256 * 1024;
     }
 
     return ExecRequest{
