@@ -54,7 +54,14 @@ export type ShadowProviderOptions = {
   denyWriteErrno?: number;
 };
 
-/** Convenience helper to turn a list of paths into a ShadowPredicate */
+/**
+ * Convenience helper to turn a list of shadowed paths into a ShadowPredicate
+ *
+ * The provided paths are interpreted as absolute VFS paths within the provider (rooted at `/`).
+ *
+ * Note: inputs are normalized with `normalizeVfsPath()`, so a relative string like
+ * `".env"` will be treated as `"/.env"` (it is not relative to the directory being accessed).
+ */
 export function createShadowPathPredicate(shadowPaths: string[]): ShadowPredicate {
   const normalized = Array.from(
     new Set(shadowPaths.map((p) => normalizeVfsPath(p)).filter((p) => p !== "/"))
