@@ -114,7 +114,7 @@ When using `pipe`, Gondolin does **not** buffer stdout/stderr into the final
 `ExecResult` (use the default buffered mode if you want captured output).
 
 Backpressure: in streaming modes (`stdout: "pipe"` / `stderr: "pipe"` or a writable),
-Gondolin uses a host↔guest credit window to keep buffered output bounded.
+Gondolin uses a host<->guest credit window to keep buffered output bounded.
 You can tune the window size with `windowBytes` (default: 256 KiB).
 
 If you need both streaming *and* to keep a copy of output, capture it yourself
@@ -161,7 +161,7 @@ console.log("exitCode:", result.exitCode);
 
 What `attach()` does:
 
-- wires `stdin` → guest process (requires `stdin: true`)
+- wires `stdin` -> guest process (requires `stdin: true`)
 - forwards `stdout`/`stderr` to the provided writable streams when they are set to `"pipe"`
 - if `stdout`/`stderr` are `"inherit"` (or a custom writable), output is already forwarded by the VM, and `attach()` only handles input/resize
 - enables raw mode on TTY stdin, and forwards terminal resize events to the guest (only meaningful with `pty: true`)
@@ -170,7 +170,7 @@ What `attach()` does:
 Notes:
 
 - `attach()` can only be called once per process.
-- Don’t simultaneously consume `proc.stdout` / async-iterate the process and call `attach()`; attaching will consume the pipe.
+- Don't simultaneously consume `proc.stdout` / async-iterate the process and call `attach()`; attaching will consume the pipe.
 
 #### Avoiding Large Buffers
 
@@ -227,6 +227,60 @@ await access.close();
 ```
 
 See also: [SSH access](./ssh.md).
+
+### `vm.enableIngress()`
+
+You can expose HTTP servers running inside the guest VM to the host machine.
+This feature is called "ingress" internally.
+
+When you call `vm.enableIngress()`:
+
+- the host starts a local HTTP gateway (default: `127.0.0.1:<ephemeral>`)
+- requests are routed based on `/etc/gondolin/listeners` inside the guest
+
+Ingress requires the default `/etc/gondolin` mount. If you disable VFS entirely
+(`vfs: null`) or override `/etc/gondolin` with a custom mount, `enableIngress()`
+will fail.
+
+Minimal example:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create();
+
+const ingress = await vm.enableIngress({
+  listenHost: "127.0.0.1",
+  listenPort: 0, // 0 picks an ephemeral port
+});
+
+console.log("Ingress:", ingress.url);
+
+// Route all requests to the guest server on port 8000
+vm.setIngressRoutes([{ prefix: "/", port: 8000, stripPrefix: true }]);
+
+// Start a server inside the guest
+// NOTE: the guest currently executes one command at a time; a long-running
+// vm.exec() (like a server) will block additional exec requests.
+const server = vm.exec(["/bin/sh", "-lc", "python -m http.server 8000"], {
+  buffer: false,
+  stdout: "inherit",
+  stderr: "inherit",
+});
+
+// Now you can reach the guest service from the host at ingress.url
+// ...
+
+await ingress.close();
+await vm.close();
+```
+
+You can read or replace the current routing table programmatically:
+
+- `vm.getIngressRoutes()`
+- `vm.setIngressRoutes(routes)`
+
+See also: [Listening](./listen.md).
 
 ## Network Policy
 

@@ -64,6 +64,7 @@ await vm.close();
 
 - [Workloads](./workloads.md): typical workloads and lifecycles
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
+- [Listening](./listen.md): expose guest HTTP servers on the host (ingress)
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
