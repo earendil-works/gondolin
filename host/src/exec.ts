@@ -139,7 +139,15 @@ export function resolveOutputMode(
   legacyBuffer: boolean | undefined,
   streamName: "stdout" | "stderr"
 ): ResolvedExecOutputMode {
-  if (value && typeof value === "object") {
+  // Treat custom Node writable streams as a dedicated output mode.
+  // Be strict here: many JS objects are typeof "object" but not writable.
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as any).write === "function" &&
+    typeof (value as any).end === "function" &&
+    (typeof (value as any).on === "function" || typeof (value as any).once === "function")
+  ) {
     return { mode: "writable", stream: value };
   }
 
@@ -259,13 +267,16 @@ export type ExecSession = {
   stdoutCredit: number;
   stderrCredit: number;
 
-  // Bytes received from the guest but not yet consumed downstream (pipe mode)
-  stdoutOutstanding: number;
-  stderrOutstanding: number;
-
   // Pending window update bytes to grant back to the guest
   stdoutUpdatePending: number;
   stderrUpdatePending: number;
+
+  // First output write error (writable mode)
+  outputWriteError: Error | null;
+
+  // Whether we already installed an error listener on the stdout/stderr writable
+  stdoutWritableErrorHooked: boolean;
+  stderrWritableErrorHooked: boolean;
 
   // Writable backpressure state (only for mode=writable)
   stdoutWritableBlocked: boolean;
@@ -369,47 +380,39 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
 
     const encoding = this.session.encoding;
 
-    type QueueItem = { stream: "stdout" | "stderr"; data: Buffer } | { done: true };
-    const queue: QueueItem[] = [];
-    let resolveWait: (() => void) | null = null;
-    let stdoutDone = false;
-    let stderrDone = false;
+    // Merge stdout/stderr without switching streams into flowing mode.
+    // Using Readable async iteration preserves credit-based backpressure.
+    const outIt = stdout[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+    const errIt = stderr[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
 
-    const push = (item: QueueItem) => {
-      queue.push(item);
-      if (resolveWait) {
-        resolveWait();
-        resolveWait = null;
-      }
-    };
+    let outNext: Promise<IteratorResult<Buffer>> | null = outIt.next();
+    let errNext: Promise<IteratorResult<Buffer>> | null = errIt.next();
 
-    stdout.on("data", (chunk: Buffer) => push({ stream: "stdout", data: chunk }));
-    stdout.on("end", () => {
-      stdoutDone = true;
-      if (stderrDone) push({ done: true });
-    });
+    while (outNext || errNext) {
+      const raced = await Promise.race([
+        outNext
+          ? outNext.then((r) => ({ stream: "stdout" as const, r }))
+          : new Promise<never>(() => {}),
+        errNext
+          ? errNext.then((r) => ({ stream: "stderr" as const, r }))
+          : new Promise<never>(() => {}),
+      ]);
 
-    stderr.on("data", (chunk: Buffer) => push({ stream: "stderr", data: chunk }));
-    stderr.on("end", () => {
-      stderrDone = true;
-      if (stdoutDone) push({ done: true });
-    });
-
-    while (true) {
-      if (queue.length === 0) {
-        await new Promise<void>((resolve) => {
-          resolveWait = resolve;
-        });
+      if (raced.r.done) {
+        if (raced.stream === "stdout") outNext = null;
+        else errNext = null;
+        continue;
       }
 
-      const item = queue.shift()!;
-      if ("done" in item) break;
-
+      const data = raced.r.value as Buffer;
       yield {
-        stream: item.stream,
-        data: item.data,
-        text: item.data.toString(encoding),
+        stream: raced.stream,
+        data,
+        text: data.toString(encoding),
       };
+
+      if (raced.stream === "stdout") outNext = outIt.next();
+      else errNext = errIt.next();
     }
   }
 
@@ -455,7 +458,18 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
 
     // In pipe mode we forward output here; in inherit/writable modes output is
     // already written by the VM output router.
-    const shouldForwardOutput = out != null && err != null;
+    const shouldForwardStdout = out != null;
+    const shouldForwardStderr = err != null;
+
+    if (!shouldForwardStdout && !shouldForwardStderr) {
+      const hasLiveOutput =
+        this.session.stdoutMode.mode === "writable" || this.session.stderrMode.mode === "writable";
+      if (!hasLiveOutput) {
+        throw new Error(
+          "attach() requires streaming output (set exec options stdout/stderr=\"pipe\" or \"inherit\")"
+        );
+      }
+    }
 
     const stderrOut = stderr ?? stdout;
 
@@ -483,8 +497,10 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
     stdin.on("data", onStdinData);
     stdin.on("end", onStdinEnd);
 
-    if (shouldForwardOutput) {
+    if (shouldForwardStdout) {
       out!.on("data", (chunk: Buffer) => stdout.write(chunk));
+    }
+    if (shouldForwardStderr) {
       err!.on("data", (chunk: Buffer) => stderrOut.write(chunk));
     }
 
@@ -533,10 +549,11 @@ export function createExecSession(
     windowBytes,
     stdoutCredit: windowBytes,
     stderrCredit: windowBytes,
-    stdoutOutstanding: 0,
-    stderrOutstanding: 0,
     stdoutUpdatePending: 0,
     stderrUpdatePending: 0,
+    outputWriteError: null,
+    stdoutWritableErrorHooked: false,
+    stderrWritableErrorHooked: false,
     stdoutWritableBlocked: false,
     stderrWritableBlocked: false,
     stdoutWritableBlockedBytes: 0,
@@ -659,6 +676,37 @@ export function rejectExecSession(session: ExecSession, error: Error): void {
   session.reject(error);
 }
 
+function failWritableOutput(
+  session: ExecSession,
+  stream: "stdout" | "stderr",
+  err: unknown,
+  extraBytes: number
+) {
+  // Switch to ignore mode to avoid deadlocks (we still grant credits back)
+  if (stream === "stdout") {
+    session.stdoutMode = { mode: "ignore" };
+    extraBytes += session.stdoutWritableBlockedBytes;
+    session.stdoutWritableBlockedBytes = 0;
+    session.stdoutWritableBlocked = false;
+  } else {
+    session.stderrMode = { mode: "ignore" };
+    extraBytes += session.stderrWritableBlockedBytes;
+    session.stderrWritableBlockedBytes = 0;
+    session.stderrWritableBlocked = false;
+  }
+
+  if (extraBytes > 0) {
+    queueWindowUpdate(session, stream, extraBytes);
+    flushWindowUpdates(session);
+  }
+
+  const error = err instanceof Error ? err : new Error(String(err));
+  if (!session.outputWriteError) {
+    session.outputWriteError = error;
+    rejectExecSession(session, new Error(`${stream} output write failed: ${error.message}`));
+  }
+}
+
 export function applyOutputChunk(session: ExecSession, stream: "stdout" | "stderr", data: Buffer) {
   // Update credit accounting (credits represent what the guest can still send)
   if (stream === "stdout") {
@@ -694,11 +742,38 @@ export function applyOutputChunk(session: ExecSession, stream: "stdout" | "stder
   if (mode.mode === "writable") {
     const w: any = mode.stream as any;
 
-    let ok = true;
+    // Observe async errors (e.g. EPIPE on a closed pipe)
+    if (typeof w.once === "function") {
+      if (stream === "stdout") {
+        if (!session.stdoutWritableErrorHooked) {
+          session.stdoutWritableErrorHooked = true;
+          w.once("error", (err: unknown) => {
+            const current = session.stdoutMode;
+            if (current.mode === "writable" && (current as any).stream === w) {
+              failWritableOutput(session, "stdout", err, 0);
+            }
+          });
+        }
+      } else {
+        if (!session.stderrWritableErrorHooked) {
+          session.stderrWritableErrorHooked = true;
+          w.once("error", (err: unknown) => {
+            const current = session.stderrMode;
+            if (current.mode === "writable" && (current as any).stream === w) {
+              failWritableOutput(session, "stderr", err, 0);
+            }
+          });
+        }
+      }
+    }
+
+    let ok: any;
     try {
       ok = w.write(data);
-    } catch {
-      ok = true;
+    } catch (err) {
+      // Treat as consumed to avoid guest deadlocks, but fail the exec.
+      failWritableOutput(session, stream, err, data.length);
+      return;
     }
 
     if (ok) {

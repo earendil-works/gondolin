@@ -62,9 +62,22 @@ test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeo
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
     const proc = vm.exec(["/bin/sh", "-c", "echo out; echo err 1>&2"], { stdout: "pipe", stderr: "pipe" });
-    const chunks: string[] = [];
 
-    for await (const chunk of proc.output()) {
+    const stdout = proc.stdout!;
+    const stderr = proc.stderr!;
+
+    // output() should not attach 'data' listeners (would force flowing mode and
+    // defeat credit-based backpressure by draining into an unbounded queue)
+    assert.equal(stdout.listenerCount("data"), 0);
+    assert.equal(stderr.listenerCount("data"), 0);
+
+    const chunks: string[] = [];
+    const iterable = proc.output();
+
+    assert.equal(stdout.listenerCount("data"), 0);
+    assert.equal(stderr.listenerCount("data"), 0);
+
+    for await (const chunk of iterable) {
       chunks.push(`${chunk.stream}:${chunk.text.trim()}`);
     }
 
