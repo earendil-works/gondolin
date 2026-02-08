@@ -1771,8 +1771,7 @@ export class SandboxServer extends EventEmitter {
       }
 
       if (!this.bridge.send(buildExecWindow(id, stdout, stderr))) {
-        // Queue still full; retry once the bridge drains.
-        this.scheduleExecWindowFlush();
+        // Queue still full; wait for bridge.onWritable to retry.
         return;
       }
 

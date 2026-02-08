@@ -187,8 +187,13 @@ class ExecPipeStream extends Readable {
     super({ highWaterMark: windowBytes });
   }
 
+  private bufferedBytes = 0;
   private consumedPending = 0;
   private consumedScheduled = false;
+
+  getBufferedBytes(): number {
+    return this.bufferedBytes;
+  }
 
   private queueConsumed(bytes: number) {
     if (!Number.isFinite(bytes) || bytes <= 0) return;
@@ -208,10 +213,18 @@ class ExecPipeStream extends Readable {
   }
 
   private consume(chunk: unknown) {
+    let bytes = 0;
     if (Buffer.isBuffer(chunk)) {
-      this.queueConsumed(chunk.length);
+      bytes = chunk.length;
     } else if (typeof chunk === "string") {
-      this.queueConsumed(Buffer.byteLength(chunk));
+      bytes = Buffer.byteLength(chunk);
+    }
+
+    if (bytes > 0) {
+      // Track bytes buffered independent of Node's readableLength, which can
+      // change units when setEncoding() is used.
+      this.bufferedBytes = Math.max(0, this.bufferedBytes - bytes);
+      this.queueConsumed(bytes);
     }
   }
 
@@ -244,6 +257,7 @@ class ExecPipeStream extends Readable {
   pushChunk(chunk: Buffer) {
     // We intentionally ignore the return value here; backpressure is enforced
     // by the credit window between host and guest.
+    this.bufferedBytes += chunk.length;
     this.push(chunk);
   }
 
@@ -597,7 +611,7 @@ function refillPipeWindow(session: ExecSession, stream: "stdout" | "stderr") {
   if (!pipe) return;
 
   // Keep guest credit aligned with host-side pipe buffering.
-  const targetCredit = Math.max(0, session.windowBytes - pipe.readableLength);
+  const targetCredit = Math.max(0, session.windowBytes - pipe.getBufferedBytes());
 
   const advertisedCredit =
     stream === "stdout"

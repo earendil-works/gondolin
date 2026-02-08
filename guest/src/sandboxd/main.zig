@@ -316,6 +316,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
     var stdout_credit: usize = max_stdout_credit;
     var stderr_credit: usize = max_stderr_credit;
 
+    // Once a pipe has hung up, poll() may keep reporting POLLHUP even if
+    // .events=0. If we're currently not allowed to read (no credits/backpressure),
+    // keep it out of the poll set to avoid a tight wakeup loop.
+    var stdout_hup_seen = false;
+    var stderr_hup_seen = false;
+
     while (true) {
         if (status != null and !stdout_open and !stderr_open and !writer.hasPending()) break;
 
@@ -328,16 +334,22 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
         const backpressure = writer.pendingBytes() >= max_buffered;
 
         if (stdout_open) {
-            stdout_index = nfds;
-            const events: i16 = if (!backpressure and stdout_credit > 0) std.posix.POLL.IN else 0;
-            pollfds[nfds] = .{ .fd = stdout_fd.?, .events = events, .revents = 0 };
-            nfds += 1;
+            const can_read = !backpressure and stdout_credit > 0;
+            if (can_read or !stdout_hup_seen) {
+                stdout_index = nfds;
+                const events: i16 = if (can_read) std.posix.POLL.IN else 0;
+                pollfds[nfds] = .{ .fd = stdout_fd.?, .events = events, .revents = 0 };
+                nfds += 1;
+            }
         }
         if (stderr_open) {
-            stderr_index = nfds;
-            const events: i16 = if (!backpressure and stderr_credit > 0) std.posix.POLL.IN else 0;
-            pollfds[nfds] = .{ .fd = stderr_fd.?, .events = events, .revents = 0 };
-            nfds += 1;
+            const can_read = !backpressure and stderr_credit > 0;
+            if (can_read or !stderr_hup_seen) {
+                stderr_index = nfds;
+                const events: i16 = if (can_read) std.posix.POLL.IN else 0;
+                pollfds[nfds] = .{ .fd = stderr_fd.?, .events = events, .revents = 0 };
+                nfds += 1;
+            }
         }
 
         // Always poll for input so we can receive exec_window updates.
@@ -360,6 +372,7 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
 
         if (stdout_index) |sindex| {
             const revents = pollfds[sindex].revents;
+            if ((revents & std.posix.POLL.HUP) != 0) stdout_hup_seen = true;
 
             if (!backpressure and stdout_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stdout_credit);
@@ -403,6 +416,7 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
 
         if (stderr_index) |sindex| {
             const revents = pollfds[sindex].revents;
+            if ((revents & std.posix.POLL.HUP) != 0) stderr_hup_seen = true;
 
             if (!backpressure and stderr_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stderr_credit);
