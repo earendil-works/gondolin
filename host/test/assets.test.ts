@@ -170,6 +170,9 @@ test("assets: downloadAndExtract downloads to temp file and cleans it up", async
   try {
     const bundleName = __test.getAssetBundleName();
 
+    // Suppress progress output from downloadAndExtract.
+    mock.method(process.stderr, "write", () => true);
+
     // Mock fetch to stream a few bytes.
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -209,6 +212,9 @@ test("assets: downloadAndExtract downloads to temp file and cleans it up", async
 test("assets: downloadAndExtract throws on non-ok response", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-assets-download-"));
   try {
+    // Suppress progress output from downloadAndExtract.
+    mock.method(process.stderr, "write", () => true);
+
     (globalThis as any).fetch = mock.fn(async () => {
       return new Response("no", { status: 404, statusText: "Not Found" });
     });
