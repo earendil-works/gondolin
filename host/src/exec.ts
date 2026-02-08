@@ -356,6 +356,7 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
       throw new Error("already attached");
     }
     this.attached = true;
+    this.session.iterating = true;
 
     const stderrOut = stderr ?? stdout;
 

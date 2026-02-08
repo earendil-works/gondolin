@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
 
 import { closeVm, withVm, shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture";
@@ -95,6 +95,33 @@ test("shell runs commands without attaching", { skip: skipVmTests, timeout: time
     await vm.start();
     const result = await vm.shell({ command: ["sh", "-c", "echo shell-ok"], attach: false });
     assert.equal(result.stdout.trim(), "shell-ok");
+  });
+});
+
+test("attach mode does not buffer output", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    // Generate ~2 MB of output to make double-buffering obvious
+    const proc = vm.exec("dd if=/dev/zero bs=1024 count=2048 2>/dev/null | base64", {
+      stdin: true,
+    });
+
+    // Create mock stdio streams that attach() accepts
+    const fakeStdin = new PassThrough() as unknown as NodeJS.ReadStream;
+    const fakeStdout = new PassThrough() as unknown as NodeJS.WriteStream;
+
+    let totalBytes = 0;
+    fakeStdout.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length;
+    });
+
+    proc.attach(fakeStdin, fakeStdout);
+
+    const result = await proc;
+    assert.equal(result.exitCode, 0);
+    assert.ok(totalBytes > 0, "should have received output via attach stream");
+    assert.equal(result.stdout, "", "attach should not double-buffer stdout");
+    assert.equal(result.stderr, "", "attach should not double-buffer stderr");
   });
 });
 
