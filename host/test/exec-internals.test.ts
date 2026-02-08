@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
 import {
@@ -13,8 +12,7 @@ import {
 
 test("resolveOutputMode only treats objects with write() as writable", () => {
   const buf = Buffer.from("x");
-  const resolved = resolveOutputMode(buf as any, undefined, "stdout");
-  assert.equal(resolved.mode, "buffer");
+  assert.throws(() => resolveOutputMode(buf as any, undefined, "stdout"));
 
   const writableLike = {
     write(_chunk: any) {},
@@ -109,24 +107,38 @@ test("attach forwards stdout when only stdout is piped", async () => {
   const stdin = new PassThrough() as any;
   stdin.isTTY = false;
 
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
 
-  const stdoutData = once(stdout, "data") as Promise<[Buffer]>;
+  const stdout = new Writable({
+    write(chunk, _enc, cb) {
+      stdoutChunks.push(Buffer.from(chunk));
+      cb();
+    },
+  }) as any;
+  stdout.isTTY = false;
 
-  proc.attach(stdin, stdout as any, stderr as any);
+  const stderr = new Writable({
+    write(chunk, _enc, cb) {
+      stderrChunks.push(Buffer.from(chunk));
+      cb();
+    },
+  }) as any;
+  stderr.isTTY = false;
+
+  proc.attach(stdin, stdout, stderr);
 
   applyOutputChunk(session, "stdout", Buffer.from("hello\n"));
   applyOutputChunk(session, "stderr", Buffer.from("ignored\n"));
 
   finishExecSession(session, 0);
   await proc;
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
-  const [chunk] = await stdoutData;
-  assert.equal(chunk.toString("utf8"), "hello\n");
+  assert.equal(Buffer.concat(stdoutChunks).toString("utf8"), "hello\n");
 
   // stderr is ignore, should not be forwarded
-  assert.equal(stderr.readableLength, 0);
+  assert.equal(Buffer.concat(stderrChunks).length, 0);
 });
 
 test("attach forwards stderr when only stderr is piped", async () => {
@@ -152,22 +164,36 @@ test("attach forwards stderr when only stderr is piped", async () => {
   const stdin = new PassThrough() as any;
   stdin.isTTY = false;
 
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
 
-  const stderrData = once(stderr, "data") as Promise<[Buffer]>;
+  const stdout = new Writable({
+    write(chunk, _enc, cb) {
+      stdoutChunks.push(Buffer.from(chunk));
+      cb();
+    },
+  }) as any;
+  stdout.isTTY = false;
 
-  proc.attach(stdin, stdout as any, stderr as any);
+  const stderr = new Writable({
+    write(chunk, _enc, cb) {
+      stderrChunks.push(Buffer.from(chunk));
+      cb();
+    },
+  }) as any;
+  stderr.isTTY = false;
+
+  proc.attach(stdin, stdout, stderr);
 
   applyOutputChunk(session, "stdout", Buffer.from("ignored\n"));
   applyOutputChunk(session, "stderr", Buffer.from("oops\n"));
 
   finishExecSession(session, 0);
   await proc;
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
-  const [chunk] = await stderrData;
-  assert.equal(chunk.toString("utf8"), "oops\n");
+  assert.equal(Buffer.concat(stderrChunks).toString("utf8"), "oops\n");
 
   // stdout is ignore, should not be forwarded
-  assert.equal(stdout.readableLength, 0);
+  assert.equal(Buffer.concat(stdoutChunks).length, 0);
 });

@@ -332,9 +332,44 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
         var virtio_index: ?usize = null;
 
         const backpressure = writer.pendingBytes() >= max_buffered;
+        const stdout_can_read = !backpressure and stdout_credit > 0;
+        const stderr_can_read = !backpressure and stderr_credit > 0;
+
+        // If we've already observed POLLHUP but cannot read right now (no credits
+        // or host-side backpressure), re-check whether the fd is drained.
+        //
+        // We keep hung-up fds out of the poll set in this state to avoid tight
+        // wakeup loops, so we need this periodic check to ensure exec completion
+        // still happens.
+        if (stdout_open and stdout_hup_seen and !stdout_can_read) {
+            if (stdout_fd) |fd| {
+                if (bytesAvailable(fd)) |avail| {
+                    if (avail == 0) {
+                        stdout_open = false;
+                        std.posix.close(fd);
+                        stdout_fd = null;
+                        if (use_pty and stdin_fd != null) {
+                            stdin_fd = null;
+                            stdin_open = false;
+                        }
+                    }
+                }
+            }
+        }
+        if (stderr_open and stderr_hup_seen and !stderr_can_read) {
+            if (stderr_fd) |fd| {
+                if (bytesAvailable(fd)) |avail| {
+                    if (avail == 0) {
+                        stderr_open = false;
+                        std.posix.close(fd);
+                        stderr_fd = null;
+                    }
+                }
+            }
+        }
 
         if (stdout_open) {
-            const can_read = !backpressure and stdout_credit > 0;
+            const can_read = stdout_can_read;
             if (can_read or !stdout_hup_seen) {
                 stdout_index = nfds;
                 const events: i16 = if (can_read) std.posix.POLL.IN else 0;
@@ -343,7 +378,7 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
             }
         }
         if (stderr_open) {
-            const can_read = !backpressure and stderr_credit > 0;
+            const can_read = stderr_can_read;
             if (can_read or !stderr_hup_seen) {
                 stderr_index = nfds;
                 const events: i16 = if (can_read) std.posix.POLL.IN else 0;
@@ -401,13 +436,15 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                 // If we are not allowed to read (no credits / backpressure) we still want to
                 // observe EOF promptly when the pipe is drained.
                 if (stdout_fd) |fd| {
-                    if (bytesAvailable(fd) == 0) {
-                        stdout_open = false;
-                        std.posix.close(fd);
-                        stdout_fd = null;
-                        if (use_pty and stdin_fd != null) {
-                            stdin_fd = null;
-                            stdin_open = false;
+                    if (bytesAvailable(fd)) |avail| {
+                        if (avail == 0) {
+                            stdout_open = false;
+                            std.posix.close(fd);
+                            stdout_fd = null;
+                            if (use_pty and stdin_fd != null) {
+                                stdin_fd = null;
+                                stdin_open = false;
+                            }
                         }
                     }
                 }
@@ -434,10 +471,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                 }
             } else if ((revents & std.posix.POLL.HUP) != 0) {
                 if (stderr_fd) |fd| {
-                    if (bytesAvailable(fd) == 0) {
-                        stderr_open = false;
-                        std.posix.close(fd);
-                        stderr_fd = null;
+                    if (bytesAvailable(fd)) |avail| {
+                        if (avail == 0) {
+                            stderr_open = false;
+                            std.posix.close(fd);
+                            stderr_fd = null;
+                        }
                     }
                 }
             }
@@ -573,9 +612,21 @@ fn handleVirtioInput(
     }
 }
 
-fn bytesAvailable(fd: std.posix.fd_t) usize {
+fn bytesAvailable(fd: std.posix.fd_t) ?usize {
     var n: c_int = 0;
-    if (c.ioctl(fd, c.FIONREAD, &n) != 0) return 1;
+
+    // ioctl(FIONREAD) can fail transiently (e.g. EINTR).  If it fails we return
+    // null (unknown) rather than guessing drained/not-drained, to avoid output
+    // truncation.
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        const rc = c.ioctl(fd, c.FIONREAD, &n);
+        if (rc == 0) break;
+        const err = std.posix.errno(rc);
+        if (err == .INTR and attempts < 3) continue;
+        return null;
+    }
+
     if (n <= 0) return 0;
     return @intCast(n);
 }

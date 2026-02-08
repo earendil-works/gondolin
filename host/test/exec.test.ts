@@ -106,8 +106,17 @@ test("exec lines iterator yields stdout lines", { skip: skipVmTests, timeout: ti
 test("shell runs commands without attaching", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const result = await vm.shell({ command: ["sh", "-c", "echo shell-ok"], attach: false });
-    assert.equal(result.stdout.trim(), "shell-ok");
+
+    const proc = vm.shell({ command: ["sh", "-c", "echo shell-ok"], attach: false });
+
+    let seen = "";
+    for await (const chunk of proc) {
+      seen += chunk;
+    }
+
+    const result = await proc;
+    assert.equal(result.exitCode, 0);
+    assert.equal(seen.trim(), "shell-ok");
   });
 });
 

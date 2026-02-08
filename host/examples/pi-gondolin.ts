@@ -161,6 +161,8 @@ function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
 					cwd: guestCwd,
 					signal: ac.signal,
 					env: sanitizeEnv(env),
+					stdout: "pipe",
+					stderr: "pipe",
 				});
 
 				for await (const chunk of proc.output()) {

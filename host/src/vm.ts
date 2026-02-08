@@ -531,7 +531,10 @@ export class VM {
             stdout: "inherit" as const,
             stderr: "inherit" as const,
           }
-        : {}),
+        : {
+            stdout: "pipe" as const,
+            stderr: "pipe" as const,
+          }),
     });
 
     if (shouldAttach) {

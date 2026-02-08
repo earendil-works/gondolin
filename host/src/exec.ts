@@ -150,6 +150,16 @@ export function resolveOutputMode(
   legacyBuffer: boolean | undefined,
   streamName: "stdout" | "stderr"
 ): ResolvedExecOutputMode {
+  // If the user didn't pass an explicit mode, default based on legacy buffer option.
+  if (value === undefined) {
+    const buffer = legacyBuffer ?? true;
+    if (buffer) return { mode: "buffer" };
+
+    // If output is not being buffered, default to ignore. This avoids accidental deadlocks
+    // where the guest blocks on output because the caller didn't consume a pipe.
+    return { mode: "ignore" };
+  }
+
   // Treat custom Node writable streams as a dedicated output mode.
   // Detection is best-effort; if it quacks like a writable, we accept it.
   const writable = asWritableStream(value);
@@ -157,18 +167,15 @@ export function resolveOutputMode(
     return { mode: "writable", stream: writable };
   }
 
-  const mode = value;
-  if (mode === "buffer" || mode === "pipe" || mode === "inherit" || mode === "ignore") {
-    return { mode };
+  if (value === "buffer" || value === "pipe" || value === "inherit" || value === "ignore") {
+    return { mode: value };
   }
 
-  // default based on legacy buffer option
-  const buffer = legacyBuffer ?? true;
-  if (buffer) return { mode: "buffer" };
-
-  // If output is not being buffered, default to ignore. This avoids accidental deadlocks
-  // where the guest blocks on output because the caller didn't consume a pipe.
-  return { mode: "ignore" };
+  // Fail-fast on invalid explicit values; otherwise misconfiguration silently changes
+  // buffering/backpressure behavior.
+  throw new Error(
+    `invalid exec ${streamName} option: ${String(value)} (expected "buffer"|"pipe"|"inherit"|"ignore" or a writable stream)`
+  );
 }
 
 export function resolveWindowBytes(value: number | undefined): number {
@@ -527,16 +534,27 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
     stdin.on("data", onStdinData);
     stdin.on("end", onStdinEnd);
 
+    // Use `pipe()` so downstream backpressure (write() => false) pauses the
+    // source stream and stays within our credit window instead of buffering
+    // unboundedly in the destination writable.
     if (shouldForwardStdout) {
-      out!.on("data", (chunk: Buffer) => stdout.write(chunk));
+      out!.pipe(stdout, { end: false });
+      // Ensure already-buffered chunks are flushed promptly.
+      out!.resume();
     }
     if (shouldForwardStderr) {
-      err!.on("data", (chunk: Buffer) => stderrOut.write(chunk));
+      err!.pipe(stderrOut, { end: false });
+      err!.resume();
     }
 
     this.session.resultPromise.finally(() => {
       stdin.off("data", onStdinData);
       stdin.off("end", onStdinEnd);
+
+      // Note: do not manually unpipe here. Readable.pipe() cleans itself up on
+      // stream end. Unpiping eagerly can drop buffered output that has not yet
+      // been flushed to the destination.
+
       if (stdout.isTTY) {
         stdout.off("resize", onResize);
       }
