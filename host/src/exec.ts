@@ -168,18 +168,63 @@ export function resolveWindowBytes(value: number | undefined): number {
 class ExecPipeStream extends Readable {
   constructor(
     windowBytes: number,
-    private readonly onConsumed: (bytes: number) => void
+    private readonly onConsumed: () => void
   ) {
     super({ highWaterMark: windowBytes });
+  }
 
-    // When the consumer actually receives data, we can grant credits back.
-    this.on("data", (chunk: Buffer) => {
-      this.onConsumed(chunk.length);
+  private consumedPending = 0;
+  private consumedScheduled = false;
+
+  private queueConsumed(bytes: number) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return;
+    this.consumedPending += bytes;
+
+    if (this.consumedScheduled) return;
+    this.consumedScheduled = true;
+
+    // Defer credit replenishment to avoid re-entrancy and allow pause()/resume()
+    // to take effect before we grant more credits.
+    queueMicrotask(() => {
+      this.consumedScheduled = false;
+      const n = this.consumedPending;
+      this.consumedPending = 0;
+      if (n > 0) this.onConsumed();
     });
   }
 
+  private consume(chunk: unknown) {
+    if (Buffer.isBuffer(chunk)) {
+      this.queueConsumed(chunk.length);
+    } else if (typeof chunk === "string") {
+      this.queueConsumed(Buffer.byteLength(chunk));
+    }
+  }
+
+  override emit(eventName: string | symbol, ...args: any[]): boolean {
+    // Intercept actual delivery of data in flowing mode without installing a
+    // 'data' listener (which would force flowing mode early and can drop output).
+    if (eventName === "data") {
+      this.consume(args[0]);
+    }
+    return super.emit(eventName as any, ...args);
+  }
+
+  override read(size?: number): any {
+    const chunk = super.read(size as any);
+
+    // In non-flowing mode, reading does not emit 'data', so we need to account
+    // credits here.
+    const state: any = (this as any)._readableState;
+    if (chunk && !state?.flowing) {
+      this.consume(chunk);
+    }
+
+    return chunk;
+  }
+
   _read(_size: number) {
-    // No-op: credits are replenished on actual consumption ('data').
+    // No-op: backpressure is enforced by the host↔guest credit window.
   }
 
   pushChunk(chunk: Buffer) {
@@ -213,6 +258,10 @@ export type ExecSession = {
   // Remaining credits granted to the guest in `bytes`
   stdoutCredit: number;
   stderrCredit: number;
+
+  // Bytes received from the guest but not yet consumed downstream (pipe mode)
+  stdoutOutstanding: number;
+  stderrOutstanding: number;
 
   // Pending window update bytes to grant back to the guest
   stdoutUpdatePending: number;
@@ -484,6 +533,8 @@ export function createExecSession(
     windowBytes,
     stdoutCredit: windowBytes,
     stderrCredit: windowBytes,
+    stdoutOutstanding: 0,
+    stderrOutstanding: 0,
     stdoutUpdatePending: 0,
     stderrUpdatePending: 0,
     stdoutWritableBlocked: false,
@@ -503,17 +554,37 @@ export function createExecSession(
   };
 
   if (session.stdoutMode.mode === "pipe") {
-    session.stdoutPipe = new ExecPipeStream(windowBytes, (bytes) => {
-      queueWindowUpdate(session, "stdout", bytes);
+    session.stdoutPipe = new ExecPipeStream(windowBytes, () => {
+      refillPipeWindow(session, "stdout");
     });
   }
   if (session.stderrMode.mode === "pipe") {
-    session.stderrPipe = new ExecPipeStream(windowBytes, (bytes) => {
-      queueWindowUpdate(session, "stderr", bytes);
+    session.stderrPipe = new ExecPipeStream(windowBytes, () => {
+      refillPipeWindow(session, "stderr");
     });
   }
 
   return session;
+}
+
+function refillPipeWindow(session: ExecSession, stream: "stdout" | "stderr") {
+  if (!session.sendWindowUpdate) return;
+
+  const pipe = stream === "stdout" ? session.stdoutPipe : session.stderrPipe;
+  if (!pipe) return;
+
+  // Keep guest credit aligned with host-side pipe buffering.
+  const targetCredit = Math.max(0, session.windowBytes - pipe.readableLength);
+
+  const advertisedCredit =
+    stream === "stdout"
+      ? session.stdoutCredit + session.stdoutUpdatePending
+      : session.stderrCredit + session.stderrUpdatePending;
+
+  const delta = targetCredit - advertisedCredit;
+  if (delta > 0) {
+    queueWindowUpdate(session, stream, delta);
+  }
 }
 
 function updateThreshold(session: ExecSession): number {
@@ -616,34 +687,12 @@ export function applyOutputChunk(session: ExecSession, stream: "stdout" | "stder
   if (mode.mode === "pipe") {
     const pipe = stream === "stdout" ? session.stdoutPipe : session.stderrPipe;
     pipe?.pushChunk(data);
-    // Credits are replenished when the consumer actually receives data ('data').
+    // Credits are replenished based on host-side pipe buffering.
     return;
   }
 
   if (mode.mode === "writable") {
     const w: any = mode.stream as any;
-
-    // Hook drain once
-    if (!w.__gondolinDrainHooked && typeof w.on === "function") {
-      w.__gondolinDrainHooked = true;
-      w.on("drain", () => {
-        if (stream === "stdout") {
-          if (session.stdoutWritableBlockedBytes > 0) {
-            const n = session.stdoutWritableBlockedBytes;
-            session.stdoutWritableBlockedBytes = 0;
-            session.stdoutWritableBlocked = false;
-            queueWindowUpdate(session, "stdout", n);
-          }
-        } else {
-          if (session.stderrWritableBlockedBytes > 0) {
-            const n = session.stderrWritableBlockedBytes;
-            session.stderrWritableBlockedBytes = 0;
-            session.stderrWritableBlocked = false;
-            queueWindowUpdate(session, "stderr", n);
-          }
-        }
-      });
-    }
 
     let ok = true;
     try {
@@ -654,14 +703,53 @@ export function applyOutputChunk(session: ExecSession, stream: "stdout" | "stder
 
     if (ok) {
       queueWindowUpdate(session, stream, data.length);
-    } else {
-      // Backpressured: don't grant credits back until drain.
-      if (stream === "stdout") {
+      return;
+    }
+
+    // Backpressured: don't grant credits back until drain.
+    if (stream === "stdout") {
+      session.stdoutWritableBlockedBytes += data.length;
+      if (!session.stdoutWritableBlocked) {
         session.stdoutWritableBlocked = true;
-        session.stdoutWritableBlockedBytes += data.length;
-      } else {
+        if (typeof w.once === "function") {
+          w.once("drain", () => {
+            const n = session.stdoutWritableBlockedBytes;
+            session.stdoutWritableBlockedBytes = 0;
+            session.stdoutWritableBlocked = false;
+            if (n > 0) {
+              queueWindowUpdate(session, "stdout", n);
+              flushWindowUpdates(session);
+            }
+          });
+        } else {
+          // Unknown writable implementation: avoid deadlocking by treating as consumed.
+          queueWindowUpdate(session, "stdout", session.stdoutWritableBlockedBytes);
+          session.stdoutWritableBlockedBytes = 0;
+          session.stdoutWritableBlocked = false;
+          flushWindowUpdates(session);
+        }
+      }
+    } else {
+      session.stderrWritableBlockedBytes += data.length;
+      if (!session.stderrWritableBlocked) {
         session.stderrWritableBlocked = true;
-        session.stderrWritableBlockedBytes += data.length;
+        if (typeof w.once === "function") {
+          w.once("drain", () => {
+            const n = session.stderrWritableBlockedBytes;
+            session.stderrWritableBlockedBytes = 0;
+            session.stderrWritableBlocked = false;
+            if (n > 0) {
+              queueWindowUpdate(session, "stderr", n);
+              flushWindowUpdates(session);
+            }
+          });
+        } else {
+          // Unknown writable implementation: avoid deadlocking by treating as consumed.
+          queueWindowUpdate(session, "stderr", session.stderrWritableBlockedBytes);
+          session.stderrWritableBlockedBytes = 0;
+          session.stderrWritableBlocked = false;
+          flushWindowUpdates(session);
+        }
       }
     }
 
