@@ -308,6 +308,10 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
     var buffer: [8192]u8 = undefined;
 
     const max_buffered: usize = 256 * 1024;
+    const max_credit: usize = 16 * 1024 * 1024;
+
+    var stdout_credit: usize = @intCast(req.stdout_window);
+    var stderr_credit: usize = @intCast(req.stderr_window);
 
     while (true) {
         if (status != null and !stdout_open and !stderr_open and !writer.hasPending()) break;
@@ -320,19 +324,19 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
 
         const backpressure = writer.pendingBytes() >= max_buffered;
 
-        if (stdout_open and !backpressure) {
+        if (stdout_open and !backpressure and stdout_credit > 0) {
             stdout_index = nfds;
             pollfds[nfds] = .{ .fd = stdout_fd.?, .events = std.posix.POLL.IN, .revents = 0 };
             nfds += 1;
         }
-        if (stderr_open and !backpressure) {
+        if (stderr_open and !backpressure and stderr_credit > 0) {
             stderr_index = nfds;
             pollfds[nfds] = .{ .fd = stderr_fd.?, .events = std.posix.POLL.IN, .revents = 0 };
             nfds += 1;
         }
 
-        var virtio_events: i16 = 0;
-        if (stdin_open) virtio_events |= std.posix.POLL.IN;
+        // Always poll for input so we can receive exec_window updates.
+        var virtio_events: i16 = std.posix.POLL.IN;
         if (writer.hasPending()) virtio_events |= std.posix.POLL.OUT;
         if (virtio_events != 0) {
             virtio_index = nfds;
@@ -352,7 +356,8 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
         if (stdout_index) |sindex| {
             const revents = pollfds[sindex].revents;
             if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
-                const n = std.posix.read(stdout_fd.?, buffer[0..]) catch |err| blk: {
+                const max_read: usize = @min(buffer.len, stdout_credit);
+                const n = std.posix.read(stdout_fd.?, buffer[0..max_read]) catch |err| blk: {
                     if (use_pty and err == error.InputOutput) {
                         break :blk 0;
                     }
@@ -367,6 +372,7 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                         stdin_open = false;
                     }
                 } else {
+                    stdout_credit -= n;
                     const payload = try protocol.encodeExecOutput(allocator, req.id, "stdout", buffer[0..n]);
                     defer allocator.free(payload);
                     try writer.enqueue(payload);
@@ -378,12 +384,14 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
         if (stderr_index) |sindex| {
             const revents = pollfds[sindex].revents;
             if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
-                const n = try std.posix.read(stderr_fd.?, buffer[0..]);
+                const max_read: usize = @min(buffer.len, stderr_credit);
+                const n = try std.posix.read(stderr_fd.?, buffer[0..max_read]);
                 if (n == 0) {
                     stderr_open = false;
                     if (stderr_fd) |fd| std.posix.close(fd);
                     stderr_fd = null;
                 } else {
+                    stderr_credit -= n;
                     const payload = try protocol.encodeExecOutput(allocator, req.id, "stderr", buffer[0..n]);
                     defer allocator.free(payload);
                     try writer.enqueue(payload);
@@ -397,16 +405,35 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
             if ((revents & std.posix.POLL.OUT) != 0) {
                 try writer.flush(virtio_fd);
             }
-            if (stdin_open and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
-                stdin_open = handleStdin(allocator, &stdin_reader, virtio_fd, stdin_fd.?, req.id, close_stdin_on_eof, pty_master) catch |err| blk: {
-                    log.err("stdin handling failed: {s}", .{@errorName(err)});
-                    if (close_stdin_on_eof) {
-                        if (stdin_fd) |fd| std.posix.close(fd);
+            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                handleVirtioInput(
+                    allocator,
+                    &stdin_reader,
+                    virtio_fd,
+                    stdin_fd,
+                    &stdin_open,
+                    req.id,
+                    close_stdin_on_eof,
+                    pty_master,
+                    &stdout_credit,
+                    &stderr_credit,
+                    max_credit,
+                ) catch |err| {
+                    log.err("virtio input handling failed: {s}", .{@errorName(err)});
+                    if (close_stdin_on_eof and stdin_fd != null) {
+                        std.posix.close(stdin_fd.?);
                         stdin_fd = null;
+                        stdin_open = false;
                     }
-                    break :blk false;
                 };
-                if (!stdin_open and close_stdin_on_eof) stdin_fd = null;
+
+                // If we were using a PTY, stdout/stdin share the master fd.
+                if (use_pty and stdin_fd != null and !stdin_open) {
+                    stdin_fd = null;
+                }
+                if (!use_pty and close_stdin_on_eof and stdin_fd != null and !stdin_open) {
+                    stdin_fd = null;
+                }
             }
         }
 
@@ -433,20 +460,27 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
     try flushWriter(virtio_fd, &writer);
 }
 
-fn handleStdin(
+fn handleVirtioInput(
     allocator: std.mem.Allocator,
     reader: *protocol.FrameReader,
     virtio_fd: std.posix.fd_t,
-    stdin_fd: std.posix.fd_t,
+    stdin_fd: ?std.posix.fd_t,
+    stdin_open: *bool,
     expected_id: u32,
     close_on_eof: bool,
     pty_master: ?std.posix.fd_t,
-) !bool {
+    stdout_credit: *usize,
+    stderr_credit: *usize,
+    max_credit: usize,
+) !void {
     while (true) {
         const frame = reader.readFrame(virtio_fd) catch |err| {
             if (err == error.EndOfStream) {
-                std.posix.close(stdin_fd);
-                return false;
+                if (stdin_fd) |fd| {
+                    std.posix.close(fd);
+                }
+                stdin_open.* = false;
+                return;
             }
             return err;
         };
@@ -458,17 +492,19 @@ fn handleStdin(
         const message = try protocol.decodeInputMessage(allocator, frame_buf, expected_id);
         switch (message) {
             .stdin => |data| {
-                if (data.data.len > 0) {
-                    try protocol.writeAll(stdin_fd, data.data);
-                }
-                if (data.eof) {
-                    if (close_on_eof) {
-                        std.posix.close(stdin_fd);
-                    } else {
-                        const eot: [1]u8 = .{4};
-                        _ = protocol.writeAll(stdin_fd, &eot) catch {};
+                if (stdin_fd) |fd| {
+                    if (data.data.len > 0) {
+                        try protocol.writeAll(fd, data.data);
                     }
-                    return false;
+                    if (data.eof) {
+                        if (close_on_eof) {
+                            std.posix.close(fd);
+                        } else {
+                            const eot: [1]u8 = .{4};
+                            _ = protocol.writeAll(fd, &eot) catch {};
+                        }
+                        stdin_open.* = false;
+                    }
                 }
             },
             .resize => |size| {
@@ -476,9 +512,18 @@ fn handleStdin(
                     applyPtyResize(fd, size.rows, size.cols);
                 }
             },
+            .window => |win| {
+                if (win.stdout > 0) {
+                    const add: usize = @intCast(win.stdout);
+                    stdout_credit.* = @min(max_credit, stdout_credit.* + add);
+                }
+                if (win.stderr > 0) {
+                    const add: usize = @intCast(win.stderr);
+                    stderr_credit.* = @min(max_credit, stderr_credit.* + add);
+                }
+            },
         }
     }
-    return true;
 }
 
 fn applyPtyResize(fd: std.posix.fd_t, rows: u32, cols: u32) void {

@@ -14,6 +14,7 @@ import {
   buildExecRequest,
   buildPtyResize,
   buildStdinData,
+  buildExecWindow,
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol";
@@ -22,6 +23,7 @@ import {
   ClientMessage,
   ErrorMessage,
   ExecCommandMessage,
+  ExecWindowCommandMessage,
   PtyResizeCommandMessage,
   StdinCommandMessage,
   encodeOutputFrame,
@@ -1495,6 +1497,8 @@ export class SandboxServer extends EventEmitter {
       this.handleStdin(client, message);
     } else if (message.type === "pty_resize") {
       this.handlePtyResize(client, message);
+    } else if (message.type === "exec_window") {
+      this.handleExecWindow(client, message);
     } else if (message.type === "lifecycle") {
       if (message.action === "restart") {
         void this.controller.restart();
@@ -1586,6 +1590,8 @@ export class SandboxServer extends EventEmitter {
       cwd: message.cwd,
       stdin: message.stdin ?? false,
       pty: message.pty ?? false,
+      stdout_window: message.stdout_window,
+      stderr_window: message.stderr_window,
     };
 
     if (!this.bridge.send(buildExecRequest(message.id, payload))) {
@@ -1708,6 +1714,47 @@ export class SandboxServer extends EventEmitter {
         code: "queue_full",
         message: "virtio bridge queue exceeded",
       });
+    }
+  }
+
+  private handleExecWindow(client: SandboxClient, message: ExecWindowCommandMessage) {
+    if (!isValidRequestId(message.id)) {
+      sendError(client, {
+        type: "error",
+        code: "invalid_request",
+        message: "exec_window requires a uint32 id",
+      });
+      return;
+    }
+
+    if (!this.inflight.has(message.id)) {
+      // ignore (the exec may have exited)
+      return;
+    }
+
+    const stdout = message.stdout;
+    const stderr = message.stderr;
+
+    const valid = (v: unknown) =>
+      v === undefined ||
+      (typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 0xffffffff);
+
+    if (!valid(stdout) || !valid(stderr)) {
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "invalid_request",
+        message: "exec_window requires positive integer credits",
+      });
+      return;
+    }
+
+    if (!stdout && !stderr) return;
+
+    if (!this.bridge.send(buildExecWindow(message.id, stdout, stderr))) {
+      // If the queue is full, do not error out - this is a best-effort performance feature.
+      // The guest will naturally block when it runs out of credits.
+      return;
     }
   }
 

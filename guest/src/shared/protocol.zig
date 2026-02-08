@@ -12,7 +12,7 @@
 //!   - `p` (map): type-specific payload
 //!
 //! ## Message Types
-//! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize
+//! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize, exec_window
 //! Filesystem: fs_request, fs_response
 //! TCP: tcp_open, tcp_opened, tcp_data, tcp_eof, tcp_close
 //! Status: vfs_ready, vfs_error
@@ -43,6 +43,10 @@ pub const ExecRequest = struct {
     stdin: bool,
     /// whether to allocate a pty
     pty: bool,
+    /// initial stdout credit window in `bytes`
+    stdout_window: u32,
+    /// initial stderr credit window in `bytes`
+    stderr_window: u32,
 };
 
 pub const StdinData = struct {
@@ -59,9 +63,17 @@ pub const PtyResize = struct {
     cols: u32,
 };
 
+pub const ExecWindow = struct {
+    /// additional stdout credits in `bytes`
+    stdout: u32,
+    /// additional stderr credits in `bytes`
+    stderr: u32,
+};
+
 pub const InputMessage = union(enum) {
     stdin: StdinData,
     resize: PtyResize,
+    window: ExecWindow,
 };
 
 pub const TcpOpen = struct {
@@ -560,6 +572,16 @@ fn parseExecRequest(allocator: std.mem.Allocator, root: cbor.Value) !ExecRequest
         pty_flag = try expectBool(pty_val);
     }
 
+    // Default windows for backward compatibility
+    var stdout_window: u32 = 256 * 1024;
+    var stderr_window: u32 = 256 * 1024;
+    if (cbor.getMapValue(payload, "stdout_window")) |val| {
+        stdout_window = try expectU32(val);
+    }
+    if (cbor.getMapValue(payload, "stderr_window")) |val| {
+        stderr_window = try expectU32(val);
+    }
+
     return ExecRequest{
         .id = id,
         .cmd = cmd,
@@ -568,6 +590,8 @@ fn parseExecRequest(allocator: std.mem.Allocator, root: cbor.Value) !ExecRequest
         .cwd = cwd,
         .stdin = stdin_flag,
         .pty = pty_flag,
+        .stdout_window = stdout_window,
+        .stderr_window = stderr_window,
     };
 }
 
@@ -619,6 +643,33 @@ fn parsePtyResize(root: cbor.Value, expected_id: u32) !PtyResize {
     };
 }
 
+fn parseExecWindow(root: cbor.Value, expected_id: u32) !ExecWindow {
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+    if (!std.mem.eql(u8, msg_type, "exec_window")) {
+        return ProtocolError.UnexpectedType;
+    }
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+    if (id != expected_id) return ProtocolError.InvalidValue;
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    var stdout: u32 = 0;
+    var stderr: u32 = 0;
+
+    if (cbor.getMapValue(payload, "stdout")) |val| {
+        stdout = try expectU32(val);
+    }
+    if (cbor.getMapValue(payload, "stderr")) |val| {
+        stderr = try expectU32(val);
+    }
+
+    return .{ .stdout = stdout, .stderr = stderr };
+}
+
 fn parseInputMessage(root: cbor.Value, expected_id: u32) !InputMessage {
     const map = try expectMap(root);
     const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
@@ -628,6 +679,9 @@ fn parseInputMessage(root: cbor.Value, expected_id: u32) !InputMessage {
     }
     if (std.mem.eql(u8, msg_type, "pty_resize")) {
         return .{ .resize = try parsePtyResize(root, expected_id) };
+    }
+    if (std.mem.eql(u8, msg_type, "exec_window")) {
+        return .{ .window = try parseExecWindow(root, expected_id) };
     }
 
     return ProtocolError.UnexpectedType;

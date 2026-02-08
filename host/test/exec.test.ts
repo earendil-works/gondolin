@@ -61,7 +61,7 @@ test("exec supports readable stdin", { skip: skipVmTests, timeout: timeoutMs }, 
 test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const proc = vm.exec(["/bin/sh", "-c", "echo out; echo err 1>&2"]);
+    const proc = vm.exec(["/bin/sh", "-c", "echo out; echo err 1>&2"], { stdout: "pipe", stderr: "pipe" });
     const chunks: string[] = [];
 
     for await (const chunk of proc.output()) {
@@ -78,7 +78,7 @@ test("exec output iterator yields stdout and stderr", { skip: skipVmTests, timeo
 test("exec lines iterator yields stdout lines", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
-    const proc = vm.exec(["/bin/sh", "-c", "printf 'one\ntwo\nthree'"]);
+    const proc = vm.exec(["/bin/sh", "-c", "printf 'one\ntwo\nthree'"] , { stdout: "pipe" });
     const lines: string[] = [];
 
     for await (const line of proc.lines()) {
