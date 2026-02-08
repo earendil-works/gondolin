@@ -192,6 +192,16 @@ class ExecPipeStream extends Readable {
   private consumedScheduled = false;
 
   getBufferedBytes(): number {
+    // `readableLength` reflects Node's internal queue size (what `pause()`/`resume()`
+    // interacts with).  Our own `bufferedBytes` tracks byte counts independent of
+    // encoding.
+    //
+    // When these disagree, we must never *undercount* buffered bytes; otherwise we
+    // may grant too many credits and allow unbounded growth in the stream buffer.
+    const rl = (this as any).readableLength as unknown;
+    if (typeof rl === "number" && Number.isFinite(rl)) {
+      return Math.max(this.bufferedBytes, rl);
+    }
     return this.bufferedBytes;
   }
 

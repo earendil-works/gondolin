@@ -1473,6 +1473,7 @@ export class SandboxServer extends EventEmitter {
       if (entry === client) {
         this.inflight.delete(id);
         this.stdinAllowed.delete(id);
+        this.pendingExecWindows.delete(id);
       }
     }
   }
@@ -1789,8 +1790,13 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    if (!this.inflight.has(message.id)) {
+    const owner = this.inflight.get(message.id);
+    if (!owner) {
       // ignore (the exec may have exited)
+      return;
+    }
+    if (owner !== client) {
+      // ignore (credits must come from the client that started the exec)
       return;
     }
 
