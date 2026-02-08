@@ -214,6 +214,11 @@ export type ExecRequest = {
     stdin?: boolean;
     /** whether to allocate a pty */
     pty?: boolean;
+
+    /** initial stdout credit window in `bytes` */
+    stdout_window?: number;
+    /** initial stderr credit window in `bytes` */
+    stderr_window?: number;
   };
 };
 
@@ -246,6 +251,22 @@ export type PtyResize = {
     rows: number;
     /** pty column count */
     cols: number;
+  };
+};
+
+export type ExecWindow = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "exec_window";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** additional stdout credits in `bytes` */
+    stdout?: number;
+    /** additional stderr credits in `bytes` */
+    stderr?: number;
   };
 };
 
@@ -308,6 +329,8 @@ export function buildExecRequest(
   if (payload.cwd !== undefined) cleaned.cwd = payload.cwd;
   if (payload.stdin !== undefined) cleaned.stdin = payload.stdin;
   if (payload.pty !== undefined) cleaned.pty = payload.pty;
+  if (payload.stdout_window !== undefined) cleaned.stdout_window = payload.stdout_window;
+  if (payload.stderr_window !== undefined) cleaned.stderr_window = payload.stderr_window;
 
   return {
     v: 1,
@@ -338,6 +361,18 @@ export function buildPtyResize(id: number, rows: number, cols: number): PtyResiz
       rows,
       cols,
     },
+  };
+}
+
+export function buildExecWindow(id: number, stdout?: number, stderr?: number): ExecWindow {
+  const p: ExecWindow["p"] = {};
+  if (stdout !== undefined) p.stdout = stdout;
+  if (stderr !== undefined) p.stderr = stderr;
+  return {
+    v: 1,
+    t: "exec_window",
+    id,
+    p,
   };
 }
 

@@ -49,7 +49,7 @@ async function runTest(vm: VM, label: string, payload: Buffer) {
     `cat > ${guestPath} && chmod +x ${guestPath} && ${guestPath}`,
   ];
 
-  const proc = vm.exec(command, { stdin: payload });
+  const proc = vm.exec(command, { stdin: payload, stdout: "pipe", stderr: "pipe" });
 
   // Stream output as it arrives
   for await (const chunk of proc.output()) {

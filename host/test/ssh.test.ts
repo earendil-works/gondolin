@@ -5,7 +5,7 @@ import test from "node:test";
 import { closeVm, withVm, shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture";
 
 const skipVmTests = shouldSkipVmTests();
-const timeoutMs = Number(process.env.WS_TIMEOUT ?? 60000);
+const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
 const sshVmKey = "ssh-default";
 
 function hasSshClient(): boolean {

@@ -51,7 +51,7 @@ async function main() {
     // Example 4: Streaming output with async iteration
     // ═══════════════════════════════════════════════════════════════════════
     console.log("\n=== Streaming output ===");
-    const streamProc = vm.exec(["/bin/sh", "-lc", "for i in 1 2 3; do echo Line $i; sleep 0.1; done"]);
+    const streamProc = vm.exec(["/bin/sh", "-lc", "for i in 1 2 3; do echo Line $i; sleep 0.1; done"], { stdout: "pipe" });
 
     for await (const chunk of streamProc) {
       process.stdout.write(`[stream] ${chunk}`);
@@ -63,7 +63,7 @@ async function main() {
     // Example 5: Labeled output (stdout + stderr)
     // ═══════════════════════════════════════════════════════════════════════
     console.log("\n=== Labeled output ===");
-    const mixedProc = vm.exec(["/bin/sh", "-lc", "echo stdout; echo stderr >&2; echo stdout2"]);
+    const mixedProc = vm.exec(["/bin/sh", "-lc", "echo stdout; echo stderr >&2; echo stdout2"], { stdout: "pipe", stderr: "pipe" });
 
     for await (const { stream, text } of mixedProc.output()) {
       console.log(`[${stream}] ${text.trimEnd()}`);
@@ -75,7 +75,7 @@ async function main() {
     // Example 6: Line-by-line iteration
     // ═══════════════════════════════════════════════════════════════════════
     console.log("\n=== Line iteration ===");
-    const lineProc = vm.exec(["/bin/sh", "-lc", "printf 'one\\ntwo\\nthree\\n'"]);
+    const lineProc = vm.exec(["/bin/sh", "-lc", "printf 'one\\ntwo\\nthree\\n'"], { stdout: "pipe" });
 
     let lineNum = 1;
     for await (const line of lineProc.lines()) {
