@@ -51,7 +51,7 @@ This is the most common of operations.  it returns an `ExecProcess` (a running
 command handle) which is both:
 
 - **Promise-like**: `await vm.exec(...)` yields an `ExecResult`
-- **Stream-like**: it is an `AsyncIterable` for stdout, and exposes `stdout`/`stderr` streams
+- **Stream-like**: when stdout/stderr are configured as `"pipe"`, it is an `AsyncIterable` for stdout and exposes `stdout`/`stderr` streams
 
 There are two forms:
 
@@ -112,6 +112,10 @@ want stderr).
 
 When using `pipe`, Gondolin does **not** buffer stdout/stderr into the final
 `ExecResult` (use the default buffered mode if you want captured output).
+
+Backpressure: in streaming modes (`stdout: "pipe"` / `stderr: "pipe"` or a writable),
+Gondolin uses a host↔guest credit window to keep buffered output bounded.
+You can tune the window size with `windowBytes` (default: 256 KiB).
 
 If you need both streaming *and* to keep a copy of output, capture it yourself
 from the piped streams:

@@ -462,7 +462,7 @@ export class VM {
    * 
    * Returns an ExecProcess which can be:
    * - awaited for a buffered result with strings
-   * - iterated for streaming output
+   * - iterated for streaming output (requires stdout: "pipe")
    * - used with stdin via write()/end()
    * 
    * @example
