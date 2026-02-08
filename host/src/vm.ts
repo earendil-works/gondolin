@@ -3,7 +3,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
-import { Readable } from "stream";
+import { Duplex, Readable } from "stream";
 import { randomUUID } from "crypto";
 
 import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
@@ -700,19 +700,55 @@ fi
       throw new Error("sandbox server is not available");
     }
 
-    const deadline = Date.now() + 3000;
+    const deadline = Date.now() + 10_000;
     let lastErr: unknown = null;
+
     while (Date.now() < deadline) {
+      let probe: Duplex | null = null;
       try {
-        const probe = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 750 });
-        probe.destroy();
+        const stream = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 2000 });
+        probe = stream;
+
+        // sshd sends its banner immediately after accepting a TCP connection.
+        // Waiting for it makes enableSsh more reliable on slow boots.
+        const banner = await new Promise<string>((resolve, reject) => {
+          const onData = (chunk: Buffer) => {
+            cleanup();
+            resolve(chunk.toString("utf8"));
+          };
+          const onError = (err: Error) => {
+            cleanup();
+            reject(err);
+          };
+          const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error("ssh banner timeout"));
+          }, 1000);
+
+          const cleanup = () => {
+            clearTimeout(timeout);
+            stream.off("data", onData);
+            stream.off("error", onError);
+          };
+
+          stream.on("data", onData);
+          stream.on("error", onError);
+        });
+
+        if (!banner.startsWith("SSH-")) {
+          throw new Error(`unexpected ssh banner: ${JSON.stringify(banner.slice(0, 32))}`);
+        }
+
         lastErr = null;
         break;
       } catch (err) {
         lastErr = err;
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 150));
+      } finally {
+        probe?.destroy();
       }
     }
+
     if (lastErr) {
       const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
       throw new Error(`ssh port-forward is not available: ${detail}`);
