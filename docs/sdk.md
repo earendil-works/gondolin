@@ -301,8 +301,11 @@ To build custom image see the documentation is here: [Building Custom Images](./
 
 Gondolin supports **disk-only checkpoints** of the VM root filesystem.
 
-A checkpoint captures the VM's writable disk state and can be cloned cheaply
-using qcow2 backing files:
+A checkpoint captures the VM's writable disk state and can be resumed cheaply
+using qcow2 backing files.
+
+See also: [Snapshots](./snapshots.md).
+
 
 ```ts
 import path from "node:path";

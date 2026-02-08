@@ -64,6 +64,7 @@ await vm.close();
 
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
+- [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
 

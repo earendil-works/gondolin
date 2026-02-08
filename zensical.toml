@@ -35,6 +35,7 @@ nav = [
     {"Using Gondolin" = [
         {"CLI" = "cli.md"},
         {"TypeScript SDK" = "sdk.md"},
+        {"Snapshots" = "snapshots.md"},
         {"SSH" = "ssh.md"},
         {"Debug Logging" = "debug.md"},
     ]},
