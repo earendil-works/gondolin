@@ -133,6 +133,7 @@ const vm = await VM.create({
 - `dns.syntheticIPv4` / `dns.syntheticIPv6`
   - The IP addresses returned in synthetic `A` / `AAAA` answers (synthetic mode only)
   - Defaults: `192.0.2.1` and `2001:db8::1`
+  - `localhost` and `*.localhost` are always answered as loopback (`127.0.0.1` / `::1`)
 - `dns.syntheticTtlSeconds`
   - TTL for synthetic answers in `seconds` (synthetic mode only)
   - Default: `60`

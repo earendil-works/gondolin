@@ -107,3 +107,100 @@ header.md-header .md-header__topic > a.md-ellipsis:hover {
   text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
   text-underline-offset: 0.12em;
 }
+
+/* Tables: make them more compact and reduce visual chrome
+ *
+ * Material's default table styling uses generous padding and a full border box.
+ * For config/API reference tables this is space-inefficient, so we tighten
+ * padding, remove the left/right outer borders, and encourage the first columns
+ * to shrink.
+ */
+.md-typeset__table {
+  /* Horizontal padding inside cells */
+  --gondolin-table-pad-x: 0.4rem;
+
+  display: block;
+  width: 100%;
+
+  /* The theme uses a scroll wrapper that already bleeds into the gutter.
+   * Keep the wrapper padded like the rest of the content, and only “bleed” the
+   * table itself by the cell padding.
+   */
+  margin: 0;
+  padding: 0 0.8rem;
+}
+
+.md-typeset table:not([class]) {
+  width: 100%;
+  min-width: 100%;
+
+  /* Slightly denser than body text, but keep readability */
+  font-size: 0.62rem;
+  line-height: 1.45;
+
+  /* Remove the default “boxed” look */
+  border: 0;
+  border-top: 0.05rem solid var(--md-typeset-table-color);
+  border-bottom: 0.05rem solid var(--md-typeset-table-color);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.35em var(--gondolin-table-pad-x);
+  vertical-align: top;
+}
+
+/* Keep the header a touch roomier */
+.md-typeset table:not([class]) thead th {
+  padding-top: 0.45em;
+  padding-bottom: 0.45em;
+}
+
+/* Encourage “Field” to take minimal width */
+.md-typeset table:not([class]) th:nth-child(1),
+.md-typeset table:not([class]) td:nth-child(1) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* Keep “Type” narrow but allow wrapping (avoid forcing huge columns) */
+.md-typeset table:not([class]) th:nth-child(2),
+.md-typeset table:not([class]) td:nth-child(2) {
+  width: 1%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Let the description wrap naturally */
+.md-typeset__table > table:not([class]) {
+  margin: 0 calc(-1 * var(--gondolin-table-pad-x));
+  width: calc(100% + (var(--gondolin-table-pad-x) * 2));
+  min-width: calc(100% + (var(--gondolin-table-pad-x) * 2));
+}
+
+.md-typeset table:not([class]) th:nth-child(n + 3),
+.md-typeset table:not([class]) td:nth-child(n + 3) {
+  overflow-wrap: anywhere;
+}
+
+/* Code blocks: match the table treatment
+ *
+ * Material gives code blocks a large horizontal padding which makes them feel
+ * overly indented compared to prose. We "bleed" the block background slightly
+ * into the gutter so the code content aligns with surrounding text.
+ */
+.md-typeset .highlight {
+  --gondolin-code-pad-x: 0.6rem;
+}
+
+.md-typeset .highlight > pre {
+  margin-left: calc(-1 * var(--gondolin-code-pad-x));
+  margin-right: calc(-1 * var(--gondolin-code-pad-x));
+}
+
+.md-typeset .highlight > pre > code {
+  padding-left: var(--gondolin-code-pad-x);
+  padding-right: var(--gondolin-code-pad-x);
+}

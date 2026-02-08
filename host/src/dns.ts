@@ -197,6 +197,12 @@ function parseIPv6(ip: string): Buffer | null {
   return buf;
 }
 
+/** RFC 6761 localhost name match */
+export function isLocalhostDnsName(name: string): boolean {
+  const n = name.toLowerCase();
+  return n === "localhost" || n.endsWith(".localhost");
+}
+
 export function buildSyntheticDnsResponse(query: ParsedDnsQuery, options: SyntheticDnsResponseOptions): Buffer {
   // Copy RD bit from request, set QR + RA.
   const RD = query.flags & 0x0100;
@@ -204,16 +210,19 @@ export function buildSyntheticDnsResponse(query: ParsedDnsQuery, options: Synthe
 
   const question = query.firstQuestion;
 
+  const effectiveIpv4 = isLocalhostDnsName(question.name) ? "127.0.0.1" : options.ipv4;
+  const effectiveIpv6 = isLocalhostDnsName(question.name) ? "::1" : options.ipv6;
+
   let answerType: number | null = null;
   let rdata: Buffer | null = null;
 
   if (question.qclass === DNS_CLASS_IN) {
     if (question.type === DNS_TYPE_A) {
       answerType = DNS_TYPE_A;
-      rdata = parseIPv4(options.ipv4);
+      rdata = parseIPv4(effectiveIpv4);
     } else if (question.type === DNS_TYPE_AAAA) {
       answerType = DNS_TYPE_AAAA;
-      rdata = parseIPv6(options.ipv6);
+      rdata = parseIPv6(effectiveIpv6);
     }
   }
 
