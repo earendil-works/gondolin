@@ -11,8 +11,8 @@ export { SandboxVfsProvider } from "./provider";
 export type { VfsHooks, VfsHookContext } from "./provider";
 export { ReadonlyProvider } from "./readonly";
 export { ReadonlyVirtualProvider } from "./readonly-virtual";
-export { ShadowProvider } from "./shadow";
-export type { ShadowProviderOptions, ShadowWriteMode } from "./shadow";
+export { ShadowProvider, createShadowPathPredicate } from "./shadow";
+export type { ShadowProviderOptions, ShadowWriteMode, ShadowPredicate, ShadowContext } from "./shadow";
 export {
   VirtualProviderClass,
   ERRNO,

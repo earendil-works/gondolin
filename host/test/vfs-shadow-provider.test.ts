@@ -28,7 +28,7 @@ test("ShadowProvider (deny mode) hides entries and blocks writes", async () => {
   }
 
   const vfs = new ShadowProvider(backend, {
-    shadowPaths: ["/.envrc"],
+    shouldShadow: ({ path }) => path === "/.envrc",
     writeMode: "deny",
   });
 
@@ -55,7 +55,7 @@ test("ShadowProvider (tmpfs mode) lets guest create its own shadowed file", asyn
   }
 
   const vfs = new ShadowProvider(backend, {
-    shadowPaths: ["/.envrc"],
+    shouldShadow: ({ path }) => path === "/.envrc",
     writeMode: "tmpfs",
   });
 
@@ -106,7 +106,7 @@ test("ShadowProvider denies symlink bypass by default", async (t) => {
   backend.symlinkSync(".envrc", "/link");
 
   const vfs = new ShadowProvider(backend, {
-    shadowPaths: ["/.envrc"],
+    shouldShadow: ({ path }) => path === "/.envrc",
     writeMode: "deny",
   });
 

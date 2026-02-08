@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Dirent } from "node:fs";
 
 import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle } from "./node";
+import type { VirtualFileHandle, VirtualProvider } from "./node";
 import { ERRNO, isWriteFlag, normalizeVfsPath, VirtualProviderClass } from "./utils";
 import { MemoryProvider } from "./node";
 
@@ -12,9 +12,24 @@ export type ShadowWriteMode =
   /** route writes to an in-memory provider so the guest can create its own files */
   | "tmpfs";
 
+export type ShadowContext = {
+  /** operation name */
+  op: string;
+  /** absolute posix path */
+  path: string;
+  /** open flags (for open/create) */
+  flags?: string;
+  /** source path for rename */
+  oldPath?: string;
+  /** destination path for rename */
+  newPath?: string;
+};
+
+export type ShadowPredicate = (ctx: ShadowContext) => boolean;
+
 export type ShadowProviderOptions = {
-  /** paths (absolute, provider-relative) to shadow */
-  shadowPaths: string[];
+  /** policy callback that returns true if a path should be shadowed */
+  shouldShadow: ShadowPredicate;
 
   /** behavior for write operations targeting shadowed paths (default: "deny") */
   writeMode?: ShadowWriteMode;
@@ -23,9 +38,9 @@ export type ShadowProviderOptions = {
   tmpfs?: VirtualProvider;
 
   /**
-   * If true, block access to any path that resolves (via realpath) to a shadowed path
+   * If true, additionally consult `backend.realpath()` and apply shadow policy to the resolved path
    *
-   * This prevents trivial bypass via symlinks (e.g. `ln -s .envrc x; cat x`).
+   * This blocks trivial symlink bypasses (e.g. `ln -s .envrc x; cat x`).
    *
    * Default: true
    */
@@ -39,6 +54,22 @@ export type ShadowProviderOptions = {
   denyWriteErrno?: number;
 };
 
+/** Convenience helper to turn a list of paths into a ShadowPredicate */
+export function createShadowPathPredicate(shadowPaths: string[]): ShadowPredicate {
+  const normalized = Array.from(
+    new Set(shadowPaths.map((p) => normalizeVfsPath(p)).filter((p) => p !== "/"))
+  ).sort((a, b) => b.length - a.length);
+
+  return ({ path }) => {
+    const p = normalizeVfsPath(path);
+    for (const shadow of normalized) {
+      if (p === shadow) return true;
+      if (p.startsWith(shadow + "/")) return true;
+    }
+    return false;
+  };
+}
+
 function isNoEntryError(err: unknown) {
   if (!err || typeof err !== "object") return false;
   const error = err as NodeJS.ErrnoException;
@@ -50,14 +81,15 @@ function getEntryName(entry: string | Dirent) {
 }
 
 /**
- * Wraps a provider and "shadows" a list of paths.
+ * Wraps a provider and shadows any path for which `shouldShadow(...)` returns true.
  *
- * - Read-ish operations behave as if the shadowed path does not exist (ENOENT)
- * - Shadowed entries are omitted from parent directory listings
- * - Optionally, writes to shadowed paths can be redirected to an in-memory provider
+ * Semantics:
+ * - Read-ish ops (stat, open for read, access, readdir) behave as if it doesn’t exist (ENOENT)
+ * - Shadowed entries are omitted from directory listings (unless present in tmpfs upper layer)
+ * - Write ops are either denied (default) or redirected to tmpfs
  */
 export class ShadowProvider extends VirtualProviderClass implements VirtualProvider {
-  private readonly shadowPaths: string[];
+  private readonly shouldShadow: ShadowPredicate;
   private readonly writeMode: ShadowWriteMode;
   private readonly tmpfs: VirtualProvider;
   private readonly denySymlinkBypass: boolean;
@@ -68,22 +100,10 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
     options: ShadowProviderOptions
   ) {
     super();
-    if (!options || !Array.isArray(options.shadowPaths) || options.shadowPaths.length === 0) {
-      throw new Error("ShadowProvider requires non-empty shadowPaths");
+    if (!options || typeof options.shouldShadow !== "function") {
+      throw new Error("ShadowProvider requires options.shouldShadow callback");
     }
-
-    this.shadowPaths = Array.from(
-      new Set(
-        options.shadowPaths
-          .map((p) => normalizeVfsPath(p))
-          .filter((p) => p !== "/")
-      )
-    ).sort((a, b) => b.length - a.length);
-
-    if (this.shadowPaths.length === 0) {
-      throw new Error("ShadowProvider shadowPaths cannot be just '/'");
-    }
-
+    this.shouldShadow = options.shouldShadow;
     this.writeMode = options.writeMode ?? "deny";
     this.tmpfs = options.tmpfs ?? new MemoryProvider();
     this.denySymlinkBypass = options.denySymlinkBypass ?? true;
@@ -91,14 +111,11 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   }
 
   get readonly() {
-    // If backend is readonly, we're readonly regardless.
-    // If we're in deny mode, also readonly for shadowed paths but not globally.
-    // Expose backend readonly since callers typically only use it as a hint.
+    // Keep backend hint; shadow writes in tmpfs mode can still succeed.
     return this.backend.readonly;
   }
 
   get supportsSymlinks() {
-    // We may block some symlink access via policy, but capability remains.
     return this.backend.supportsSymlinks;
   }
 
@@ -106,19 +123,48 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
     return this.backend.supportsWatch;
   }
 
+  // === core shadow checks ===
+
+  private shadowedFor(op: string, entryPath: string, flags?: string) {
+    const p = normalizeVfsPath(entryPath);
+    return this.shouldShadow({ op, path: p, flags });
+  }
+
+  private shadowedForRename(op: string, oldPath: string, newPath: string) {
+    const from = normalizeVfsPath(oldPath);
+    const to = normalizeVfsPath(newPath);
+    const fromShadow = this.shouldShadow({ op, path: from, oldPath: from, newPath: to });
+    const toShadow = this.shouldShadow({ op, path: to, oldPath: from, newPath: to });
+    return { from, to, fromShadow, toShadow };
+  }
+
+  private async resolvesToShadowed(op: string, entryPath: string, flags?: string) {
+    if (!this.denySymlinkBypass || !this.backend.realpath) return false;
+    try {
+      const resolved = normalizeVfsPath(await this.backend.realpath(normalizeVfsPath(entryPath)));
+      return this.shouldShadow({ op, path: resolved, flags });
+    } catch {
+      return false;
+    }
+  }
+
+  private resolvesToShadowedSync(op: string, entryPath: string, flags?: string) {
+    if (!this.denySymlinkBypass || !this.backend.realpathSync) return false;
+    try {
+      const resolved = normalizeVfsPath(this.backend.realpathSync(normalizeVfsPath(entryPath)));
+      return this.shouldShadow({ op, path: resolved, flags });
+    } catch {
+      return false;
+    }
+  }
+
+  // === provider API ===
+
   async open(entryPath: string, flags: string, mode?: number): Promise<VirtualFileHandle> {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (isWriteFlag(flags)) {
-        return this.openShadowed(p, flags, mode);
-      }
-      // read-only open: only succeeds if shadow tmpfs contains the entry
+    if (this.shadowedFor("open", p, flags) || (await this.resolvesToShadowed("open", p, flags))) {
       return this.openShadowed(p, flags, mode);
-    }
-
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
-      throw createErrnoError(ERRNO.ENOENT, "open", p);
     }
 
     return this.backend.open(p, flags, mode);
@@ -127,12 +173,8 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   openSync(entryPath: string, flags: string, mode?: number): VirtualFileHandle {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("open", p, flags) || this.resolvesToShadowedSync("open", p, flags)) {
       return this.openShadowedSync(p, flags, mode);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
-      throw createErrnoError(ERRNO.ENOENT, "open", p);
     }
 
     return this.backend.openSync(p, flags, mode);
@@ -141,15 +183,8 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async stat(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.stat(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "stat", p);
-    }
-
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
-      throw createErrnoError(ERRNO.ENOENT, "stat", p);
+    if (this.shadowedFor("stat", p) || (await this.resolvesToShadowed("stat", p))) {
+      return this.statShadowed(p, options);
     }
 
     return this.backend.stat(p, options);
@@ -158,15 +193,8 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   statSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.statSync(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "stat", p);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
-      throw createErrnoError(ERRNO.ENOENT, "stat", p);
+    if (this.shadowedFor("stat", p) || this.resolvesToShadowedSync("stat", p)) {
+      return this.statShadowedSync(p, options);
     }
 
     return this.backend.statSync(p, options);
@@ -175,17 +203,8 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async lstat(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.lstat(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "lstat", p);
-    }
-
-    // lstat does not follow symlinks, but we still want to hide the symlink itself
-    // if it resolves to a shadowed path.
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
-      throw createErrnoError(ERRNO.ENOENT, "lstat", p);
+    if (this.shadowedFor("lstat", p) || (await this.resolvesToShadowed("lstat", p))) {
+      return this.lstatShadowed(p, options);
     }
 
     return this.backend.lstat(p, options);
@@ -194,15 +213,8 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   lstatSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.lstatSync(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "lstat", p);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
-      throw createErrnoError(ERRNO.ENOENT, "lstat", p);
+    if (this.shadowedFor("lstat", p) || this.resolvesToShadowedSync("lstat", p)) {
+      return this.lstatShadowedSync(p, options);
     }
 
     return this.backend.lstatSync(p, options);
@@ -211,40 +223,35 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async readdir(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.readdir(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "readdir", p);
+    // If the directory itself is shadowed, it behaves as non-existent.
+    if (this.shadowedFor("readdir", p) || (await this.resolvesToShadowed("readdir", p))) {
+      return this.readdirShadowed(p, options);
     }
 
     const lower = (await this.backend.readdir(p, options)) as Array<string | Dirent>;
     const withTypes = Boolean((options as { withFileTypes?: boolean } | undefined)?.withFileTypes);
 
-    const upper = this.writeMode === "tmpfs" ? await this.tryReaddirUpper(p, options) : [];
+    // Filter lower entries by policy.
+    const filteredLower = lower.filter((entry) => {
+      const name = getEntryName(entry);
+      const child = normalizeVfsPath(path.posix.join(p, name));
+      return !this.shouldShadow({ op: "readdir", path: child });
+    });
 
-    const blocked = this.directShadowedChildren(p);
-
-    // Filter blocked entries from lower.
-    const filteredLower = blocked.size
-      ? lower.filter((e) => !blocked.has(getEntryName(e)))
-      : lower;
-
-    if (upper.length === 0) {
+    if (this.writeMode !== "tmpfs") {
       return filteredLower;
     }
 
-    // Merge, letting upper override duplicates.
-    const seen = new Set<string>(filteredLower.map(getEntryName));
+    // Merge tmpfs upper layer entries (these are visible even if shadowed).
+    const upper = await this.tryReaddirUpper(p, options);
+    if (upper.length === 0) return filteredLower;
+
     const merged: Array<string | Dirent> = [...filteredLower];
+    const seen = new Set(merged.map(getEntryName));
 
     for (const entry of upper) {
       const name = getEntryName(entry);
-      if (blocked.has(name)) {
-        // ok: upper un-hides it
-      }
       if (seen.has(name)) {
-        // Replace lower entry with upper entry in-place when withTypes.
         if (withTypes) {
           const idx = merged.findIndex((e) => getEntryName(e) === name);
           if (idx !== -1) merged[idx] = entry;
@@ -261,28 +268,28 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   readdirSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
-      if (this.writeMode === "tmpfs") {
-        return this.tmpfs.readdirSync(p, options);
-      }
-      throw createErrnoError(ERRNO.ENOENT, "readdir", p);
+    if (this.shadowedFor("readdir", p) || this.resolvesToShadowedSync("readdir", p)) {
+      return this.readdirShadowedSync(p, options);
     }
 
     const lower = this.backend.readdirSync(p, options) as Array<string | Dirent>;
     const withTypes = Boolean((options as { withFileTypes?: boolean } | undefined)?.withFileTypes);
-    const upper = this.writeMode === "tmpfs" ? this.tryReaddirUpperSync(p, options) : [];
 
-    const blocked = this.directShadowedChildren(p);
-    const filteredLower = blocked.size
-      ? lower.filter((e) => !blocked.has(getEntryName(e)))
-      : lower;
+    const filteredLower = lower.filter((entry) => {
+      const name = getEntryName(entry);
+      const child = normalizeVfsPath(path.posix.join(p, name));
+      return !this.shouldShadow({ op: "readdir", path: child });
+    });
 
-    if (upper.length === 0) {
+    if (this.writeMode !== "tmpfs") {
       return filteredLower;
     }
 
-    const seen = new Set<string>(filteredLower.map(getEntryName));
+    const upper = this.tryReaddirUpperSync(p, options);
+    if (upper.length === 0) return filteredLower;
+
     const merged: Array<string | Dirent> = [...filteredLower];
+    const seen = new Set(merged.map(getEntryName));
 
     for (const entry of upper) {
       const name = getEntryName(entry);
@@ -303,7 +310,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async mkdir(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && (await this.resolvesToShadowed(p)))) {
+    if (this.shadowedFor("mkdir", p) || (await this.resolvesToShadowed("mkdir", p))) {
       return this.writeShadowed("mkdir", p, () => this.tmpfs.mkdir(p, options));
     }
 
@@ -313,7 +320,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   mkdirSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && this.resolvesToShadowedSync(p))) {
+    if (this.shadowedFor("mkdir", p) || this.resolvesToShadowedSync("mkdir", p)) {
       return this.writeShadowedSync("mkdir", p, () => this.tmpfs.mkdirSync(p, options));
     }
 
@@ -323,12 +330,11 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async rmdir(entryPath: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && (await this.resolvesToShadowed(p)))) {
+    if (this.shadowedFor("rmdir", p) || (await this.resolvesToShadowed("rmdir", p))) {
       return this.writeShadowed("rmdir", p, async () => {
         try {
           await this.tmpfs.rmdir(p);
         } catch (err) {
-          // If it only exists in the backend, treat this as a successful no-op.
           if (!isNoEntryError(err)) throw err;
         }
       });
@@ -340,7 +346,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   rmdirSync(entryPath: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && this.resolvesToShadowedSync(p))) {
+    if (this.shadowedFor("rmdir", p) || this.resolvesToShadowedSync("rmdir", p)) {
       return this.writeShadowedSync("rmdir", p, () => {
         try {
           return this.tmpfs.rmdirSync(p);
@@ -356,12 +362,11 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async unlink(entryPath: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && (await this.resolvesToShadowed(p)))) {
+    if (this.shadowedFor("unlink", p) || (await this.resolvesToShadowed("unlink", p))) {
       return this.writeShadowed("unlink", p, async () => {
         try {
           await this.tmpfs.unlink(p);
         } catch (err) {
-          // If it only exists in the backend, treat this as a successful no-op.
           if (!isNoEntryError(err)) throw err;
         }
       });
@@ -373,7 +378,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   unlinkSync(entryPath: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && this.resolvesToShadowedSync(p))) {
+    if (this.shadowedFor("unlink", p) || this.resolvesToShadowedSync("unlink", p)) {
       return this.writeShadowedSync("unlink", p, () => {
         try {
           return this.tmpfs.unlinkSync(p);
@@ -387,30 +392,17 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   }
 
   async rename(oldPath: string, newPath: string) {
-    const from = normalizeVfsPath(oldPath);
-    const to = normalizeVfsPath(newPath);
+    const { from, to, fromShadow, toShadow } = this.shadowedForRename("rename", oldPath, newPath);
 
-    const fromShadow = this.isShadowed(from);
-    const toShadow = this.isShadowed(to);
+    const fromResolved = this.denySymlinkBypass ? await this.resolvesToShadowed("rename", from) : false;
+    const toResolved = this.denySymlinkBypass ? await this.resolvesToShadowed("rename", to) : false;
 
-    // Symlink bypass: resolve both ends if enabled.
-    if (this.denySymlinkBypass) {
-      const [fromResolves, toResolves] = await Promise.all([this.resolvesToShadowed(from), this.resolvesToShadowed(to)]);
-      if (!fromShadow && fromResolves) {
-        throw createErrnoError(ERRNO.ENOENT, "rename", from);
-      }
-      if (!toShadow && toResolves) {
-        // rename-to into a shadowed target shouldn't be allowed unless both paths are shadowed
-        throw createErrnoError(this.denyWriteErrno, "rename", to);
-      }
-    }
+    const shadow = fromShadow || toShadow || fromResolved || toResolved;
 
-    if (fromShadow || toShadow) {
-      if (fromShadow && toShadow && this.writeMode === "tmpfs") {
+    if (shadow) {
+      if (this.writeMode === "tmpfs" && (fromShadow || fromResolved) && (toShadow || toResolved)) {
         return this.tmpfs.rename(from, to);
       }
-
-      // Disallow cross-boundary renames.
       throw createErrnoError(ERRNO.EXDEV, "rename", `${from} -> ${to}`);
     }
 
@@ -418,23 +410,15 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   }
 
   renameSync(oldPath: string, newPath: string) {
-    const from = normalizeVfsPath(oldPath);
-    const to = normalizeVfsPath(newPath);
+    const { from, to, fromShadow, toShadow } = this.shadowedForRename("rename", oldPath, newPath);
 
-    const fromShadow = this.isShadowed(from);
-    const toShadow = this.isShadowed(to);
+    const fromResolved = this.denySymlinkBypass ? this.resolvesToShadowedSync("rename", from) : false;
+    const toResolved = this.denySymlinkBypass ? this.resolvesToShadowedSync("rename", to) : false;
 
-    if (this.denySymlinkBypass) {
-      if (!fromShadow && this.resolvesToShadowedSync(from)) {
-        throw createErrnoError(ERRNO.ENOENT, "rename", from);
-      }
-      if (!toShadow && this.resolvesToShadowedSync(to)) {
-        throw createErrnoError(this.denyWriteErrno, "rename", to);
-      }
-    }
+    const shadow = fromShadow || toShadow || fromResolved || toResolved;
 
-    if (fromShadow || toShadow) {
-      if (fromShadow && toShadow && this.writeMode === "tmpfs") {
+    if (shadow) {
+      if (this.writeMode === "tmpfs" && (fromShadow || fromResolved) && (toShadow || toResolved)) {
         return this.tmpfs.renameSync(from, to);
       }
       throw createErrnoError(ERRNO.EXDEV, "rename", `${from} -> ${to}`);
@@ -446,14 +430,10 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async readlink(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("readlink", p) || (await this.resolvesToShadowed("readlink", p))) {
       if (this.writeMode === "tmpfs" && this.tmpfs.readlink) {
         return this.tmpfs.readlink(p, options);
       }
-      throw createErrnoError(ERRNO.ENOENT, "readlink", p);
-    }
-
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
       throw createErrnoError(ERRNO.ENOENT, "readlink", p);
     }
 
@@ -466,14 +446,10 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   readlinkSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("readlink", p) || this.resolvesToShadowedSync("readlink", p)) {
       if (this.writeMode === "tmpfs" && this.tmpfs.readlinkSync) {
         return this.tmpfs.readlinkSync(p, options);
       }
-      throw createErrnoError(ERRNO.ENOENT, "readlink", p);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
       throw createErrnoError(ERRNO.ENOENT, "readlink", p);
     }
 
@@ -486,7 +462,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async symlink(target: string, entryPath: string, type?: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && (await this.resolvesToShadowed(p)))) {
+    if (this.shadowedFor("symlink", p) || (await this.resolvesToShadowed("symlink", p))) {
       return this.writeShadowed("symlink", p, () => {
         if (this.tmpfs.symlink) {
           return this.tmpfs.symlink(target, p, type);
@@ -504,7 +480,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   symlinkSync(target: string, entryPath: string, type?: string) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p) || (this.denySymlinkBypass && this.resolvesToShadowedSync(p))) {
+    if (this.shadowedFor("symlink", p) || this.resolvesToShadowedSync("symlink", p)) {
       return this.writeShadowedSync("symlink", p, () => {
         if (this.tmpfs.symlinkSync) {
           return this.tmpfs.symlinkSync(target, p, type);
@@ -522,17 +498,13 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async realpath(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("realpath", p) || (await this.resolvesToShadowed("realpath", p))) {
       if (this.writeMode === "tmpfs") {
         if (this.tmpfs.realpath) {
           return this.tmpfs.realpath(p, options);
         }
         return super.realpath(p, options);
       }
-      throw createErrnoError(ERRNO.ENOENT, "realpath", p);
-    }
-
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
       throw createErrnoError(ERRNO.ENOENT, "realpath", p);
     }
 
@@ -545,17 +517,13 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   realpathSync(entryPath: string, options?: object) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("realpath", p) || this.resolvesToShadowedSync("realpath", p)) {
       if (this.writeMode === "tmpfs") {
         if (this.tmpfs.realpathSync) {
           return this.tmpfs.realpathSync(p, options);
         }
         return super.realpathSync(p, options);
       }
-      throw createErrnoError(ERRNO.ENOENT, "realpath", p);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
       throw createErrnoError(ERRNO.ENOENT, "realpath", p);
     }
 
@@ -568,17 +536,13 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   async access(entryPath: string, mode?: number) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("access", p) || (await this.resolvesToShadowed("access", p))) {
       if (this.writeMode === "tmpfs") {
         if (this.tmpfs.access) {
           return this.tmpfs.access(p, mode);
         }
         return super.access(p, mode);
       }
-      throw createErrnoError(ERRNO.ENOENT, "access", p);
-    }
-
-    if (this.denySymlinkBypass && (await this.resolvesToShadowed(p))) {
       throw createErrnoError(ERRNO.ENOENT, "access", p);
     }
 
@@ -591,17 +555,13 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
   accessSync(entryPath: string, mode?: number) {
     const p = normalizeVfsPath(entryPath);
 
-    if (this.isShadowed(p)) {
+    if (this.shadowedFor("access", p) || this.resolvesToShadowedSync("access", p)) {
       if (this.writeMode === "tmpfs") {
         if (this.tmpfs.accessSync) {
           return this.tmpfs.accessSync(p, mode);
         }
         return super.accessSync(p, mode);
       }
-      throw createErrnoError(ERRNO.ENOENT, "access", p);
-    }
-
-    if (this.denySymlinkBypass && this.resolvesToShadowedSync(p)) {
       throw createErrnoError(ERRNO.ENOENT, "access", p);
     }
 
@@ -646,46 +606,7 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
     }
   }
 
-  private isShadowed(entryPath: string) {
-    const p = normalizeVfsPath(entryPath);
-    for (const shadow of this.shadowPaths) {
-      if (p === shadow) return true;
-      if (p.startsWith(shadow + "/")) return true;
-    }
-    return false;
-  }
-
-  private directShadowedChildren(dirPath: string) {
-    const dir = normalizeVfsPath(dirPath);
-    const blocked = new Set<string>();
-
-    for (const shadow of this.shadowPaths) {
-      const parent = path.posix.dirname(shadow);
-      if (parent !== dir) continue;
-      const base = path.posix.basename(shadow);
-      if (base) blocked.add(base);
-    }
-
-    return blocked;
-  }
-
-  private async tryReaddirUpper(entryPath: string, options?: object) {
-    try {
-      return (await this.tmpfs.readdir(entryPath, options)) as Array<string | Dirent>;
-    } catch (err) {
-      if (isNoEntryError(err)) return [];
-      throw err;
-    }
-  }
-
-  private tryReaddirUpperSync(entryPath: string, options?: object) {
-    try {
-      return this.tmpfs.readdirSync(entryPath, options) as Array<string | Dirent>;
-    } catch (err) {
-      if (isNoEntryError(err)) return [];
-      throw err;
-    }
-  }
+  // === shadowed operation helpers ===
 
   private async openShadowed(entryPath: string, flags: string, mode?: number): Promise<VirtualFileHandle> {
     if (this.writeMode === "tmpfs") {
@@ -709,47 +630,77 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
     throw createErrnoError(ERRNO.ENOENT, "open", entryPath);
   }
 
-  private async writeShadowed<T>(op: string, entryPath: string, fn: () => Promise<T> | T) {
-    if (this.backend.readonly) {
-      throw createErrnoError(ERRNO.EROFS, op, entryPath);
+  private async statShadowed(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.stat(entryPath, options);
     }
+    throw createErrnoError(ERRNO.ENOENT, "stat", entryPath);
+  }
 
+  private statShadowedSync(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.statSync(entryPath, options);
+    }
+    throw createErrnoError(ERRNO.ENOENT, "stat", entryPath);
+  }
+
+  private async lstatShadowed(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.lstat(entryPath, options);
+    }
+    throw createErrnoError(ERRNO.ENOENT, "lstat", entryPath);
+  }
+
+  private lstatShadowedSync(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.lstatSync(entryPath, options);
+    }
+    throw createErrnoError(ERRNO.ENOENT, "lstat", entryPath);
+  }
+
+  private async readdirShadowed(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.readdir(entryPath, options);
+    }
+    throw createErrnoError(ERRNO.ENOENT, "readdir", entryPath);
+  }
+
+  private readdirShadowedSync(entryPath: string, options?: object) {
+    if (this.writeMode === "tmpfs") {
+      return this.tmpfs.readdirSync(entryPath, options);
+    }
+    throw createErrnoError(ERRNO.ENOENT, "readdir", entryPath);
+  }
+
+  private async tryReaddirUpper(entryPath: string, options?: object) {
+    try {
+      return (await this.tmpfs.readdir(entryPath, options)) as Array<string | Dirent>;
+    } catch (err) {
+      if (isNoEntryError(err)) return [];
+      throw err;
+    }
+  }
+
+  private tryReaddirUpperSync(entryPath: string, options?: object) {
+    try {
+      return this.tmpfs.readdirSync(entryPath, options) as Array<string | Dirent>;
+    } catch (err) {
+      if (isNoEntryError(err)) return [];
+      throw err;
+    }
+  }
+
+  private async writeShadowed<T>(op: string, entryPath: string, fn: () => Promise<T> | T) {
     if (this.writeMode === "deny") {
       throw createErrnoError(this.denyWriteErrno, op, entryPath);
     }
-
     return await fn();
   }
 
   private writeShadowedSync<T>(op: string, entryPath: string, fn: () => T) {
-    if (this.backend.readonly) {
-      throw createErrnoError(ERRNO.EROFS, op, entryPath);
-    }
-
     if (this.writeMode === "deny") {
       throw createErrnoError(this.denyWriteErrno, op, entryPath);
     }
-
     return fn();
-  }
-
-  private async resolvesToShadowed(entryPath: string) {
-    if (!this.backend.realpath) return false;
-    try {
-      const resolved = normalizeVfsPath(await this.backend.realpath(entryPath));
-      return this.isShadowed(resolved);
-    } catch {
-      return false;
-    }
-  }
-
-  private resolvesToShadowedSync(entryPath: string) {
-    if (!this.backend.realpathSync) return false;
-    try {
-      const resolved = normalizeVfsPath(this.backend.realpathSync(entryPath));
-      return this.isShadowed(resolved);
-    } catch {
-      return false;
-    }
   }
 }
