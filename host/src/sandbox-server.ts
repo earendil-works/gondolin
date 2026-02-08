@@ -44,7 +44,13 @@ import {
   type DebugConfig,
   type DebugFlag,
 } from "./debug";
-import { ensureGuestAssets, loadAssetManifest, loadGuestAssets, type GuestAssets } from "./assets";
+import {
+  ensureGuestAssets,
+  loadAssetManifest,
+  loadGuestAssets,
+  resolveGuestAssetsSync,
+  type GuestAssets,
+} from "./assets";
 
 /**
  * Path to guest image assets.
@@ -241,36 +247,6 @@ export type ResolvedSandboxServerOptions = {
   vfsProvider: VirtualProvider | null;
 };
 
-/**
- * Get default guest asset paths from local development checkout.
- * Returns undefined for each path if not found locally.
- */
-function getLocalGuestAssets(): Partial<GuestAssets> {
-  // Handle both source (src/) and compiled (dist/src/) paths
-  // We need to find the repo root where guest/ lives
-  const possibleRepoRoots = [
-    path.resolve(__dirname, "../.."),      // from src/: -> host/ -> gondolin/
-    path.resolve(__dirname, "../../.."),   // from dist/src/: -> dist/ -> host/ -> gondolin/
-  ];
-  
-  for (const repoRoot of possibleRepoRoots) {
-    const devPath = path.join(repoRoot, "guest", "image", "out");
-    const kernelPath = path.join(devPath, "vmlinuz-virt");
-    const initrdPath = path.join(devPath, "initramfs.cpio.lz4");
-    const rootfsPath = path.join(devPath, "rootfs.ext4");
-
-    // Check if local dev paths exist
-    if (
-      fs.existsSync(kernelPath) &&
-      fs.existsSync(initrdPath) &&
-      fs.existsSync(rootfsPath)
-    ) {
-      return { kernelPath, initrdPath, rootfsPath };
-    }
-  }
-
-  return {};
-}
 
 /**
  * Resolve imagePath to GuestAssets.
@@ -342,7 +318,7 @@ export function resolveSandboxServerOptions(
   } else if (assets) {
     resolvedAssets = assets;
   } else {
-    resolvedAssets = getLocalGuestAssets();
+    resolvedAssets = resolveGuestAssetsSync() ?? {};
   }
 
   const kernelPath = resolvedAssets.kernelPath;
@@ -461,19 +437,6 @@ export async function resolveSandboxServerOptionsAsync(
     return resolveSandboxServerOptions(options);
   }
 
-  // If GONDOLIN_GUEST_DIR is set, use it (don't fall back to local dev paths)
-  if (process.env.GONDOLIN_GUEST_DIR) {
-    const assets = await ensureGuestAssets();
-    return resolveSandboxServerOptions(options, assets);
-  }
-
-  // Check for local dev paths
-  const localAssets = getLocalGuestAssets();
-  if (localAssets.kernelPath && localAssets.initrdPath && localAssets.rootfsPath) {
-    return resolveSandboxServerOptions(options, localAssets as GuestAssets);
-  }
-
-  // Download assets if needed
   const assets = await ensureGuestAssets();
   return resolveSandboxServerOptions(options, assets);
 }

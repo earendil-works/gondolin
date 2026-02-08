@@ -48,11 +48,27 @@ function getAssetBundleName(): string {
 }
 
 /**
+ * Walk upwards from a starting directory until the filesystem root.
+ */
+function findUpwards<T>(startDir: string, probe: (dir: string) => T | null): T | null {
+  let dir = path.resolve(startDir);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const found = probe(dir);
+    if (found !== null) return found;
+
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
  * Determine where to look for / store guest assets.
  *
  * Priority:
  * 1. GONDOLIN_GUEST_DIR environment variable (explicit override)
- * 2. Local development checkout (guest/image/out relative to package)
+ * 2. Local repo checkout (searches upwards for guest/image/out)
  * 3. User cache directory (~/.cache/gondolin/<version>)
  */
 function getAssetDir(): string {
@@ -61,24 +77,19 @@ function getAssetDir(): string {
     return process.env.GONDOLIN_GUEST_DIR;
   }
 
-  // Check for local development (repo checkout)
-  // Handle both source (src/) and compiled (dist/src/) paths
-  // We need to find the repo root where guest/ lives
-  const possibleRepoRoots = [
-    path.resolve(__dirname, "..", ".."),       // from src/: -> host/ -> gondolin/
-    path.resolve(__dirname, "..", "..", ".."), // from dist/src/: -> dist/ -> host/ -> gondolin/
-  ];
-  
-  for (const repoRoot of possibleRepoRoots) {
-    const devPath = path.join(repoRoot, "guest", "image", "out");
-    if (fs.existsSync(path.join(devPath, "vmlinuz-virt"))) {
-      return devPath;
-    }
-  }
+  const tryFindRepoAssetsFrom = (anchor: string): string | null =>
+    findUpwards(anchor, (dir) => {
+      const candidate = path.join(dir, "guest", "image", "out");
+      return assetsExist(candidate) ? candidate : null;
+    });
+
+  // Prefer whatever directory the caller is operating in, but also check the
+  // module location (works even when invoked from a different cwd).
+  const repoDir = tryFindRepoAssetsFrom(process.cwd()) ?? tryFindRepoAssetsFrom(__dirname);
+  if (repoDir) return repoDir;
 
   // User cache directory
-  const cacheBase =
-    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+  const cacheBase = process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
   return path.join(cacheBase, "gondolin", resolveAssetVersion());
 }
 
@@ -281,10 +292,17 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
  * Check if all guest assets are present in a directory.
  */
 function assetsExist(dir: string): boolean {
+  const manifest = loadAssetManifest(dir);
+  const assetFiles = manifest?.assets ?? {
+    kernel: "vmlinuz-virt",
+    initramfs: "initramfs.cpio.lz4",
+    rootfs: "rootfs.ext4",
+  };
+
   return (
-    fs.existsSync(path.join(dir, "vmlinuz-virt")) &&
-    fs.existsSync(path.join(dir, "initramfs.cpio.lz4")) &&
-    fs.existsSync(path.join(dir, "rootfs.ext4"))
+    fs.existsSync(path.join(dir, assetFiles.kernel)) &&
+    fs.existsSync(path.join(dir, assetFiles.initramfs)) &&
+    fs.existsSync(path.join(dir, assetFiles.rootfs))
   );
 }
 
@@ -397,16 +415,12 @@ export async function ensureGuestAssets(): Promise<GuestAssets> {
     return loadGuestAssets(assetDir);
   }
 
-  // Check if already present
+  // Check if already present (repo checkout or cache)
   if (!assetsExist(assetDir)) {
     await downloadAndExtract(assetDir);
   }
 
-  return {
-    kernelPath: path.join(assetDir, "vmlinuz-virt"),
-    initrdPath: path.join(assetDir, "initramfs.cpio.lz4"),
-    rootfsPath: path.join(assetDir, "rootfs.ext4"),
-  };
+  return loadGuestAssets(assetDir);
 }
 
 /**
@@ -429,6 +443,26 @@ export function getAssetDirectory(): string {
  */
 export function hasGuestAssets(): boolean {
   return assetsExist(getAssetDir());
+}
+
+/**
+ * Resolve guest assets synchronously without downloading.
+ *
+ * Resolution priority:
+ * 1. GONDOLIN_GUEST_DIR (explicit override)
+ * 2. Repo checkout (guest/image/out)
+ * 3. Cache directory (if already populated)
+ */
+export function resolveGuestAssetsSync(): GuestAssets | null {
+  // Explicit override must be respected (and should error if broken)
+  if (process.env.GONDOLIN_GUEST_DIR) {
+    return loadGuestAssets(process.env.GONDOLIN_GUEST_DIR);
+  }
+
+  // getAssetDir() picks repo assets when available, otherwise the cache location
+  const dir = getAssetDir();
+  if (!assetsExist(dir)) return null;
+  return loadGuestAssets(dir);
 }
 
 /** @internal */
