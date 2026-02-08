@@ -305,6 +305,8 @@ A checkpoint captures the VM's writable disk state and can be cloned cheaply
 using qcow2 backing files:
 
 ```ts
+import path from "node:path";
+
 import { VM } from "@earendil-works/gondolin";
 
 const base = await VM.create();
@@ -313,10 +315,12 @@ const base = await VM.create();
 await base.exec("apk add git");
 await base.exec("echo hello > /etc/my-base-marker");
 
-const checkpoint = await base.checkpoint("dev-base");
+// Note: must be an absolute path
+const checkpointPath = path.resolve("./dev-base.qcow2");
+const checkpoint = await base.checkpoint(checkpointPath);
 
-const task1 = await checkpoint.clone();
-const task2 = await checkpoint.clone();
+const task1 = await checkpoint.resume();
+const task2 = await checkpoint.resume();
 
 // Both VMs start from the same disk state and diverge independently
 await task1.close();
@@ -328,6 +332,8 @@ checkpoint.delete();
 Notes:
 
 - This is **disk-only** (no in-VM RAM/process restore)
+- The checkpoint is a single `.qcow2` file; metadata is stored as a JSON trailer
+  (reload with `VmCheckpoint.load(checkpointPath)`)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`);
   writes under those paths are not part of disk checkpoints
 

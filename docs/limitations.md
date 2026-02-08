@@ -9,7 +9,7 @@ Gondolin does not provide full VM save/restore (capturing in-VM process state +
 RAM) today.
 
 However, Gondolin *does* support **disk-only checkpoints** (qcow2-backed) via
-`vm.checkpoint()` and `checkpoint.clone()` (tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8)).
+`vm.checkpoint(<absolute qcow2 path>)` and `checkpoint.resume()` (tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8)).
 
 **Note:** Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`,
 `/var/log`). Writes under those paths are not part of disk checkpoints.

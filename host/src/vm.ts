@@ -878,7 +878,7 @@ fi
 
   private async startInternal() {
     if (this.checkpointed) {
-      throw new Error("vm was checkpointed and cannot be restarted; clone the checkpoint instead");
+      throw new Error("vm was checkpointed and cannot be restarted; resume the checkpoint instead");
     }
 
     this.ensureQemuAvailable();
@@ -1343,10 +1343,20 @@ fi
   /**
    * Create a disk-only checkpoint of the VM root disk.
    *
-   * This stops the VM and materializes its writable qcow2 overlay in the
-   * checkpoint directory.
+   * This stops the VM and materializes its writable qcow2 overlay at
+   * `checkpointPath`.
+   *
+   * The checkpoint metadata is stored as a JSON trailer appended to the qcow2
+   * file so the checkpoint is a single file.
    */
-  async checkpoint(name?: string): Promise<VmCheckpoint> {
+  async checkpoint(checkpointPath: string): Promise<VmCheckpoint> {
+    if (!checkpointPath) {
+      throw new Error("checkpointPath is required");
+    }
+    if (!path.isAbsolute(checkpointPath)) {
+      throw new Error(`checkpointPath must be an absolute path (got: ${checkpointPath})`);
+    }
+
     const rootDisk = this.rootDisk;
     if (!rootDisk) {
       throw new Error("vm has no root disk");
@@ -1373,20 +1383,20 @@ fi
 
     await this.close();
 
-    const checkpointName = (name ?? `checkpoint-${randomUUID().slice(0, 8)}`).trim();
-    const checkpointDir = VmCheckpoint.getCheckpointDir(checkpointName);
+    const resolvedCheckpointPath = path.resolve(checkpointPath);
+    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
+    fs.rmSync(resolvedCheckpointPath, { force: true });
 
-    fs.rmSync(checkpointDir, { recursive: true, force: true });
-    fs.mkdirSync(checkpointDir, { recursive: true });
+    moveFile(rootDisk.path, resolvedCheckpointPath);
 
-    const diskDst = path.join(checkpointDir, "disk.qcow2");
-    moveFile(rootDisk.path, diskDst);
+    const checkpointName = path.basename(resolvedCheckpointPath, path.extname(resolvedCheckpointPath));
 
     const data: VmCheckpointData = {
       version: 1,
       name: checkpointName,
       createdAt: new Date().toISOString(),
-      diskFile: "disk.qcow2",
+      // Kept for schema compatibility (ignored for single-file checkpoints)
+      diskFile: path.basename(resolvedCheckpointPath),
       guestAssets: {
         kernelPath: this.resolvedSandboxOptions.kernelPath,
         initrdPath: this.resolvedSandboxOptions.initrdPath,
@@ -1394,17 +1404,13 @@ fi
       },
     };
 
-    fs.writeFileSync(
-      path.join(checkpointDir, "checkpoint.json"),
-      JSON.stringify(data, null, 2) + "\n",
-      "utf8"
-    );
+    VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
 
     // Mark this VM as consumed.
     this.rootDisk = null;
     this.checkpointed = true;
 
-    return new VmCheckpoint(checkpointDir, data, this.baseOptionsForClone);
+    return new VmCheckpoint(resolvedCheckpointPath, data, this.baseOptionsForClone, { isDirectory: false });
   }
 
   private sendJson(message: ClientMessage) { 

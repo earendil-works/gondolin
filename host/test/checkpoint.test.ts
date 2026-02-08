@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { VM } from "../src/vm";
@@ -12,9 +14,10 @@ test.after(() => {
   scheduleForceExit();
 });
 
-test("disk checkpoints can be cloned (qcow2 backing)", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+test("disk checkpoints can be resumed (qcow2 backing)", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   let base: VM | null = null;
   let checkpoint: any = null;
+  let checkpointPath: string | null = null;
   let clone1: VM | null = null;
   let clone2: VM | null = null;
   let fresh: VM | null = null;
@@ -32,14 +35,15 @@ test("disk checkpoints can be cloned (qcow2 backing)", { skip: skipVmTests, time
     const write = await base!.exec(["/bin/sh", "-c", "echo base > /etc/checkpoint.txt"]);
     assert.equal(write.exitCode, 0);
 
-    checkpoint = await base!.checkpoint(`test-${Date.now()}`);
+    checkpointPath = path.join(os.tmpdir(), `gondolin-checkpoint-${Date.now()}.qcow2`);
+    checkpoint = await base!.checkpoint(checkpointPath);
     base = null;
 
     // Ensure checkpoints can be reloaded from disk.
-    checkpoint = VmCheckpoint.load(checkpoint.dir);
+    checkpoint = VmCheckpoint.load(checkpointPath);
 
-    // Clone 1 sees the base file
-    clone1 = await checkpoint.clone({
+    // Resume 1 sees the base file
+    clone1 = await checkpoint.resume({
       vfs: null,
       sandbox: {
         console: "none",
@@ -55,8 +59,8 @@ test("disk checkpoints can be cloned (qcow2 backing)", { skip: skipVmTests, time
     await clone1.close();
     clone1 = null;
 
-    // Clone 2 should not see clone1's change
-    clone2 = await checkpoint.clone({
+    // Resume 2 should not see clone1's change
+    clone2 = await checkpoint.resume({
       vfs: null,
       sandbox: {
         console: "none",
