@@ -23,3 +23,8 @@ test("listeners file: serializes canonical form", () => {
 
   assert.equal(text, "/\t:8080\n/api\t:4000\n/api2\t:4001\tstrip_prefix=false\n");
 });
+
+test("listeners file: ignores NUL padding", () => {
+  const parsed = parseListenersFile(`/ :8000\n\0\0\n`);
+  assert.deepEqual(parsed.routes, [{ prefix: "/", port: 8000, stripPrefix: true }]);
+});

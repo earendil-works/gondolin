@@ -35,6 +35,9 @@ export type ParsedListenersFile = {
 export function parseListenersFile(text: string): ParsedListenersFile {
   const routes: IngressRoute[] = [];
 
+  // Be tolerant of NUL padding (can happen with some file update patterns)
+  text = text.replace(/\0/g, "");
+
   const lines = text.split(/\r?\n/);
   for (let lineNo = 0; lineNo < lines.length; lineNo++) {
     let line = lines[lineNo]!;
@@ -331,9 +334,14 @@ async function* readToEnd(stream: Duplex, initial: Buffer): AsyncGenerator<Buffe
 export class GondolinListeners extends EventEmitter {
   private routes: IngressRoute[] = [];
   private reloadTimer: NodeJS.Timeout | null = null;
+  private lastReloadError: unknown = null;
 
   constructor(private readonly etcProvider: VirtualProvider) {
     super();
+  }
+
+  getLastReloadError(): unknown {
+    return this.lastReloadError;
   }
 
   getRoutes(): IngressRoute[] {
@@ -348,8 +356,10 @@ export class GondolinListeners extends EventEmitter {
       try {
         this.reloadNow();
       } catch (err) {
-        // keep old routes on parse failure
-        this.emit("error", err);
+        // Keep old routes on parse failure.
+        this.lastReloadError = err;
+        // Do NOT emit the special "error" event (would crash the process if unhandled).
+        this.emit("reloadError", err);
       }
     }, 25);
   }
@@ -362,6 +372,7 @@ export class GondolinListeners extends EventEmitter {
       stripPrefix: r.stripPrefix ?? true,
     }));
     this.routes = normalized;
+    this.lastReloadError = null;
     this.writeCanonical();
     this.emit("changed", this.getRoutes());
   }
@@ -371,6 +382,7 @@ export class GondolinListeners extends EventEmitter {
     const text = this.readListenersText();
     const parsed = parseListenersFile(text);
     this.routes = parsed.routes;
+    this.lastReloadError = null;
 
     const canonical = serializeListenersFile({ routes: this.routes });
     if (canonical !== text) {
