@@ -751,10 +751,33 @@ function ensureHostDistBuilt(hostPkgRoot: string, log: (msg: string) => void): v
   }
 
   log("Building host dist output (tsc) for container build...");
-  execFileSync(process.execPath, [tscPath, "-p", tsconfigPath], {
-    cwd: hostPkgRoot,
-    stdio: "inherit",
-  });
+
+  // Note: in Node's test runner (and other harnesses) `stdio: "inherit"` can
+  // result in swallowed diagnostics. Capture output and rethrow a helpful error.
+  try {
+    execFileSync(process.execPath, [tscPath, "-p", tsconfigPath], {
+      cwd: hostPkgRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+  } catch (err) {
+    const e = err as {
+      stdout?: unknown;
+      stderr?: unknown;
+      status?: unknown;
+    };
+
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+
+    throw new Error(
+      `Host dist build (tsc) failed (exit ${String(e.status ?? "?")}).\n` +
+        `Command: ${process.execPath} ${tscPath} -p ${tsconfigPath}\n` +
+        (stdout || stderr
+          ? `--- tsc output ---\n${stdout}${stderr}`
+          : "(no tsc output captured)")
+    );
+  }
 
   if (!fs.existsSync(distBuilder)) {
     throw new Error(
