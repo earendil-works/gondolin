@@ -14,6 +14,7 @@ import {
   buildExecRequest,
   buildPtyResize,
   buildStdinData,
+  buildExecWindow,
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol";
@@ -22,6 +23,7 @@ import {
   ClientMessage,
   ErrorMessage,
   ExecCommandMessage,
+  ExecWindowCommandMessage,
   PtyResizeCommandMessage,
   StdinCommandMessage,
   encodeOutputFrame,
@@ -560,6 +562,9 @@ class VirtioBridge {
   onMessage?: (message: IncomingMessage) => void;
   onError?: (error: unknown) => void;
 
+  /** Called when the bridge may be able to accept more queued messages */
+  onWritable?: () => void;
+
   private writeFrame(frame: Buffer): boolean {
     if (!this.socket || !this.socket.writable) {
       return this.queueFrame(frame);
@@ -586,12 +591,18 @@ class VirtioBridge {
 
   private flushPending() {
     if (!this.socket || this.waitingDrain || !this.socket.writable) return;
+    let freed = false;
     while (this.pending.length > 0) {
       const frame = this.pending.shift()!;
       this.pendingBytes -= frame.length;
+      freed = true;
       const ok = this.writeFrame(frame);
-      if (!ok || this.waitingDrain) return;
+      if (!ok || this.waitingDrain) {
+        if (freed) this.onWritable?.();
+        return;
+      }
     }
+    if (freed) this.onWritable?.();
   }
 
   private attachSocket(socket: net.Socket) {
@@ -831,6 +842,10 @@ export class SandboxServer extends EventEmitter {
   private clients = new Set<SandboxClient>();
   private inflight = new Map<number, SandboxClient>();
   private stdinAllowed = new Set<number>();
+
+  // Pending exec_window credits that could not be sent due to virtio queue pressure
+  private pendingExecWindows = new Map<number, { stdout: number; stderr: number }>();
+  private execWindowFlushScheduled = false;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
@@ -935,6 +950,9 @@ export class SandboxServer extends EventEmitter {
     );
 
     this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
+    this.bridge.onWritable = () => {
+      this.scheduleExecWindowFlush();
+    };
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
     this.sshBridge = new VirtioBridge(this.options.virtioSshSocketPath, Math.max(maxPendingBytes, 64 * 1024 * 1024));
@@ -1455,6 +1473,7 @@ export class SandboxServer extends EventEmitter {
       if (entry === client) {
         this.inflight.delete(id);
         this.stdinAllowed.delete(id);
+        this.pendingExecWindows.delete(id);
       }
     }
   }
@@ -1495,6 +1514,8 @@ export class SandboxServer extends EventEmitter {
       this.handleStdin(client, message);
     } else if (message.type === "pty_resize") {
       this.handlePtyResize(client, message);
+    } else if (message.type === "exec_window") {
+      this.handleExecWindow(client, message);
     } else if (message.type === "lifecycle") {
       if (message.action === "restart") {
         void this.controller.restart();
@@ -1576,6 +1597,19 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
+    const validWindow = (v: unknown) =>
+      v === undefined || (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff);
+
+    if (!validWindow(message.stdout_window) || !validWindow(message.stderr_window)) {
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "invalid_request",
+        message: "stdout_window/stderr_window must be uint32 byte counts (0 = default)",
+      });
+      return;
+    }
+
     this.inflight.set(message.id, client);
     if (message.stdin) this.stdinAllowed.add(message.id);
 
@@ -1586,6 +1620,8 @@ export class SandboxServer extends EventEmitter {
       cwd: message.cwd,
       stdin: message.stdin ?? false,
       pty: message.pty ?? false,
+      stdout_window: message.stdout_window,
+      stderr_window: message.stderr_window,
     };
 
     if (!this.bridge.send(buildExecRequest(message.id, payload))) {
@@ -1711,6 +1747,95 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
+  private scheduleExecWindowFlush() {
+    if (this.execWindowFlushScheduled) return;
+    this.execWindowFlushScheduled = true;
+    setImmediate(() => {
+      this.execWindowFlushScheduled = false;
+      this.flushPendingExecWindows();
+    });
+  }
+
+  private flushPendingExecWindows() {
+    for (const [id, win] of this.pendingExecWindows.entries()) {
+      if (!this.inflight.has(id)) {
+        this.pendingExecWindows.delete(id);
+        continue;
+      }
+
+      const stdout = win.stdout > 0 ? win.stdout : undefined;
+      const stderr = win.stderr > 0 ? win.stderr : undefined;
+
+      if (!stdout && !stderr) {
+        this.pendingExecWindows.delete(id);
+        continue;
+      }
+
+      if (!this.bridge.send(buildExecWindow(id, stdout, stderr))) {
+        // Queue still full; wait for bridge.onWritable to retry.
+        return;
+      }
+
+      this.pendingExecWindows.delete(id);
+    }
+  }
+
+  private handleExecWindow(client: SandboxClient, message: ExecWindowCommandMessage) {
+    if (!isValidRequestId(message.id)) {
+      sendError(client, {
+        type: "error",
+        code: "invalid_request",
+        message: "exec_window requires a uint32 id",
+      });
+      return;
+    }
+
+    const owner = this.inflight.get(message.id);
+    if (!owner) {
+      // ignore (the exec may have exited)
+      return;
+    }
+    if (owner !== client) {
+      // ignore (credits must come from the client that started the exec)
+      return;
+    }
+
+    const stdout = message.stdout;
+    const stderr = message.stderr;
+
+    const valid = (v: unknown) =>
+      v === undefined ||
+      (typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 0xffffffff);
+
+    if (!valid(stdout) || !valid(stderr)) {
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "invalid_request",
+        message: "exec_window requires positive integer credits",
+      });
+      return;
+    }
+
+    const out = stdout ?? 0;
+    const err = stderr ?? 0;
+    if (out <= 0 && err <= 0) return;
+
+    const existing = this.pendingExecWindows.get(message.id);
+    if (existing) {
+      existing.stdout = Math.min(0xffffffff, existing.stdout + out);
+      existing.stderr = Math.min(0xffffffff, existing.stderr + err);
+    } else {
+      this.pendingExecWindows.set(message.id, {
+        stdout: Math.min(0xffffffff, out),
+        stderr: Math.min(0xffffffff, err),
+      });
+    }
+
+    // Try sending immediately; if the bridge is congested we'll retry later.
+    this.flushPendingExecWindows();
+  }
+
   private failInflight(code: string, message: string) {
     for (const [id, client] of this.inflight.entries()) {
       sendError(client, {
@@ -1722,6 +1847,7 @@ export class SandboxServer extends EventEmitter {
     }
     this.inflight.clear();
     this.stdinAllowed.clear();
+    this.pendingExecWindows.clear();
   }
 }
 

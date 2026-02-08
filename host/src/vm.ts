@@ -49,6 +49,8 @@ import {
   createExecSession,
   finishExecSession,
   rejectExecSession,
+  resolveOutputMode,
+  applyOutputChunk,
 } from "./exec";
 
 const MAX_REQUEST_ID = 0xffffffff;
@@ -473,8 +475,8 @@ export class VM {
    * const r2 = await vm.exec(["/bin/echo", "hello"]);
    * console.log(r2.stdout); // 'hello\n'
    * 
-   * // Streaming output
-   * for await (const line of vm.exec(["/bin/tail", "-f", "/var/log/syslog"])) {
+   * // Streaming output (piped stdout)
+   * for await (const line of vm.exec(["/bin/tail", "-f", "/var/log/syslog"], { stdout: "pipe" })) {
    *   console.log(line);
    * }
    * 
@@ -524,6 +526,15 @@ export class VM {
       stdin: true,
       pty: true,
       signal: options.signal,
+      ...(shouldAttach
+        ? {
+            stdout: "inherit" as const,
+            stderr: "inherit" as const,
+          }
+        : {
+            stdout: "pipe" as const,
+            stderr: "pipe" as const,
+          }),
     });
 
     if (shouldAttach) {
@@ -830,11 +841,16 @@ fi
     const stdinSetting = options.stdin;
     const stdinEnabled = stdinSetting !== undefined && stdinSetting !== false;
 
+    const stdout = resolveOutputMode(options.stdout, options.buffer, "stdout");
+    const stderr = resolveOutputMode(options.stderr, options.buffer, "stderr");
+
     const session = createExecSession(id, {
       stdinEnabled,
       encoding: options.encoding,
       signal: options.signal,
-      buffer: options.buffer,
+      stdout,
+      stderr,
+      windowBytes: options.windowBytes,
     });
 
     // Setup abort handling
@@ -848,6 +864,21 @@ fi
     }
 
     this.sessions.set(id, session);
+
+    // Wire up credit-based flow control
+    session.sendWindowUpdate = (stdoutBytes, stderrBytes) => {
+      if (stdoutBytes <= 0 && stderrBytes <= 0) return;
+      try {
+        this.sendJson({
+          type: "exec_window",
+          id,
+          stdout: stdoutBytes > 0 ? stdoutBytes : undefined,
+          stderr: stderrBytes > 0 ? stderrBytes : undefined,
+        });
+      } catch {
+        // ignore (e.g. connection closed)
+      }
+    };
 
     // Create the process handle
     const proc = new ExecProcess(session, {
@@ -885,6 +916,8 @@ fi
         cwd: options.cwd,
         stdin: session.stdinEnabled ? true : undefined,
         pty: options.pty ? true : undefined,
+        stdout_window: session.windowBytes,
+        stderr_window: session.windowBytes,
       };
 
       this.sendJson(message);
@@ -1218,15 +1251,32 @@ fi
 
     const session = createExecSession(id, {
       stdinEnabled: false,
+      stdout: { mode: "buffer" },
+      stderr: { mode: "buffer" },
     });
 
     this.sessions.set(id, session);
+    session.sendWindowUpdate = (stdoutBytes, stderrBytes) => {
+      if (stdoutBytes <= 0 && stderrBytes <= 0) return;
+      try {
+        this.sendJson({
+          type: "exec_window",
+          id,
+          stdout: stdoutBytes > 0 ? stdoutBytes : undefined,
+          stderr: stderrBytes > 0 ? stderrBytes : undefined,
+        });
+      } catch {
+        // ignore
+      }
+    };
 
     const message = {
       type: "exec" as const,
       id,
       cmd,
       argv: argv.length ? argv : undefined,
+      stdout_window: session.windowBytes,
+      stderr_window: session.windowBytes,
     };
 
     try {
@@ -1262,17 +1312,7 @@ fi
       const frame = decodeOutputFrame(buffer);
       const session = this.sessions.get(frame.id);
       if (!session) return;
-      if (frame.stream === "stdout") {
-        if (session.buffer && !session.iterating) {
-          session.stdoutChunks.push(frame.data);
-        }
-        session.stdout.write(frame.data);
-      } else {
-        if (session.buffer && !session.iterating) {
-          session.stderrChunks.push(frame.data);
-        }
-        session.stderr.write(frame.data);
-      }
+      applyOutputChunk(session, frame.stream, frame.data);
       return;
     }
 

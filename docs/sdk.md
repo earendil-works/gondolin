@@ -96,7 +96,7 @@ exit codes do *not* throw).  You typically check:
 You can stream output while the command runs:
 
 ```ts
-const proc = vm.exec("for i in 1 2 3; do echo $i; sleep 1; done");
+const proc = vm.exec("for i in 1 2 3; do echo $i; sleep 1; done", { stdout: "pipe" });
 
 for await (const chunk of proc) {
   // default async iteration yields stdout chunks as strings
@@ -107,18 +107,19 @@ const result = await proc;
 console.log(result.exitCode);
 ```
 
-Important detail: when you start streaming via `for await (const chunk of proc)` (or
-`proc.lines()` / `proc.output()`), Gondolin disables stdout/stderr buffering for
-that exec session to avoid unbounded memory growth.  That means the final
-`ExecResult.stdout` / `stderr` will typically be **empty** in streaming mode.
+Important detail: streaming output requires `stdout: "pipe"` (and `stderr: "pipe"` if you
+want stderr).
+
+When using `pipe`, Gondolin does **not** buffer stdout/stderr into the final
+`ExecResult` (use the default buffered mode if you want captured output).
 
 If you need both streaming *and* to keep a copy of output, capture it yourself
-from the streams:
+from the piped streams:
 
 ```ts
-const proc = vm.exec(["/bin/echo", "hello"]);
+const proc = vm.exec(["/bin/echo", "hello"], { stdout: "pipe" });
 let stdout = "";
-proc.stdout.on("data", (b) => (stdout += b.toString("utf-8")));
+proc.stdout!.on("data", (b) => (stdout += b.toString("utf-8")));
 
 await proc;
 console.log(stdout);
@@ -127,22 +128,26 @@ console.log(stdout);
 To stream both stdout and stderr with labels, use `proc.output()`:
 
 ```ts
-for await (const { stream, text } of vm.exec("echo out; echo err >&2").output()) {
+for await (const { stream, text } of vm.exec("echo out; echo err >&2", { stdout: "pipe", stderr: "pipe" }).output()) {
   process.stdout.write(`[${stream}] ${text}`);
 }
 ```
 
 #### Avoiding Large Buffers
 
-For commands that may produce a lot of output, set `buffer: false`:
+For commands that may produce a lot of output, set `buffer: false` (drops stdout/stderr):
 
 ```ts
 const result = await vm.exec(["/bin/cat", "/some/huge/file"], { buffer: false });
 console.log("exitCode:", result.exitCode);
+
+// Or stream it with backpressure:
+// const proc = vm.exec(["/bin/cat", "/some/huge/file"], { stdout: "pipe", buffer: false });
+// for await (const chunk of proc) process.stdout.write(chunk);
 ```
 
-You can still stream output, but the resulting `ExecResult` will not include
-buffered stdout/stderr.
+You can still stream output by using `stdout: "pipe"` / `stderr: "pipe"`.
+The resulting `ExecResult` will not include buffered stdout/stderr.
 
 #### Cancellation
 

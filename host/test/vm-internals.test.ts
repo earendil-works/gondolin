@@ -146,7 +146,7 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
       close: () => {},
     };
 
-    const session = createExecSession(1, { stdinEnabled: true });
+    const session = createExecSession(1, { stdinEnabled: true, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
     (vm as any).sessions.set(1, session);
 
     // Queue stdin + resize before the request is marked ready.
@@ -256,8 +256,8 @@ test("vm internals: handleDisconnect rejects pending state waiters and sessions"
   try {
     const waiter = (vm as any).waitForState("running");
 
-    const session1 = createExecSession(1, { stdinEnabled: false });
-    const session2 = createExecSession(2, { stdinEnabled: false });
+    const session1 = createExecSession(1, { stdinEnabled: false, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
+    const session2 = createExecSession(2, { stdinEnabled: false, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
     (vm as any).sessions.set(1, session1);
     (vm as any).sessions.set(2, session2);
 

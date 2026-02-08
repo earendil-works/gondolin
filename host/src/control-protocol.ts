@@ -39,6 +39,11 @@ export type ExecCommandMessage = {
   stdin?: boolean;
   /** whether to allocate a pty */
   pty?: boolean;
+
+  /** initial stdout credit window in `bytes` (0 = default) */
+  stdout_window?: number;
+  /** initial stderr credit window in `bytes` (0 = default) */
+  stderr_window?: number;
 };
 
 export type StdinCommandMessage = {
@@ -75,11 +80,22 @@ export type BootCommandMessage = {
   fuseBinds?: string[];
 };
 
+export type ExecWindowCommandMessage = {
+  type: "exec_window";
+  /** request id */
+  id: number;
+  /** additional stdout credits in `bytes` */
+  stdout?: number;
+  /** additional stderr credits in `bytes` */
+  stderr?: number;
+};
+
 export type ClientMessage =
   | BootCommandMessage
   | ExecCommandMessage
   | StdinCommandMessage
   | PtyResizeCommandMessage
+  | ExecWindowCommandMessage
   | LifecycleCommandMessage;
 
 export type ExecResponseMessage = {

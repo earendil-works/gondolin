@@ -67,13 +67,14 @@ class ShellTerminalAttach {
     if (this.started) return;
     this.started = true;
 
-    // Output
-    this.proc.stdout.on("data", (chunk: Buffer) => {
-      this.stdout.write(chunk);
-    });
-    this.proc.stderr.on("data", (chunk: Buffer) => {
-      this.stderr.write(chunk);
-    });
+    // Output (use pipe() so downstream backpressure is respected)
+    const out = this.proc.stdout;
+    const err = this.proc.stderr;
+    if (!out || !err) {
+      throw new Error('proc must be started with stdout/stderr="pipe"');
+    }
+    out.pipe(this.stdout, { end: false });
+    err.pipe(this.stderr, { end: false });
 
     // Input
     if (this.stdin.isTTY) {
@@ -118,6 +119,13 @@ class ShellTerminalAttach {
 
     this.stdin.off("data", this.onStdinData);
     this.stdin.off("end", this.onStdinEnd);
+
+    // Note: Don't unpipe()/pause() here.
+    //
+    // The exec result promise can resolve before the piped output has fully
+    // drained into the destination writables (process.stdout/stderr). Let
+    // Readable.pipe() clean itself up on stream end to avoid truncating tail
+    // output.
 
     if (this.stdout.isTTY) {
       this.stdout.off("resize", this.onResize);
