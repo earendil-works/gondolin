@@ -10,10 +10,6 @@ test("resolveOutputMode only treats objects with write() as writable", () => {
 
   const writableLike = {
     write(_chunk: any) {},
-    end() {},
-    on(_event: string, _cb: (...args: any[]) => void) {
-      return this;
-    },
   };
   const resolvedWritable = resolveOutputMode(writableLike as any, undefined, "stdout");
   assert.equal(resolvedWritable.mode, "writable");

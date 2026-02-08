@@ -134,21 +134,27 @@ export type ResolvedExecOutputMode =
   | { mode: "inherit" }
   | { mode: "writable"; stream: NodeJS.WritableStream };
 
+function asWritableStream(value: unknown): NodeJS.WritableStream | null {
+  // Best-effort detection: we intentionally only require `.write(...)`.
+  // Some call sites pass custom writable-like objects and we don't want to be
+  // overly strict. At the same time, avoid obvious false-positives like Buffer.
+  if (!value || typeof value !== "object") return null;
+  if (Buffer.isBuffer(value)) return null;
+  const v: any = value as any;
+  if (typeof v.write !== "function") return null;
+  return value as NodeJS.WritableStream;
+}
+
 export function resolveOutputMode(
   value: ExecOutputMode | undefined,
   legacyBuffer: boolean | undefined,
   streamName: "stdout" | "stderr"
 ): ResolvedExecOutputMode {
   // Treat custom Node writable streams as a dedicated output mode.
-  // Be strict here: many JS objects are typeof "object" but not writable.
-  if (
-    value &&
-    typeof value === "object" &&
-    typeof (value as any).write === "function" &&
-    typeof (value as any).end === "function" &&
-    (typeof (value as any).on === "function" || typeof (value as any).once === "function")
-  ) {
-    return { mode: "writable", stream: value };
+  // Detection is best-effort; if it quacks like a writable, we accept it.
+  const writable = asWritableStream(value);
+  if (writable) {
+    return { mode: "writable", stream: writable };
   }
 
   const mode = value;
