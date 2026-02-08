@@ -280,7 +280,7 @@ You can read or replace the current routing table programmatically:
 - `vm.getIngressRoutes()`
 - `vm.setIngressRoutes(routes)`
 
-See also: [Listening](./listen.md).
+See also: [Ingress](./ingress.md).
 
 ## Network Policy
 
