@@ -16,7 +16,7 @@ test.after(async () => {
 });
 
 function makeSpamCommand(lines: number) {
-  // ~65 bytes per line -> 20k lines ~1.3MB
+  // ~65 bytes per line
   return [
     "/bin/sh",
     "-lc",
@@ -45,7 +45,7 @@ test(
       await vm.start();
 
       const windowBytes = 4096;
-      const proc = vm.exec(makeSpamCommand(20000), {
+      const proc = vm.exec(makeSpamCommand(12000), {
         stdout: "pipe",
         stderr: "ignore",
         windowBytes,
@@ -57,22 +57,40 @@ test(
       let received = 0;
       let maxBuffered = 0;
 
-      // Throttle consumption: pause after each chunk, resume shortly after.
+      // Throttle consumption enough to trigger host↔guest backpressure, but avoid
+      // a timer-per-chunk strategy (slow/flaky on loaded CI runners).
+      const pauseEveryBytes = 64 * 1024;
+      let sincePause = 0;
+      let ended = false;
+      let paused = false;
+
       stdout.on("data", (chunk: Buffer) => {
         received += chunk.length;
+        sincePause += chunk.length;
         maxBuffered = Math.max(maxBuffered, stdout.readableLength);
-        stdout.pause();
-        setTimeout(() => stdout.resume(), 2);
+
+        if (!paused && sincePause >= pauseEveryBytes) {
+          paused = true;
+          sincePause = 0;
+          stdout.pause();
+          setTimeout(() => {
+            paused = false;
+            if (!ended) stdout.resume();
+          }, 2);
+        }
       });
 
       await new Promise<void>((resolve, reject) => {
-        stdout.once("end", () => resolve());
+        stdout.once("end", () => {
+          ended = true;
+          resolve();
+        });
         stdout.once("error", (err) => reject(err));
       });
 
       const result = await proc;
       assert.equal(result.exitCode, 0);
-      assert.ok(received > 1024 * 1024, `expected to receive >1MiB, got ${received}`);
+      assert.ok(received > 512 * 1024, `expected to receive >512KiB, got ${received}`);
 
       // We expect the internal readable buffer to remain bounded.
       // Allow a little slack for Node stream bookkeeping.

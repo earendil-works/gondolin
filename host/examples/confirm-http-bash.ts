@@ -120,17 +120,12 @@ class ShellTerminalAttach {
     this.stdin.off("data", this.onStdinData);
     this.stdin.off("end", this.onStdinEnd);
 
-    // Unpipe output forwarding
-    const out = this.proc.stdout;
-    const err = this.proc.stderr;
-    if (out) {
-      out.unpipe(this.stdout);
-      out.pause();
-    }
-    if (err) {
-      err.unpipe(this.stderr);
-      err.pause();
-    }
+    // Note: Don't unpipe()/pause() here.
+    //
+    // The exec result promise can resolve before the piped output has fully
+    // drained into the destination writables (process.stdout/stderr). Let
+    // Readable.pipe() clean itself up on stream end to avoid truncating tail
+    // output.
 
     if (this.stdout.isTTY) {
       this.stdout.off("resize", this.onResize);

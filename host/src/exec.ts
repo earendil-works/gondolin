@@ -433,11 +433,26 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
 
     // Merge stdout/stderr without switching streams into flowing mode.
     // Using Readable async iteration preserves credit-based backpressure.
-    const outIt = stdout[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
-    const errIt = stderr[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+    //
+    // If the consumer calls `proc.stdout.setEncoding(...)` / `proc.stderr.setEncoding(...)`,
+    // Node will yield strings from async iteration. Normalize those back to Buffer so our
+    // public OutputChunk.data contract remains stable.
+    const outIt = stdout[Symbol.asyncIterator]() as AsyncIterator<unknown>;
+    const errIt = stderr[Symbol.asyncIterator]() as AsyncIterator<unknown>;
 
-    let outNext: Promise<IteratorResult<Buffer>> | null = outIt.next();
-    let errNext: Promise<IteratorResult<Buffer>> | null = errIt.next();
+    const toBuffer = (pipe: Readable, chunk: unknown): Buffer => {
+      if (Buffer.isBuffer(chunk)) return chunk;
+      if (typeof chunk === "string") {
+        const enc = (pipe as any).readableEncoding;
+        const bufEnc: BufferEncoding =
+          typeof enc === "string" && enc.length > 0 ? (enc as BufferEncoding) : "utf8";
+        return Buffer.from(chunk, bufEnc);
+      }
+      throw new Error(`unexpected ${typeof chunk} chunk from exec output stream`);
+    };
+
+    let outNext: Promise<IteratorResult<unknown>> | null = outIt.next();
+    let errNext: Promise<IteratorResult<unknown>> | null = errIt.next();
 
     while (outNext || errNext) {
       const raced = await Promise.race([
@@ -455,7 +470,8 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
         continue;
       }
 
-      const data = raced.r.value as Buffer;
+      const pipe = raced.stream === "stdout" ? stdout : stderr;
+      const data = toBuffer(pipe, raced.r.value);
       yield {
         stream: raced.stream,
         data,

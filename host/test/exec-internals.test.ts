@@ -113,6 +113,59 @@ test("pipe mode byte accounting respects non-utf8 setEncoding()", async () => {
   }
 });
 
+test("ExecProcess.output() yields Buffer data even if setEncoding() is used on pipes", async () => {
+  const session = createExecSession(1, {
+    stdinEnabled: false,
+    stdout: { mode: "pipe" },
+    stderr: { mode: "pipe" },
+    windowBytes: 4096,
+  });
+  session.sendWindowUpdate = () => {};
+
+  const proc = new ExecProcess(session, {
+    sendStdin: () => {
+      // unused
+    },
+    sendStdinEof: () => {
+      // unused
+    },
+    cleanup: () => {
+      // unused
+    },
+  });
+
+  // Force async iteration to produce strings for stdout.
+  session.stdoutPipe!.setEncoding("hex");
+
+  const collected = (async () => {
+    const out: Array<{ stream: "stdout" | "stderr"; data: Buffer; text: string }> = [];
+    for await (const chunk of proc.output()) {
+      out.push(chunk);
+    }
+    return out;
+  })();
+
+  applyOutputChunk(session, "stdout", Buffer.from("hi", "utf8"));
+  applyOutputChunk(session, "stderr", Buffer.from("err", "utf8"));
+  finishExecSession(session, 0);
+
+  const chunks = await collected;
+
+  const byStream = new Map(chunks.map((c) => [c.stream, c] as const));
+
+  const outChunk = byStream.get("stdout");
+  assert.ok(outChunk);
+  assert.ok(Buffer.isBuffer(outChunk.data));
+  assert.equal(outChunk.data.toString("utf8"), "hi");
+  assert.equal(outChunk.text, "hi");
+
+  const errChunk = byStream.get("stderr");
+  assert.ok(errChunk);
+  assert.ok(Buffer.isBuffer(errChunk.data));
+  assert.equal(errChunk.data.toString("utf8"), "err");
+  assert.equal(errChunk.text, "err");
+});
+
 test("applyOutputChunk rejects exec on writable write() throw and switches to ignore", async () => {
   const events: Array<{ stdout: number; stderr: number }> = [];
 

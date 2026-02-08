@@ -40,9 +40,9 @@ export type ExecCommandMessage = {
   /** whether to allocate a pty */
   pty?: boolean;
 
-  /** initial stdout credit window in `bytes` */
+  /** initial stdout credit window in `bytes` (0 = default) */
   stdout_window?: number;
-  /** initial stderr credit window in `bytes` */
+  /** initial stderr credit window in `bytes` (0 = default) */
   stderr_window?: number;
 };
 

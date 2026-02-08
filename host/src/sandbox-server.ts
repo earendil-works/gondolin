@@ -1598,14 +1598,14 @@ export class SandboxServer extends EventEmitter {
     }
 
     const validWindow = (v: unknown) =>
-      v === undefined || (typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 0xffffffff);
+      v === undefined || (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff);
 
     if (!validWindow(message.stdout_window) || !validWindow(message.stderr_window)) {
       sendError(client, {
         type: "error",
         id: message.id,
         code: "invalid_request",
-        message: "stdout_window/stderr_window must be positive uint32 byte counts",
+        message: "stdout_window/stderr_window must be uint32 byte counts (0 = default)",
       });
       return;
     }
