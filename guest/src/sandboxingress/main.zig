@@ -12,6 +12,8 @@ const Conn = struct {
     pending: std.ArrayList(u8),
     /// whether the host half-closed the write side
     host_eof: bool,
+    /// whether we've half-closed the backend TCP socket write side
+    backend_shutdown: bool,
 };
 
 pub fn main() !void {
@@ -131,8 +133,11 @@ pub fn main() !void {
                     .eof => |id| {
                         if (conns.getPtr(id)) |conn| {
                             conn.host_eof = true;
-                            // Best-effort half-close
-                            _ = std.posix.shutdown(conn.fd, .send) catch {};
+                            // Only half-close the backend after we've flushed all pending bytes.
+                            if (!conn.backend_shutdown and conn.pending.items.len == 0) {
+                                conn.backend_shutdown = true;
+                                _ = std.posix.shutdown(conn.fd, .send) catch {};
+                            }
                         }
                     },
                     .close => |id| {
@@ -162,6 +167,13 @@ pub fn main() !void {
                     const remaining = conn_ptr.pending.items.len - n;
                     std.mem.copyForwards(u8, conn_ptr.pending.items[0..remaining], conn_ptr.pending.items[n..]);
                     conn_ptr.pending.items = conn_ptr.pending.items[0..remaining];
+                }
+
+                // If the host already signaled EOF and we've now flushed everything,
+                // half-close the backend so it can observe end-of-request.
+                if (conn_ptr.pending.items.len == 0 and conn_ptr.host_eof and !conn_ptr.backend_shutdown) {
+                    conn_ptr.backend_shutdown = true;
+                    _ = std.posix.shutdown(conn_ptr.fd, .send) catch {};
                 }
             }
 
@@ -242,7 +254,7 @@ fn handleOpen(
     _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | nonblock_flag);
 
     const pending = std.ArrayList(u8).empty;
-    try conns.put(open.id, .{ .fd = fd, .pending = pending, .host_eof = false });
+    try conns.put(open.id, .{ .fd = fd, .pending = pending, .host_eof = false, .backend_shutdown = false });
 
     try sendOpened(allocator, writer, virtio_fd, open.id, true, null);
 }

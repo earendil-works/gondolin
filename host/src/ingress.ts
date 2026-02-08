@@ -209,14 +209,17 @@ async function readHttpHead(stream: Duplex): Promise<{ statusCode: number; statu
 
     const race = Promise.race([
       once(stream, "readable").then(() => "readable" as const),
+      // Note: Duplex streams can emit "close" without "end" when destroyed.
+      // Treat that as an upstream close so we don't hang waiting for headers.
       once(stream, "end").then(() => "end" as const),
+      once(stream, "close").then(() => "close" as const),
       once(stream, "error").then((args) => {
         throw args[0];
       }),
     ]);
 
     const ev = await race;
-    if (ev === "end") {
+    if (ev === "end" || ev === "close") {
       throw new Error("upstream closed before sending headers");
     }
   }
@@ -234,11 +237,12 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
     const ev = await Promise.race([
       once(stream, "readable").then(() => "readable" as const),
       once(stream, "end").then(() => "end" as const),
+      once(stream, "close").then(() => "close" as const),
       once(stream, "error").then((args) => {
         throw args[0];
       }),
     ]);
-    if (ev === "end") {
+    if (ev === "end" || ev === "close") {
       throw new Error("upstream closed during chunked body");
     }
     await readMore();
@@ -306,11 +310,12 @@ async function* readFixedBody(stream: Duplex, initial: Buffer, length: number): 
         const ev = await Promise.race([
           once(stream, "readable").then(() => "readable" as const),
           once(stream, "end").then(() => "end" as const),
+          once(stream, "close").then(() => "close" as const),
           once(stream, "error").then((args) => {
             throw args[0];
           }),
         ]);
-        if (ev === "end") {
+        if (ev === "end" || ev === "close") {
           throw new Error("upstream closed before content-length satisfied");
         }
         continue;
