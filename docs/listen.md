@@ -10,8 +10,9 @@ This feature is called "ingress" internally. It works by:
 3. Routing each incoming host HTTP request to a guest-local HTTP server based on
    a routing table in `/etc/gondolin/listeners`.
 
-This is intentionally not a generic port forward. It is designed specifically
-for HTTP services.
+This is intentionally not a generic port forward.  It is designed specifically
+for HTTP services with the intentional to allow the host greater control over
+what the sandbox is exposing.
 
 ## CLI Usage
 
@@ -45,16 +46,16 @@ gondolin bash --listen 127.0.0.1:0
 
 ## Quick Start Example
 
-Inside the VM, start an HTTP server:
-
-```sh
-python -m http.server 8000
-```
-
-In another terminal, configure a route (inside the VM):
+Inside the VM configure a route (inside the VM):
 
 ```sh
 echo '/ :8000' > /etc/gondolin/listeners
+```
+
+And then start a server:
+
+```sh
+python -m http.server 8000
 ```
 
 Now from the host:
@@ -63,17 +64,18 @@ Now from the host:
 curl -v http://127.0.0.1:58650/
 ```
 
-## Routing Table: `/etc/gondolin/listeners`
+## Routing Table
 
 The file `/etc/gondolin/listeners` is the authoritative ingress configuration.
 The host gateway watches it and reloads routes shortly after it changes.
 
 Gondolin may rewrite the file into a canonical form (normalized prefixes, a
-trailing newline, and consistent formatting). Unknown `key=value` options are
+trailing newline, and consistent formatting).  Unknown `key=value` options are
 ignored for forward compatibility.
 
 This file is provided by the host via a dedicated `/etc/gondolin` mount, so the
-configuration is per-VM and does not persist after the VM is closed.
+configuration is per-VM and does not persist after the VM is closed and is
+also not snapshotted.
 
 Each non-empty, non-comment line has the form:
 
@@ -149,24 +151,6 @@ If requests hang or return `404`/`502`, enable protocol debug logging on the hos
 ```bash
 GONDOLIN_DEBUG=protocol gondolin bash --listen
 ```
-
-Things to check:
-
-- Does the guest server answer on loopback?
-
-  ```sh
-  curl -v http://127.0.0.1:8000/
-  netstat -ltn | grep 8000
-  ```
-
-- Is the route file correct?
-
-  ```sh
-  cat /etc/gondolin/listeners
-  ```
-
-- Do you see `virtioingress rx t=tcp_opened ... ok=true` in the host logs?
-  If not, ingress is not connected to the guest helper.
 
 ## SDK Usage
 
