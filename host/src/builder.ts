@@ -195,10 +195,11 @@ async function buildNative(
 ): Promise<BuildResult> {
   const outputDir = path.resolve(options.outputDir);
 
-  // Step 1: Build or locate sandboxd, sandboxfs, and sandboxssh binaries
+  // Step 1: Build or locate sandboxd, sandboxfs, sandboxssh, and sandboxingress binaries
   let sandboxdPath = config.sandboxdPath;
   let sandboxfsPath = config.sandboxfsPath;
   let sandboxsshPath = config.sandboxsshPath;
+  let sandboxingressPath = config.sandboxingressPath;
 
   if (!options.skipBinaries && !sandboxdPath && !sandboxfsPath) {
     const guestDir = findGuestDir();
@@ -216,12 +217,15 @@ async function buildNative(
     sandboxdPath = path.join(guestDir, "zig-out", "bin", "sandboxd");
     sandboxfsPath = path.join(guestDir, "zig-out", "bin", "sandboxfs");
     sandboxsshPath = path.join(guestDir, "zig-out", "bin", "sandboxssh");
+    sandboxingressPath = path.join(guestDir, "zig-out", "bin", "sandboxingress");
   } else {
-    if (!sandboxdPath || !sandboxfsPath || !sandboxsshPath) {
+    if (!sandboxdPath || !sandboxfsPath || !sandboxsshPath || !sandboxingressPath) {
       const guestDir = findGuestDir();
       sandboxdPath = sandboxdPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxd");
       sandboxfsPath = sandboxfsPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxfs");
       sandboxsshPath = sandboxsshPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxssh");
+      sandboxingressPath =
+        sandboxingressPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxingress");
     }
   }
 
@@ -233,6 +237,9 @@ async function buildNative(
   }
   if (!fs.existsSync(sandboxsshPath)) {
     throw new Error(`sandboxssh binary not found: ${sandboxsshPath}`);
+  }
+  if (!fs.existsSync(sandboxingressPath)) {
+    throw new Error(`sandboxingress binary not found: ${sandboxingressPath}`);
   }
 
   // Step 2: Build the images using the TypeScript builder
@@ -274,6 +281,7 @@ async function buildNative(
     sandboxdBin: sandboxdPath,
     sandboxfsBin: sandboxfsPath,
     sandboxsshBin: sandboxsshPath,
+    sandboxingressBin: sandboxingressPath,
     rootfsLabel: config.rootfs?.label ?? "gondolin-root",
     rootfsSizeMb: config.rootfs?.sizeMb,
     rootfsInit,
@@ -425,6 +433,10 @@ async function buildInContainer(
   if (containerConfig.sandboxsshPath) {
     copyExecutable(path.resolve(containerConfig.sandboxsshPath), "sandboxssh");
     containerConfig.sandboxsshPath = "/work/sandboxssh";
+  }
+  if (containerConfig.sandboxingressPath) {
+    copyExecutable(path.resolve(containerConfig.sandboxingressPath), "sandboxingress");
+    containerConfig.sandboxingressPath = "/work/sandboxingress";
   }
 
   fs.writeFileSync(configPath, JSON.stringify(containerConfig, null, 2));

@@ -55,6 +55,20 @@ pub fn build(b: *std.Build) void {
     ssh_exe.linkLibC();
     b.installArtifact(ssh_exe);
 
+    const ingress_exe = b.addExecutable(.{
+        .name = "sandboxingress",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sandboxingress/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sandboxd", .module = mod },
+            },
+        }),
+    });
+    ingress_exe.linkLibC();
+    b.installArtifact(ingress_exe);
+
     const mod_tests = b.addTest(.{
         .name = "sandboxd-mod-tests",
         .root_module = mod,

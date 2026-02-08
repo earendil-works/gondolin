@@ -106,6 +106,9 @@ export interface BuildConfig {
 
   /** custom sandboxssh binary path (built-in when undefined) */
   sandboxsshPath?: string;
+
+  /** custom sandboxingress binary path (built-in when undefined) */
+  sandboxingressPath?: string;
 }
 
 /**
@@ -245,6 +248,10 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
   }
 
   if (!isOptionalString(cfg.sandboxsshPath)) {
+    return false;
+  }
+
+  if (!isOptionalString(cfg.sandboxingressPath)) {
     return false;
   }
 

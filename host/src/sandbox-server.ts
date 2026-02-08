@@ -102,6 +102,9 @@ export type SandboxServerOptions = {
   virtioFsSocketPath?: string;
   /** virtio-serial ssh socket path */
   virtioSshSocketPath?: string;
+
+  /** virtio-serial ingress socket path */
+  virtioIngressSocketPath?: string;
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
@@ -206,6 +209,9 @@ export type ResolvedSandboxServerOptions = {
   virtioFsSocketPath: string;
   /** virtio-serial ssh socket path */
   virtioSshSocketPath: string;
+
+  /** virtio-serial ingress socket path */
+  virtioIngressSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
   /** guest mac address */
@@ -341,6 +347,10 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`
   );
+  const defaultVirtioIngress = path.resolve(
+    tmpDir,
+    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetSock = path.resolve(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`
@@ -404,6 +414,7 @@ export function resolveSandboxServerOptions(
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
     virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
+    virtioIngressSocketPath: options.virtioIngressSocketPath ?? defaultVirtioIngress,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
@@ -831,11 +842,16 @@ export class SandboxServer extends EventEmitter {
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
+  private readonly ingressBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
   private tcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
   private nextTcpStreamId = 1;
+
+  private ingressTcpStreams = new Map<number, TcpForwardStream>();
+  private ingressTcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+  private nextIngressTcpStreamId = 1;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -928,6 +944,7 @@ export class SandboxServer extends EventEmitter {
       virtioSocketPath: this.options.virtioSocketPath,
       virtioFsSocketPath: this.options.virtioFsSocketPath,
       virtioSshSocketPath: this.options.virtioSshSocketPath,
+      virtioIngressSocketPath: this.options.virtioIngressSocketPath,
       netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
       append: this.baseAppend,
@@ -956,6 +973,11 @@ export class SandboxServer extends EventEmitter {
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
     this.sshBridge = new VirtioBridge(this.options.virtioSshSocketPath, Math.max(maxPendingBytes, 64 * 1024 * 1024));
+    // Ingress proxy streams can also be long-lived and high-throughput.
+    this.ingressBridge = new VirtioBridge(
+      this.options.virtioIngressSocketPath,
+      Math.max(maxPendingBytes, 64 * 1024 * 1024)
+    );
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
           logger: this.hasDebug("vfs") ? (message) => this.emitDebug("vfs", message) : undefined,
@@ -991,6 +1013,7 @@ export class SandboxServer extends EventEmitter {
         this.bridge.connect();
         this.fsBridge.connect();
         this.sshBridge.connect();
+        this.ingressBridge.connect();
       }
       if (state === "stopped") {
         this.failInflight("sandbox_stopped", "sandbox is not running");
@@ -1225,6 +1248,76 @@ export class SandboxServer extends EventEmitter {
       this.tcpStreams.clear();
     };
 
+    this.ingressBridge.onMessage = (message: any) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "tcp_data"
+            ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : message.t === "tcp_opened"
+              ? ` ok=${Boolean((message as any).p?.ok)}`
+              : "";
+        this.emitDebug("protocol", `virtioingress rx t=${message.t} id=${id}${extra}`);
+      }
+
+      if (!isValidRequestId(message.id)) return;
+
+      if (message.t === "tcp_opened") {
+        const waiter = this.ingressTcpOpenWaiters.get(message.id);
+        if (!waiter) return;
+        this.ingressTcpOpenWaiters.delete(message.id);
+
+        const ok = Boolean((message as any).p?.ok);
+        const msg = typeof (message as any).p?.message === "string" ? (message as any).p.message : "tcp_open failed";
+
+        if (ok) {
+          waiter.resolve();
+        } else {
+          const stream = this.ingressTcpStreams.get(message.id);
+          stream?.openFailed(msg);
+          this.ingressTcpStreams.delete(message.id);
+          waiter.reject(new Error(msg));
+        }
+        return;
+      }
+
+      if (message.t === "tcp_data") {
+        const stream = this.ingressTcpStreams.get(message.id);
+        if (!stream) return;
+        const data = (message as any).p?.data;
+        if (!Buffer.isBuffer(data)) return;
+        stream.pushRemote(data);
+        return;
+      }
+
+      if (message.t === "tcp_close") {
+        const stream = this.ingressTcpStreams.get(message.id);
+        if (!stream) return;
+        this.ingressTcpStreams.delete(message.id);
+        const waiter = this.ingressTcpOpenWaiters.get(message.id);
+        if (waiter) {
+          this.ingressTcpOpenWaiters.delete(message.id);
+          waiter.reject(new Error("tcp stream closed"));
+        }
+        stream.remoteClose();
+        return;
+      }
+    };
+
+    this.ingressBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[ingress] virtio decode error: ${message}`));
+      // Fail any pending opens.
+      for (const [id, waiter] of this.ingressTcpOpenWaiters.entries()) {
+        waiter.reject(new Error("ingress virtio bridge error"));
+        this.ingressTcpOpenWaiters.delete(id);
+      }
+      for (const stream of this.ingressTcpStreams.values()) {
+        stream.destroy(new Error("ingress virtio bridge error"));
+      }
+      this.ingressTcpStreams.clear();
+    };
+
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
       this.emit("error", new Error(`[virtio] decode error: ${message}`));
@@ -1335,6 +1428,80 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
+  /**
+   * Open a TCP stream to a loopback service inside the guest via the ingress connector.
+   *
+   * This is intended for the host-side ingress gateway and should not be exposed
+   * as a generic port-forwarding primitive.
+   */
+  async openIngressStream(target: { host: string; port: number; timeoutMs?: number }): Promise<Duplex> {
+    const host = target.host;
+    const port = target.port;
+    const timeoutMs = target.timeoutMs ?? 5000;
+
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error(`invalid guest port: ${port}`);
+    }
+
+    // Allocate stream id
+    let id = this.nextIngressTcpStreamId;
+    for (let i = 0; i < 0xffffffff; i++) {
+      if (!this.ingressTcpStreams.has(id) && !this.ingressTcpOpenWaiters.has(id)) break;
+      id = (id + 1) >>> 0;
+      if (id === 0) id = 1;
+    }
+    this.nextIngressTcpStreamId = (id + 1) >>> 0;
+    if (this.nextIngressTcpStreamId === 0) this.nextIngressTcpStreamId = 1;
+
+    const stream = new TcpForwardStream(id, (m) => this.ingressBridge.send(m), () => {
+      this.ingressTcpStreams.delete(id);
+      const waiter = this.ingressTcpOpenWaiters.get(id);
+      if (waiter) {
+        this.ingressTcpOpenWaiters.delete(id);
+        waiter.reject(new Error("tcp stream closed"));
+      }
+    });
+
+    this.ingressTcpStreams.set(id, stream);
+
+    const openedPromise = new Promise<void>((resolve, reject) => {
+      this.ingressTcpOpenWaiters.set(id, { resolve, reject });
+    });
+
+    const ok = this.ingressBridge.send({
+      v: 1,
+      t: "tcp_open",
+      id,
+      p: {
+        host,
+        port,
+      },
+    });
+
+    if (!ok) {
+      this.ingressTcpStreams.delete(id);
+      this.ingressTcpOpenWaiters.delete(id);
+      stream.destroy();
+      throw new Error("virtio tcp queue exceeded");
+    }
+
+    let timeout: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        openedPromise,
+        new Promise<void>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("tcp_open timeout")), timeoutMs);
+        }),
+      ]);
+      return stream;
+    } catch (err) {
+      stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   private broadcastStatus(state: SandboxState) {
     for (const client of this.clients) {
       sendJson(client, { type: "status", state });
@@ -1423,6 +1590,7 @@ export class SandboxServer extends EventEmitter {
     this.bridge.connect();
     this.fsBridge.connect();
     this.sshBridge.connect();
+    this.ingressBridge.connect();
   }
 
   private async closeInternal() {
@@ -1432,11 +1600,17 @@ export class SandboxServer extends EventEmitter {
     this.bridge.disconnect();
     this.fsBridge.disconnect();
     this.sshBridge.disconnect();
+    this.ingressBridge.disconnect();
     for (const stream of this.tcpStreams.values()) {
       stream.destroy();
     }
     this.tcpStreams.clear();
     this.tcpOpenWaiters.clear();
+    for (const stream of this.ingressTcpStreams.values()) {
+      stream.destroy();
+    }
+    this.ingressTcpStreams.clear();
+    this.ingressTcpOpenWaiters.clear();
     await this.fsService?.close();
     this.network?.close();
     this.started = false;

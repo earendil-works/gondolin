@@ -34,6 +34,7 @@ ROOTFS_LABEL=${ROOTFS_LABEL:-"gondolin-root"}
 SANDBOXD_BIN=${SANDBOXD_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxd"}
 SANDBOXFS_BIN=${SANDBOXFS_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxfs"}
 SANDBOXSSH_BIN=${SANDBOXSSH_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxssh"}
+SANDBOXINGRESS_BIN=${SANDBOXINGRESS_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxingress"}
 
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
 ALPINE_URL=${ALPINE_URL:-"https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${ARCH}/${ALPINE_TARBALL}"}
@@ -84,7 +85,7 @@ fi
 
 mkdir -p "${CACHE_DIR}" "${OUT_DIR}"
 
-if [[ ! -f "${SANDBOXD_BIN}" || ! -f "${SANDBOXFS_BIN}" || ! -f "${SANDBOXSSH_BIN}" ]]; then
+if [[ ! -f "${SANDBOXD_BIN}" || ! -f "${SANDBOXFS_BIN}" || ! -f "${SANDBOXSSH_BIN}" || ! -f "${SANDBOXINGRESS_BIN}" ]]; then
     echo "guest binaries not found, building..." >&2
     (cd "${GUEST_DIR}" && ${ZIG:-zig} build -Doptimize=ReleaseSmall)
 fi
@@ -280,6 +281,7 @@ install_packages "${INITRAMFS_DIR}" "${INITRAMFS_PACKAGES}"
 install -m 0755 "${SANDBOXD_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxd"
 install -m 0755 "${SANDBOXFS_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxfs"
 install -m 0755 "${SANDBOXSSH_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxssh"
+install -m 0755 "${SANDBOXINGRESS_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxingress"
 install -m 0755 "${ROOTFS_INIT}" "${ROOTFS_DIR}/init"
 install -m 0755 "${INITRAMFS_INIT}" "${INITRAMFS_DIR}/init"
 

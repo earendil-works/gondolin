@@ -36,6 +36,8 @@ function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
     cpus: 1,
     virtioSocketPath: "/tmp/virtio.sock",
     virtioFsSocketPath: "/tmp/virtiofs.sock",
+    virtioSshSocketPath: "/tmp/virtio-ssh.sock",
+    virtioIngressSocketPath: "/tmp/virtio-ingress.sock",
     append: "console=ttyS0",
     machineType: "virt",
     accel: "tcg",

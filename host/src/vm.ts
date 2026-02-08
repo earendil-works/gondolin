@@ -36,6 +36,14 @@ import {
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
 import { defaultDebugLog, resolveDebugFlags, type DebugComponent, type DebugLogFn } from "./debug";
 import {
+  IngressGateway,
+  type EnableIngressOptions,
+  type IngressAccess,
+  type IngressRoute,
+  createGondolinEtcHooks,
+  createGondolinEtcMount,
+} from "./ingress";
+import {
   MountRouterProvider,
   listMountPaths,
   normalizeMountMap,
@@ -229,6 +237,9 @@ export class VM {
   private debugLog: DebugLogFn | null = null;
   private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
   private sshAccess: SshAccess | null = null;
+  private gondolinEtc: ReturnType<typeof createGondolinEtcMount> | null = null;
+  private ingressGateway: IngressGateway | null = null;
+  private ingressAccess: IngressAccess | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -294,7 +305,32 @@ export class VM {
       options.sandbox?.mitmCertDir,
       options.sandbox?.netEnabled ?? true
     );
-    const resolvedVfs = resolveVmVfs(options.vfs, mitmMounts);
+
+    // Inject a guarded /etc/gondolin mount (host-authoritative ingress configuration)
+    let gondolinMounts: Record<string, VirtualProvider> = {};
+    let gondolinHooks: VfsHooks = {};
+    if (options.vfs !== null) {
+      const mountPaths = listMountPaths(options.vfs?.mounts);
+      if (!mountPaths.includes("/etc/gondolin")) {
+        const etcProvider = new MemoryProvider();
+        this.gondolinEtc = createGondolinEtcMount(etcProvider);
+        gondolinMounts = {
+          "/etc/gondolin": etcProvider,
+        };
+        gondolinHooks = createGondolinEtcHooks(this.gondolinEtc.listeners) as VfsHooks;
+      }
+    }
+
+    const mergedHooks = composeVfsHooks(options.vfs?.hooks, gondolinHooks);
+    const vfsOptions =
+      options.vfs === null
+        ? null
+        : {
+            ...(options.vfs ?? {}),
+            hooks: mergedHooks,
+          };
+
+    const resolvedVfs = resolveVmVfs(vfsOptions, { ...mitmMounts, ...gondolinMounts });
     this.vfs = resolvedVfs.provider;
     this.defaultEnv = options.env;
     let fuseMounts = resolvedVfs.mounts;
@@ -834,6 +870,54 @@ fi
     return access;
   }
 
+  /**
+   * Get the current ingress routes (parsed from /etc/gondolin/listeners).
+   */
+  getIngressRoutes(): IngressRoute[] {
+    if (!this.gondolinEtc) return [];
+    return this.gondolinEtc.listeners.getRoutes();
+  }
+
+  /**
+   * Replace ingress routes and write the canonical /etc/gondolin/listeners file.
+   */
+  setIngressRoutes(routes: IngressRoute[]): void {
+    if (!this.gondolinEtc) {
+      throw new Error("/etc/gondolin mount is not available");
+    }
+    this.gondolinEtc.listeners.setRoutes(routes);
+  }
+
+  /**
+   * Enable the host-side ingress gateway.
+   *
+   * The gateway listens on a single host port and routes requests to guest-local
+   * HTTP servers as configured by /etc/gondolin/listeners.
+   */
+  async enableIngress(options: EnableIngressOptions = {}): Promise<IngressAccess> {
+    if (this.ingressAccess) return this.ingressAccess;
+
+    await this.start();
+
+    if (!this.gondolinEtc) {
+      throw new Error(
+        "ingress requires the /etc/gondolin mount. Ensure VFS is enabled and that /etc/gondolin is not overridden by a custom mount."
+      );
+    }
+
+    if (!this.server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    const gateway = new IngressGateway(this.server, this.gondolinEtc.listeners);
+    const access = await gateway.listen(options);
+
+    this.ingressGateway = gateway;
+    this.ingressAccess = access;
+
+    return access;
+  }
+
   private execInternal(command: ExecInput, options: ExecOptions): ExecProcess {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
@@ -964,6 +1048,16 @@ fi
   }
 
   private async closeInternal() {
+    if (this.ingressAccess) {
+      try {
+        await this.ingressAccess.close();
+      } catch {
+        // ignore
+      } finally {
+        this.ingressAccess = null;
+        this.ingressGateway = null;
+      }
+    }
     if (this.sshAccess) {
       try {
         await this.sshAccess.close();
@@ -1579,6 +1673,22 @@ function resolveVmVfs(
   }
 
   return { provider: wrapProvider(provider, hooks), mounts };
+}
+
+function composeVfsHooks(a?: VfsHooks, b?: VfsHooks): VfsHooks {
+  if (!a || (!a.before && !a.after)) return b ?? {};
+  if (!b || (!b.before && !b.after)) return a;
+
+  return {
+    before: async (ctx) => {
+      if (a.before) await a.before(ctx);
+      if (b.before) await b.before(ctx);
+    },
+    after: async (ctx) => {
+      if (a.after) await a.after(ctx);
+      if (b.after) await b.after(ctx);
+    },
+  };
 }
 
 function wrapProvider(provider: VirtualProvider, hooks: VfsHooks) {

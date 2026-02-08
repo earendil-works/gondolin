@@ -137,6 +137,41 @@ for await (const { stream, text } of vm.exec("echo out; echo err >&2", { stdout:
 }
 ```
 
+#### `proc.attach()`
+
+`vm.exec()` returns an `ExecProcess`, which can be **attached** to a terminal (or any Node streams):
+
+```ts
+const proc = vm.exec(["/bin/bash", "-i"], {
+  stdin: true,
+  pty: true,
+  stdout: "pipe",
+  stderr: "pipe",
+});
+
+proc.attach(
+  process.stdin as NodeJS.ReadStream,
+  process.stdout as NodeJS.WriteStream,
+  process.stderr as NodeJS.WriteStream,
+);
+
+const result = await proc;
+console.log("exitCode:", result.exitCode);
+```
+
+What `attach()` does:
+
+- wires `stdin` → guest process (requires `stdin: true`)
+- forwards `stdout`/`stderr` to the provided writable streams when they are set to `"pipe"`
+- if `stdout`/`stderr` are `"inherit"` (or a custom writable), output is already forwarded by the VM, and `attach()` only handles input/resize
+- enables raw mode on TTY stdin, and forwards terminal resize events to the guest (only meaningful with `pty: true`)
+- automatically cleans up listeners and restores raw mode when the process exits
+
+Notes:
+
+- `attach()` can only be called once per process.
+- Don’t simultaneously consume `proc.stdout` / async-iterate the process and call `attach()`; attaching will consume the pipe.
+
 #### Avoiding Large Buffers
 
 For commands that may produce a lot of output, set `buffer: false` (drops stdout/stderr):

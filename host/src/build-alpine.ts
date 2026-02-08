@@ -43,6 +43,9 @@ export interface AlpineBuildOptions {
   sandboxfsBin: string;
   /** path to the sandboxssh binary */
   sandboxsshBin: string;
+
+  /** path to the sandboxingress binary */
+  sandboxingressBin: string;
   /** volume label for the rootfs ext4 image */
   rootfsLabel: string;
   /** fixed rootfs image size in `mb` (auto when undefined) */
@@ -81,6 +84,7 @@ export async function buildAlpineImages(
     sandboxdBin,
     sandboxfsBin,
     sandboxsshBin,
+    sandboxingressBin,
     rootfsLabel,
     rootfsSizeMb,
     workDir,
@@ -134,6 +138,7 @@ export async function buildAlpineImages(
   copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"));
   copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"));
   copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"));
+  copyExecutable(sandboxingressBin, path.join(rootfsDir, "usr/bin/sandboxingress"));
 
   const rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
   const initramfsInitContent = opts.initramfsInit ?? INITRAMFS_INIT_SCRIPT;
@@ -1001,6 +1006,13 @@ if [ -x /usr/bin/sandboxssh ]; then
   /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
 else
   log "[init] /usr/bin/sandboxssh missing"
+fi
+
+if [ -x /usr/bin/sandboxingress ]; then
+  log "[init] starting sandboxingress"
+  /usr/bin/sandboxingress > "\${CONSOLE:-/dev/null}" 2>&1 &
+else
+  log "[init] /usr/bin/sandboxingress missing"
 fi
 
 log "[init] starting sandboxd"

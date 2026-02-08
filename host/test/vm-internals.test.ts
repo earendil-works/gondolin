@@ -29,6 +29,7 @@ function makeTempResolvedServerOptions() {
       virtioSocketPath: path.join(dir, "virtio.sock"),
       virtioFsSocketPath: path.join(dir, "virtiofs.sock"),
       virtioSshSocketPath: path.join(dir, "virtio-ssh.sock"),
+      virtioIngressSocketPath: path.join(dir, "virtio-ingress.sock"),
       netSocketPath: path.join(dir, "net.sock"),
       netMac: "02:00:00:00:00:01",
       netEnabled: false,

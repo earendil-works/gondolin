@@ -79,6 +79,17 @@ export {
   type DebugLogFn,
 } from "./debug";
 
+// Ingress gateway
+export {
+  IngressGateway,
+  GondolinListeners,
+  parseListenersFile,
+  serializeListenersFile,
+  type IngressRoute,
+  type EnableIngressOptions,
+  type IngressAccess,
+} from "./ingress";
+
 // Asset management
 export {
   ensureGuestAssets,

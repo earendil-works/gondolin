@@ -193,6 +193,13 @@ else
   log "[init] /usr/bin/sandboxssh missing"
 fi
 
+if [ -x /usr/bin/sandboxingress ]; then
+  log "[init] starting sandboxingress"
+  /usr/bin/sandboxingress > "${CONSOLE:-/dev/null}" 2>&1 &
+else
+  log "[init] /usr/bin/sandboxingress missing"
+fi
+
 log "[init] starting sandboxd"
 
 exec /usr/bin/sandboxd
