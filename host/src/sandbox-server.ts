@@ -102,6 +102,27 @@ export type SandboxServerOptions = {
   netEnabled?: boolean;
 
   /**
+   * Root disk image path (attached as `/dev/vda`)
+   *
+   * If omitted, uses the base rootfs image from the guest assets.
+   */
+  rootDiskPath?: string;
+
+  /** root disk image format */
+  rootDiskFormat?: "raw" | "qcow2";
+
+  /** qemu snapshot mode for the root disk (discard writes) */
+  rootDiskSnapshot?: boolean;
+
+  /**
+   * Delete the root disk image on VM close
+   *
+   * This is a host-side lifecycle hint. It is currently only honored by the
+   * higher-level {@link VM} wrapper.
+   */
+  rootDiskDeleteOnClose?: boolean;
+
+  /**
    * Debug configuration
    *
    * - `true`: enable all debug components
@@ -165,6 +186,14 @@ export type ResolvedSandboxServerOptions = {
   initrdPath: string;
   /** rootfs image path */
   rootfsPath: string;
+
+  /** root disk image path (attached as `/dev/vda`) */
+  rootDiskPath: string;
+  /** root disk image format */
+  rootDiskFormat: "raw" | "qcow2";
+  /** qemu snapshot mode for the root disk (discard writes) */
+  rootDiskSnapshot: boolean;
+
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
   /** vm cpu count */
@@ -399,11 +428,18 @@ export function resolveSandboxServerOptions(
     );
   }
 
+  const rootDiskPath = options.rootDiskPath ?? rootfsPath;
+  const rootDiskFormat = options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
+  const rootDiskSnapshot = options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
+
   return {
     qemuPath,
     kernelPath,
     initrdPath,
     rootfsPath,
+    rootDiskPath,
+    rootDiskFormat,
+    rootDiskSnapshot,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
@@ -932,7 +968,9 @@ export class SandboxServer extends EventEmitter {
       qemuPath: this.options.qemuPath,
       kernelPath: this.options.kernelPath,
       initrdPath: this.options.initrdPath,
-      rootfsPath: this.options.rootfsPath,
+      rootDiskPath: this.options.rootDiskPath,
+      rootDiskFormat: this.options.rootDiskFormat,
+      rootDiskSnapshot: this.options.rootDiskSnapshot,
       memory: this.options.memory,
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,

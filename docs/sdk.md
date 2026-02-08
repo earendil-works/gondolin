@@ -317,6 +317,41 @@ const vm = await VM.create({
 For details (including where the upper layer is mounted and how to archive it),
 see [Overlay Root](./root-overlay.md).
 
+## Disk checkpoints (qcow2)
+
+Gondolin supports **disk-only checkpoints** of the VM root filesystem.
+
+A checkpoint captures the VM's writable disk state and can be cloned cheaply
+using qcow2 backing files:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const base = await VM.create();
+
+// Install packages / write to the root filesystem...
+await base.exec("apk add git");
+await base.exec("echo hello > /etc/my-base-marker");
+
+const checkpoint = await base.checkpoint("dev-base");
+
+const task1 = await checkpoint.clone();
+const task2 = await checkpoint.clone();
+
+// Both VMs start from the same disk state and diverge independently
+await task1.close();
+await task2.close();
+
+checkpoint.delete();
+```
+
+Notes:
+
+- This is **disk-only** (no in-VM RAM/process restore)
+- `sandbox.rootOverlay` is not compatible with disk checkpoints (it redirects root writes to tmpfs)
+- Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`);
+  writes under those paths are not part of disk checkpoints
+
 Use the custom assets programmatically by pointing `sandbox.imagePath` at the
 asset directory:
 

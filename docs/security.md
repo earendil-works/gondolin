@@ -116,7 +116,7 @@ This is what Gondolin actually enforces.
   - `-nodefaults` (avoid unexpected devices)
   - `-no-reboot`, `-nographic`
   - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng)
-  - the rootfs block device is attached as `snapshot=on` so writes do not persist to the base image
+  - the root filesystem is attached as a copy-on-write disk (qcow2 overlay) so writes do not persist to the base image
 
 **Guarantee:** absent a QEMU escape, guest processes cannot directly access the
 *host kernel, host memory, or host filesystem.

@@ -4,6 +4,10 @@ import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { Readable } from "stream";
+import { randomUUID } from "crypto";
+
+import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
+import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 
 import {
   ErrorMessage,
@@ -15,6 +19,7 @@ import {
 import {
   SandboxServer,
   SandboxServerOptions,
+  resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
   type ResolvedSandboxServerOptions,
   type SandboxConnection,
@@ -164,6 +169,23 @@ export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
 export type VMState = SandboxState | "unknown";
 
+type RootDiskState = {
+  /** root disk image path */
+  path: string;
+  /** qemu disk format */
+  format: "raw" | "qcow2";
+  /** qemu snapshot mode (discard writes) */
+  snapshot: boolean;
+  /** delete the disk file on vm.close() */
+  deleteOnClose: boolean;
+};
+
+function inferDiskFormatFromPath(diskPath: string): "raw" | "qcow2" {
+  const lower = diskPath.toLowerCase();
+  if (lower.endsWith(".qcow2") || lower.endsWith(".qcow")) return "qcow2";
+  return "raw";
+}
+
 export class VM {
   /**
    * Replace the debug log callback.
@@ -175,6 +197,10 @@ export class VM {
   }
   private readonly autoStart: boolean;
   private server: SandboxServer | null;
+  private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
+  private rootDisk: RootDiskState | null = null;
+  private checkpointed = false;
+  private readonly baseOptionsForClone: VMOptions;
   private readonly defaultEnv: EnvInput | undefined;
   private connection: SandboxConnection | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -258,6 +284,7 @@ export class VM {
    * @param resolvedSandboxOptions Optional pre-resolved sandbox options (from VM.create())
    */
   constructor(options: VMOptions = {}, resolvedSandboxOptions?: ResolvedSandboxServerOptions) {
+    this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
@@ -326,16 +353,54 @@ export class VM {
       sandboxOptions.cpus = options.cpus;
     }
 
-    // Handle VFS in resolved options
-    if (resolvedSandboxOptions) {
-      // Merge VFS provider into resolved options
-      if (this.vfs) {
-        (resolvedSandboxOptions as any).vfsProvider = this.vfs;
-      }
-      this.server = new SandboxServer(resolvedSandboxOptions);
-    } else {
-      this.server = new SandboxServer(sandboxOptions);
+    // Resolve sandbox options (sync) if needed so we can prepare the root disk.
+    const resolved = resolvedSandboxOptions
+      ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
+      : resolveSandboxServerOptions(sandboxOptions);
+
+    // Merge VFS provider into resolved options
+    if (this.vfs) {
+      (resolved as any).vfsProvider = this.vfs;
     }
+
+    // Prepare root disk:
+    // - If the caller provided sandbox.rootDiskPath, use it as-is.
+    // - Otherwise create an ephemeral qcow2 overlay backed by the base rootfs.
+    const userRootDiskPath = sandboxOptions.rootDiskPath;
+    if (userRootDiskPath) {
+      const format = sandboxOptions.rootDiskFormat ?? resolved.rootDiskFormat ?? inferDiskFormatFromPath(userRootDiskPath);
+      const snapshot = sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
+      const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
+
+      resolved.rootDiskPath = userRootDiskPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskSnapshot = snapshot;
+
+      this.rootDisk = {
+        path: userRootDiskPath,
+        format,
+        snapshot,
+        deleteOnClose,
+      };
+    } else {
+      ensureQemuImgAvailable();
+      const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
+      const overlayPath = createTempQcow2Overlay(resolved.rootfsPath, backingFormat);
+
+      resolved.rootDiskPath = overlayPath;
+      resolved.rootDiskFormat = "qcow2";
+      resolved.rootDiskSnapshot = false;
+
+      this.rootDisk = {
+        path: overlayPath,
+        format: "qcow2",
+        snapshot: false,
+        deleteOnClose: true,
+      };
+    }
+
+    this.resolvedSandboxOptions = resolved;
+    this.server = new SandboxServer(resolved);
 
     const effectiveDebugFlags = resolvedSandboxOptions
       ? new Set(resolvedSandboxOptions.debug ?? [])
@@ -812,6 +877,10 @@ fi
   }
 
   private async startInternal() {
+    if (this.checkpointed) {
+      throw new Error("vm was checkpointed and cannot be restarted; clone the checkpoint instead");
+    }
+
     this.ensureQemuAvailable();
 
     if (this.server) {
@@ -840,6 +909,15 @@ fi
     }
     await this.disconnect();
     this.vfsReadyPromise = null;
+
+    // Cleanup ephemeral root disk
+    if (this.rootDisk && this.rootDisk.deleteOnClose) {
+      try {
+        fs.rmSync(this.rootDisk.path, { force: true });
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private allocateId(): number {
@@ -1262,7 +1340,79 @@ fi
     connection.close();
   }
 
-  private sendJson(message: ClientMessage) {
+  /**
+   * Create a disk-only checkpoint of the VM root disk.
+   *
+   * This stops the VM and materializes its writable qcow2 overlay in the
+   * checkpoint directory.
+   */
+  async checkpoint(name?: string): Promise<VmCheckpoint> {
+    const rootDisk = this.rootDisk;
+    if (!rootDisk) {
+      throw new Error("vm has no root disk");
+    }
+    if (rootDisk.snapshot) {
+      throw new Error("cannot checkpoint: root disk is running in qemu snapshot mode");
+    }
+    if (rootDisk.format !== "qcow2") {
+      throw new Error(`cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`);
+    }
+    if (this.resolvedSandboxOptions.rootOverlay === "tmpfs") {
+      throw new Error(
+        "cannot checkpoint: sandbox.rootOverlay is enabled (guest writes are redirected to tmpfs and not captured by disk checkpoints)"
+      );
+    }
+
+    // Ensure the disk isn't deleted by close().
+    rootDisk.deleteOnClose = false;
+
+    // Best-effort flush of guest filesystem buffers so the checkpoint captures
+    // recent writes even though we currently stop QEMU abruptly.
+    if (this.server && this.server.getState() === "running") {
+      try {
+        await this.exec(["/bin/sh", "-c", "sync; sync"]);
+      } catch {
+        // ignore
+      }
+    }
+
+    await this.close();
+
+    const checkpointName = (name ?? `checkpoint-${randomUUID().slice(0, 8)}`).trim();
+    const checkpointDir = VmCheckpoint.getCheckpointDir(checkpointName);
+
+    fs.rmSync(checkpointDir, { recursive: true, force: true });
+    fs.mkdirSync(checkpointDir, { recursive: true });
+
+    const diskDst = path.join(checkpointDir, "disk.qcow2");
+    moveFile(rootDisk.path, diskDst);
+
+    const data: VmCheckpointData = {
+      version: 1,
+      name: checkpointName,
+      createdAt: new Date().toISOString(),
+      diskFile: "disk.qcow2",
+      guestAssets: {
+        kernelPath: this.resolvedSandboxOptions.kernelPath,
+        initrdPath: this.resolvedSandboxOptions.initrdPath,
+        rootfsPath: this.resolvedSandboxOptions.rootfsPath,
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(checkpointDir, "checkpoint.json"),
+      JSON.stringify(data, null, 2) + "\n",
+      "utf8"
+    );
+
+    // Mark this VM as consumed.
+    this.rootDisk = null;
+    this.checkpointed = true;
+
+    return new VmCheckpoint(checkpointDir, data, this.baseOptionsForClone);
+  }
+
+  private sendJson(message: ClientMessage) { 
     if (!this.connection) {
       throw new Error("sandbox connection is not available");
     }
