@@ -65,6 +65,7 @@ await vm.close();
 - [Workloads](./workloads.md): typical workloads and lifecycles
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
+- [VFS Providers](./vfs.md): configure host-provided mounts and filesystem policies
 - [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging

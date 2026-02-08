@@ -238,34 +238,27 @@ For deeper conceptual background, see [Network stack](./network.md).
 
 ## VFS Providers
 
-The VM exposes hookable VFS mounts:
+Gondolin can mount host-backed paths into the guest via programmable VFS
+providers.
+
+See [VFS Providers](./vfs.md) for the full provider reference and common
+recipes (blocking `/.env`, hiding `node_modules`, read-only mounts, hooks, and
+more).
+
+Minimal example:
 
 ```ts
-import {
-  VM,
-  MemoryProvider,
-  RealFSProvider,
-  ReadonlyProvider,
-} from "@earendil-works/gondolin";
+import { VM, RealFSProvider, MemoryProvider } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
   vfs: {
     mounts: {
-      "/": new MemoryProvider(),
-      "/data": new RealFSProvider("/host/data"),
-      "/config": new ReadonlyProvider(new RealFSProvider("/host/config")),
-    },
-    hooks: {
-      before: (ctx) => console.log("before", ctx.op, ctx.path),
-      after: (ctx) => console.log("after", ctx.op, ctx.path),
+      "/workspace": new RealFSProvider("/host/workspace"),
+      "/scratch": new MemoryProvider(),
     },
   },
 });
 ```
-
-> Note: Avoid mounting a `MemoryProvider` at `/` unless you also provide CA
-> certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
-> failures (e.g. `curl: (60)`).
 
 ## Image Management
 

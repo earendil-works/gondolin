@@ -23,7 +23,7 @@ not.  See [Snapshots](./snapshots.md) for details.
 Design your workloads so that throwing away a VM is always safe.  This means:
 
 - **Write durable state to VFS mounts.**  The root filesystem is ephemeral by
-  default.  Use a [VFS provider](./sdk.md) (e.g. `MemoryProvider`,
+  default.  Use a [VFS provider](./vfs.md) (e.g. `MemoryProvider`,
   `RealFSProvider`) mounted at a known path like `/workspace` to store files
   you care about.
 - **Don't rely on long-running background processes.**  There is no mechanism
