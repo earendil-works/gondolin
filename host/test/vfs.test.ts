@@ -126,6 +126,30 @@ test("vfs roundtrip between host and guest", { skip: skipVmTests, timeout: timeo
   });
 });
 
+test("vfs can read large files without truncation", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
+    const size = 256 * 1024;
+
+    const handle = await rootProvider.open("/large.bin", "w+");
+    await handle.writeFile(Buffer.alloc(size, 0x61));
+    await handle.close();
+
+    await vm.start();
+
+    // Pipe through cat to ensure we're measuring bytes actually read, not just stat().
+    const result = await withTimeout(
+      vm.exec(["/bin/sh", "-c", "cat /data/large.bin | wc -c"]),
+      timeoutMs
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`wc failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    }
+
+    const count = Number(result.stdout.trim());
+    assert.equal(count, size);
+  });
+});
+
 test("vfs hooks can block writes", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   blockedEntries.length = 0;
 

@@ -720,27 +720,52 @@ const SandboxFs = struct {
             return;
         }
 
+        // The kernel can issue reads larger than our RPC payload budget.
+        // Returning a short read for a non-EOF region can cause the kernel
+        // to cache an early EOF and silently truncate subsequent reads.
+        //
+        // To avoid this, fulfill the kernel's requested size by chunking the
+        // request into multiple RPC calls and concatenating the results.
         const read_in = try parseRead(payload);
-        const size = @min(read_in.size, @as(u32, MAX_RPC_DATA));
 
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "fh", .value = .{ .UInt = read_in.fh } },
-            .{ .name = "offset", .value = .{ .UInt = read_in.offset } },
-            .{ .name = "size", .value = .{ .UInt = size } },
-        };
-        var response = try self.rpc.?.request("read", &fields);
-        defer response.deinit();
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(self.allocator);
 
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
+        var offset: u64 = read_in.offset;
+        var remaining: u32 = read_in.size;
+
+        while (remaining > 0) {
+            const chunk_size: u32 = @min(remaining, @as(u32, MAX_RPC_DATA));
+
+            var fields = [_]fs_rpc.Field{
+                .{ .name = "fh", .value = .{ .UInt = read_in.fh } },
+                .{ .name = "offset", .value = .{ .UInt = offset } },
+                .{ .name = "size", .value = .{ .UInt = chunk_size } },
+            };
+            var response = try self.rpc.?.request("read", &fields);
+            defer response.deinit();
+
+            if (response.err != 0) {
+                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
+                return;
+            }
+
+            const res_map = response.res orelse return error.InvalidResponse;
+            const data_val = cbor.getMapValue(res_map, "data") orelse return error.InvalidResponse;
+            const data = try expectBytes(data_val);
+
+            try buf.appendSlice(self.allocator, data);
+
+            // A short read is only valid at EOF.
+            if (data.len < @as(usize, @intCast(chunk_size))) {
+                break;
+            }
+
+            offset += @intCast(data.len);
+            remaining -= @intCast(data.len);
         }
 
-        const res_map = response.res orelse return error.InvalidResponse;
-        const data_val = cbor.getMapValue(res_map, "data") orelse return error.InvalidResponse;
-        const data = try expectBytes(data_val);
-
-        try sendResponse(self.fuse_fd, header.unique, 0, data);
+        try sendResponse(self.fuse_fd, header.unique, 0, buf.items);
     }
 
     fn handleWrite(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {

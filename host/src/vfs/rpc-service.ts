@@ -239,11 +239,27 @@ export class FsRpcService {
     if (size > MAX_RPC_DATA) {
       throw createErrnoError(ERRNO.EINVAL, "read");
     }
+
     const handle = this.getHandle(fh, "read");
+
+    // node:fs FileHandle.read() is allowed to return short reads even for
+    // regular files.  Treating a short read as EOF would silently truncate
+    // large guest reads, so loop until we fill the buffer or hit true EOF.
     const buffer = Buffer.alloc(size);
-    const { bytesRead } = await handle.handle.read(buffer, 0, size, offset);
-    const data = buffer.subarray(0, bytesRead);
-    this.metrics.bytesRead += bytesRead;
+    let total = 0;
+    while (total < size) {
+      const { bytesRead } = await handle.handle.read(
+        buffer,
+        total,
+        size - total,
+        offset + total
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+
+    const data = buffer.subarray(0, total);
+    this.metrics.bytesRead += total;
     return { data };
   }
 
