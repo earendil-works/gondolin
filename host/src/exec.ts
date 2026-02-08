@@ -167,7 +167,14 @@ export function resolveOutputMode(
     return { mode: "writable", stream: writable };
   }
 
-  if (value === "buffer" || value === "pipe" || value === "inherit" || value === "ignore") {
+  if (value === "inherit") {
+    return {
+      mode: "writable",
+      stream: streamName === "stdout" ? process.stdout : process.stderr,
+    };
+  }
+
+  if (value === "buffer" || value === "pipe" || value === "ignore") {
     return { mode: value };
   }
 
@@ -199,9 +206,16 @@ class ExecPipeStream extends Readable {
   private consumedScheduled = false;
 
   getBufferedBytes(): number {
-    // `readableLength` reflects Node's internal queue size (what `pause()`/`resume()`
-    // interacts with).  Our own `bufferedBytes` tracks byte counts independent of
-    // encoding.
+    // When an encoding is set (setEncoding()), Node's `readableLength` can be in
+    // units that do not match raw byte counts (e.g. "hex" expands 1 byte -> 2 chars).
+    // Credits/backpressure are based on raw bytes, so rely on our own accounting.
+    if ((this as any).readableEncoding) {
+      return this.bufferedBytes;
+    }
+
+    // Without an encoding, `readableLength` reflects Node's internal queue size in
+    // bytes (what `pause()`/`resume()` interacts with).  Our own `bufferedBytes`
+    // tracks raw bytes pushed/consumed.
     //
     // When these disagree, we must never *undercount* buffered bytes; otherwise we
     // may grant too many credits and allow unbounded growth in the stream buffer.
@@ -234,7 +248,8 @@ class ExecPipeStream extends Readable {
     if (Buffer.isBuffer(chunk)) {
       bytes = chunk.length;
     } else if (typeof chunk === "string") {
-      bytes = Buffer.byteLength(chunk);
+      const enc = (this as any).readableEncoding ?? "utf8";
+      bytes = Buffer.byteLength(chunk, enc);
     }
 
     if (bytes > 0) {
@@ -586,10 +601,22 @@ export function createExecSession(
 
   const windowBytes = resolveWindowBytes(options.windowBytes);
 
+  // Normalize inherit here so ExecSession never needs to handle it specially.
+  // This also makes attach() behavior consistent even when createExecSession()
+  // is called directly in tests or internal tooling.
+  const stdoutMode: ResolvedExecOutputMode =
+    options.stdout.mode === "inherit"
+      ? { mode: "writable", stream: process.stdout }
+      : options.stdout;
+  const stderrMode: ResolvedExecOutputMode =
+    options.stderr.mode === "inherit"
+      ? { mode: "writable", stream: process.stderr }
+      : options.stderr;
+
   const session: ExecSession = {
     id,
-    stdoutMode: options.stdout,
-    stderrMode: options.stderr,
+    stdoutMode,
+    stderrMode,
     stdoutPipe: null,
     stderrPipe: null,
     stdoutChunks: [],

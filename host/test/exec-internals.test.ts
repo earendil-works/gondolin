@@ -49,6 +49,70 @@ test("pipe mode byte accounting is stable with setEncoding()", async () => {
   assert.equal(stdout.getBufferedBytes(), 0);
 });
 
+test("pipe mode byte accounting respects non-utf8 setEncoding()", async () => {
+  // hex
+  {
+    const session = createExecSession(1, {
+      stdinEnabled: false,
+      stdout: { mode: "pipe" },
+      stderr: { mode: "ignore" },
+      windowBytes: 4096,
+    });
+    session.sendWindowUpdate = () => {};
+
+    const stdout = session.stdoutPipe!;
+    stdout.setEncoding("hex");
+
+    const data = Buffer.from([0, 1, 2, 3, 255]);
+    applyOutputChunk(session, "stdout", data);
+
+    assert.equal(stdout.getBufferedBytes(), data.length);
+
+    const received = await new Promise<string>((resolve) => {
+      stdout.once("data", (chunk: string) => resolve(chunk));
+    });
+
+    assert.equal(Buffer.byteLength(received, "hex"), data.length);
+    assert.equal(stdout.getBufferedBytes(), 0);
+  }
+
+  // base64
+  {
+    const session = createExecSession(1, {
+      stdinEnabled: false,
+      stdout: { mode: "pipe" },
+      stderr: { mode: "ignore" },
+      windowBytes: 4096,
+    });
+    session.sendWindowUpdate = () => {};
+
+    const stdout = session.stdoutPipe!;
+    stdout.setEncoding("base64");
+
+    const data = Buffer.from([1, 2, 3, 4, 5, 6, 7]);
+    applyOutputChunk(session, "stdout", data);
+
+    assert.equal(stdout.getBufferedBytes(), data.length);
+
+    // base64 decoding can buffer trailing bytes internally until EOF, so consume
+    // the full stream to ensure the final partial group is flushed.
+    const collected = (async () => {
+      let out = "";
+      for await (const chunk of stdout) {
+        out += chunk as string;
+      }
+      return out;
+    })();
+
+    finishExecSession(session, 0);
+
+    const received = await collected;
+
+    assert.equal(Buffer.from(received, "base64").length, data.length);
+    assert.equal(stdout.getBufferedBytes(), 0);
+  }
+});
+
 test("applyOutputChunk rejects exec on writable write() throw and switches to ignore", async () => {
   const events: Array<{ stdout: number; stderr: number }> = [];
 
