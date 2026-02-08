@@ -84,12 +84,86 @@ function getAssetDir(): string {
 
 export const MANIFEST_FILENAME = "manifest.json";
 
+// Fixed namespace UUID used for deriving deterministic guest asset build IDs.
+//
+// This must never change, otherwise the same asset checksums would produce
+// different IDs across versions.
+const GUEST_ASSET_BUILD_ID_NAMESPACE = "7b6ed0c0-7e7f-4c2a-8b2d-0bf3d5be9d52";
+
+function uuidToBytes(uuid: string): Buffer {
+  const hex = uuid.replace(/-/g, "");
+  if (hex.length !== 32) throw new Error(`invalid uuid: ${uuid}`);
+  return Buffer.from(hex, "hex");
+}
+
+function bytesToUuid(bytes: Uint8Array): string {
+  const hex = Buffer.from(bytes).toString("hex");
+  return (
+    hex.slice(0, 8) +
+    "-" +
+    hex.slice(8, 12) +
+    "-" +
+    hex.slice(12, 16) +
+    "-" +
+    hex.slice(16, 20) +
+    "-" +
+    hex.slice(20)
+  );
+}
+
+function uuidv5(name: string, namespace: string): string {
+  const ns = uuidToBytes(namespace);
+  const hash = createHash("sha1");
+  hash.update(ns);
+  hash.update(Buffer.from(name, "utf8"));
+  const digest = hash.digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+
+  // Set version to 5 (0101)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  // Set variant to RFC 4122 (10xx)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  return bytesToUuid(bytes);
+}
+
+export type AssetBuildIdInput = {
+  /** sha256 checksums (hex) */
+  checksums: { kernel: string; initramfs: string; rootfs: string };
+  /** guest architecture identifier (e.g. "aarch64") */
+  arch?: string;
+};
+
+/**
+ * Compute a deterministic guest asset build ID.
+ *
+ * This is intentionally derived from *content* (checksums), not host paths.
+ */
+export function computeAssetBuildId(input: AssetBuildIdInput): string {
+  const arch = input.arch ?? "unknown";
+  const name =
+    "gondolin-asset-build" +
+    "\n" +
+    `kernel=${input.checksums.kernel}` +
+    "\n" +
+    `initramfs=${input.checksums.initramfs}` +
+    "\n" +
+    `rootfs=${input.checksums.rootfs}` +
+    "\n" +
+    `arch=${arch}`;
+
+  return uuidv5(name, GUEST_ASSET_BUILD_ID_NAMESPACE);
+}
+
 /**
  * Manifest describing the built assets.
  */
 export interface AssetManifest {
   /** manifest schema version */
   version: 1;
+
+  /** deterministic content-derived build identifier (uuid) */
+  buildId?: string;
 
   /** build configuration */
   config: BuildConfig;
@@ -141,7 +215,13 @@ export function loadAssetManifest(assetDir: string): AssetManifest | null {
 
   try {
     const content = fs.readFileSync(manifestPath, "utf8");
-    return JSON.parse(content) as AssetManifest;
+    const raw = JSON.parse(content) as any;
+
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+
+    return raw as AssetManifest;
   } catch {
     return null;
   }

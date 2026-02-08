@@ -8,6 +8,7 @@ import { randomUUID } from "crypto";
 
 import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
 import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
+import { loadAssetManifest } from "./assets";
 
 import {
   ErrorMessage,
@@ -1391,17 +1392,34 @@ fi
 
     const checkpointName = path.basename(resolvedCheckpointPath, path.extname(resolvedCheckpointPath));
 
+    const guestAssets = {
+      kernelPath: this.resolvedSandboxOptions.kernelPath,
+      initrdPath: this.resolvedSandboxOptions.initrdPath,
+      rootfsPath: this.resolvedSandboxOptions.rootfsPath,
+    };
+
+    const commonDir =
+      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.initrdPath) &&
+      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.rootfsPath)
+        ? path.dirname(guestAssets.kernelPath)
+        : null;
+
+    const manifest = commonDir ? loadAssetManifest(commonDir) : null;
+    const guestAssetBuildId = manifest?.buildId;
+
+    if (!guestAssetBuildId) {
+      throw new Error(
+        "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)"
+      );
+    }
+
     const data: VmCheckpointData = {
       version: 1,
       name: checkpointName,
       createdAt: new Date().toISOString(),
       // Kept for schema compatibility (ignored for single-file checkpoints)
       diskFile: path.basename(resolvedCheckpointPath),
-      guestAssets: {
-        kernelPath: this.resolvedSandboxOptions.kernelPath,
-        initrdPath: this.resolvedSandboxOptions.initrdPath,
-        rootfsPath: this.resolvedSandboxOptions.rootfsPath,
-      },
+      guestAssetBuildId,
     };
 
     VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);

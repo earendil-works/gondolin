@@ -62,6 +62,7 @@ await vm.close();
 
 ## Using Gondolin
 
+- [Workloads](./workloads.md): typical workloads and lifecycles
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
 - [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)

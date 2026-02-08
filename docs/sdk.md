@@ -337,6 +337,8 @@ Notes:
 - This is **disk-only** (no in-VM RAM/process restore)
 - The checkpoint is a single `.qcow2` file; metadata is stored as a JSON trailer
   (reload with `VmCheckpoint.load(checkpointPath)`)
+- Checkpoints require guest assets with a `manifest.json` that includes a
+  deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`);
   writes under those paths are not part of disk checkpoints
 

@@ -69,3 +69,51 @@ export function moveFile(src: string, dst: string): void {
     throw err;
   }
 }
+
+export type QemuImgInfo = Record<string, unknown>;
+
+export function qemuImgInfoJson(imagePath: string): QemuImgInfo {
+  const raw = execFileSync("qemu-img", ["info", "--output=json", imagePath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return JSON.parse(raw) as QemuImgInfo;
+}
+
+function extractBackingFilename(info: any): string | null {
+  if (info && typeof info["backing-filename"] === "string") {
+    return info["backing-filename"];
+  }
+
+  const fmt = info?.["format-specific"]?.data;
+  if (fmt && typeof fmt["backing-filename"] === "string") {
+    return fmt["backing-filename"];
+  }
+
+  return null;
+}
+
+/**
+ * Return the qcow2 backing filename recorded in the image (if any).
+ *
+ * Note: this is the string stored in the qcow2 metadata and may be relative.
+ */
+export function getQcow2BackingFilename(imagePath: string): string | null {
+  const info = qemuImgInfoJson(imagePath);
+  return extractBackingFilename(info);
+}
+
+/**
+ * Rebase a qcow2 image to a new backing file path (in-place, unsafe mode).
+ */
+export function rebaseQcow2InPlace(
+  imagePath: string,
+  backingPath: string,
+  backingFormat: "raw" | "qcow2"
+): void {
+  execFileSync(
+    "qemu-img",
+    ["rebase", "-u", "-F", backingFormat, "-b", backingPath, imagePath],
+    { stdio: "ignore" }
+  );
+}

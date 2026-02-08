@@ -215,8 +215,12 @@ my-assets/
   rootfs.ext4          # Root filesystem image
 ```
 
-The `manifest.json` contains the build configuration, timestamps, and SHA-256
-checksums for verification.
+The `manifest.json` contains the build configuration, timestamps, SHA-256
+checksums for verification, and a deterministic `buildId` derived from those
+checksums.
+
+That `buildId` is used by snapshots/checkpoints to locate the correct guest
+assets without embedding absolute host paths.
 
 ## Troubleshooting
 

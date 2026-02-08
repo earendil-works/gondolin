@@ -15,7 +15,7 @@ import type {
   BuildConfig,
   Architecture,
 } from "./build-config";
-import { MANIFEST_FILENAME, loadAssetManifest, type AssetManifest } from "./assets";
+import { MANIFEST_FILENAME, computeAssetBuildId, loadAssetManifest, type AssetManifest } from "./assets";
 import {
   buildAlpineImages,
   downloadFile,
@@ -305,8 +305,15 @@ async function buildNative(
   // Step 5: Generate manifest
   log("Generating manifest...");
 
+  const checksums = {
+    kernel: computeFileHash(kernelDst),
+    initramfs: computeFileHash(initramfsDst),
+    rootfs: computeFileHash(rootfsDst),
+  };
+
   const manifest: AssetManifest = {
     version: 1,
+    buildId: computeAssetBuildId({ checksums, arch: config.arch }),
     config,
     buildTime: new Date().toISOString(),
     assets: {
@@ -314,11 +321,7 @@ async function buildNative(
       initramfs: INITRAMFS_FILENAME,
       rootfs: ROOTFS_FILENAME,
     },
-    checksums: {
-      kernel: computeFileHash(kernelDst),
-      initramfs: computeFileHash(initramfsDst),
-      rootfs: computeFileHash(rootfsDst),
-    },
+    checksums,
   };
 
   const manifestPath = path.join(outputDir, MANIFEST_FILENAME);
