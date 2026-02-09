@@ -35,6 +35,8 @@ function makeResolvedOptions(
 
     maxStdinBytes: 64 * 1024,
     maxQueuedStdinBytes: 1024,
+    maxTotalQueuedStdinBytes: 1024 * 1024,
+    maxQueuedExecs: 64,
     maxHttpBodyBytes: 1024 * 1024,
     maxHttpResponseBodyBytes: 1024 * 1024,
     fetch: undefined,
@@ -225,4 +227,80 @@ test("queued PTY resize is not dropped on send failure and can be retried", () =
   );
 
   assert.ok(sent.some((m) => m.t === "pty_resize" && m.id === 2));
+});
+
+test("queued exec requests are bounded by maxQueuedExecs", () => {
+  const server = new SandboxServer(makeResolvedOptions({ maxQueuedExecs: 1 }));
+
+  const bridge = (server as any).bridge;
+  bridge.send = () => true;
+
+  const a = makeClient();
+  const b = makeClient();
+  const c = makeClient();
+
+  (server as any).handleExec(a.client, execMessage(1));
+  (server as any).handleExec(b.client, execMessage(2));
+
+  assert.ok((server as any).execQueue.some((e: any) => e.message.id === 2));
+
+  (server as any).handleExec(c.client, execMessage(3));
+
+  assert.ok(
+    c.captured.json.some((m) => m?.type === "error" && m?.id === 3 && m?.code === "queue_full"),
+    "expected queue_full error"
+  );
+
+  assert.ok(!(server as any).inflight.has(3));
+  assert.ok(!(server as any).execQueue.some((e: any) => e.message.id === 3));
+});
+
+test("total queued stdin is bounded by maxTotalQueuedStdinBytes and cancels queued exec on overflow", () => {
+  const server = new SandboxServer(
+    makeResolvedOptions({ maxQueuedStdinBytes: 100, maxTotalQueuedStdinBytes: 10 })
+  );
+
+  const sent: any[] = [];
+  const bridge = (server as any).bridge;
+  bridge.send = (msg: any) => {
+    sent.push(msg);
+    return true;
+  };
+
+  const a = makeClient();
+  const b = makeClient();
+  const c = makeClient();
+
+  (server as any).handleExec(a.client, execMessage(1));
+  (server as any).handleExec(b.client, execMessage(2));
+  (server as any).handleExec(c.client, execMessage(3));
+
+  (server as any).handleStdin(b.client, stdinMessage(2, Buffer.from("123456"))); // 6 bytes
+  (server as any).handleStdin(c.client, stdinMessage(3, Buffer.from("abcdef"))); // +6 bytes => overflow
+
+  assert.ok(
+    c.captured.json.some((m) => m?.type === "error" && m?.id === 3 && m?.code === "payload_too_large"),
+    "expected payload_too_large error"
+  );
+
+  // Exec 3 should have been cancelled/removed from queue
+  assert.ok(!(server as any).inflight.has(3));
+  assert.ok(!(server as any).stdinAllowed.has(3));
+  assert.ok(!(server as any).queuedStdin.has(3));
+  assert.ok(!(server as any).queuedPtyResize.has(3));
+  assert.ok(!(server as any).execQueue.some((e: any) => e.message.id === 3));
+
+  assert.equal((server as any).queuedStdinBytesTotal, 6);
+
+  // Ensure we can still queue more stdin for exec 2 within the global limit.
+  (server as any).handleStdin(b.client, stdinMessage(2, Buffer.from("xx"))); // +2 bytes
+  assert.equal((server as any).queuedStdinBytesTotal, 8);
+
+  // Finishing exec 1 should not start exec 3
+  bridge.onMessage({ v: 1, t: "exec_response", id: 1, p: { exit_code: 0 } });
+
+  assert.ok(
+    !sent.some((m) => m.t === "exec_request" && m.id === 3),
+    "exec 3 should not start after being cancelled"
+  );
 });

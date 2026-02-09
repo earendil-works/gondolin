@@ -801,6 +801,24 @@ async function runBash(argv: string[]) {
       escape: {
         byte: ESCAPE_BYTE,
         onEscape: () => {
+          // Detach output immediately (Ctrl-] should stop forwarding stdout/stderr too).
+          if (proc.stdout) {
+            try {
+              proc.stdout.unpipe(stdout);
+            } catch {
+              // ignore
+            }
+            proc.stdout.pause();
+          }
+          if (proc.stderr) {
+            try {
+              proc.stderr.unpipe(stderr);
+            } catch {
+              // ignore
+            }
+            proc.stderr.pause();
+          }
+
           process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
           resolveEscape();
         },

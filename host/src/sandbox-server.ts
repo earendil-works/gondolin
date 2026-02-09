@@ -66,6 +66,8 @@ export type ImagePath = string | GuestAssets;
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_QUEUED_EXECS = 64;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_TIMEOUT_MS",
@@ -157,8 +159,12 @@ export type SandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
-  /** max stdin buffered for queued (not yet active) execs in `bytes` */
+  /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
   maxQueuedStdinBytes?: number;
+  /** max total stdin buffered across all queued (not yet active) execs in `bytes` */
+  maxTotalQueuedStdinBytes?: number;
+  /** max number of exec requests buffered while a previous exec is active */
+  maxQueuedExecs?: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
@@ -234,8 +240,12 @@ export type ResolvedSandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
-  /** max stdin buffered for queued (not yet active) execs in `bytes` */
+  /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
   maxQueuedStdinBytes: number;
+  /** max total stdin buffered across all queued (not yet active) execs in `bytes` */
+  maxTotalQueuedStdinBytes: number;
+  /** max number of exec requests buffered while a previous exec is active */
+  maxQueuedExecs: number;
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
@@ -421,6 +431,9 @@ export function resolveSandboxServerOptions(
     append: options.append,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxQueuedStdinBytes: options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
+    maxTotalQueuedStdinBytes:
+      options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
+    maxQueuedExecs: options.maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
@@ -856,6 +869,8 @@ export class SandboxServer extends EventEmitter {
   private execQueue: Array<{ client: SandboxClient; message: ExecCommandMessage; payload: any }> = [];
   private queuedStdin = new Map<number, Array<{ data: Buffer; eof: boolean }>>();
   private queuedStdinBytes = new Map<number, number>();
+  /** total bytes buffered in queuedStdin across all queued exec ids in `bytes` */
+  private queuedStdinBytesTotal = 0;
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
@@ -924,6 +939,9 @@ export class SandboxServer extends EventEmitter {
       ...resolvedOptions,
       maxQueuedStdinBytes:
         (resolvedOptions as any).maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
+      maxTotalQueuedStdinBytes:
+        (resolvedOptions as any).maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
+      maxQueuedExecs: (resolvedOptions as any).maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
     };
 
     this.debugFlags = new Set(this.options.debug ?? []);
@@ -1509,8 +1527,7 @@ export class SandboxServer extends EventEmitter {
         this.inflight.delete(id);
         this.stdinAllowed.delete(id);
         this.pendingExecWindows.delete(id);
-        this.queuedStdin.delete(id);
-        this.queuedStdinBytes.delete(id);
+        this.clearQueuedStdin(id);
         this.queuedPtyResize.delete(id);
       }
     }
@@ -1523,6 +1540,15 @@ export class SandboxServer extends EventEmitter {
     // If we just removed the active exec's inflight entry, we still keep
     // activeExecId until the guest reports completion so we don't send another
     // exec_request concurrently.
+  }
+
+  private clearQueuedStdin(id: number) {
+    const bytes = this.queuedStdinBytes.get(id) ?? 0;
+    if (bytes > 0) {
+      this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - bytes);
+    }
+    this.queuedStdin.delete(id);
+    this.queuedStdinBytes.delete(id);
   }
 
   private handleClientMessage(client: SandboxClient, message: ClientMessage) {
@@ -1624,8 +1650,7 @@ export class SandboxServer extends EventEmitter {
       this.inflight.delete(id);
       this.stdinAllowed.delete(id);
       this.pendingExecWindows.delete(id);
-      this.queuedStdin.delete(id);
-      this.queuedStdinBytes.delete(id);
+      this.clearQueuedStdin(id);
       this.queuedPtyResize.delete(id);
       sendError(entry.client, {
         type: "error",
@@ -1650,8 +1675,7 @@ export class SandboxServer extends EventEmitter {
 
     const stdinChunks = this.queuedStdin.get(id);
     if (stdinChunks && stdinChunks.length > 0) {
-      this.queuedStdin.delete(id);
-      this.queuedStdinBytes.delete(id);
+      this.clearQueuedStdin(id);
       for (const chunk of stdinChunks) {
         if (!this.bridge.send(buildStdinData(id, chunk.data, chunk.eof))) {
           // Treat as exec failure to avoid silent input loss
@@ -1686,8 +1710,7 @@ export class SandboxServer extends EventEmitter {
       if (!this.inflight.has(id)) {
         this.stdinAllowed.delete(id);
         this.pendingExecWindows.delete(id);
-        this.queuedStdin.delete(id);
-        this.queuedStdinBytes.delete(id);
+        this.clearQueuedStdin(id);
         this.queuedPtyResize.delete(id);
         continue;
       }
@@ -1758,6 +1781,22 @@ export class SandboxServer extends EventEmitter {
     const entry = { client, message, payload };
 
     if (this.activeExecId !== null) {
+      if (this.execQueue.length >= this.options.maxQueuedExecs) {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "queue_full",
+          message: `too many queued exec requests (limit ${this.options.maxQueuedExecs})`,
+        });
+
+        this.inflight.delete(message.id);
+        this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+        return;
+      }
+
       this.execQueue.push(entry);
       return;
     }
@@ -1824,22 +1863,34 @@ export class SandboxServer extends EventEmitter {
     if (this.activeExecId !== message.id) {
       const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
       const nextBytes = queuedBytes + data.length;
-      if (nextBytes > this.options.maxQueuedStdinBytes) {
+      const nextTotal = this.queuedStdinBytesTotal + data.length;
+
+      const cancelQueuedExec = (errorMessage: string) => {
         sendError(client, {
           type: "error",
           id: message.id,
           code: "payload_too_large",
-          message: `queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`,
+          message: errorMessage,
         });
 
         // Cancel the queued exec to avoid running it with partial stdin.
         this.inflight.delete(message.id);
         this.stdinAllowed.delete(message.id);
         this.pendingExecWindows.delete(message.id);
-        this.queuedStdin.delete(message.id);
-        this.queuedStdinBytes.delete(message.id);
+        this.clearQueuedStdin(message.id);
         this.queuedPtyResize.delete(message.id);
         this.execQueue = this.execQueue.filter((entry) => entry.message.id !== message.id);
+      };
+
+      if (nextBytes > this.options.maxQueuedStdinBytes) {
+        cancelQueuedExec(`queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`);
+        return;
+      }
+
+      if (nextTotal > this.options.maxTotalQueuedStdinBytes) {
+        cancelQueuedExec(
+          `total queued stdin exceeds limit (${this.options.maxTotalQueuedStdinBytes} bytes)`
+        );
         return;
       }
 
@@ -1847,6 +1898,7 @@ export class SandboxServer extends EventEmitter {
       list.push({ data, eof: Boolean(message.eof) });
       this.queuedStdin.set(message.id, list);
       this.queuedStdinBytes.set(message.id, nextBytes);
+      this.queuedStdinBytesTotal = nextTotal;
       return;
     }
 
@@ -2047,6 +2099,7 @@ export class SandboxServer extends EventEmitter {
     this.activeExecId = null;
     this.queuedStdin.clear();
     this.queuedStdinBytes.clear();
+    this.queuedStdinBytesTotal = 0;
     this.queuedPtyResize.clear();
   }
 }
