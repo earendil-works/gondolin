@@ -259,6 +259,9 @@ function parseListenSpec(spec: string): { host: string; port: number } {
       throw new Error(`Invalid --listen value: ${spec} (missing ']')`);
     }
     host = portStr.slice(1, bracketEnd);
+    if (!host) {
+      throw new Error(`Invalid --listen value: ${spec} (empty host in brackets)`);
+    }
     const rest = portStr.slice(bracketEnd + 1);
     if (!rest.startsWith(":")) {
       throw new Error(`Invalid --listen value: ${spec} (expected :PORT after ])`);

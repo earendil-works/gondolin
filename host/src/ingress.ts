@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "http";
 import type { Duplex, Writable } from "stream";
 
-import type { MemoryProvider, VirtualProvider } from "./vfs";
+import type { VirtualProvider } from "./vfs";
 import type { SandboxServer } from "./sandbox-server";
 
 const MAX_LISTENERS_FILE_BYTES = 64 * 1024;
@@ -12,11 +12,23 @@ const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
   "proxy-connection",
+  "proxy-authenticate",
+  "proxy-authorization",
   "transfer-encoding",
   "te",
   "trailer",
   "upgrade",
 ]);
+
+class ListenersFileTooLargeError extends Error {
+  /** stable identifier for listeners size-cap violations */
+  readonly code = "LISTENERS_FILE_TOO_LARGE";
+
+  constructor() {
+    super("listeners file too large");
+    this.name = "ListenersFileTooLargeError";
+  }
+}
 
 export type IngressRoute = {
   /** external path prefix (must start with "/") */
@@ -491,7 +503,7 @@ export class GondolinListeners extends EventEmitter {
     try {
       const st = this.etcProvider.statSync("/listeners");
       if (st.size > MAX_LISTENERS_FILE_BYTES) {
-        throw new Error("listeners file too large");
+        throw new ListenersFileTooLargeError();
       }
 
       // Prefer provider-level readFileSync if present.
@@ -509,7 +521,7 @@ export class GondolinListeners extends EventEmitter {
       }
     } catch (err) {
       // If the file exists but violates our size cap, propagate so reloadNow keeps the previous routes.
-      if (err instanceof Error && err.message === "listeners file too large") {
+      if (err instanceof ListenersFileTooLargeError) {
         throw err;
       }
 
@@ -531,7 +543,7 @@ export class GondolinListeners extends EventEmitter {
 
   private writeListenersText(text: string) {
     if (Buffer.byteLength(text, "utf8") > MAX_LISTENERS_FILE_BYTES) {
-      throw new Error("listeners file too large");
+      throw new ListenersFileTooLargeError();
     }
 
     // Write through the underlying provider directly (not via VFS hooks)
@@ -786,11 +798,16 @@ export class IngressGateway {
         console.error("ingress bad gateway:", err);
       }
 
-      if (!res.headersSent) {
-        res.statusCode = 502;
-        res.setHeader("content-type", "text/plain");
+      try {
+        if (!res.headersSent) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "text/plain");
+        }
+        res.end("bad gateway\n");
+      } catch {
+        // If the client disconnected, res.end() can throw synchronously.
+        // Swallow it to avoid turning this into an unhandled rejection.
       }
-      res.end("bad gateway\n");
     } finally {
       if (upstream) {
         try {
