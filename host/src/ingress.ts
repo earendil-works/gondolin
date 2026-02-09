@@ -917,13 +917,13 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
       if (!isGondolinListenersRelevantPath(ctx.path)) return;
 
       if (ctx.op === "writeFile" && ctx.data && ctx.data.length > MAX_LISTENERS_FILE_BYTES) {
-        throw new Error("/etc/gondolin/listeners too large");
+        throw new ListenersFileTooLargeError();
       }
 
       // Guard open+write growth, not just writeFile/truncate.
       if (ctx.op === "write") {
         if (typeof ctx.length !== "number") {
-          throw new Error("/etc/gondolin/listeners too large");
+          throw new ListenersFileTooLargeError();
         }
 
         // In append mode (O_APPEND), the RPC layer writes with position=null.
@@ -945,12 +945,12 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
         }
 
         if (offset + ctx.length > MAX_LISTENERS_FILE_BYTES) {
-          throw new Error("/etc/gondolin/listeners too large");
+          throw new ListenersFileTooLargeError();
         }
       }
 
       if (ctx.op === "truncate" && typeof ctx.size === "number" && ctx.size > MAX_LISTENERS_FILE_BYTES) {
-        throw new Error("/etc/gondolin/listeners too large");
+        throw new ListenersFileTooLargeError();
       }
     },
   };
