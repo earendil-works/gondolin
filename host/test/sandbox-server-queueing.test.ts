@@ -95,15 +95,16 @@ function stdinMessage(id: number, data: Buffer, eof = false) {
   };
 }
 
-test("startExecNow stdin replay queue_full does not clear activeExecId or deadlock queue", () => {
+test("startExecNow stdin replay queue_full keeps exec inflight and retries", () => {
   const server = new SandboxServer(makeResolvedOptions());
 
   const sent: any[] = [];
   const bridge = (server as any).bridge;
 
+  let failStdin = true;
   bridge.send = (msg: any) => {
     sent.push(msg);
-    if (msg.t === "stdin_data" && msg.id === 2) return false;
+    if (msg.t === "stdin_data" && msg.id === 2 && failStdin) return false;
     return true;
   };
 
@@ -119,15 +120,35 @@ test("startExecNow stdin replay queue_full does not clear activeExecId or deadlo
 
   (server as any).handleStdin(b.client, stdinMessage(2, Buffer.from("hello")));
 
-  // Exec 1 finishes -> exec 2 starts -> queued stdin replay fails
+  // Exec 1 finishes -> exec 2 starts -> queued stdin replay initially hits backpressure
   bridge.onMessage({ v: 1, t: "exec_response", id: 1, p: { exit_code: 0 } });
 
   assert.equal((server as any).activeExecId, 2);
+  assert.ok((server as any).inflight.has(2), "exec 2 should remain inflight");
+  assert.ok((server as any).stdinAllowed.has(2), "exec 2 should retain stdin ownership");
+  assert.ok((server as any).queuedStdin.has(2), "unsent queued stdin should remain buffered");
+
+  assert.equal(
+    sent.filter((m) => m.t === "stdin_data" && m.id === 2).length,
+    1,
+    "expected exactly one failed stdin replay attempt"
+  );
 
   assert.ok(
-    b.captured.json.some((m) => m?.type === "error" && m?.id === 2 && m?.code === "queue_full"),
-    "expected queue_full error for exec 2"
+    !b.captured.json.some((m) => m?.type === "error" && m?.id === 2),
+    "should not fail exec 2 or drop inflight state on transient backpressure"
   );
+
+  // Retry once the bridge becomes writable again
+  failStdin = false;
+  (server as any).flushQueuedStdin();
+
+  assert.equal(
+    sent.filter((m) => m.t === "stdin_data" && m.id === 2).length,
+    2,
+    "expected stdin replay to be retried"
+  );
+  assert.ok(!((server as any).queuedStdin.has(2)), "queued stdin should be cleared after retry");
 
   // A new exec should NOT start immediately; it must wait for exec 2 completion.
   (server as any).handleExec(c.client, execMessage(3));
@@ -227,6 +248,35 @@ test("queued PTY resize is not dropped on send failure and can be retried", () =
   );
 
   assert.ok(sent.some((m) => m.t === "pty_resize" && m.id === 2));
+});
+
+test("queued PTY resize is cleared on exec completion if still queued", () => {
+  const server = new SandboxServer(makeResolvedOptions());
+
+  const bridge = (server as any).bridge;
+  bridge.send = (msg: any) => {
+    if (msg.t === "pty_resize" && msg.id === 2) return false;
+    return true;
+  };
+
+  const a = makeClient();
+  const b = makeClient();
+
+  (server as any).handleExec(a.client, execMessage(1));
+  (server as any).handleExec(b.client, execMessage(2, { pty: true }));
+
+  (server as any).handlePtyResize(b.client, { type: "pty_resize", id: 2, rows: 40, cols: 100 });
+  assert.ok((server as any).queuedPtyResize.has(2));
+
+  // Exec 1 finishes -> exec 2 starts -> resize send fails and remains queued
+  bridge.onMessage({ v: 1, t: "exec_response", id: 1, p: { exit_code: 0 } });
+  assert.equal((server as any).activeExecId, 2);
+  assert.ok((server as any).queuedPtyResize.has(2));
+
+  // Exec 2 finishes before the resize can be retried
+  bridge.onMessage({ v: 1, t: "exec_response", id: 2, p: { exit_code: 0 } });
+
+  assert.ok(!((server as any).queuedPtyResize.has(2)), "queued resize should be cleared on exec completion");
 });
 
 test("queued exec requests are bounded by maxQueuedExecs", () => {
