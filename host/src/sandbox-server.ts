@@ -922,27 +922,19 @@ export class SandboxServer extends EventEmitter {
       this.emitDebug("error", message);
     });
     // Detect if we received pre-resolved options (from static create())
-    // by checking for a field that's required in resolved but computed in unresolved
+    // by checking for fields that only exist on resolved options.
     const isResolved =
-      "maxStdinBytes" in options &&
-      "maxHttpBodyBytes" in options &&
-      "maxHttpResponseBodyBytes" in options &&
-      typeof options.maxStdinBytes === "number" &&
-      typeof options.maxHttpBodyBytes === "number" &&
-      typeof (options as any).maxHttpResponseBodyBytes === "number";
+      "kernelPath" in options &&
+      "initrdPath" in options &&
+      "rootfsPath" in options &&
+      typeof (options as any).kernelPath === "string" &&
+      typeof (options as any).initrdPath === "string" &&
+      typeof (options as any).rootfsPath === "string";
     const resolvedOptions = isResolved
       ? (options as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(options as SandboxServerOptions);
 
-    // Backwards-compatible defaulting for newly added resolved fields
-    this.options = {
-      ...resolvedOptions,
-      maxQueuedStdinBytes:
-        (resolvedOptions as any).maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
-      maxTotalQueuedStdinBytes:
-        (resolvedOptions as any).maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
-      maxQueuedExecs: (resolvedOptions as any).maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
-    };
+    this.options = resolvedOptions;
 
     this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
