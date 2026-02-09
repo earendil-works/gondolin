@@ -14,6 +14,7 @@ import {
   encodeFrame,
   IncomingMessage,
 } from "../src/virtio-protocol";
+import { attachTty } from "../src/tty-attach";
 import {
   getDefaultBuildConfig,
   serializeBuildConfig,
@@ -70,6 +71,7 @@ function bashUsage() {
   console.log("Usage: gondolin bash [options]");
   console.log();
   console.log("Start an interactive bash session in the sandbox.");
+  console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("VFS Options:");
   console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
@@ -858,14 +860,74 @@ async function runBash(argv: string[]) {
       );
     }
 
-    // shell() automatically attaches to stdin/stdout/stderr in TTY mode
-    const result = await vm.shell();
+    // Start the shell without using ExecProcess.attach() so we can implement
+    // a CLI-local escape hatch (Ctrl-]) that always regains control.
+    const proc = vm.shell({ attach: false });
 
-    if (result.signal !== undefined) {
-      process.stderr.write(`process exited due to signal ${result.signal}\n`);
+    const stdin = process.stdin as NodeJS.ReadStream;
+    const stdout = process.stdout as NodeJS.WriteStream;
+    const stderr = process.stderr as NodeJS.WriteStream;
+
+    const ESCAPE_BYTE = 0x1d; // Ctrl-]
+
+    let resolveEscape!: () => void;
+    const escapePromise = new Promise<void>((resolve) => {
+      resolveEscape = resolve;
+    });
+
+    // This intentionally shares logic with ExecProcess.attach() via attachTty()
+    // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
+    const { cleanup } = attachTty(stdin, stdout, stderr, proc.stdout, proc.stderr, {
+      write: (chunk) => proc.write(chunk),
+      end: () => proc.end(),
+      resize: (rows, cols) => proc.resize(rows, cols),
+      escape: {
+        byte: ESCAPE_BYTE,
+        onEscape: () => {
+          // Detach output immediately (Ctrl-] should stop forwarding stdout/stderr too).
+          if (proc.stdout) {
+            try {
+              proc.stdout.unpipe(stdout);
+            } catch {
+              // ignore
+            }
+            proc.stdout.pause();
+          }
+          if (proc.stderr) {
+            try {
+              proc.stderr.unpipe(stderr);
+            } catch {
+              // ignore
+            }
+            proc.stderr.pause();
+          }
+
+          process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
+          resolveEscape();
+        },
+      },
+    });
+
+    void proc.result.then(
+      () => cleanup(),
+      () => cleanup()
+    );
+
+    const raced = await Promise.race([
+      proc.result.then((result) => ({ type: "result" as const, result })),
+      escapePromise.then(() => ({ type: "escape" as const })),
+    ]);
+
+    if (raced.type === "escape") {
+      // 130 matches typical "terminated by user" conventions (SIGINT-like)
+      exitCode = 130;
+    } else {
+      const result = raced.result;
+      if (result.signal !== undefined) {
+        process.stderr.write(`process exited due to signal ${result.signal}\n`);
+      }
+      exitCode = result.exitCode;
     }
-
-    exitCode = result.exitCode;
   } catch (err) {
     renderCliError(err);
     exitCode = 1;

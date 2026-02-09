@@ -275,7 +275,7 @@ await ingress.close();
 await vm.close();
 ```
 
-#### Ingress hooks (gateway request/response rewriting)
+#### Ingress Hooks
 
 `enableIngress()` can install **host-side hook points** on the ingress gateway.
 This is useful for:

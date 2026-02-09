@@ -65,6 +65,9 @@ export type ImagePath = string | GuestAssets;
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
+const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_QUEUED_EXECS = 64;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_TIMEOUT_MS",
@@ -159,6 +162,12 @@ export type SandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
+  /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
+  maxQueuedStdinBytes?: number;
+  /** max total stdin buffered across all queued (not yet active) execs in `bytes` */
+  maxTotalQueuedStdinBytes?: number;
+  /** max number of exec requests buffered while a previous exec is active */
+  maxQueuedExecs?: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
@@ -237,6 +246,12 @@ export type ResolvedSandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
+  /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
+  maxQueuedStdinBytes: number;
+  /** max total stdin buffered across all queued (not yet active) execs in `bytes` */
+  maxTotalQueuedStdinBytes: number;
+  /** max number of exec requests buffered while a previous exec is active */
+  maxQueuedExecs: number;
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
@@ -426,6 +441,10 @@ export function resolveSandboxServerOptions(
     autoRestart: options.autoRestart ?? false,
     append: options.append,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
+    maxQueuedStdinBytes: options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
+    maxTotalQueuedStdinBytes:
+      options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
+    maxQueuedExecs: options.maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
@@ -859,9 +878,21 @@ export class SandboxServer extends EventEmitter {
   private inflight = new Map<number, SandboxClient>();
   private stdinAllowed = new Set<number>();
 
+  // sandboxd currently processes one exec at a time on the virtio control port.
+  // Queue additional exec requests (and any early stdin/resize) to avoid dropping
+  // frames if the client sends a new exec before the previous one finishes.
+  private activeExecId: number | null = null;
+  private execQueue: Array<{ client: SandboxClient; message: ExecCommandMessage; payload: any }> = [];
+  private queuedStdin = new Map<number, Array<{ data: Buffer; eof: boolean }>>();
+  private queuedStdinBytes = new Map<number, number>();
+  /** total bytes buffered in queuedStdin across all queued exec ids in `bytes` */
+  private queuedStdinBytesTotal = 0;
+  private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
+
   // Pending exec_window credits that could not be sent due to virtio queue pressure
   private pendingExecWindows = new Map<number, { stdout: number; stderr: number }>();
   private execWindowFlushScheduled = false;
+  private execIoFlushScheduled = false;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
@@ -907,17 +938,19 @@ export class SandboxServer extends EventEmitter {
       this.emitDebug("error", message);
     });
     // Detect if we received pre-resolved options (from static create())
-    // by checking for a field that's required in resolved but computed in unresolved
+    // by checking for fields that only exist on resolved options.
     const isResolved =
-      "maxStdinBytes" in options &&
-      "maxHttpBodyBytes" in options &&
-      "maxHttpResponseBodyBytes" in options &&
-      typeof options.maxStdinBytes === "number" &&
-      typeof options.maxHttpBodyBytes === "number" &&
-      typeof (options as any).maxHttpResponseBodyBytes === "number";
-    this.options = isResolved
+      "kernelPath" in options &&
+      "initrdPath" in options &&
+      "rootfsPath" in options &&
+      typeof (options as any).kernelPath === "string" &&
+      typeof (options as any).initrdPath === "string" &&
+      typeof (options as any).rootfsPath === "string";
+    const resolvedOptions = isResolved
       ? (options as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(options as SandboxServerOptions);
+
+    this.options = resolvedOptions;
 
     this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
@@ -969,6 +1002,7 @@ export class SandboxServer extends EventEmitter {
     this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
     this.bridge.onWritable = () => {
       this.scheduleExecWindowFlush();
+      this.scheduleExecIoFlush();
     };
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
@@ -1110,6 +1144,14 @@ export class SandboxServer extends EventEmitter {
         }
         this.inflight.delete(message.id);
         this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+
+        if (this.activeExecId === message.id) {
+          this.activeExecId = null;
+          this.pumpExecQueue();
+        }
       } else if (message.t === "error") {
         const client = this.inflight.get(message.id);
         if (client) {
@@ -1122,6 +1164,14 @@ export class SandboxServer extends EventEmitter {
         }
         this.inflight.delete(message.id);
         this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+
+        if (this.activeExecId === message.id) {
+          this.activeExecId = null;
+          this.pumpExecQueue();
+        }
       } else if (message.t === "vfs_ready") {
         this.handleVfsReady();
       } else if (message.t === "vfs_error") {
@@ -1647,13 +1697,34 @@ export class SandboxServer extends EventEmitter {
     }
 
     this.clients.delete(client);
+
     for (const [id, entry] of this.inflight.entries()) {
       if (entry === client) {
         this.inflight.delete(id);
         this.stdinAllowed.delete(id);
         this.pendingExecWindows.delete(id);
+        this.clearQueuedStdin(id);
+        this.queuedPtyResize.delete(id);
       }
     }
+
+    // Remove any queued exec requests owned by this client.
+    if (this.execQueue.length > 0) {
+      this.execQueue = this.execQueue.filter((entry) => entry.client !== client);
+    }
+
+    // If we just removed the active exec's inflight entry, we still keep
+    // activeExecId until the guest reports completion so we don't send another
+    // exec_request concurrently.
+  }
+
+  private clearQueuedStdin(id: number) {
+    const bytes = this.queuedStdinBytes.get(id) ?? 0;
+    if (bytes > 0) {
+      this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - bytes);
+    }
+    this.queuedStdin.delete(id);
+    this.queuedStdinBytes.delete(id);
   }
 
   private handleClientMessage(client: SandboxClient, message: ClientMessage) {
@@ -1744,6 +1815,74 @@ export class SandboxServer extends EventEmitter {
     sendJson(client, { type: "status", state: this.status });
   }
 
+  private startExecNow(entry: {
+    client: SandboxClient;
+    message: ExecCommandMessage;
+    payload: any;
+  }): void {
+    const id = entry.message.id;
+
+    if (!this.bridge.send(buildExecRequest(id, entry.payload))) {
+      this.inflight.delete(id);
+      this.stdinAllowed.delete(id);
+      this.pendingExecWindows.delete(id);
+      this.clearQueuedStdin(id);
+      this.queuedPtyResize.delete(id);
+      sendError(entry.client, {
+        type: "error",
+        id,
+        code: "queue_full",
+        message: "virtio bridge queue exceeded",
+      });
+      return;
+    }
+
+    this.activeExecId = id;
+
+    const resize = this.queuedPtyResize.get(id);
+    if (resize) {
+      if (this.bridge.send(buildPtyResize(id, resize.rows, resize.cols))) {
+        this.queuedPtyResize.delete(id);
+      } else {
+        // Keep queued to retry once the virtio bridge becomes writable again.
+        this.scheduleExecIoFlush();
+      }
+    }
+
+    // Replay any stdin queued while the exec was waiting in the host queue.
+    //
+    // If the virtio bridge is congested, keep the remainder buffered and retry
+    // when the bridge becomes writable again.
+    this.flushQueuedStdin();
+    if ((this.queuedStdin.get(id)?.length ?? 0) > 0) {
+      this.scheduleExecIoFlush();
+    }
+
+    // Flush any credits collected while the exec was queued.
+    this.flushPendingExecWindows();
+  }
+
+  private pumpExecQueue(): void {
+    if (this.activeExecId !== null) return;
+
+    while (this.execQueue.length > 0) {
+      const next = this.execQueue.shift()!;
+      const id = next.message.id;
+
+      // The client may have disconnected while queued.
+      if (!this.inflight.has(id)) {
+        this.stdinAllowed.delete(id);
+        this.pendingExecWindows.delete(id);
+        this.clearQueuedStdin(id);
+        this.queuedPtyResize.delete(id);
+        continue;
+      }
+
+      this.startExecNow(next);
+      if (this.activeExecId !== null) return;
+    }
+  }
+
   private handleExec(client: SandboxClient, message: ExecCommandMessage) {
     if (this.hasDebug("exec")) {
       const envKeys = (message.env ?? [])
@@ -1802,16 +1941,30 @@ export class SandboxServer extends EventEmitter {
       stderr_window: message.stderr_window,
     };
 
-    if (!this.bridge.send(buildExecRequest(message.id, payload))) {
-      this.inflight.delete(message.id);
-      this.stdinAllowed.delete(message.id);
-      sendError(client, {
-        type: "error",
-        id: message.id,
-        code: "queue_full",
-        message: "virtio bridge queue exceeded",
-      });
+    const entry = { client, message, payload };
+
+    if (this.activeExecId !== null) {
+      if (this.execQueue.length >= this.options.maxQueuedExecs) {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "queue_full",
+          message: `too many queued exec requests (limit ${this.options.maxQueuedExecs})`,
+        });
+
+        this.inflight.delete(message.id);
+        this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+        return;
+      }
+
+      this.execQueue.push(entry);
+      return;
     }
+
+    this.startExecNow(entry);
   }
 
   private handleStdin(client: SandboxClient, message: StdinCommandMessage) {
@@ -1870,14 +2023,118 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    if (!this.bridge.send(buildStdinData(message.id, data, message.eof))) {
+    if (this.activeExecId !== message.id) {
+      const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
+      const nextBytes = queuedBytes + data.length;
+      const nextTotal = this.queuedStdinBytesTotal + data.length;
+
+      const cancelQueuedExec = (errorMessage: string) => {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "payload_too_large",
+          message: errorMessage,
+        });
+
+        // Cancel the queued exec to avoid running it with partial stdin.
+        this.inflight.delete(message.id);
+        this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+        this.execQueue = this.execQueue.filter((entry) => entry.message.id !== message.id);
+      };
+
+      if (nextBytes > this.options.maxQueuedStdinBytes) {
+        cancelQueuedExec(`queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`);
+        return;
+      }
+
+      if (nextTotal > this.options.maxTotalQueuedStdinBytes) {
+        cancelQueuedExec(
+          `total queued stdin exceeds limit (${this.options.maxTotalQueuedStdinBytes} bytes)`
+        );
+        return;
+      }
+
+      const list = this.queuedStdin.get(message.id) ?? [];
+      list.push({ data, eof: Boolean(message.eof) });
+      this.queuedStdin.set(message.id, list);
+      this.queuedStdinBytes.set(message.id, nextBytes);
+      this.queuedStdinBytesTotal = nextTotal;
+      return;
+    }
+
+    // If we already have buffered stdin for this exec (e.g. because the virtio
+    // bridge was congested during startExecNow replay), append to preserve
+    // ordering and retry once writable.
+    if ((this.queuedStdin.get(message.id)?.length ?? 0) > 0) {
+      const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
+      const nextBytes = queuedBytes + data.length;
+      const nextTotal = this.queuedStdinBytesTotal + data.length;
+
+      if (nextBytes > this.options.maxQueuedStdinBytes) {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "payload_too_large",
+          message: `queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`,
+        });
+        return;
+      }
+
+      if (nextTotal > this.options.maxTotalQueuedStdinBytes) {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "payload_too_large",
+          message: `total queued stdin exceeds limit (${this.options.maxTotalQueuedStdinBytes} bytes)`,
+        });
+        return;
+      }
+
+      this.queuedStdin.get(message.id)!.push({ data, eof: Boolean(message.eof) });
+      this.queuedStdinBytes.set(message.id, nextBytes);
+      this.queuedStdinBytesTotal = nextTotal;
+      this.scheduleExecIoFlush();
+      return;
+    }
+
+    if (this.bridge.send(buildStdinData(message.id, data, message.eof))) {
+      return;
+    }
+
+    // Virtio bridge backpressure: buffer and retry when the bridge becomes writable.
+    const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
+    const nextBytes = queuedBytes + data.length;
+    const nextTotal = this.queuedStdinBytesTotal + data.length;
+
+    if (nextBytes > this.options.maxQueuedStdinBytes) {
       sendError(client, {
         type: "error",
         id: message.id,
-        code: "queue_full",
-        message: "virtio bridge queue exceeded",
+        code: "payload_too_large",
+        message: `queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`,
       });
+      return;
     }
+
+    if (nextTotal > this.options.maxTotalQueuedStdinBytes) {
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "payload_too_large",
+        message: `total queued stdin exceeds limit (${this.options.maxTotalQueuedStdinBytes} bytes)`,
+      });
+      return;
+    }
+
+    const list = this.queuedStdin.get(message.id) ?? [];
+    list.push({ data, eof: Boolean(message.eof) });
+    this.queuedStdin.set(message.id, list);
+    this.queuedStdinBytes.set(message.id, nextBytes);
+    this.queuedStdinBytesTotal = nextTotal;
+    this.scheduleExecIoFlush();
   }
 
   private handlePtyResize(client: SandboxClient, message: PtyResizeCommandMessage) {
@@ -1915,13 +2172,18 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    if (!this.bridge.send(buildPtyResize(message.id, Math.trunc(rows), Math.trunc(cols)))) {
-      sendError(client, {
-        type: "error",
-        id: message.id,
-        code: "queue_full",
-        message: "virtio bridge queue exceeded",
-      });
+    const safeRows = Math.trunc(rows);
+    const safeCols = Math.trunc(cols);
+
+    if (this.activeExecId !== message.id) {
+      this.queuedPtyResize.set(message.id, { rows: safeRows, cols: safeCols });
+      return;
+    }
+
+    if (!this.bridge.send(buildPtyResize(message.id, safeRows, safeCols))) {
+      // Keep queued to retry once the virtio bridge becomes writable again.
+      this.queuedPtyResize.set(message.id, { rows: safeRows, cols: safeCols });
+      this.scheduleExecIoFlush();
     }
   }
 
@@ -1934,10 +2196,75 @@ export class SandboxServer extends EventEmitter {
     });
   }
 
+  private scheduleExecIoFlush() {
+    if (this.execIoFlushScheduled) return;
+    this.execIoFlushScheduled = true;
+    setImmediate(() => {
+      this.execIoFlushScheduled = false;
+      this.flushQueuedPtyResize();
+      this.flushQueuedStdin();
+    });
+  }
+
+  private flushQueuedPtyResize() {
+    const id = this.activeExecId;
+    if (id === null) return;
+    const resize = this.queuedPtyResize.get(id);
+    if (!resize) return;
+
+    if (!this.bridge.send(buildPtyResize(id, resize.rows, resize.cols))) {
+      // Queue still full; wait for bridge.onWritable to retry.
+      return;
+    }
+
+    this.queuedPtyResize.delete(id);
+  }
+
+  private flushQueuedStdin() {
+    const id = this.activeExecId;
+    if (id === null) return;
+
+    const list = this.queuedStdin.get(id);
+    if (!list || list.length === 0) return;
+
+    let remainingBytes = this.queuedStdinBytes.get(id) ?? 0;
+
+    let sent = 0;
+    for (; sent < list.length; sent++) {
+      const chunk = list[sent];
+      if (!this.bridge.send(buildStdinData(id, chunk.data, chunk.eof))) {
+        // Queue still full; wait for bridge.onWritable to retry.
+        break;
+      }
+
+      remainingBytes = Math.max(0, remainingBytes - chunk.data.length);
+      if (chunk.data.length > 0) {
+        this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - chunk.data.length);
+      }
+    }
+
+    if (sent === 0) return;
+
+    if (sent >= list.length) {
+      this.queuedStdin.delete(id);
+      this.queuedStdinBytes.delete(id);
+      return;
+    }
+
+    this.queuedStdin.set(id, list.slice(sent));
+    this.queuedStdinBytes.set(id, remainingBytes);
+  }
+
   private flushPendingExecWindows() {
     for (const [id, win] of this.pendingExecWindows.entries()) {
       if (!this.inflight.has(id)) {
         this.pendingExecWindows.delete(id);
+        continue;
+      }
+
+      // Only send credits for the currently active exec; queued execs will be
+      // flushed when they become active.
+      if (this.activeExecId !== id) {
         continue;
       }
 
@@ -2026,6 +2353,12 @@ export class SandboxServer extends EventEmitter {
     this.inflight.clear();
     this.stdinAllowed.clear();
     this.pendingExecWindows.clear();
+    this.execQueue = [];
+    this.activeExecId = null;
+    this.queuedStdin.clear();
+    this.queuedStdinBytes.clear();
+    this.queuedStdinBytesTotal = 0;
+    this.queuedPtyResize.clear();
   }
 }
 
