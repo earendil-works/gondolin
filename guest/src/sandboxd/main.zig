@@ -348,9 +348,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                         stdout_open = false;
                         std.posix.close(fd);
                         stdout_fd = null;
-                        if (use_pty and stdin_fd != null) {
-                            stdin_fd = null;
-                            stdin_open = false;
+                        if (use_pty) {
+                            pty_master = null;
+                            if (stdin_fd != null) {
+                                stdin_fd = null;
+                                stdin_open = false;
+                            }
                         }
                     }
                 }
@@ -421,9 +424,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                     stdout_open = false;
                     if (stdout_fd) |fd| std.posix.close(fd);
                     stdout_fd = null;
-                    if (use_pty and stdin_fd != null) {
-                        stdin_fd = null;
-                        stdin_open = false;
+                    if (use_pty) {
+                        pty_master = null;
+                        if (stdin_fd != null) {
+                            stdin_fd = null;
+                            stdin_open = false;
+                        }
                     }
                 } else {
                     stdout_credit -= n;
@@ -441,9 +447,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                             stdout_open = false;
                             std.posix.close(fd);
                             stdout_fd = null;
-                            if (use_pty and stdin_fd != null) {
-                                stdin_fd = null;
-                                stdin_open = false;
+                            if (use_pty) {
+                                pty_master = null;
+                                if (stdin_fd != null) {
+                                    stdin_fd = null;
+                                    stdin_open = false;
+                                }
                             }
                         }
                     }
@@ -524,6 +533,21 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
             const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
             if (res.pid != 0) {
                 status = res.status;
+
+                // In PTY mode, define exec lifetime by the main exec'd process.
+                // Close the PTY master as soon as the main PID exits so background
+                // processes inheriting the slave cannot keep the session open.
+                if (use_pty and pty_master != null) {
+                    const fd = pty_master.?;
+                    std.posix.close(fd);
+                    pty_master = null;
+
+                    // stdout/stdin share the PTY master
+                    stdout_fd = null;
+                    stdin_fd = null;
+                    stdout_open = false;
+                    stdin_open = false;
+                }
             }
         }
     }

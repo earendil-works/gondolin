@@ -131,3 +131,39 @@ test("exec aborts with signal", { skip: skipVmTests, timeout: timeoutMs }, async
     await assert.rejects(proc, /exec aborted/);
   });
 });
+
+test(
+  "pty exec completes even when background jobs keep the PTY open",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+
+      // Run a short-lived main process that starts a long-lived background job
+      // inheriting the PTY slave.
+      const proc = vm.exec(["/bin/sh", "-c", "sh -c 'trap \"\" HUP; sleep 1000' &"], {
+        pty: true,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      // Ensure that if the test fails early (e.g. timeout) we don't leave a
+      // late rejection from the exec session as an unhandledRejection.
+      void proc.result.catch(() => {});
+
+      const result = await Promise.race([
+        proc.result,
+        new Promise<never>((_, reject) => {
+          const t = setTimeout(
+            () => reject(new Error("timeout waiting for pty exec to exit")),
+            8000
+          );
+          t.unref();
+          void proc.result.finally(() => clearTimeout(t));
+        }),
+      ]);
+
+      assert.equal(result.exitCode, 0);
+    });
+  }
+);

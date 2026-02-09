@@ -70,6 +70,7 @@ function bashUsage() {
   console.log("Usage: gondolin bash [options]");
   console.log();
   console.log("Start an interactive bash session in the sandbox.");
+  console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("VFS Options:");
   console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
@@ -775,14 +776,122 @@ async function runBash(argv: string[]) {
       process.stderr.write(`SSH enabled: ${access.command}\n`);
     }
 
-    // shell() automatically attaches to stdin/stdout/stderr in TTY mode
-    const result = await vm.shell();
+    // Start the shell without using ExecProcess.attach() so we can implement
+    // a CLI-local escape hatch (Ctrl-]) that always regains control.
+    const proc = vm.shell({ attach: false });
 
-    if (result.signal !== undefined) {
-      process.stderr.write(`process exited due to signal ${result.signal}\n`);
+    const stdin = process.stdin as NodeJS.ReadStream;
+    const stdout = process.stdout as NodeJS.WriteStream;
+    const stderr = process.stderr as NodeJS.WriteStream;
+
+    const ESCAPE_BYTE = 0x1d; // Ctrl-]
+
+    let escaped = false;
+    let cleanupDone = false;
+    let resolveEscape!: () => void;
+
+    const escapePromise = new Promise<void>((resolve) => {
+      resolveEscape = resolve;
+    });
+
+    const cleanup = () => {
+      if (cleanupDone) return;
+      cleanupDone = true;
+
+      stdin.off("data", onStdinData);
+      stdin.off("end", onStdinEnd);
+
+      if (stdout.isTTY) {
+        stdout.off("resize", onResize);
+      }
+
+      if (stdin.isTTY) {
+        try {
+          stdin.setRawMode(false);
+        } catch {
+          // ignore
+        }
+      }
+
+      stdin.pause();
+    };
+
+    const onResize = () => {
+      if (!stdout.isTTY) return;
+      const cols = stdout.columns;
+      const rows = stdout.rows;
+      if (typeof cols === "number" && typeof rows === "number") {
+        proc.resize(rows, cols);
+      }
+    };
+
+    const onStdinData = (chunk: Buffer) => {
+      if (escaped) return;
+
+      const idx = chunk.indexOf(ESCAPE_BYTE);
+      if (idx !== -1) {
+        // Forward bytes before the escape, but do not forward the escape itself.
+        if (idx > 0) {
+          proc.write(chunk.subarray(0, idx));
+        }
+        escaped = true;
+        cleanup();
+        process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
+        resolveEscape();
+        return;
+      }
+
+      proc.write(chunk);
+    };
+
+    const onStdinEnd = () => {
+      try {
+        proc.end();
+      } catch {
+        // ignore
+      }
+    };
+
+    if (stdin.isTTY) {
+      stdin.setRawMode(true);
+    }
+    stdin.resume();
+
+    if (stdout.isTTY) {
+      onResize();
+      stdout.on("resize", onResize);
     }
 
-    exitCode = result.exitCode;
+    stdin.on("data", onStdinData);
+    stdin.on("end", onStdinEnd);
+
+    // Forward output via pipes to preserve credit-based backpressure.
+    if (proc.stdout) {
+      proc.stdout.pipe(stdout, { end: false });
+      proc.stdout.resume();
+    }
+    if (proc.stderr) {
+      proc.stderr.pipe(stderr, { end: false });
+      proc.stderr.resume();
+    }
+
+    proc.result.finally(() => cleanup());
+
+    const raced = await Promise.race([
+      proc.result.then((result) => ({ type: "result" as const, result })),
+      escapePromise.then(() => ({ type: "escape" as const })),
+    ]);
+
+    if (raced.type === "escape") {
+      // 130 matches typical "terminated by user" conventions (SIGINT-like)
+      exitCode = 130;
+    } else {
+      const result = raced.result;
+      if (result.signal !== undefined) {
+        process.stderr.write(`process exited due to signal ${result.signal}\n`);
+      }
+      exitCode = result.exitCode;
+    }
   } catch (err) {
     renderCliError(err);
     exitCode = 1;
