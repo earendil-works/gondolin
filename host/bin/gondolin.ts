@@ -14,6 +14,7 @@ import {
   encodeFrame,
   IncomingMessage,
 } from "../src/virtio-protocol";
+import { attachTty } from "../src/tty-attach";
 import {
   getDefaultBuildConfig,
   serializeBuildConfig,
@@ -786,94 +787,25 @@ async function runBash(argv: string[]) {
 
     const ESCAPE_BYTE = 0x1d; // Ctrl-]
 
-    let escaped = false;
-    let cleanupDone = false;
     let resolveEscape!: () => void;
-
     const escapePromise = new Promise<void>((resolve) => {
       resolveEscape = resolve;
     });
 
-    const cleanup = () => {
-      if (cleanupDone) return;
-      cleanupDone = true;
-
-      stdin.off("data", onStdinData);
-      stdin.off("end", onStdinEnd);
-
-      if (stdout.isTTY) {
-        stdout.off("resize", onResize);
-      }
-
-      if (stdin.isTTY) {
-        try {
-          stdin.setRawMode(false);
-        } catch {
-          // ignore
-        }
-      }
-
-      stdin.pause();
-    };
-
-    const onResize = () => {
-      if (!stdout.isTTY) return;
-      const cols = stdout.columns;
-      const rows = stdout.rows;
-      if (typeof cols === "number" && typeof rows === "number") {
-        proc.resize(rows, cols);
-      }
-    };
-
-    const onStdinData = (chunk: Buffer) => {
-      if (escaped) return;
-
-      const idx = chunk.indexOf(ESCAPE_BYTE);
-      if (idx !== -1) {
-        // Forward bytes before the escape, but do not forward the escape itself.
-        if (idx > 0) {
-          proc.write(chunk.subarray(0, idx));
-        }
-        escaped = true;
-        cleanup();
-        process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
-        resolveEscape();
-        return;
-      }
-
-      proc.write(chunk);
-    };
-
-    const onStdinEnd = () => {
-      try {
-        proc.end();
-      } catch {
-        // ignore
-      }
-    };
-
-    if (stdin.isTTY) {
-      stdin.setRawMode(true);
-    }
-    stdin.resume();
-
-    if (stdout.isTTY) {
-      onResize();
-      stdout.on("resize", onResize);
-    }
-
-    stdin.on("data", onStdinData);
-    stdin.on("end", onStdinEnd);
-
-    // Forward output via pipes to preserve credit-based backpressure.
-    if (proc.stdout) {
-      proc.stdout.pipe(stdout, { end: false });
-      proc.stdout.resume();
-    }
-    if (proc.stderr) {
-      proc.stderr.pipe(stderr, { end: false });
-      proc.stderr.resume();
-    }
+    // This intentionally shares logic with ExecProcess.attach() via attachTty()
+    // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
+    const { cleanup } = attachTty(stdin, stdout, stderr, proc.stdout, proc.stderr, {
+      write: (chunk) => proc.write(chunk),
+      end: () => proc.end(),
+      resize: (rows, cols) => proc.resize(rows, cols),
+      escape: {
+        byte: ESCAPE_BYTE,
+        onEscape: () => {
+          process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
+          resolveEscape();
+        },
+      },
+    });
 
     proc.result.finally(() => cleanup());
 

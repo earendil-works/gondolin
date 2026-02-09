@@ -1,5 +1,7 @@
 import { Readable } from "stream";
 
+import { attachTty } from "./tty-attach";
+
 const DEFAULT_ENCODING = "utf-8";
 const DEFAULT_WINDOW_BYTES = 256 * 1024;
 const MIN_WINDOW_UPDATE_BYTES = 32 * 1024;
@@ -538,60 +540,24 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
       }
     }
 
-    const stderrOut = stderr ?? stdout;
-
-    const onResize = () => {
-      if (!stdout.isTTY) return;
-      const cols = stdout.columns;
-      const rows = stdout.rows;
-      if (typeof cols === "number" && typeof rows === "number") {
-        this.resize(rows, cols);
+    const { cleanup } = attachTty(
+      stdin,
+      stdout,
+      (stderr ?? stdout) as NodeJS.WriteStream,
+      shouldForwardStdout ? out : null,
+      shouldForwardStderr ? err : null,
+      {
+        write: (chunk) => this.write(chunk),
+        end: () => this.end(),
+        resize: (rows, cols) => this.resize(rows, cols),
       }
-    };
-
-    if (stdin.isTTY) {
-      stdin.setRawMode(true);
-    }
-    stdin.resume();
-
-    if (stdout.isTTY) {
-      onResize();
-      stdout.on("resize", onResize);
-    }
-
-    const onStdinData = (chunk: Buffer) => this.write(chunk);
-    const onStdinEnd = () => this.end();
-    stdin.on("data", onStdinData);
-    stdin.on("end", onStdinEnd);
-
-    // Use `pipe()` so downstream backpressure (write() => false) pauses the
-    // source stream and stays within our credit window instead of buffering
-    // unboundedly in the destination writable.
-    if (shouldForwardStdout) {
-      out!.pipe(stdout, { end: false });
-      // Ensure already-buffered chunks are flushed promptly.
-      out!.resume();
-    }
-    if (shouldForwardStderr) {
-      err!.pipe(stderrOut, { end: false });
-      err!.resume();
-    }
+    );
 
     this.session.resultPromise.finally(() => {
-      stdin.off("data", onStdinData);
-      stdin.off("end", onStdinEnd);
-
       // Note: do not manually unpipe here. Readable.pipe() cleans itself up on
       // stream end. Unpiping eagerly can drop buffered output that has not yet
       // been flushed to the destination.
-
-      if (stdout.isTTY) {
-        stdout.off("resize", onResize);
-      }
-      if (stdin.isTTY) {
-        stdin.setRawMode(false);
-      }
-      stdin.pause();
+      cleanup();
     });
   }
 }
