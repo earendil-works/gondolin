@@ -349,13 +349,9 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
             const now_ms = std.time.milliTimestamp();
             const deadline_ms = pty_close_deadline_ms.?;
 
+            // Do not close early just because the PTY appears empty: late-arriving
+            // output can show up shortly after process exit under load.
             var should_close = now_ms >= deadline_ms;
-
-            if (!should_close) {
-                if (bytesAvailable(pty_master.?)) |avail| {
-                    if (avail == 0) should_close = true;
-                }
-            }
 
             if (!should_close) {
                 if (pty_exit_drain_remaining) |rem| {

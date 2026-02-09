@@ -65,6 +65,7 @@ export type ImagePath = string | GuestAssets;
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
+const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_TIMEOUT_MS",
@@ -156,6 +157,8 @@ export type SandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
+  /** max stdin buffered for queued (not yet active) execs in `bytes` */
+  maxQueuedStdinBytes?: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
@@ -231,6 +234,8 @@ export type ResolvedSandboxServerOptions = {
 
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
+  /** max stdin buffered for queued (not yet active) execs in `bytes` */
+  maxQueuedStdinBytes: number;
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
@@ -415,6 +420,7 @@ export function resolveSandboxServerOptions(
     autoRestart: options.autoRestart ?? false,
     append: options.append,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
+    maxQueuedStdinBytes: options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
@@ -849,11 +855,13 @@ export class SandboxServer extends EventEmitter {
   private activeExecId: number | null = null;
   private execQueue: Array<{ client: SandboxClient; message: ExecCommandMessage; payload: any }> = [];
   private queuedStdin = new Map<number, Array<{ data: Buffer; eof: boolean }>>();
+  private queuedStdinBytes = new Map<number, number>();
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
   private pendingExecWindows = new Map<number, { stdout: number; stderr: number }>();
   private execWindowFlushScheduled = false;
+  private execIoFlushScheduled = false;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
@@ -907,9 +915,16 @@ export class SandboxServer extends EventEmitter {
       typeof options.maxStdinBytes === "number" &&
       typeof options.maxHttpBodyBytes === "number" &&
       typeof (options as any).maxHttpResponseBodyBytes === "number";
-    this.options = isResolved
+    const resolvedOptions = isResolved
       ? (options as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(options as SandboxServerOptions);
+
+    // Backwards-compatible defaulting for newly added resolved fields
+    this.options = {
+      ...resolvedOptions,
+      maxQueuedStdinBytes:
+        (resolvedOptions as any).maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
+    };
 
     this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
@@ -960,6 +975,7 @@ export class SandboxServer extends EventEmitter {
     this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
     this.bridge.onWritable = () => {
       this.scheduleExecWindowFlush();
+      this.scheduleExecIoFlush();
     };
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
@@ -1494,6 +1510,7 @@ export class SandboxServer extends EventEmitter {
         this.stdinAllowed.delete(id);
         this.pendingExecWindows.delete(id);
         this.queuedStdin.delete(id);
+        this.queuedStdinBytes.delete(id);
         this.queuedPtyResize.delete(id);
       }
     }
@@ -1608,6 +1625,7 @@ export class SandboxServer extends EventEmitter {
       this.stdinAllowed.delete(id);
       this.pendingExecWindows.delete(id);
       this.queuedStdin.delete(id);
+      this.queuedStdinBytes.delete(id);
       this.queuedPtyResize.delete(id);
       sendError(entry.client, {
         type: "error",
@@ -1622,13 +1640,18 @@ export class SandboxServer extends EventEmitter {
 
     const resize = this.queuedPtyResize.get(id);
     if (resize) {
-      this.queuedPtyResize.delete(id);
-      this.bridge.send(buildPtyResize(id, resize.rows, resize.cols));
+      if (this.bridge.send(buildPtyResize(id, resize.rows, resize.cols))) {
+        this.queuedPtyResize.delete(id);
+      } else {
+        // Keep queued to retry once the virtio bridge becomes writable again.
+        this.scheduleExecIoFlush();
+      }
     }
 
     const stdinChunks = this.queuedStdin.get(id);
     if (stdinChunks && stdinChunks.length > 0) {
       this.queuedStdin.delete(id);
+      this.queuedStdinBytes.delete(id);
       for (const chunk of stdinChunks) {
         if (!this.bridge.send(buildStdinData(id, chunk.data, chunk.eof))) {
           // Treat as exec failure to avoid silent input loss
@@ -1641,7 +1664,8 @@ export class SandboxServer extends EventEmitter {
             code: "queue_full",
             message: "virtio bridge queue exceeded",
           });
-          this.activeExecId = null;
+          // Keep activeExecId set: the exec_request was already sent and the guest
+          // will eventually send exec_response, which is what releases the queue.
           break;
         }
       }
@@ -1663,6 +1687,7 @@ export class SandboxServer extends EventEmitter {
         this.stdinAllowed.delete(id);
         this.pendingExecWindows.delete(id);
         this.queuedStdin.delete(id);
+        this.queuedStdinBytes.delete(id);
         this.queuedPtyResize.delete(id);
         continue;
       }
@@ -1797,9 +1822,31 @@ export class SandboxServer extends EventEmitter {
     }
 
     if (this.activeExecId !== message.id) {
+      const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
+      const nextBytes = queuedBytes + data.length;
+      if (nextBytes > this.options.maxQueuedStdinBytes) {
+        sendError(client, {
+          type: "error",
+          id: message.id,
+          code: "payload_too_large",
+          message: `queued stdin exceeds limit (${this.options.maxQueuedStdinBytes} bytes)`,
+        });
+
+        // Cancel the queued exec to avoid running it with partial stdin.
+        this.inflight.delete(message.id);
+        this.stdinAllowed.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.queuedStdin.delete(message.id);
+        this.queuedStdinBytes.delete(message.id);
+        this.queuedPtyResize.delete(message.id);
+        this.execQueue = this.execQueue.filter((entry) => entry.message.id !== message.id);
+        return;
+      }
+
       const list = this.queuedStdin.get(message.id) ?? [];
       list.push({ data, eof: Boolean(message.eof) });
       this.queuedStdin.set(message.id, list);
+      this.queuedStdinBytes.set(message.id, nextBytes);
       return;
     }
 
@@ -1873,6 +1920,29 @@ export class SandboxServer extends EventEmitter {
       this.execWindowFlushScheduled = false;
       this.flushPendingExecWindows();
     });
+  }
+
+  private scheduleExecIoFlush() {
+    if (this.execIoFlushScheduled) return;
+    this.execIoFlushScheduled = true;
+    setImmediate(() => {
+      this.execIoFlushScheduled = false;
+      this.flushQueuedPtyResize();
+    });
+  }
+
+  private flushQueuedPtyResize() {
+    const id = this.activeExecId;
+    if (id === null) return;
+    const resize = this.queuedPtyResize.get(id);
+    if (!resize) return;
+
+    if (!this.bridge.send(buildPtyResize(id, resize.rows, resize.cols))) {
+      // Queue still full; wait for bridge.onWritable to retry.
+      return;
+    }
+
+    this.queuedPtyResize.delete(id);
   }
 
   private flushPendingExecWindows() {
@@ -1976,6 +2046,7 @@ export class SandboxServer extends EventEmitter {
     this.execQueue = [];
     this.activeExecId = null;
     this.queuedStdin.clear();
+    this.queuedStdinBytes.clear();
     this.queuedPtyResize.clear();
   }
 }
