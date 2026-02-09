@@ -1439,7 +1439,7 @@ export class SandboxServer extends EventEmitter {
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
 
-    if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    if (host !== "127.0.0.1" && host !== "localhost") {
       throw new Error(`invalid ingress host: ${host}`);
     }
 

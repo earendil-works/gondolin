@@ -73,7 +73,11 @@ export function parseListenersFile(text: string): ParsedListenersFile {
       throw new Error(`invalid listeners file line ${lineNo + 1}: backend must be ':<port>'`);
     }
 
-    const port = Number.parseInt(backend.slice(1), 10);
+    const portText = backend.slice(1);
+    if (!/^\d+$/.test(portText)) {
+      throw new Error(`invalid listeners file line ${lineNo + 1}: invalid port`);
+    }
+    const port = Number.parseInt(portText, 10);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       throw new Error(`invalid listeners file line ${lineNo + 1}: invalid port`);
     }
@@ -213,6 +217,11 @@ function coerceError(err: unknown): Error {
 }
 
 async function waitForReadableOrThrow(stream: Duplex, closedMessage: string): Promise<void> {
+  const s = stream as any;
+  if (s.destroyed || s.readableEnded) {
+    throw new Error(closedMessage);
+  }
+
   await new Promise<void>((resolve, reject) => {
     const onReadable = () => cleanup(() => resolve());
     const onEnd = () => cleanup(() => reject(new Error(closedMessage)));
@@ -831,13 +840,19 @@ export class IngressGateway {
       }
 
       try {
-        if (!res.headersSent) {
-          res.statusCode = 502;
-          res.setHeader("content-type", "text/plain");
+        if (res.headersSent) {
+          // We already forwarded upstream headers; writing a gateway body here can
+          // corrupt fixed-length responses.
+          (res as any).destroy?.();
+          (res as any).socket?.destroy?.();
+          return;
         }
+
+        res.statusCode = 502;
+        res.setHeader("content-type", "text/plain");
         res.end("bad gateway\n");
       } catch {
-        // If the client disconnected, res.end() can throw synchronously.
+        // If the client disconnected, res.end()/destroy() can throw synchronously.
         // Swallow it to avoid turning this into an unhandled rejection.
       }
     } finally {

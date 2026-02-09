@@ -28,3 +28,7 @@ test("listeners file: ignores NUL padding", () => {
   const parsed = parseListenersFile(`/ :8000\n\0\0\n`);
   assert.deepEqual(parsed.routes, [{ prefix: "/", port: 8000, stripPrefix: true }]);
 });
+
+test("listeners file: rejects ports with trailing junk", () => {
+  assert.throws(() => parseListenersFile(`/ :8080foo\n`), /invalid listeners file line 1: invalid port/);
+});
