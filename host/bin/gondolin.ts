@@ -760,7 +760,12 @@ function parseBashArgs(argv: string[]): BashArgs {
       case "--listen": {
         args.listen = true;
         const spec = argv[i + 1];
-        if (spec && !spec.startsWith("-")) {
+
+        // --listen optionally accepts a value. If the next token looks like a
+        // long option ("--foo"), treat it as another flag; otherwise treat it
+        // as the listen spec even if it starts with "-" (so "--listen -1"
+        // errors instead of being silently ignored).
+        if (spec && !spec.startsWith("--") && spec !== "-h") {
           i += 1;
           const parsed = parseListenSpec(spec);
           args.listenHost = parsed.host;

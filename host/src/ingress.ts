@@ -137,10 +137,59 @@ function normalizeIncomingHeaders(headers: IncomingHttpHeaders): Record<string, 
   return out;
 }
 
+function joinHeaderValue(raw: string | string[] | undefined): string {
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) return raw.join(",");
+  return "";
+}
+
+function parseTransferEncoding(raw: string | string[] | undefined): string[] {
+  const joined = joinHeaderValue(raw);
+  if (!joined) return [];
+  return joined
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function parseContentLength(raw: string | string[] | undefined): number | null {
+  if (raw === undefined) return null;
+
+  const values = Array.isArray(raw) ? raw : [raw];
+  const trimmed = values.map((v) => v.trim());
+
+  // Node may coalesce duplicate headers into a single comma-separated string.
+  if (trimmed.length === 1 && trimmed[0]!.includes(",")) {
+    return null;
+  }
+
+  if (trimmed.some((v) => v.includes(",") || !/^\d+$/.test(v))) {
+    return null;
+  }
+
+  const first = trimmed[0]!;
+  if (!trimmed.every((v) => v === first)) {
+    return null;
+  }
+
+  const n = Number.parseInt(first, 10);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+
 function filterHopByHop(headers: Record<string, string | string[]>): Record<string, string | string[]> {
+  const connection = joinHeaderValue(headers["connection"]).toLowerCase();
+  const connectionTokens = new Set(
+    connection
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
   const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
     if (HOP_BY_HOP_HEADERS.has(k)) continue;
+    if (connectionTokens.has(k)) continue;
     out[k] = v;
   }
   return out;
@@ -463,7 +512,15 @@ export class GondolinListeners extends EventEmitter {
       if (err instanceof Error && err.message === "listeners file too large") {
         throw err;
       }
-      return "";
+
+      // Missing file means "no routes".
+      const code = (err as any)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return "";
+      }
+
+      // Any other provider error should keep the last-known-good routes.
+      throw err;
     }
   }
 
@@ -635,16 +692,23 @@ export class IngressGateway {
 
       // Decide request body encoding
       const hasBody =
-        req.headers["content-length"] !== undefined ||
-        req.headers["transfer-encoding"] !== undefined ||
+        incoming["content-length"] !== undefined ||
+        incoming["transfer-encoding"] !== undefined ||
         method === "POST" ||
         method === "PUT" ||
         method === "PATCH";
 
+      const incomingTeTokens = parseTransferEncoding(incoming["transfer-encoding"]);
+      const hasTransferEncoding = incomingTeTokens.length > 0;
+      const incomingContentLength = parseContentLength(incoming["content-length"]);
+
       let useChunked = false;
-      const rawCl = req.headers["content-length"];
-      if (typeof rawCl === "string" && /^\d+$/.test(rawCl)) {
-        filtered["content-length"] = rawCl;
+
+      // If the client used transfer-encoding, never forward its content-length.
+      // Node already de-chunks/frames the inbound body; forwarding a conflicting
+      // content-length to the guest backend can cause mis-framing.
+      if (!hasTransferEncoding && incomingContentLength !== null) {
+        filtered["content-length"] = String(incomingContentLength);
       } else if (hasBody) {
         useChunked = true;
         filtered["transfer-encoding"] = "chunked";
@@ -694,10 +758,9 @@ export class IngressGateway {
       delete respHeaders["transfer-encoding"];
 
       // Body mode
-      const te = typeof head.headers["transfer-encoding"] === "string" ? head.headers["transfer-encoding"] : "";
-      const isChunked = te.toLowerCase().includes("chunked");
-      const clRaw = head.headers["content-length"];
-      const contentLength = typeof clRaw === "string" && /^\d+$/.test(clRaw) ? Number.parseInt(clRaw, 10) : null;
+      const upstreamTeTokens = parseTransferEncoding(head.headers["transfer-encoding"]);
+      const isChunked = upstreamTeTokens.includes("chunked");
+      const contentLength = parseContentLength(head.headers["content-length"]);
 
       // If we have a fixed content-length and the upstream isn't chunked, preserve it.
       if (!isChunked && contentLength !== null) {
@@ -756,7 +819,16 @@ export function isGondolinListenersRelevantPath(path: string | undefined): boole
 
 export function createGondolinEtcHooks(listeners: GondolinListeners) {
   return {
-    after: (ctx: { op: string; path?: string; oldPath?: string; newPath?: string; data?: Buffer; size?: number }) => {
+    after: (ctx: {
+      op: string;
+      path?: string;
+      oldPath?: string;
+      newPath?: string;
+      data?: Buffer;
+      size?: number;
+      offset?: number;
+      length?: number;
+    }) => {
       // Only reload when the file is in a stable state (close/rename/writeFile).
       if (!new Set(["writeFile", "truncate", "rename", "unlink", "release"]).has(ctx.op)) {
         return;
@@ -769,11 +841,23 @@ export function createGondolinEtcHooks(listeners: GondolinListeners) {
         listeners.notifyDirty();
       }
     },
-    before: (ctx: { op: string; path?: string; data?: Buffer; size?: number }) => {
+    before: (ctx: { op: string; path?: string; data?: Buffer; size?: number; offset?: number; length?: number }) => {
       if (!isGondolinListenersRelevantPath(ctx.path)) return;
+
       if (ctx.op === "writeFile" && ctx.data && ctx.data.length > MAX_LISTENERS_FILE_BYTES) {
         throw new Error("/etc/gondolin/listeners too large");
       }
+
+      // Guard open+write growth, not just writeFile/truncate.
+      if (ctx.op === "write") {
+        if (typeof ctx.offset !== "number" || typeof ctx.length !== "number") {
+          throw new Error("/etc/gondolin/listeners too large");
+        }
+        if (ctx.offset + ctx.length > MAX_LISTENERS_FILE_BYTES) {
+          throw new Error("/etc/gondolin/listeners too large");
+        }
+      }
+
       if (ctx.op === "truncate" && typeof ctx.size === "number" && ctx.size > MAX_LISTENERS_FILE_BYTES) {
         throw new Error("/etc/gondolin/listeners too large");
       }
