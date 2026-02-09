@@ -362,9 +362,7 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
 
   while (true) {
     // Need a full line for chunk size
-    while (true) {
-      const lineEnd = buf.indexOf("\r\n");
-      if (lineEnd !== -1) break;
+    while (buf.indexOf("\r\n") === -1) {
       await readMore();
     }
 
@@ -388,6 +386,9 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
         return;
       }
       while (buf.indexOf("\r\n\r\n") === -1) {
+        if (buf.length > MAX_HTTP_HEADER_BYTES) {
+          throw new Error("upstream trailers too large");
+        }
         await readMore();
       }
       const trailerEnd = buf.indexOf("\r\n\r\n");
@@ -395,17 +396,26 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
       return;
     }
 
-    // Ensure we have size bytes + \r\n
-    while (buf.length < size + 2) {
-      await readMore();
+    // Stream chunk payload without buffering the entire chunk into memory.
+    let remaining = size;
+    while (remaining > 0) {
+      if (buf.length === 0) {
+        await readMore();
+        continue;
+      }
+
+      const take = Math.min(remaining, buf.length);
+      yield buf.subarray(0, take);
+      buf = buf.subarray(take);
+      remaining -= take;
     }
 
-    const data = buf.subarray(0, size);
-    const crlf = buf.subarray(size, size + 2);
-    if (crlf[0] !== 13 || crlf[1] !== 10) throw new Error("invalid chunk terminator");
-    buf = buf.subarray(size + 2);
-
-    yield data;
+    // Consume trailing CRLF
+    while (buf.length < 2) {
+      await readMore();
+    }
+    if (buf[0] !== 13 || buf[1] !== 10) throw new Error("invalid chunk terminator");
+    buf = buf.subarray(2);
   }
 }
 
@@ -473,11 +483,33 @@ export class GondolinListeners extends EventEmitter {
 
   /** Replace the routing table and write canonical listeners file back into the guest */
   setRoutes(routes: IngressRoute[]): void {
-    const normalized = routes.map((r) => ({
-      prefix: normalizePrefix(r.prefix),
-      port: r.port,
-      stripPrefix: r.stripPrefix ?? true,
-    }));
+    const normalized: IngressRoute[] = [];
+
+    for (const r of routes) {
+      if (typeof r.prefix !== "string" || r.prefix.trim() === "") {
+        throw new Error("invalid ingress route prefix");
+      }
+      if (/\s/.test(r.prefix)) {
+        throw new Error("invalid ingress route prefix");
+      }
+
+      const port = r.port;
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        throw new Error(`invalid ingress route port: ${port}`);
+      }
+
+      const stripPrefix = r.stripPrefix ?? true;
+      if (typeof stripPrefix !== "boolean") {
+        throw new Error("invalid ingress route stripPrefix");
+      }
+
+      normalized.push({
+        prefix: normalizePrefix(r.prefix),
+        port,
+        stripPrefix,
+      });
+    }
+
     this.routes = normalized;
     this.lastReloadError = null;
     this.writeCanonical();
@@ -840,6 +872,8 @@ export function isGondolinListenersRelevantPath(path: string | undefined): boole
   return path === "/etc/gondolin/listeners";
 }
 
+const LISTENERS_RELOAD_OPS = new Set(["writeFile", "truncate", "rename", "unlink", "release"]);
+
 export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider?: VirtualProvider) {
   return {
     after: (ctx: {
@@ -853,7 +887,7 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
       length?: number;
     }) => {
       // Only reload when the file is in a stable state (close/rename/writeFile).
-      if (!new Set(["writeFile", "truncate", "rename", "unlink", "release"]).has(ctx.op)) {
+      if (!LISTENERS_RELOAD_OPS.has(ctx.op)) {
         return;
       }
       if (
