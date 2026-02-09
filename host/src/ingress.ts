@@ -121,10 +121,8 @@ export function serializeListenersFile(data: ParsedListenersFile): string {
 }
 
 function normalizePrefix(prefix: string): string {
-  // normalize duplicate slashes etc
   let p = prefix;
   if (!p.startsWith("/")) p = "/" + p;
-  // remove trailing slash except for root
   if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
   return p;
 }

@@ -1,4 +1,4 @@
-# Listening
+# Ingress and Listening
 
 Gondolin can expose HTTP servers running inside the guest VM to the host machine.
 
