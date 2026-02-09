@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "http";
-import { once } from "events";
-import type { Duplex } from "stream";
+import type { Duplex, Writable } from "stream";
 
 import type { MemoryProvider, VirtualProvider } from "./vfs";
 import type { SandboxServer } from "./sandbox-server";
@@ -147,10 +146,83 @@ function filterHopByHop(headers: Record<string, string | string[]>): Record<stri
   return out;
 }
 
-async function writeStream(stream: Duplex, chunk: Buffer | string): Promise<void> {
-  if (!stream.write(chunk)) {
-    await once(stream, "drain");
+function coerceError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  return new Error(String(err));
+}
+
+async function waitForReadableOrThrow(stream: Duplex, closedMessage: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onReadable = () => cleanup(() => resolve());
+    const onEnd = () => cleanup(() => reject(new Error(closedMessage)));
+    const onClose = () => cleanup(() => reject(new Error(closedMessage)));
+    const onError = (err: unknown) => cleanup(() => reject(coerceError(err)));
+
+    const cleanup = (fn: () => void) => {
+      stream.off("readable", onReadable);
+      stream.off("end", onEnd);
+      stream.off("close", onClose);
+      stream.off("error", onError as any);
+      fn();
+    };
+
+    stream.once("readable", onReadable);
+    stream.once("end", onEnd);
+    stream.once("close", onClose);
+    stream.once("error", onError as any);
+  });
+}
+
+async function writeStream(stream: Writable, chunk: Buffer | string): Promise<void> {
+  const s = stream as any;
+  if (s.destroyed || s.writableEnded || s.writableFinished) {
+    throw new Error("stream closed");
   }
+
+  await new Promise<void>((resolve, reject) => {
+    let needDrain = false;
+    let wrote = false;
+    let drained = false;
+
+    const onError = (err: unknown) => cleanup(() => reject(coerceError(err)));
+    const onClose = () => cleanup(() => reject(new Error("stream closed")));
+    const onFinish = () => cleanup(() => reject(new Error("stream finished")));
+    const onDrain = () => {
+      drained = true;
+      if (wrote) cleanup(() => resolve());
+    };
+
+    const onWrite = (err?: Error | null) => {
+      if (err) return cleanup(() => reject(err));
+      wrote = true;
+      if (!needDrain || drained) cleanup(() => resolve());
+    };
+
+    const cleanup = (fn: () => void) => {
+      stream.off("error", onError as any);
+      stream.off("close", onClose);
+      stream.off("finish", onFinish);
+      stream.off("drain", onDrain);
+      fn();
+    };
+
+    // Always attach an error handler while a write is in flight so we don't crash
+    // on an unhandled "error" event.
+    stream.on("error", onError as any);
+    stream.once("close", onClose);
+    stream.once("finish", onFinish);
+
+    try {
+      needDrain = !stream.write(chunk, onWrite);
+    } catch (err) {
+      cleanup(() => reject(coerceError(err)));
+      return;
+    }
+
+    if (needDrain) {
+      stream.once("drain", onDrain);
+    }
+  });
 }
 
 function parseStatusLine(line: string): { statusCode: number; statusMessage: string } {
@@ -207,21 +279,9 @@ async function readHttpHead(stream: Duplex): Promise<{ statusCode: number; statu
       continue;
     }
 
-    const race = Promise.race([
-      once(stream, "readable").then(() => "readable" as const),
-      // Note: Duplex streams can emit "close" without "end" when destroyed.
-      // Treat that as an upstream close so we don't hang waiting for headers.
-      once(stream, "end").then(() => "end" as const),
-      once(stream, "close").then(() => "close" as const),
-      once(stream, "error").then((args) => {
-        throw args[0];
-      }),
-    ]);
-
-    const ev = await race;
-    if (ev === "end" || ev === "close") {
-      throw new Error("upstream closed before sending headers");
-    }
+    // Note: Duplex streams can emit "close" without "end" when destroyed.
+    // Treat that as an upstream close so we don't hang waiting for headers.
+    await waitForReadableOrThrow(stream, "upstream closed before sending headers");
   }
 }
 
@@ -229,23 +289,14 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
   let buf = initial;
 
   const readMore = async () => {
-    const chunk = stream.read() as Buffer | null;
-    if (chunk) {
-      buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
-      return;
+    while (true) {
+      const chunk = stream.read() as Buffer | null;
+      if (chunk) {
+        buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
+        return;
+      }
+      await waitForReadableOrThrow(stream, "upstream closed during chunked body");
     }
-    const ev = await Promise.race([
-      once(stream, "readable").then(() => "readable" as const),
-      once(stream, "end").then(() => "end" as const),
-      once(stream, "close").then(() => "close" as const),
-      once(stream, "error").then((args) => {
-        throw args[0];
-      }),
-    ]);
-    if (ev === "end" || ev === "close") {
-      throw new Error("upstream closed during chunked body");
-    }
-    await readMore();
   };
 
   while (true) {
@@ -307,17 +358,7 @@ async function* readFixedBody(stream: Duplex, initial: Buffer, length: number): 
       if (chunk) {
         buf = chunk;
       } else {
-        const ev = await Promise.race([
-          once(stream, "readable").then(() => "readable" as const),
-          once(stream, "end").then(() => "end" as const),
-          once(stream, "close").then(() => "close" as const),
-          once(stream, "error").then((args) => {
-            throw args[0];
-          }),
-        ]);
-        if (ev === "end" || ev === "close") {
-          throw new Error("upstream closed before content-length satisfied");
-        }
+        await waitForReadableOrThrow(stream, "upstream closed before content-length satisfied");
         continue;
       }
     }
@@ -399,6 +440,11 @@ export class GondolinListeners extends EventEmitter {
 
   private readListenersText(): string {
     try {
+      const st = this.etcProvider.statSync("/listeners");
+      if (st.size > MAX_LISTENERS_FILE_BYTES) {
+        throw new Error("listeners file too large");
+      }
+
       // Prefer provider-level readFileSync if present.
       const p = this.etcProvider as any;
       if (typeof p.readFileSync === "function") {
@@ -412,7 +458,11 @@ export class GondolinListeners extends EventEmitter {
       } finally {
         handle.closeSync();
       }
-    } catch {
+    } catch (err) {
+      // If the file exists but violates our size cap, propagate so reloadNow keeps the previous routes.
+      if (err instanceof Error && err.message === "listeners file too large") {
+        throw err;
+      }
       return "";
     }
   }
@@ -503,7 +553,7 @@ export class IngressGateway {
     return {
       host,
       port,
-      url: `http://${host}:${port}`,
+      url: `http://${host.includes(":") ? `[${host}]` : host}:${port}`,
       close: async () => {
         const s = this.server;
         this.server = null;
@@ -526,6 +576,15 @@ export class IngressGateway {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let upstream: Duplex | null = null;
+    let upstreamError: unknown = null;
+
+    const onUpstreamError = (err: unknown) => {
+      upstreamError = err;
+      // Prevent an unhandled "error" event from crashing the process.
+      // The request handler will surface failures via awaited reads/writes.
+    };
+
     try {
       const url = new URL(req.url ?? "/", "http://gondolin.local");
       const route = this.pickRoute(url.pathname);
@@ -540,7 +599,8 @@ export class IngressGateway {
       const backendPathname = route.stripPrefix ? stripPrefix(url.pathname, route.prefix) : url.pathname;
       const backendTarget = backendPathname + url.search;
 
-      const upstream = await this.sandbox.openIngressStream({ host: "127.0.0.1", port: route.port, timeoutMs: 2000 });
+      upstream = await this.sandbox.openIngressStream({ host: "127.0.0.1", port: route.port, timeoutMs: 2000 });
+      upstream.on("error", onUpstreamError);
 
       // Build upstream request headers
       const incoming = normalizeIncomingHeaders(req.headers);
@@ -653,9 +713,7 @@ export class IngressGateway {
           : readToEnd(upstream, head.rest);
 
       for await (const chunk of bodyIter) {
-        if (!res.write(chunk)) {
-          await once(res, "drain");
-        }
+        await writeStream(res, chunk);
       }
       res.end();
     } catch (err) {
@@ -664,6 +722,14 @@ export class IngressGateway {
         res.setHeader("content-type", "text/plain");
       }
       res.end(`bad gateway: ${err instanceof Error ? err.message : String(err)}\n`);
+    } finally {
+      if (upstream) {
+        try {
+          upstream.destroy(upstreamError instanceof Error ? upstreamError : undefined);
+        } catch {
+          // ignore
+        }
+      }
     }
   }
 }
