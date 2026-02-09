@@ -44,7 +44,16 @@ class HookedHandle implements VirtualFileHandle {
   ) {}
 
   get path() {
-    return this.inner.path ?? this.handlePath;
+    // Always report the path that was used to open the handle.
+    //
+    // Many backend providers expose a handle-local `path` property that is
+    // relative to the provider's mount root (e.g. "/listeners" for a mount
+    // at "/etc/gondolin").  VFS hooks, however, operate on the *guest-visible*
+    // paths that flow through the mounted provider (e.g. "/etc/gondolin/listeners").
+    //
+    // Using the backend handle's `path` here breaks path-based hooks like the
+    // /etc/gondolin/listeners reload logic.
+    return this.handlePath;
   }
 
   get flags() {
