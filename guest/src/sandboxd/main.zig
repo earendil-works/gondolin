@@ -305,6 +305,13 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
     const close_stdin_on_eof = !use_pty;
 
     var status: ?u32 = null;
+
+    // PTY mode: after the main PID exits, we stop waiting for EOF (other
+    // processes may still hold the slave open) but do a short best-effort drain
+    // of already-buffered output before forcing the PTY closed.
+    var pty_close_deadline_ms: ?i64 = null;
+    var pty_exit_drain_remaining: ?usize = null;
+
     var buffer: [8192]u8 = undefined;
 
     const max_buffered: usize = 256 * 1024;
@@ -334,6 +341,39 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
         const backpressure = writer.pendingBytes() >= max_buffered;
         const stdout_can_read = !backpressure and stdout_credit > 0;
         const stderr_can_read = !backpressure and stderr_credit > 0;
+
+        // If the main PID has exited in PTY mode, do not wait for EOF. Instead
+        // drain what is currently buffered (bounded) and then force-close the
+        // PTY master so background jobs cannot keep the session open.
+        if (use_pty and pty_master != null and pty_close_deadline_ms != null) {
+            const now_ms = std.time.milliTimestamp();
+            const deadline_ms = pty_close_deadline_ms.?;
+
+            var should_close = now_ms >= deadline_ms;
+
+            if (!should_close) {
+                if (bytesAvailable(pty_master.?)) |avail| {
+                    if (avail == 0) should_close = true;
+                }
+            }
+
+            if (!should_close) {
+                if (pty_exit_drain_remaining) |rem| {
+                    if (rem == 0) should_close = true;
+                }
+            }
+
+            if (should_close) {
+                const fd = pty_master.?;
+                std.posix.close(fd);
+                pty_master = null;
+
+                stdout_fd = null;
+                stdin_fd = null;
+                stdout_open = false;
+                stdin_open = false;
+            }
+        }
 
         // If we've already observed POLLHUP but cannot read right now (no credits
         // or host-side backpressure), re-check whether the fd is drained.
@@ -432,6 +472,11 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                         }
                     }
                 } else {
+                    if (use_pty and pty_exit_drain_remaining != null) {
+                        const rem = pty_exit_drain_remaining.?;
+                        pty_exit_drain_remaining = if (n >= rem) 0 else rem - n;
+                    }
+
                     stdout_credit -= n;
                     const payload = try protocol.encodeExecOutput(allocator, req.id, "stdout", buffer[0..n]);
                     defer allocator.free(payload);
@@ -535,18 +580,12 @@ fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: prot
                 status = res.status;
 
                 // In PTY mode, define exec lifetime by the main exec'd process.
-                // Close the PTY master as soon as the main PID exits so background
-                // processes inheriting the slave cannot keep the session open.
-                if (use_pty and pty_master != null) {
-                    const fd = pty_master.?;
-                    std.posix.close(fd);
-                    pty_master = null;
-
-                    // stdout/stdin share the PTY master
-                    stdout_fd = null;
-                    stdin_fd = null;
-                    stdout_open = false;
-                    stdin_open = false;
+                // Do not wait for EOF: background processes may keep the slave
+                // open forever. Instead, start a short best-effort drain (bounded)
+                // and then force-close the PTY master.
+                if (use_pty and pty_master != null and pty_close_deadline_ms == null) {
+                    pty_close_deadline_ms = std.time.milliTimestamp() + 250;
+                    pty_exit_drain_remaining = 64 * 1024;
                 }
             }
         }

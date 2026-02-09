@@ -124,7 +124,7 @@ test("exec aborts with signal", { skip: skipVmTests, timeout: timeoutMs }, async
   await withVm(execVmKey, execVmOptions, async (vm) => {
     await vm.start();
     const controller = new AbortController();
-    const proc = vm.exec(["/bin/sh", "-c", "sleep 5"], { signal: controller.signal });
+    const proc = vm.exec(["/bin/sh", "-c", "sleep 1"], { signal: controller.signal });
 
     setTimeout(() => controller.abort(), 100);
 
@@ -159,7 +159,10 @@ test(
             8000
           );
           t.unref();
-          void proc.result.finally(() => clearTimeout(t));
+          void proc.result.then(
+            () => clearTimeout(t),
+            () => clearTimeout(t)
+          );
         }),
       ]);
 

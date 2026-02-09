@@ -807,7 +807,10 @@ async function runBash(argv: string[]) {
       },
     });
 
-    proc.result.finally(() => cleanup());
+    void proc.result.then(
+      () => cleanup(),
+      () => cleanup()
+    );
 
     const raced = await Promise.race([
       proc.result.then((result) => ({ type: "result" as const, result })),

@@ -553,12 +553,17 @@ export class ExecProcess implements PromiseLike<ExecResult>, AsyncIterable<strin
       }
     );
 
-    this.session.resultPromise.finally(() => {
-      // Note: do not manually unpipe here. Readable.pipe() cleans itself up on
-      // stream end. Unpiping eagerly can drop buffered output that has not yet
-      // been flushed to the destination.
-      cleanup();
-    });
+    void this.session.resultPromise.then(
+      () => {
+        // Note: do not manually unpipe here. Readable.pipe() cleans itself up on
+        // stream end. Unpiping eagerly can drop buffered output that has not yet
+        // been flushed to the destination.
+        cleanup();
+      },
+      () => {
+        cleanup();
+      }
+    );
   }
 }
 
