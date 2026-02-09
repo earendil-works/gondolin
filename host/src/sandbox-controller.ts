@@ -159,16 +159,104 @@ export class SandboxController extends EventEmitter {
       this.restartTimer = null;
     }
 
-    child.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, 3000);
-      child.once("exit", () => {
-        clearTimeout(timeout);
+    // Best-effort shutdown sequence:
+    // - SIGTERM first
+    // - SIGKILL after a short grace period
+    // - never hang forever waiting on an "exit" event
+    //
+    // CI runners (notably Linux/KVM) have occasionally exhibited situations where
+    // QEMU does not terminate promptly and keeps Node alive via its stdio pipes.
+    // In that case we fall back to destroying the pipes + unref'ing the child so
+    // the process can still exit.
+    const closeTimeoutMs = 10_000;
+
+    let exited = false;
+    let exitHandler: (() => void) | null = null;
+    let errorHandler: ((err: Error) => void) | null = null;
+
+    const waitForExit = new Promise<void>((resolve) => {
+      // If the process is already gone, don't wait.
+      // (ChildProcess.exitCode is `number | null`; treat `undefined` as "unknown" and keep waiting.)
+      const exitCode = (child as any).exitCode as number | null | undefined;
+      if (typeof exitCode === "number") {
+        exited = true;
         resolve();
-      });
+        return;
+      }
+
+      exitHandler = () => {
+        exited = true;
+        resolve();
+      };
+
+      errorHandler = () => {
+        exited = true;
+        resolve();
+      };
+
+      child.once("exit", exitHandler);
+      child.once("error", errorHandler);
     });
+
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+
+    const sigkillTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }, 3000);
+
+    // Hard cap on waiting for the child to exit.
+    await Promise.race([
+      waitForExit,
+      new Promise<void>((resolve) => setTimeout(resolve, closeTimeoutMs)),
+    ]);
+
+    clearTimeout(sigkillTimer);
+
+    // If the child is still around, do not keep the event loop alive waiting for it.
+    if (!exited) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+
+      // Last resort: detach the child so it cannot keep Node alive.
+      try {
+        (child.stdin as any)?.destroy?.();
+      } catch {
+        // ignore
+      }
+      try {
+        (child.stdout as any)?.destroy?.();
+      } catch {
+        // ignore
+      }
+      try {
+        (child.stderr as any)?.destroy?.();
+      } catch {
+        // ignore
+      }
+      try {
+        child.unref();
+      } catch {
+        // ignore
+      }
+
+      // Also SIGKILL any other tracked children (best-effort)
+      killActiveChildren();
+
+      // Remove our listeners to avoid leaks if the child exits later.
+      if (exitHandler) child.off("exit", exitHandler);
+      if (errorHandler) child.off("error", errorHandler);
+    }
 
     this.setState("stopped");
   }
