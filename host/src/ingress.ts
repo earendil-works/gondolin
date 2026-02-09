@@ -780,11 +780,17 @@ export class IngressGateway {
       }
       res.end();
     } catch (err) {
+      if (process.env.GONDOLIN_DEBUG) {
+        // Avoid leaking internal error details to network clients, but keep them
+        // available for debugging when explicitly enabled.
+        console.error("ingress bad gateway:", err);
+      }
+
       if (!res.headersSent) {
         res.statusCode = 502;
         res.setHeader("content-type", "text/plain");
       }
-      res.end(`bad gateway: ${err instanceof Error ? err.message : String(err)}\n`);
+      res.end("bad gateway\n");
     } finally {
       if (upstream) {
         try {
@@ -817,7 +823,7 @@ export function isGondolinListenersRelevantPath(path: string | undefined): boole
   return path === "/etc/gondolin/listeners";
 }
 
-export function createGondolinEtcHooks(listeners: GondolinListeners) {
+export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider?: VirtualProvider) {
   return {
     after: (ctx: {
       op: string;
@@ -850,10 +856,29 @@ export function createGondolinEtcHooks(listeners: GondolinListeners) {
 
       // Guard open+write growth, not just writeFile/truncate.
       if (ctx.op === "write") {
-        if (typeof ctx.offset !== "number" || typeof ctx.length !== "number") {
+        if (typeof ctx.length !== "number") {
           throw new Error("/etc/gondolin/listeners too large");
         }
-        if (ctx.offset + ctx.length > MAX_LISTENERS_FILE_BYTES) {
+
+        // In append mode (O_APPEND), the RPC layer writes with position=null.
+        // That maps to an undefined offset in the hook context.
+        let offset = ctx.offset;
+        if (typeof offset !== "number") {
+          if (!etcProvider) {
+            throw new Error("/etc/gondolin/listeners append writes not supported");
+          }
+          try {
+            offset = etcProvider.statSync("/listeners").size;
+          } catch (err: any) {
+            if (err?.code === "ENOENT") {
+              offset = 0;
+            } else {
+              throw err;
+            }
+          }
+        }
+
+        if (offset + ctx.length > MAX_LISTENERS_FILE_BYTES) {
           throw new Error("/etc/gondolin/listeners too large");
         }
       }

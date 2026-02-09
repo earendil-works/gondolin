@@ -317,7 +317,7 @@ export class VM {
         gondolinMounts = {
           "/etc/gondolin": etcProvider,
         };
-        gondolinHooks = createGondolinEtcHooks(this.gondolinEtc.listeners) as VfsHooks;
+        gondolinHooks = createGondolinEtcHooks(this.gondolinEtc.listeners, etcProvider) as VfsHooks;
       }
     }
 
@@ -1675,18 +1675,28 @@ function resolveVmVfs(
   return { provider: wrapProvider(provider, hooks), mounts };
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as any)?.then === "function";
+}
+
 function composeVfsHooks(a?: VfsHooks, b?: VfsHooks): VfsHooks {
   if (!a || (!a.before && !a.after)) return b ?? {};
   if (!b || (!b.before && !b.after)) return a;
 
   return {
-    before: async (ctx) => {
-      if (a.before) await a.before(ctx);
-      if (b.before) await b.before(ctx);
+    before: (ctx) => {
+      const ra = a.before?.(ctx);
+      if (isPromiseLike(ra)) {
+        return Promise.resolve(ra).then(() => b.before?.(ctx));
+      }
+      return b.before?.(ctx);
     },
-    after: async (ctx) => {
-      if (a.after) await a.after(ctx);
-      if (b.after) await b.after(ctx);
+    after: (ctx) => {
+      const ra = a.after?.(ctx);
+      if (isPromiseLike(ra)) {
+        return Promise.resolve(ra).then(() => b.after?.(ctx));
+      }
+      return b.after?.(ctx);
     },
   };
 }
@@ -1834,6 +1844,7 @@ export const __test = {
   resolveFuseConfig,
   resolveMitmMounts,
   createMitmCaProvider,
+  composeVfsHooks,
   buildShellEnv,
   mergeEnvInputs,
   envInputToEntries,
