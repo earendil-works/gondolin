@@ -275,6 +275,73 @@ await ingress.close();
 await vm.close();
 ```
 
+#### Ingress hooks (gateway request/response rewriting)
+
+`enableIngress()` can install **host-side hook points** on the ingress gateway.
+This is useful for:
+
+- allow/deny decisions based on client IP / path / route
+- rewriting upstream target paths (or headers)
+- adding/removing response headers
+- optionally buffering responses so you can rewrite bodies
+
+Hooks are configured via `enableIngress({ hooks: ... })`:
+
+- `hooks.isAllowed(info) -> boolean`: return `false` to deny (default response: `403 forbidden`)
+  - for a custom deny response, throw `new IngressRequestBlockedError(...)`
+- `hooks.onRequest(request) -> patch`: rewrite headers and/or upstream target
+  - can also enable per-request response buffering via `bufferResponseBody: true`
+- `hooks.onResponse(response, request) -> patch`: rewrite status/headers and optionally replace the body
+
+Streaming vs buffering:
+
+- by default, responses are streamed directly (no buffering)
+- if you enable buffering (either globally via `enableIngress({ bufferResponseBody: true })` or per-request via `onRequest()`), the full upstream response body is buffered before `onResponse()` runs and provided as `response.body`
+
+Header patch semantics:
+
+- set a header to a `string`/`string[]` to set/overwrite it
+- set a header to `null` to delete it
+
+Example:
+
+```ts
+import { IngressRequestBlockedError, VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create();
+
+await vm.enableIngress({
+  hooks: {
+    isAllowed: ({ clientIp, path }) => {
+      if (path.startsWith("/admin")) {
+        throw new IngressRequestBlockedError(
+          `admin blocked for ${clientIp}`,
+          403,
+          "Forbidden",
+          "nope\n"
+        );
+      }
+      return true;
+    },
+
+    onRequest: (req) => ({
+      // Rewrite /api/* -> /* inside the guest
+      backendTarget: req.backendTarget.startsWith("/api/") ? req.backendTarget.slice(4) : req.backendTarget,
+      headers: { "x-added": "1", "x-remove": null },
+
+      // Only buffer responses we plan to inspect/modify
+      bufferResponseBody: req.backendTarget.endsWith(".json"),
+      maxBufferedResponseBodyBytes: 8 * 1024 * 1024,
+    }),
+
+    onResponse: (res) => ({
+      headers: { "x-ingress": "1" },
+      body: res.body ? Buffer.from(res.body.toString("utf8").toUpperCase()) : undefined,
+    }),
+  },
+});
+```
+
 You can read or replace the current routing table programmatically:
 
 - `vm.getIngressRoutes()`
@@ -306,8 +373,8 @@ const { httpHooks, env } = createHttpHooks({
     console.log(req.url);
     return req;
   },
-  onResponse: async (req, res) => {
-    console.log(res.status);
+  onResponse: async (res, req) => {
+    console.log(req.url, res.status);
     return res;
   },
 });

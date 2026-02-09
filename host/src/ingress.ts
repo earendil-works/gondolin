@@ -209,6 +209,27 @@ function filterHopByHop(headers: Record<string, string | string[]>): Record<stri
   return out;
 }
 
+function normalizeHeaderRecord(headers: Record<string, string | string[]>): IngressHeaders {
+  const out: IngressHeaders = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k.toLowerCase()] = v;
+  }
+  return out;
+}
+
+function applyHeaderPatch(base: IngressHeaders, patch: IngressHeaderPatch): IngressHeaders {
+  const out: IngressHeaders = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    const key = k.toLowerCase();
+    if (v === null || v === undefined) {
+      delete out[key];
+    } else {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
 function coerceError(err: unknown): Error {
   if (err instanceof Error) return err;
   return new Error(String(err));
@@ -455,6 +476,22 @@ async function* readToEnd(stream: Duplex, initial: Buffer): AsyncGenerator<Buffe
   }
 }
 
+async function bufferAsyncIterable(iter: AsyncIterable<Buffer>, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  for await (const chunk of iter) {
+    const b = Buffer.from(chunk);
+    total += b.length;
+    if (total > maxBytes) {
+      throw new Error(`buffered body too large (>${maxBytes} bytes)`);
+    }
+    chunks.push(b);
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
 export class GondolinListeners extends EventEmitter {
   private routes: IngressRoute[] = [];
   private reloadTimer: NodeJS.Timeout | null = null;
@@ -595,11 +632,127 @@ export class GondolinListeners extends EventEmitter {
   }
 }
 
+export type IngressHeaderValue = string | string[];
+export type IngressHeaders = Record<string, IngressHeaderValue>;
+export type IngressHeaderPatch = Record<string, IngressHeaderValue | null | undefined>;
+
+export class IngressRequestBlockedError extends Error {
+  /** http status code */
+  readonly statusCode: number;
+  /** http status message */
+  readonly statusMessage: string;
+  /** response body */
+  readonly body: string;
+
+  constructor(message = "request blocked", statusCode = 403, statusMessage = "Forbidden", body = "forbidden\n") {
+    super(message);
+    this.name = "IngressRequestBlockedError";
+    this.statusCode = statusCode;
+    this.statusMessage = statusMessage;
+    this.body = body;
+  }
+}
+
+export type IngressAllowInfo = {
+  /** client ip address (as reported by Node) */
+  clientIp: string;
+  /** http method */
+  method: string;
+  /** request path including query */
+  path: string;
+  /** request headers (lowercased) */
+  headers: Record<string, string | string[]>;
+  /** matched ingress route */
+  route: IngressRoute;
+};
+
+export type IngressHookRequest = {
+  /** client ip address (as reported by Node) */
+  clientIp: string;
+  /** http method */
+  method: string;
+  /** original request path including query */
+  path: string;
+  /** matched ingress route */
+  route: IngressRoute;
+
+  /** upstream target host */
+  backendHost: string;
+  /** upstream target port */
+  backendPort: number;
+  /** upstream request target (path + query) */
+  backendTarget: string;
+
+  /** upstream request headers (lowercased) */
+  headers: IngressHeaders;
+};
+
+export type IngressHookRequestPatch = {
+  /** updated http method */
+  method?: string;
+  /** updated upstream host */
+  backendHost?: string;
+  /** updated upstream port */
+  backendPort?: number;
+  /** updated upstream request target (path + query) */
+  backendTarget?: string;
+  /** upstream header patch */
+  headers?: IngressHeaderPatch;
+
+  /** buffer full upstream response body before calling onResponse */
+  bufferResponseBody?: boolean;
+  /** max buffered upstream response body size in `bytes` */
+  maxBufferedResponseBodyBytes?: number;
+};
+
+export type IngressHookResponse = {
+  /** http status code */
+  statusCode: number;
+  /** http status message */
+  statusMessage: string;
+  /** response headers (lowercased) */
+  headers: IngressHeaders;
+  /** buffered response body (only if `bufferResponseBody` is enabled) */
+  body?: Buffer;
+};
+
+export type IngressHookResponsePatch = {
+  /** updated http status code */
+  statusCode?: number;
+  /** updated http status message */
+  statusMessage?: string;
+  /** response header patch */
+  headers?: IngressHeaderPatch;
+  /** replacement response body */
+  body?: Buffer;
+};
+
+export type IngressGatewayHooks = {
+  /** allow/deny callback */
+  isAllowed?: (info: IngressAllowInfo) => Promise<boolean> | boolean;
+  /** request rewrite hook (rewrite headers / upstream target) */
+  onRequest?: (request: IngressHookRequest) => Promise<IngressHookRequestPatch | void> | IngressHookRequestPatch | void;
+  /** response rewrite hook (rewrite status / headers and optionally body) */
+  onResponse?: (
+    response: IngressHookResponse,
+    request: IngressHookRequest
+  ) => Promise<IngressHookResponsePatch | void> | IngressHookResponsePatch | void;
+};
+
 export type EnableIngressOptions = {
   /** host interface to bind (default: 127.0.0.1) */
   listenHost?: string;
   /** host port to bind (default: 0 = ephemeral) */
   listenPort?: number;
+
+  /** ingress gateway hooks */
+  hooks?: IngressGatewayHooks;
+
+  /** buffer full upstream response bodies before sending them to the client (default: false) */
+  bufferResponseBody?: boolean;
+
+  /** max buffered upstream response body size in `bytes` (default: 2 MiB) */
+  maxBufferedResponseBodyBytes?: number;
 };
 
 export type IngressAccess = {
@@ -611,15 +764,33 @@ export type IngressAccess = {
 
 export class IngressGateway {
   private server: http.Server | null = null;
+  private hooks: IngressGatewayHooks | null;
+  private bufferResponseBody: boolean;
+  private maxBufferedResponseBodyBytes: number;
 
   constructor(
     private readonly sandbox: SandboxServer,
-    private readonly listeners: GondolinListeners
-  ) {}
+    private readonly listeners: GondolinListeners,
+    options: Pick<EnableIngressOptions, "hooks" | "bufferResponseBody" | "maxBufferedResponseBodyBytes"> = {}
+  ) {
+    this.hooks = options.hooks ?? null;
+    this.bufferResponseBody = options.bufferResponseBody ?? false;
+    this.maxBufferedResponseBodyBytes = options.maxBufferedResponseBodyBytes ?? 2 * 1024 * 1024;
+  }
 
   async listen(options: EnableIngressOptions = {}): Promise<IngressAccess> {
     if (this.server) {
       throw new Error("ingress gateway already running");
+    }
+
+    if (options.hooks !== undefined) {
+      this.hooks = options.hooks ?? null;
+    }
+    if (options.bufferResponseBody !== undefined) {
+      this.bufferResponseBody = options.bufferResponseBody;
+    }
+    if (options.maxBufferedResponseBodyBytes !== undefined) {
+      this.maxBufferedResponseBodyBytes = options.maxBufferedResponseBodyBytes;
     }
 
     const listenHost = options.listenHost ?? "127.0.0.1";
@@ -703,51 +874,109 @@ export class IngressGateway {
         return;
       }
 
-      // Rewrite path
-      const backendPathname = route.stripPrefix ? stripPrefix(url.pathname, route.prefix) : url.pathname;
-      const backendTarget = backendPathname + url.search;
-
-      upstream = await this.sandbox.openIngressStream({ host: "127.0.0.1", port: route.port, timeoutMs: 2000 });
-      upstream.on("error", onUpstreamError);
-
-      // Build upstream request headers
+      const hooks = this.hooks;
+      const clientIp = req.socket.remoteAddress ?? "";
+      const clientMethod = (req.method ?? "GET").toUpperCase();
+      const path = url.pathname + url.search;
       const incoming = normalizeIncomingHeaders(req.headers);
-      const filtered = filterHopByHop(incoming);
 
-      // Remove body framing headers; we choose framing ourselves.
-      delete filtered["content-length"];
-      delete filtered["transfer-encoding"];
-      delete filtered["expect"];
-
-      const hostHeader = typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
-      filtered["host"] = hostHeader;
-      filtered["connection"] = "close";
-
-      // Forwarded headers
-      const remote = req.socket.remoteAddress ?? "";
-      if (remote) {
-        const prev = filtered["x-forwarded-for"];
-        if (typeof prev === "string" && prev.length > 0) {
-          filtered["x-forwarded-for"] = `${prev}, ${remote}`;
-        } else {
-          filtered["x-forwarded-for"] = remote;
+      if (hooks?.isAllowed) {
+        const allowed = await hooks.isAllowed({ clientIp, method: clientMethod, path, headers: incoming, route });
+        if (!allowed) {
+          throw new IngressRequestBlockedError();
         }
       }
-      filtered["x-forwarded-host"] = hostHeader;
-      filtered["x-forwarded-proto"] = "http";
+
+      // Rewrite path
+      const backendPathname = route.stripPrefix ? stripPrefix(url.pathname, route.prefix) : url.pathname;
+
+      // Response buffering defaults (can be overridden per-request via onRequest)
+      let bufferResponseBody = this.bufferResponseBody;
+      let maxBufferedResponseBodyBytes = this.maxBufferedResponseBodyBytes;
+
+      // Build initial upstream request config (can be patched by onRequest)
+      let hookRequest: IngressHookRequest = {
+        clientIp,
+        method: clientMethod,
+        path,
+        route,
+        backendHost: "127.0.0.1",
+        backendPort: route.port,
+        backendTarget: backendPathname + url.search,
+        headers: normalizeHeaderRecord(filterHopByHop(incoming)),
+      };
+
+      // Remove body framing headers; we choose framing ourselves.
+      delete hookRequest.headers["content-length"];
+      delete hookRequest.headers["transfer-encoding"];
+      delete hookRequest.headers["expect"];
+
+      const hostHeader = typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
+      hookRequest.headers["host"] = hostHeader;
+      hookRequest.headers["connection"] = "close";
+
+      // Forwarded headers
+      if (clientIp) {
+        const prev = hookRequest.headers["x-forwarded-for"];
+        if (typeof prev === "string" && prev.length > 0) {
+          hookRequest.headers["x-forwarded-for"] = `${prev}, ${clientIp}`;
+        } else {
+          hookRequest.headers["x-forwarded-for"] = clientIp;
+        }
+      }
+      hookRequest.headers["x-forwarded-host"] = hostHeader;
+      hookRequest.headers["x-forwarded-proto"] = "http";
       if (route.stripPrefix && route.prefix !== "/") {
-        filtered["x-forwarded-prefix"] = route.prefix;
+        hookRequest.headers["x-forwarded-prefix"] = route.prefix;
       }
 
-      const method = (req.method ?? "GET").toUpperCase();
+      if (hooks?.onRequest) {
+        const patch = await hooks.onRequest(hookRequest);
+        if (patch) {
+          if (patch.method !== undefined) hookRequest.method = patch.method;
+          if (patch.backendHost !== undefined) hookRequest.backendHost = patch.backendHost;
+          if (patch.backendPort !== undefined) hookRequest.backendPort = patch.backendPort;
+          if (patch.backendTarget !== undefined) hookRequest.backendTarget = patch.backendTarget;
+          if (patch.headers) {
+            hookRequest.headers = applyHeaderPatch(hookRequest.headers, patch.headers);
+          }
+          if (patch.bufferResponseBody !== undefined) bufferResponseBody = patch.bufferResponseBody;
+          if (patch.maxBufferedResponseBodyBytes !== undefined) {
+            maxBufferedResponseBodyBytes = patch.maxBufferedResponseBodyBytes;
+          }
+        }
+      }
 
-      // Decide request body encoding
+      hookRequest.method = (hookRequest.method ?? "GET").toUpperCase();
+
+      if (hookRequest.backendHost !== "127.0.0.1" && hookRequest.backendHost !== "localhost") {
+        throw new Error(`invalid ingress backend host: ${hookRequest.backendHost}`);
+      }
+
+      if (!Number.isInteger(hookRequest.backendPort) || hookRequest.backendPort <= 0 || hookRequest.backendPort > 65535) {
+        throw new Error(`invalid ingress backend port: ${hookRequest.backendPort}`);
+      }
+
+      if (!hookRequest.backendTarget.startsWith("/")) {
+        throw new Error(`invalid ingress backend target: ${hookRequest.backendTarget}`);
+      }
+
+      // Enforce hop-by-hop filtering after the user hook
+      hookRequest.headers = normalizeHeaderRecord(filterHopByHop(hookRequest.headers as any));
+
+      // Remove body framing headers; we choose framing ourselves.
+      delete hookRequest.headers["content-length"];
+      delete hookRequest.headers["transfer-encoding"];
+      delete hookRequest.headers["expect"];
+      hookRequest.headers["connection"] = "close";
+
+      // Decide request body encoding (based on what we received from the client)
       const hasBody =
         incoming["content-length"] !== undefined ||
         incoming["transfer-encoding"] !== undefined ||
-        method === "POST" ||
-        method === "PUT" ||
-        method === "PATCH";
+        clientMethod === "POST" ||
+        clientMethod === "PUT" ||
+        clientMethod === "PATCH";
 
       const incomingTeTokens = parseTransferEncoding(incoming["transfer-encoding"]);
       const hasTransferEncoding = incomingTeTokens.length > 0;
@@ -759,16 +988,23 @@ export class IngressGateway {
       // Node already de-chunks/frames the inbound body; forwarding a conflicting
       // content-length to the guest backend can cause mis-framing.
       if (!hasTransferEncoding && incomingContentLength !== null) {
-        filtered["content-length"] = String(incomingContentLength);
+        hookRequest.headers["content-length"] = String(incomingContentLength);
       } else if (hasBody) {
         useChunked = true;
-        filtered["transfer-encoding"] = "chunked";
+        hookRequest.headers["transfer-encoding"] = "chunked";
       }
+
+      upstream = await this.sandbox.openIngressStream({
+        host: hookRequest.backendHost,
+        port: hookRequest.backendPort,
+        timeoutMs: 2000,
+      });
+      upstream.on("error", onUpstreamError);
 
       // Send request line + headers
       const headerLines: string[] = [];
-      headerLines.push(`${method} ${backendTarget} HTTP/1.1`);
-      for (const [k, v] of Object.entries(filtered)) {
+      headerLines.push(`${hookRequest.method} ${hookRequest.backendTarget} HTTP/1.1`);
+      for (const [k, v] of Object.entries(hookRequest.headers)) {
         if (v === undefined) continue;
         if (Array.isArray(v)) {
           for (const vv of v) headerLines.push(`${k}: ${vv}`);
@@ -804,7 +1040,7 @@ export class IngressGateway {
 
       // Read response head
       const head = await readHttpHead(upstream);
-      const respHeaders = filterHopByHop(head.headers);
+      let respHeaders = normalizeHeaderRecord(filterHopByHop(head.headers));
       delete respHeaders["content-length"]; // let node decide unless we keep fixed-length
       delete respHeaders["transfer-encoding"];
 
@@ -818,19 +1054,75 @@ export class IngressGateway {
         respHeaders["content-length"] = String(contentLength);
       }
 
-      res.writeHead(head.statusCode, head.statusMessage, respHeaders as any);
+      const responseForHook: IngressHookResponse = {
+        statusCode: head.statusCode,
+        statusMessage: head.statusMessage,
+        headers: respHeaders,
+      };
 
-      const bodyIter = isChunked
+      let bodyIter: AsyncIterable<Buffer> = isChunked
         ? decodeChunkedBody(upstream, head.rest)
         : contentLength !== null
           ? readFixedBody(upstream, head.rest, contentLength)
           : readToEnd(upstream, head.rest);
+
+      const shouldBufferResponseBody = bufferResponseBody && !!hooks?.onResponse;
+      if (shouldBufferResponseBody) {
+        const max = maxBufferedResponseBodyBytes;
+        if (!Number.isInteger(max) || max <= 0) {
+          throw new Error("invalid maxBufferedResponseBodyBytes");
+        }
+        responseForHook.body = await bufferAsyncIterable(bodyIter, max);
+      }
+
+      if (hooks?.onResponse) {
+        const patch = await hooks.onResponse(responseForHook, hookRequest);
+        if (patch) {
+          if (patch.statusCode !== undefined) responseForHook.statusCode = patch.statusCode;
+          if (patch.statusMessage !== undefined) responseForHook.statusMessage = patch.statusMessage;
+          if (patch.headers) responseForHook.headers = applyHeaderPatch(responseForHook.headers, patch.headers);
+          if (patch.body !== undefined) responseForHook.body = patch.body;
+        }
+      }
+
+      const finalHeaders = normalizeHeaderRecord(filterHopByHop(responseForHook.headers as any));
+
+      // If we buffered the response (or a hook provided an explicit replacement body), send it with a fixed content-length.
+      if (responseForHook.body !== undefined) {
+        delete finalHeaders["transfer-encoding"];
+        finalHeaders["content-length"] = String(responseForHook.body.length);
+
+        res.writeHead(responseForHook.statusCode, responseForHook.statusMessage, finalHeaders as any);
+        if (responseForHook.body.length > 0) {
+          await writeStream(res, responseForHook.body);
+        }
+        res.end();
+        return;
+      }
+
+      res.writeHead(responseForHook.statusCode, responseForHook.statusMessage, finalHeaders as any);
 
       for await (const chunk of bodyIter) {
         await writeStream(res, chunk);
       }
       res.end();
     } catch (err) {
+      if (err instanceof IngressRequestBlockedError) {
+        try {
+          if (res.headersSent) {
+            (res as any).destroy?.();
+            (res as any).socket?.destroy?.();
+            return;
+          }
+
+          res.writeHead(err.statusCode, err.statusMessage, { "content-type": "text/plain" });
+          res.end(err.body);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
       if (process.env.GONDOLIN_DEBUG) {
         // Avoid leaking internal error details to network clients, but keep them
         // available for debugging when explicitly enabled.
