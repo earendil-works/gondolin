@@ -26,6 +26,6 @@ mkdir -p /etc/chromium
 rm -f /etc/chromium/99-gondolin.conf
 cat > /etc/chromium/zz-gondolin.conf <<'EOF'
 # Appended to any distro defaults from other .conf files
-CHROMIUM_FLAGS="$CHROMIUM_FLAGS --headless --no-sandbox --disable-gpu --ignore-certificate-errors"
+CHROMIUM_FLAGS="$CHROMIUM_FLAGS --headless --no-sandbox --disable-gpu --ignore-certificate-errors --no-first-run --no-default-browser-check"
 EOF
 log "[init] configured default chromium flags"
