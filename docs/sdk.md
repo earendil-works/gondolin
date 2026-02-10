@@ -385,6 +385,9 @@ Notable consequences:
 - ICMP echo requests in the guest "work", but are synthetic (you can ping any address).
 - HTTP redirects are resolved on the host and hidden from the guest (the guest only
   sees the final response), so redirects cannot escape the allowlist.
+- WebSockets are supported via HTTP/1.1 Upgrade, but after the `101` response the connection becomes an opaque tunnel (only the handshake is hookable).
+  - Disable egress WebSockets via `VM.create({ allowWebSockets: false })` (or `sandbox.allowWebSockets: false`).
+  - Disable ingress WebSockets via `vm.enableIngress({ allowWebSockets: false })`.
 - DNS is available in multiple modes:
 
     - `synthetic` (default): no upstream DNS, returns synthetic answers

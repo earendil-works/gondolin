@@ -74,6 +74,12 @@ injecting secrets without exposing them inside the VM.
   - The secret is only permitted for the listed host(s)
   - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
+- `--disable-websockets`
+  - Disable WebSocket upgrades through the bridge
+  - Affects both:
+    - egress (guest -> upstream)
+    - ingress (host -> guest) when using `gondolin bash --listen`
+
 Examples:
 
 ```bash

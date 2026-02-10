@@ -15,7 +15,6 @@ import forge from "node-forge";
 
 import { loadOrCreateMitmCa, resolveMitmCertDir } from "./mitm";
 import { buildSyntheticDnsResponse, isProbablyDnsPacket, parseDnsQuery } from "./dns";
-import { lookup } from "dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const MAX_HTTP_REDIRECTS = 10;
@@ -2385,7 +2384,8 @@ export class QemuNetworkBackend extends EventEmitter {
   private stripHopByHopHeadersForWebSocket(headers: Record<string, string>): Record<string, string> {
     const out: Record<string, string> = { ...headers };
 
-    // Keep connection/upgrade for WebSocket handshakes.
+    // Unlike normal HTTP proxying, WebSocket handshakes require forwarding Connection/Upgrade.
+    // Still strip proxy-only and framing hop-by-hop headers.
     delete out["keep-alive"];
     delete out["proxy-connection"];
     delete out["proxy-authenticate"];
@@ -2399,6 +2399,26 @@ export class QemuNetworkBackend extends EventEmitter {
     // Avoid forwarding framed/trailer-related hop-by-hop headers.
     delete out["te"];
     delete out["trailer"];
+
+    // Apply Connection: token stripping, but keep Upgrade + WebSocket-specific headers.
+    const connection = out["connection"]?.toLowerCase() ?? "";
+    const tokens = connection
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+
+    const keepNominated = new Set([
+      "upgrade",
+      "sec-websocket-key",
+      "sec-websocket-version",
+      "sec-websocket-protocol",
+      "sec-websocket-extensions",
+    ]);
+
+    for (const token of tokens) {
+      if (keepNominated.has(token)) continue;
+      delete out[token];
+    }
 
     return out;
   }
@@ -2462,20 +2482,10 @@ export class QemuNetworkBackend extends EventEmitter {
       throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
     }
 
-    // Resolve + policy check (also used for the actual connect so the connection is pinned to an allowed IP).
-    const { address, family } = await this.resolveHostname(parsedUrl.hostname);
-    if (this.options.httpHooks?.isAllowed) {
-      const allowed = await this.options.httpHooks.isAllowed({
-        hostname: parsedUrl.hostname,
-        ip: address,
-        family: family as 4 | 6,
-        port,
-        protocol,
-      });
-      if (!allowed) {
-        throw new HttpRequestBlockedError(`blocked by policy: ${parsedUrl.hostname}`);
-      }
-    }
+    // Resolve all A/AAAA records and pick the first IP allowed by policy.
+    // This pins the websocket tunnel to an allowed address and avoids rejecting
+    // a hostname just because the first DNS answer is blocked.
+    const { address } = await this.resolveHostname(parsedUrl.hostname, { protocol, port });
 
     const ws = session.ws;
     if (!ws) {
@@ -2928,13 +2938,49 @@ export class QemuNetworkBackend extends EventEmitter {
     return `${defaultScheme}://${host}${request.target}`;
   }
 
-  private async resolveHostname(hostname: string): Promise<{ address: string; family: 4 | 6 }> {
+  private async resolveHostname(
+    hostname: string,
+    policy?: { protocol: "http" | "https"; port: number }
+  ): Promise<{ address: string; family: 4 | 6 }> {
     const ipFamily = net.isIP(hostname);
-    if (ipFamily === 4 || ipFamily === 6) {
-      return { address: hostname, family: ipFamily };
+
+    const entries: LookupEntry[] =
+      ipFamily === 4 || ipFamily === 6
+        ? [{ address: hostname, family: ipFamily }]
+        : normalizeLookupEntries(
+            // Use all addresses so policy checks can pick the first allowed entry.
+            await new Promise<dns.LookupAddress[]>((resolve, reject) => {
+              dns.lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
+                if (err) reject(err);
+                else resolve(addresses as dns.LookupAddress[]);
+              });
+            })
+          );
+
+    if (entries.length === 0) {
+      throw new Error("DNS lookup returned no addresses");
     }
-    const result = await lookup(hostname);
-    return { address: result.address, family: result.family as 4 | 6 };
+
+    const isAllowed = this.options.httpHooks?.isAllowed;
+    if (!policy || !isAllowed) {
+      const first = entries[0]!;
+      return { address: first.address, family: first.family };
+    }
+
+    for (const entry of entries) {
+      const allowed = await isAllowed({
+        hostname,
+        ip: entry.address,
+        family: entry.family,
+        port: policy.port,
+        protocol: policy.protocol,
+      });
+      if (allowed) {
+        return { address: entry.address, family: entry.family };
+      }
+    }
+
+    throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
   }
 
   private async ensureRequestAllowed(
@@ -2943,17 +2989,11 @@ export class QemuNetworkBackend extends EventEmitter {
     port: number
   ) {
     if (!this.options.httpHooks?.isAllowed) return;
-    const { address, family } = await this.resolveHostname(parsedUrl.hostname);
-    const allowed = await this.options.httpHooks.isAllowed({
-      hostname: parsedUrl.hostname,
-      ip: address,
-      family,
-      port,
-      protocol,
-    });
-    if (!allowed) {
-      throw new HttpRequestBlockedError(`blocked by policy: ${parsedUrl.hostname}`);
-    }
+
+    // Resolve all A/AAAA records and ensure at least one address is permitted.
+    // When using the default fetch, the guarded undici lookup will additionally
+    // pin the actual connect to an allowed IP.
+    await this.resolveHostname(parsedUrl.hostname, { protocol, port });
   }
 
   private async applyRequestHooks(request: HttpHookRequest): Promise<HttpHookRequest> {

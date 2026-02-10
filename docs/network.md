@@ -268,7 +268,7 @@ The network stack is intentionally *not* a general-purpose internet connection.
 Common limitations include:
 
 - No HTTP/3 or HTTP/2 (HTTP/1.x only)
-- No WebSockets
+- WebSocket upgrades are supported, but after the `101` response the connection becomes an opaque tunnel (only the handshake is mediated/hookable). Disable via `allowWebSockets: false` / `--disable-websockets`
 - No HTTP `CONNECT`
 - No generic UDP (DNS-only)
 - No arbitrary TCP protocols

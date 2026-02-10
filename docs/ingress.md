@@ -132,7 +132,7 @@ To disable rewriting:
 ## Behavior And Limitations
 
 - The gateway only speaks HTTP (HTTP/1.1 on the host side).
-- WebSocket upgrades are not supported.
+- WebSocket upgrades are supported by default, but after the `101` response the gateway tunnels bytes (only the handshake is hookable). Disable via `enableIngress({ allowWebSockets: false })` or `--disable-websockets`.
 - Each inbound request is forwarded over a fresh guest loopback TCP connection.
   The gateway sets `Connection: close`.
 - The guest backend must be reachable on `127.0.0.1:<port>`.

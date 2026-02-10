@@ -6,6 +6,7 @@ import test from "node:test";
 import crypto from "node:crypto";
 import tls from "node:tls";
 import net from "node:net";
+import dns from "node:dns";
 
 import forge from "node-forge";
 
@@ -168,6 +169,62 @@ test("qemu-net: stripHopByHopHeaders removes headers nominated by Connection", (
   assert.ok(!("connection" in stripped));
   assert.ok(!("keep-alive" in stripped));
   assert.equal(stripped["x-ok"], "1");
+});
+
+test("qemu-net: stripHopByHopHeadersForWebSocket strips connection-nominated headers", () => {
+  const backend = makeBackend();
+
+  const stripped = (backend as any).stripHopByHopHeadersForWebSocket({
+    host: "example.com",
+    connection: "Upgrade, x-foo, sec-websocket-key",
+    upgrade: "websocket",
+    "sec-websocket-key": "x",
+    "sec-websocket-version": "13",
+    "x-foo": "bar",
+    "keep-alive": "timeout=5",
+  });
+
+  assert.ok(!("x-foo" in stripped));
+  assert.ok(!("keep-alive" in stripped));
+  assert.equal(stripped.host, "example.com");
+  assert.equal(stripped.connection, "Upgrade, x-foo, sec-websocket-key");
+  assert.equal(stripped.upgrade, "websocket");
+  assert.equal(stripped["sec-websocket-key"], "x");
+  assert.equal(stripped["sec-websocket-version"], "13");
+});
+
+test("qemu-net: resolveHostname picks first allowed DNS answer", async () => {
+  const originalLookup = dns.lookup;
+
+  // Simulate a hostname that resolves to a blocked address first, then an allowed one.
+  (dns as any).lookup = (
+    _hostname: string,
+    _options: any,
+    cb: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+  ) => {
+    cb(null, [
+      { address: "10.0.0.1", family: 4 },
+      { address: "127.0.0.1", family: 4 },
+    ]);
+  };
+
+  try {
+    const backend = makeBackend({
+      httpHooks: {
+        isAllowed: ({ ip }) => ip === "127.0.0.1",
+      },
+    });
+
+    const resolved = await (backend as any).resolveHostname("example.com", {
+      protocol: "http",
+      port: 80,
+    });
+
+    assert.equal(resolved.address, "127.0.0.1");
+    assert.equal(resolved.family, 4);
+  } finally {
+    (dns as any).lookup = originalLookup;
+  }
 });
 
 test("qemu-net: handleHttpDataWithWriter sends 100-continue when body is pending", async () => {
