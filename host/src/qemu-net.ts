@@ -432,6 +432,17 @@ type TlsSession = {
   servername: string | null;
 };
 
+type WebSocketState = {
+  /** current websocket state */
+  phase: "handshake" | "open";
+  /** connected upstream socket (null until connected) */
+  upstream: net.Socket | null;
+  /** buffered guest->upstream bytes while the upstream socket is not yet connected */
+  pending: Buffer[];
+  /** bytes currently queued in `pending` in `bytes` */
+  pendingBytes: number;
+};
+
 type TcpSession = {
   socket: net.Socket | null;
   srcIP: string;
@@ -447,6 +458,9 @@ type TcpSession = {
   pendingWriteBytes: number;
   http?: HttpSession;
   tls?: TlsSession;
+
+  /** active WebSocket upgrade/tunnel state */
+  ws?: WebSocketState;
 };
 
 export type HttpFetch = typeof undiciFetch;
@@ -560,6 +574,9 @@ export type QemuNetworkOptions = {
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes?: number;
 
+  /** whether to allow WebSocket upgrades (default: true) */
+  allowWebSockets?: boolean;
+
   /** max buffered guest->upstream tcp write bytes per session in `bytes` */
   maxTcpPendingWriteBytes?: number;
 
@@ -608,6 +625,7 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly maxHttpBodyBytes: number;
   private readonly maxHttpResponseBodyBytes: number;
   private readonly maxTcpPendingWriteBytes: number;
+  private readonly allowWebSockets: boolean;
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
 
@@ -636,6 +654,8 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.maxTcpPendingWriteBytes =
       options.maxTcpPendingWriteBytes ?? DEFAULT_MAX_TCP_PENDING_WRITE_BYTES;
+
+    this.allowWebSockets = options.allowWebSockets ?? true;
 
     this.tlsContextCacheMaxEntries =
       options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
@@ -1192,6 +1212,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const session = this.tcpSessions.get(message.key);
     if (session) {
       session.http = undefined;
+      session.ws = undefined;
       session.pendingWrites = [];
       session.pendingWriteBytes = 0;
       if (session.tls) {
@@ -1320,6 +1341,11 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private async handlePlainHttpData(key: string, session: TcpSession, data: Buffer) {
+    if (session.ws) {
+      this.handleWebSocketClientData(key, session, data);
+      return;
+    }
+
     await this.handleHttpDataWithWriter(key, session, data, {
       scheme: "http",
       write: (chunk) => {
@@ -1336,6 +1362,11 @@ export class QemuNetworkBackend extends EventEmitter {
     const tlsSession = session.tls;
     if (!tlsSession) return;
 
+    if (session.ws) {
+      this.handleWebSocketClientData(key, session, data);
+      return;
+    }
+
     await this.handleHttpDataWithWriter(key, session, data, {
       scheme: "https",
       write: (chunk) => {
@@ -1348,6 +1379,66 @@ export class QemuNetworkBackend extends EventEmitter {
         });
       },
     });
+  }
+
+  private abortWebSocketSession(key: string, session: TcpSession, reason: string) {
+    if (this.options.debug) {
+      this.emitDebug(
+        `websocket session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+      );
+    }
+
+    try {
+      session.ws?.upstream?.destroy();
+    } catch {
+      // ignore
+    }
+
+    try {
+      session.tls?.socket.destroy();
+    } catch {
+      // ignore
+    }
+
+    session.ws = undefined;
+    this.abortTcpSession(key, session, reason);
+  }
+
+  private handleWebSocketClientData(key: string, session: TcpSession, data: Buffer) {
+    const ws = session.ws;
+    if (!ws) return;
+    if (data.length === 0) return;
+
+    const upstream = ws.upstream;
+
+    if (upstream && upstream.writable) {
+      const nextWritable = upstream.writableLength + data.length;
+      if (nextWritable > this.maxTcpPendingWriteBytes) {
+        this.abortWebSocketSession(
+          key,
+          session,
+          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
+        );
+        return;
+      }
+
+      upstream.write(data);
+      return;
+    }
+
+    // Handshake in progress (or upstream not yet connected): buffer until we have an upstream.
+    const nextBytes = ws.pendingBytes + data.length;
+    if (nextBytes > this.maxTcpPendingWriteBytes) {
+      this.abortWebSocketSession(
+        key,
+        session,
+        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
+      );
+      return;
+    }
+
+    ws.pending.push(data);
+    ws.pendingBytes = nextBytes;
   }
 
   private maybeSend100ContinueFromHead(
@@ -1590,15 +1681,42 @@ export class QemuNetworkBackend extends EventEmitter {
 
     if (!parsed) return;
 
+    const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+      parsed.request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+
     httpSession.processing = true;
     httpSession.buffer.resetTo(parsed.remaining);
 
+    let keepOpen = false;
+
     try {
+      if (this.allowWebSockets && this.isWebSocketUpgradeRequest(parsed.request)) {
+        // Prevent further HTTP parsing on this TCP session; upgraded connections become opaque tunnels.
+        httpSession.closed = true;
+
+        // Initialize websocket state early so any subsequent guest bytes are buffered/forwarded
+        // as websocket frames rather than being parsed as HTTP.
+        session.ws = session.ws ?? {
+          phase: "handshake",
+          upstream: null,
+          pending: [],
+          pendingBytes: 0,
+        };
+
+        // Anything already buffered after the request head is treated as early websocket data.
+        const early = httpSession.buffer.toBuffer();
+        httpSession.buffer.resetTo(Buffer.alloc(0));
+        if (early.length > 0) {
+          this.handleWebSocketClientData(key, session, early);
+        }
+
+        keepOpen = await this.handleWebSocketUpgrade(key, parsed.request, session, options, httpVersion);
+        return;
+      }
+
       await this.fetchAndRespond(parsed.request, options.scheme, options.write);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
-        parsed.request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
@@ -1609,10 +1727,26 @@ export class QemuNetworkBackend extends EventEmitter {
         this.emit("error", error);
         this.respondWithError(options.write, 502, "Bad Gateway", httpVersion);
       }
+
+      // Failed websocket upgrades should not leave the session in websocket mode.
+      session.ws = undefined;
+      if (session.socket) {
+        try {
+          session.socket.destroy();
+        } catch {
+          // ignore
+        }
+        session.socket = null;
+        session.connected = false;
+      }
     } finally {
-      httpSession.closed = true;
-      options.finish();
-      this.flush();
+      httpSession.processing = false;
+
+      if (!keepOpen) {
+        httpSession.closed = true;
+        options.finish();
+        this.flush();
+      }
     }
   }
 
@@ -2238,6 +2372,410 @@ export class QemuNetworkBackend extends EventEmitter {
 
   }
 
+  private isWebSocketUpgradeRequest(request: HttpRequestData): boolean {
+    const upgrade = request.headers["upgrade"]?.toLowerCase() ?? "";
+    if (upgrade === "websocket") return true;
+
+    // Some clients omit Upgrade/Connection but include the WebSocket-specific headers.
+    if (request.headers["sec-websocket-key"] || request.headers["sec-websocket-version"]) return true;
+
+    return false;
+  }
+
+  private stripHopByHopHeadersForWebSocket(headers: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = { ...headers };
+
+    // Keep connection/upgrade for WebSocket handshakes.
+    delete out["keep-alive"];
+    delete out["proxy-connection"];
+    delete out["proxy-authenticate"];
+    delete out["proxy-authorization"];
+
+    // No request bodies for WebSocket handshake.
+    delete out["content-length"];
+    delete out["transfer-encoding"];
+    delete out["expect"];
+
+    // Avoid forwarding framed/trailer-related hop-by-hop headers.
+    delete out["te"];
+    delete out["trailer"];
+
+    return out;
+  }
+
+  private async handleWebSocketUpgrade(
+    key: string,
+    request: HttpRequestData,
+    session: TcpSession,
+    options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void },
+    httpVersion: "HTTP/1.0" | "HTTP/1.1"
+  ): Promise<boolean> {
+    if (request.version !== "HTTP/1.1") {
+      throw new HttpRequestBlockedError("websocket upgrade requires HTTP/1.1", 501, "Not Implemented");
+    }
+
+    // WebSocket upgrades are always GET without a body.
+    if (request.method.toUpperCase() !== "GET") {
+      throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
+    }
+    if (request.body.length > 0) {
+      throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
+    }
+
+    const url = this.buildFetchUrl(request, options.scheme);
+    if (!url) {
+      throw new HttpRequestBlockedError("missing host", 400, "Bad Request");
+    }
+
+    let hookRequest: HttpHookRequest = {
+      method: "GET",
+      url,
+      headers: this.stripHopByHopHeadersForWebSocket(request.headers),
+      body: null,
+    };
+
+    hookRequest = await this.applyRequestHooks(hookRequest);
+
+    const method = (hookRequest.method ?? "GET").toUpperCase();
+    if (method !== "GET") {
+      throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
+    }
+
+    if (hookRequest.body && hookRequest.body.length > 0) {
+      throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(hookRequest.url);
+    } catch {
+      throw new HttpRequestBlockedError("invalid url", 400, "Bad Request");
+    }
+
+    const protocol = getUrlProtocol(parsedUrl);
+    if (!protocol) {
+      throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
+    }
+
+    const port = getUrlPort(parsedUrl, protocol);
+    if (!Number.isFinite(port) || port <= 0) {
+      throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
+    }
+
+    // Resolve + policy check (also used for the actual connect so the connection is pinned to an allowed IP).
+    const { address, family } = await this.resolveHostname(parsedUrl.hostname);
+    if (this.options.httpHooks?.isAllowed) {
+      const allowed = await this.options.httpHooks.isAllowed({
+        hostname: parsedUrl.hostname,
+        ip: address,
+        family: family as 4 | 6,
+        port,
+        protocol,
+      });
+      if (!allowed) {
+        throw new HttpRequestBlockedError(`blocked by policy: ${parsedUrl.hostname}`);
+      }
+    }
+
+    const ws = session.ws;
+    if (!ws) {
+      throw new Error("internal error: websocket state missing");
+    }
+
+    const upstream = await this.connectWebSocketUpstream({
+      protocol,
+      hostname: parsedUrl.hostname,
+      address,
+      port,
+    });
+
+    ws.upstream = upstream;
+
+    // Also store upstream in `session.socket` so pause/resume + close propagate.
+    session.socket = upstream;
+    session.connected = true;
+
+    if (session.flowControlPaused) {
+      try {
+        upstream.pause();
+      } catch {
+        // ignore
+      }
+    }
+
+    const guestWrite = (chunk: Buffer) => {
+      options.write(chunk);
+      this.flush();
+    };
+
+    let finished = false;
+    const finishOnce = () => {
+      if (finished) return;
+      finished = true;
+      options.finish();
+    };
+
+    // Ensure Host header exists.
+    const reqHeaders: Record<string, string> = { ...hookRequest.headers };
+    if (!reqHeaders["host"]) {
+      reqHeaders["host"] = parsedUrl.host;
+    }
+
+    // Remove body framing headers; websocket handshakes do not send a body.
+    delete reqHeaders["content-length"];
+    delete reqHeaders["transfer-encoding"];
+    delete reqHeaders["expect"];
+
+    const target = (parsedUrl.pathname || "/") + parsedUrl.search;
+
+    const headerLines: string[] = [];
+    headerLines.push(`${method} ${target} HTTP/1.1`);
+    for (const [rawName, rawValue] of Object.entries(reqHeaders)) {
+      const name = rawName.replace(/[\r\n:]+/g, "");
+      if (!name) continue;
+      const value = String(rawValue).replace(/[\r\n]+/g, " ");
+      headerLines.push(`${name}: ${value}`);
+    }
+    const headerBlob = headerLines.join("\r\n") + "\r\n\r\n";
+
+    upstream.write(Buffer.from(headerBlob, "latin1"));
+
+    // Flush any guest data buffered while we were connecting.
+    if (ws.pending.length > 0) {
+      const pending = ws.pending;
+      ws.pending = [];
+      ws.pendingBytes = 0;
+      for (const chunk of pending) {
+        if (chunk.length === 0) continue;
+        upstream.write(chunk);
+      }
+    }
+
+    // Read handshake response head.
+    const resp = await this.readUpstreamHttpResponseHead(upstream);
+
+    let responseHeaders: HttpResponseHeaders = resp.headers;
+
+    let hookResponse: HttpHookResponse = {
+      status: resp.statusCode,
+      statusText: resp.statusMessage || "OK",
+      headers: responseHeaders,
+      body: Buffer.alloc(0),
+    };
+
+    if (this.options.httpHooks?.onResponse) {
+      const updated = await this.options.httpHooks.onResponse(hookResponse, hookRequest);
+      if (updated) hookResponse = updated;
+    }
+
+    // If the hook injected a body, send it as a normal HTTP response and do not upgrade.
+    if (hookResponse.body.length > 0) {
+      const headers = { ...hookResponse.headers };
+      delete headers["transfer-encoding"];
+      headers["content-length"] = String(hookResponse.body.length);
+      this.sendHttpResponse(guestWrite, { ...hookResponse, headers }, httpVersion);
+      finishOnce();
+      upstream.destroy();
+      session.ws = undefined;
+      return false;
+    }
+
+    this.sendHttpResponseHead(guestWrite, hookResponse, httpVersion);
+
+    if (resp.rest.length > 0) {
+      guestWrite(resp.rest);
+    }
+
+    const upgraded = resp.statusCode === 101 && hookResponse.status === 101;
+    if (!upgraded) {
+      finishOnce();
+      upstream.destroy();
+      session.ws = undefined;
+      return false;
+    }
+
+    ws.phase = "open";
+
+    upstream.on("data", (chunk) => {
+      guestWrite(Buffer.from(chunk));
+    });
+
+    upstream.on("end", () => {
+      finishOnce();
+    });
+
+    upstream.on("error", (err) => {
+      this.emit("error", err);
+      this.abortWebSocketSession(key, session, "upstream-error");
+    });
+
+    upstream.on("close", () => {
+      session.ws = undefined;
+
+      // Some upstreams emit "close" without a prior "end".
+      finishOnce();
+
+      // For plain HTTP flows, closing the upstream socket should also close the guest TCP session.
+      // For TLS flows, closing the guest TLS socket triggers stack.handleTcpClosed.
+      if (options.scheme === "http") {
+        // If the session was already aborted/removed, do not emit a second close.
+        if (!this.tcpSessions.has(key)) return;
+        this.stack?.handleTcpClosed({ key });
+        this.tcpSessions.delete(key);
+      }
+    });
+
+    // Resume after the header read paused the socket.
+    try {
+      upstream.resume();
+    } catch {
+      // ignore
+    }
+
+    return true;
+  }
+
+  private async connectWebSocketUpstream(info: {
+    protocol: "http" | "https";
+    hostname: string;
+    address: string;
+    port: number;
+  }): Promise<net.Socket> {
+    if (info.protocol === "https") {
+      const socket = tls.connect({
+        host: info.address,
+        port: info.port,
+        servername: info.hostname,
+        ALPNProtocols: ["http/1.1"],
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          socket.off("secureConnect", onConnect);
+          reject(err);
+        };
+        const onConnect = () => {
+          socket.off("error", onError);
+          resolve();
+        };
+        socket.once("error", onError);
+        socket.once("secureConnect", onConnect);
+      });
+
+      return socket;
+    }
+
+    const socket = new net.Socket();
+    socket.connect(info.port, info.address);
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        socket.off("connect", onConnect);
+        reject(err);
+      };
+      const onConnect = () => {
+        socket.off("error", onError);
+        resolve();
+      };
+      socket.once("error", onError);
+      socket.once("connect", onConnect);
+    });
+
+    return socket;
+  }
+
+  private async readUpstreamHttpResponseHead(socket: net.Socket): Promise<{
+    statusCode: number;
+    statusMessage: string;
+    headers: Record<string, string | string[]>;
+    rest: Buffer;
+  }> {
+    let buf = Buffer.alloc(0);
+
+    return await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        socket.off("data", onData);
+        socket.off("error", onError);
+        socket.off("close", onClose);
+        socket.off("end", onEnd);
+      };
+
+      const onError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+
+      const onClose = () => {
+        cleanup();
+        reject(new Error("upstream closed before sending headers"));
+      };
+
+      const onEnd = () => {
+        cleanup();
+        reject(new Error("upstream ended before sending headers"));
+      };
+
+      const onData = (chunk: Buffer) => {
+        buf = buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
+
+        if (buf.length > MAX_HTTP_HEADER_BYTES + 4) {
+          cleanup();
+          reject(new Error("upstream headers too large"));
+          return;
+        }
+
+        const idx = buf.indexOf("\r\n\r\n");
+        if (idx === -1) return;
+
+        const head = buf.subarray(0, idx).toString("latin1");
+        const rest = buf.subarray(idx + 4);
+
+        cleanup();
+
+        try {
+          socket.pause();
+        } catch {
+          // ignore
+        }
+
+        const [statusLine, ...headerLines] = head.split("\r\n");
+        if (!statusLine) {
+          reject(new Error("missing status line"));
+          return;
+        }
+
+        const m = /^HTTP\/\d+\.\d+\s+(\d{3})\s*(.*)$/.exec(statusLine);
+        if (!m) {
+          reject(new Error(`invalid http status line: ${JSON.stringify(statusLine)}`));
+          return;
+        }
+
+        const statusCode = Number.parseInt(m[1]!, 10);
+        const statusMessage = m[2] ?? "";
+
+        const headers: Record<string, string | string[]> = {};
+        for (const line of headerLines) {
+          if (!line) continue;
+          const i = line.indexOf(":");
+          if (i === -1) continue;
+          const k = line.slice(0, i).trim().toLowerCase();
+          const v = line.slice(i + 1).trim();
+          const prev = headers[k];
+          if (prev === undefined) headers[k] = v;
+          else if (Array.isArray(prev)) prev.push(v);
+          else headers[k] = [prev, v];
+        }
+
+        resolve({ statusCode, statusMessage, headers, rest });
+      };
+
+      socket.on("data", onData);
+      socket.once("error", onError);
+      socket.once("close", onClose);
+      socket.once("end", onEnd);
+    });
+  }
+
   private sendHttpResponseHead(
     write: (chunk: Buffer) => void,
     response: { status: number; statusText: string; headers: HttpResponseHeaders },
@@ -2370,7 +2908,19 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private buildFetchUrl(request: HttpRequestData, defaultScheme: "http" | "https") {
-    if (request.target.startsWith("http://") || request.target.startsWith("https://")) {
+    if (
+      request.target.startsWith("http://") ||
+      request.target.startsWith("https://") ||
+      request.target.startsWith("ws://") ||
+      request.target.startsWith("wss://")
+    ) {
+      // Map WebSocket schemes to HTTP schemes for policy checks / hooks.
+      if (request.target.startsWith("ws://")) {
+        return `http://${request.target.slice("ws://".length)}`;
+      }
+      if (request.target.startsWith("wss://")) {
+        return `https://${request.target.slice("wss://".length)}`;
+      }
       return request.target;
     }
     const host = request.headers["host"];

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import crypto from "node:crypto";
 import tls from "node:tls";
+import net from "node:net";
 
 import forge from "node-forge";
 
@@ -458,6 +459,118 @@ test("qemu-net: fetchAndRespond rejects websocket upgrade requests", async () =>
 
   const responseText = Buffer.concat(writes).toString("utf8");
   assert.match(responseText, /^HTTP\/1\.1 501 /);
+});
+
+test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
+  const server = net.createServer();
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+
+  const port = addr.port;
+
+  server.on("connection", (sock) => {
+    let buf = Buffer.alloc(0);
+    let upgraded = false;
+
+    sock.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+
+      if (!upgraded) {
+        const idx = buf.indexOf("\r\n\r\n");
+        if (idx === -1) return;
+        const rest = buf.subarray(idx + 4);
+        upgraded = true;
+        buf = Buffer.alloc(0);
+
+        sock.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "\r\n"
+        );
+
+        // Initial server data
+        sock.write(Buffer.from("welcome"));
+
+        if (rest.length > 0) {
+          sock.write(Buffer.from("echo:"));
+          sock.write(rest);
+        }
+
+        return;
+      }
+
+      if (chunk.length > 0) {
+        sock.write(Buffer.from("echo:"));
+        sock.write(chunk);
+      }
+    });
+  });
+
+  const backend = makeBackend({
+    httpHooks: {
+      isAllowed: () => true,
+    },
+    allowWebSockets: true,
+  });
+
+  // Pin example.com to localhost for the test.
+  (backend as any).resolveHostname = async () => ({ address: "127.0.0.1", family: 4 });
+
+  const key = "TCP:1.1.1.1:1234:2.2.2.2:80";
+  const session: any = {
+    socket: null,
+    srcIP: "1.1.1.1",
+    srcPort: 1234,
+    dstIP: "2.2.2.2",
+    dstPort: 80,
+    connectIP: "2.2.2.2",
+    flowControlPaused: false,
+    protocol: "http",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  (backend as any).tcpSessions.set(key, session);
+
+  const writes: Buffer[] = [];
+
+  const req = Buffer.from(
+    "GET /chat HTTP/1.1\r\n" +
+      `Host: example.com:${port}\r\n` +
+      "Connection: Upgrade\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Sec-WebSocket-Key: x\r\n" +
+      "Sec-WebSocket-Version: 13\r\n" +
+      "\r\n" +
+      "hello"
+  );
+
+  // Call the internal HTTP handler directly with a custom writer.
+  await (backend as any).handleHttpDataWithWriter(key, session, req, {
+    scheme: "http",
+    write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+    finish: () => {
+      // ignored for this test
+    },
+  });
+
+  // Send a post-upgrade frame.
+  await new Promise((r) => setTimeout(r, 50));
+  await (backend as any).handlePlainHttpData(key, session, Buffer.from("ping"));
+
+  await new Promise((r) => setTimeout(r, 50));
+
+  const out = Buffer.concat(writes).toString("utf8");
+  assert.match(out, /^HTTP\/1\.1 101 /);
+  assert.ok(out.includes("welcome"));
+  assert.ok(out.includes("echo:hello"));
+  assert.ok(out.includes("echo:ping"));
+
+  server.close();
 });
 
 test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () => {
