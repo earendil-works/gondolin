@@ -68,10 +68,10 @@ test("SandboxController: start emits state transitions and forwards logs", async
   const controller = new SandboxController(makeConfig());
 
   const states: SandboxState[] = [];
-  const logs: string[] = [];
+  const logs: Array<{ stream: string; chunk: string }> = [];
   const exits: any[] = [];
   controller.on("state", (s) => states.push(s));
-  controller.on("log", (l) => logs.push(l));
+  controller.on("log", (chunk: any, stream: any) => logs.push({ stream, chunk }));
   controller.on("exit", (e) => exits.push(e));
 
   await controller.start();
@@ -84,7 +84,10 @@ test("SandboxController: start emits state transitions and forwards logs", async
   child.stdout.write("out");
   child.stderr.write("err");
   await flush();
-  assert.equal(logs.join(""), "outerr");
+  assert.deepEqual(logs, [
+    { stream: "stdout", chunk: "out" },
+    { stream: "stderr", chunk: "err" },
+  ]);
 
   child.emit("spawn");
   assert.equal(controller.getState(), "running");
@@ -215,6 +218,50 @@ test("SandboxController: error event emits exit with error and does not auto-res
   // No restart should be scheduled from the error path.
   mock.timers.tick(2000);
   assert.equal(controller.getState(), "stopped");
+});
+
+test("sandbox-controller: buildQemuArgs does not select -cpu host when using tcg", () => {
+  const hostArch = process.arch === "arm64" ? "arm64" : "x64";
+
+  // Note: cpu/accel selection is platform-specific, but "tcg" should always
+  // avoid "-cpu host".
+  const args = (__test as any).buildQemuArgs({
+    qemuPath: hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64",
+    kernelPath: "/tmp/vmlinuz",
+    initrdPath: "/tmp/initrd",
+    memory: "256M",
+    cpus: 1,
+    virtioSocketPath: "/tmp/virtio.sock",
+    virtioFsSocketPath: "/tmp/virtiofs.sock",
+    virtioSshSocketPath: "/tmp/virtiossh.sock",
+    append: "console=ttyS0",
+    machineType: "q35",
+    accel: "tcg",
+    // cpu intentionally omitted
+    console: "none",
+    autoRestart: false,
+  });
+
+  const cpuIndex = args.indexOf("-cpu");
+  assert.notEqual(cpuIndex, -1);
+  assert.equal(args[cpuIndex + 1], "max");
+});
+
+test("sandbox-controller: selectCpu only uses host with matching hw accel", () => {
+  const hostArch = process.arch === "arm64" ? "arm64" : "x64";
+
+  assert.equal((__test as any).selectCpu(hostArch, "tcg"), "max");
+
+  if (process.platform === "linux") {
+    assert.equal((__test as any).selectCpu(hostArch, "kvm"), "host");
+  } else if (process.platform === "darwin") {
+    assert.equal((__test as any).selectCpu(hostArch, "hvf"), "host");
+  } else {
+    assert.equal((__test as any).selectCpu(hostArch, "kvm"), "max");
+  }
+
+  const otherArch = hostArch === "arm64" ? "x64" : "arm64";
+  assert.equal((__test as any).selectCpu(otherArch, "kvm"), "max");
 });
 
 test("sandbox-controller: killActiveChildren kills tracked processes", async () => {

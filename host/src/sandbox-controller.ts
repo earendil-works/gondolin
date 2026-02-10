@@ -86,6 +86,8 @@ export type SandboxConfig = {
 
 export type SandboxState = "starting" | "running" | "stopped";
 
+export type SandboxLogStream = "stdout" | "stderr";
+
 export class SandboxController extends EventEmitter {
   private child: ChildProcess | null = null;
   private state: SandboxState = "stopped";
@@ -117,11 +119,11 @@ export class SandboxController extends EventEmitter {
     trackChild(this.child);
 
     this.child.stdout?.on("data", (chunk) => {
-      this.emit("log", chunk.toString());
+      this.emit("log", chunk.toString(), "stdout" satisfies SandboxLogStream);
     });
 
     this.child.stderr?.on("data", (chunk) => {
-      this.emit("log", chunk.toString());
+      this.emit("log", chunk.toString(), "stderr" satisfies SandboxLogStream);
     });
 
     this.child.on("spawn", () => {
@@ -331,7 +333,9 @@ function buildQemuArgs(config: SandboxConfig) {
   const accel = config.accel ?? selectAccel(targetArch);
   if (accel) args.push("-accel", accel);
 
-  const cpu = config.cpu ?? selectCpu(targetArch);
+  // Keep CPU selection consistent with the selected accelerator.
+  // In particular, "-cpu host" generally requires hardware acceleration.
+  const cpu = config.cpu ?? selectCpu(targetArch, accel);
   if (cpu) args.push("-cpu", cpu);
 
   if (config.console === "none") {
@@ -444,17 +448,25 @@ function selectAccel(targetArch: string) {
   return "tcg";
 }
 
-function selectCpu(targetArch: string) {
+function selectCpu(targetArch: string, accel?: string) {
   const hostArch = getHostArch();
 
-  // "-cpu host" only makes sense when using hardware accel for the same arch.
+  // "-cpu host" only makes sense when running the same arch with hardware accel.
   if (targetArch !== hostArch) {
     return "max";
   }
 
-  if (process.platform === "linux" || process.platform === "darwin") {
-    return "host";
+  const accelName = (accel ?? "").split(",", 1)[0]!.trim().toLowerCase();
+
+  // Be conservative: "host" generally requires hardware acceleration.
+  if (process.platform === "linux") {
+    return accelName === "kvm" ? "host" : "max";
   }
+
+  if (process.platform === "darwin") {
+    return accelName === "hvf" ? "host" : "max";
+  }
+
   return "max";
 }
 

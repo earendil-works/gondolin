@@ -29,7 +29,7 @@ import {
   encodeOutputFrame,
   ServerMessage,
 } from "./control-protocol";
-import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-controller";
+import { SandboxController, SandboxConfig, SandboxState, type SandboxLogStream } from "./sandbox-controller";
 import {
   QemuNetworkBackend,
   DEFAULT_MAX_HTTP_BODY_BYTES,
@@ -850,6 +850,42 @@ export class SandboxServer extends EventEmitter {
     this.emit("log", `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""));
   }
 
+  private normalizeQemuHintLine(line: string): string | null {
+    let normalized = stripTrailingNewline(line).trimEnd();
+    if (!normalized) return null;
+
+    // Avoid leaking control sequences / non-printable bytes into client-visible
+    // error messages. This is especially important when QEMU is configured with
+    // -serial stdio, where stdout may contain untrusted guest console output.
+    normalized = normalized
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "") // ANSI CSI
+      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "") // ANSI OSC
+      // Strip C0 control characters (except TAB) + DEL
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+      .replace(/\r/g, "");
+
+    normalized = normalized.trimEnd();
+    if (!normalized) return null;
+    return normalized;
+  }
+
+  private recordQemuLogLine(line: string) {
+    const normalized = this.normalizeQemuHintLine(line);
+    if (!normalized) return;
+    this.qemuLogTail.push(normalized);
+    // Keep a small tail so error messages can include likely root causes.
+    if (this.qemuLogTail.length > 50) {
+      this.qemuLogTail.splice(0, this.qemuLogTail.length - 50);
+    }
+  }
+
+  private formatQemuLogHint(): string {
+    if (this.qemuLogTail.length === 0) return "";
+    const last = this.qemuLogTail[this.qemuLogTail.length - 1]!;
+    const truncated = last.length > 300 ? last.slice(0, 300) + "…" : last;
+    return ` (qemu: ${truncated})`;
+  }
+
   private readonly debugFlags: ReadonlySet<DebugFlag>;
 
   private hasDebug(flag: DebugFlag) {
@@ -896,7 +932,10 @@ export class SandboxServer extends EventEmitter {
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
-  private qemuLogBuffer = "";
+  private qemuStdoutBuffer = "";
+  private qemuStderrBuffer = "";
+  /** recent QEMU stderr log lines, used to enrich error messages */
+  private qemuLogTail: string[] = [];
   private status: SandboxState = "stopped";
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
@@ -1050,10 +1089,22 @@ export class SandboxServer extends EventEmitter {
         this.ingressBridge.connect();
       }
       if (state === "stopped") {
-        this.failInflight("sandbox_stopped", "sandbox is not running");
+        // The controller emits state="stopped" before emitting "exit".
+        // Defer failing inflight requests so the exit handler can include the
+        // exit code/signal and (sanitized) QEMU stderr hint.
+        queueMicrotask(() => {
+          if (this.controller.getState() !== "stopped") return;
+          if (this.inflight.size === 0) return;
+          this.failInflight("sandbox_stopped", "sandbox is not running");
+        });
       }
 
       if (state === "starting") {
+        // Clear previous run's logs so hints stay scoped to the current VM.
+        this.qemuStdoutBuffer = "";
+        this.qemuStderrBuffer = "";
+        this.qemuLogTail = [];
+
         this.vfsReady = false;
         this.clearVfsReadyTimer();
         this.status = "starting";
@@ -1075,26 +1126,81 @@ export class SandboxServer extends EventEmitter {
     });
 
     this.controller.on("exit", (info) => {
-      if (this.qemuLogBuffer.length > 0) {
+      // Flush any unterminated chunks so exit diagnostics have a chance to
+      // include the last stderr line.
+      if (this.qemuStderrBuffer.length > 0) {
+        this.recordQemuLogLine(this.qemuStderrBuffer);
         if (this.hasDebug("protocol")) {
-          this.emitDebug("qemu", this.qemuLogBuffer);
+          const normalized = this.normalizeQemuHintLine(this.qemuStderrBuffer);
+          if (normalized) this.emitDebug("qemu", normalized);
         }
-        this.qemuLogBuffer = "";
+        this.qemuStderrBuffer = "";
       }
-      this.failInflight("sandbox_stopped", "sandbox exited");
+      if (this.qemuStdoutBuffer.length > 0) {
+        if (this.hasDebug("protocol")) {
+          const normalized = this.normalizeQemuHintLine(this.qemuStdoutBuffer);
+          if (normalized) this.emitDebug("qemu", `stdout: ${normalized}`);
+        }
+        this.qemuStdoutBuffer = "";
+      }
+
+      const detail =
+        info.code !== null
+          ? `code=${info.code}`
+          : info.signal
+            ? `signal=${info.signal}`
+            : "";
+      const base = detail ? `sandbox exited (${detail})` : "sandbox exited";
+      this.failInflight("sandbox_stopped", base + this.formatQemuLogHint());
       this.emit("exit", info);
     });
 
-    this.controller.on("log", (chunk: string) => {
-      this.qemuLogBuffer += chunk;
-      let newlineIndex = this.qemuLogBuffer.indexOf("\n");
-      while (newlineIndex !== -1) {
-        const line = this.qemuLogBuffer.slice(0, newlineIndex + 1);
-        this.qemuLogBuffer = this.qemuLogBuffer.slice(newlineIndex + 1);
-        if (this.hasDebug("protocol")) {
-          this.emitDebug("qemu", line);
+    this.controller.on("log", (chunkOrEntry: string | any, streamArg?: SandboxLogStream) => {
+      // Backwards/forwards compatibility: accept either (chunk, stream) or an
+      // object payload.
+      let stream: SandboxLogStream = "stderr";
+      let chunk: string;
+
+      if (typeof chunkOrEntry === "string") {
+        chunk = chunkOrEntry;
+        if (streamArg === "stdout" || streamArg === "stderr") {
+          stream = streamArg;
         }
-        newlineIndex = this.qemuLogBuffer.indexOf("\n");
+      } else {
+        chunk = typeof chunkOrEntry?.chunk === "string" ? chunkOrEntry.chunk : String(chunkOrEntry ?? "");
+        if (chunkOrEntry?.stream === "stdout" || chunkOrEntry?.stream === "stderr") {
+          stream = chunkOrEntry.stream;
+        }
+      }
+
+      let buffer = stream === "stdout" ? this.qemuStdoutBuffer : this.qemuStderrBuffer;
+      buffer += chunk;
+
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex + 1);
+        buffer = buffer.slice(newlineIndex + 1);
+
+        // Only use stderr for client-visible error hints to avoid leaking
+        // untrusted guest console output from -serial stdio.
+        if (stream === "stderr") {
+          this.recordQemuLogLine(line);
+        }
+
+        if (this.hasDebug("protocol")) {
+          const normalized = this.normalizeQemuHintLine(line);
+          if (normalized) {
+            this.emitDebug("qemu", stream === "stderr" ? normalized : `stdout: ${normalized}`);
+          }
+        }
+
+        newlineIndex = buffer.indexOf("\n");
+      }
+
+      if (stream === "stdout") {
+        this.qemuStdoutBuffer = buffer;
+      } else {
+        this.qemuStderrBuffer = buffer;
       }
     });
 
@@ -1286,7 +1392,7 @@ export class SandboxServer extends EventEmitter {
 
     this.sshBridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
-      this.emit("error", new Error(`[ssh] virtio decode error: ${message}`));
+      this.emit("error", new Error(`[ssh] virtio bridge error: ${message}`));
       // Fail any pending opens.
       for (const [id, waiter] of this.tcpOpenWaiters.entries()) {
         waiter.reject(new Error("ssh virtio bridge error"));
@@ -1370,13 +1476,16 @@ export class SandboxServer extends EventEmitter {
 
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
-      this.emit("error", new Error(`[virtio] decode error: ${message}`));
-      this.failInflight("protocol_error", "virtio decode error");
+      this.emit("error", new Error(`[virtio] bridge error: ${message}`));
+      this.failInflight(
+        "protocol_error",
+        `virtio bridge error: ${message}` + this.formatQemuLogHint()
+      );
     };
 
     this.fsBridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
-      this.emit("error", new Error(`[fs] decode error: ${message}`));
+      this.emit("error", new Error(`[fs] virtio bridge error: ${message}`));
     };
   }
 
