@@ -6,15 +6,10 @@ import { once } from "node:events";
 import { IngressGateway } from "../src/ingress";
 
 test("ingress: websocket upgrades are tunneled", async () => {
-  const backend = net.createServer();
+  const backendSockets: net.Socket[] = [];
+  const backend = net.createServer((sock) => {
+    backendSockets.push(sock);
 
-  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
-  const backendAddr = backend.address();
-  assert.ok(backendAddr && typeof backendAddr !== "string");
-
-  const backendPort = backendAddr.port;
-
-  backend.on("connection", (sock) => {
     let buf = Buffer.alloc(0);
     let upgraded = false;
 
@@ -51,6 +46,12 @@ test("ingress: websocket upgrades are tunneled", async () => {
       }
     });
   });
+
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  const backendAddr = backend.address();
+  assert.ok(backendAddr && typeof backendAddr !== "string");
+
+  const backendPort = backendAddr.port;
 
   const sandbox = {
     openIngressStream: async ({ host, port }: { host: string; port: number }) => {
@@ -102,5 +103,14 @@ test("ingress: websocket upgrades are tunneled", async () => {
 
   client.destroy();
   await access.close();
-  backend.close();
+
+  for (const s of backendSockets) {
+    try {
+      s.destroy();
+    } catch {
+      // ignore
+    }
+  }
+
+  await new Promise<void>((resolve) => backend.close(() => resolve()));
 });

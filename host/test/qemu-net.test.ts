@@ -462,15 +462,10 @@ test("qemu-net: fetchAndRespond rejects websocket upgrade requests", async () =>
 });
 
 test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
-  const server = net.createServer();
+  const serverSockets: net.Socket[] = [];
+  const server = net.createServer((sock) => {
+    serverSockets.push(sock);
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const addr = server.address();
-  assert.ok(addr && typeof addr !== "string");
-
-  const port = addr.port;
-
-  server.on("connection", (sock) => {
     let buf = Buffer.alloc(0);
     let upgraded = false;
 
@@ -508,6 +503,12 @@ test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
       }
     });
   });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+
+  const port = addr.port;
 
   const backend = makeBackend({
     httpHooks: {
@@ -570,7 +571,22 @@ test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
   assert.ok(out.includes("echo:hello"));
   assert.ok(out.includes("echo:ping"));
 
-  server.close();
+  // Ensure we don't keep open sockets/servers alive across the full test suite.
+  try {
+    await backend.close();
+  } catch {
+    // ignore
+  }
+
+  for (const s of serverSockets) {
+    try {
+      s.destroy();
+    } catch {
+      // ignore
+    }
+  }
+
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () => {
