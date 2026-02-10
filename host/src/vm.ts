@@ -117,6 +117,8 @@ export type VMOptions = {
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes?: number;
+  /** whether to allow WebSocket upgrades for guest egress (default: true) */
+  allowWebSockets?: boolean;
   /** vfs configuration (null disables vfs integration) */
   vfs?: VmVfsOptions | null;
   /** default environment variables */
@@ -273,6 +275,9 @@ export class VM {
     ) {
       (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
     }
+    if (options.allowWebSockets !== undefined && sandboxOptions.allowWebSockets === undefined) {
+      sandboxOptions.allowWebSockets = options.allowWebSockets;
+    }
     if (options.memory && sandboxOptions.memory === undefined) {
       sandboxOptions.memory = options.memory;
     }
@@ -381,6 +386,9 @@ export class VM {
       (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
     ) {
       (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
+    }
+    if (options.allowWebSockets !== undefined && sandboxOptions.allowWebSockets === undefined) {
+      sandboxOptions.allowWebSockets = options.allowWebSockets;
     }
     if (this.vfs && sandboxOptions.vfsProvider === undefined) {
       sandboxOptions.vfsProvider = this.vfs;

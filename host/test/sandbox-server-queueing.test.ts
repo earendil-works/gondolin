@@ -24,6 +24,7 @@ function makeResolvedOptions(
     netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
+    allowWebSockets: true,
 
     debug: [],
     machineType: undefined,

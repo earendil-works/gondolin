@@ -114,6 +114,8 @@ export type SandboxServerOptions = {
   netMac?: string;
   /** whether to enable networking */
   netEnabled?: boolean;
+  /** whether to allow WebSocket upgrades for guest egress (default: true) */
+  allowWebSockets?: boolean;
 
   /**
    * Root disk image path (attached as `/dev/vda`)
@@ -227,6 +229,8 @@ export type ResolvedSandboxServerOptions = {
   netMac: string;
   /** whether networking is enabled */
   netEnabled: boolean;
+  /** whether to allow WebSocket upgrades for guest egress */
+  allowWebSockets: boolean;
 
   /** enabled debug components */
   debug: DebugFlag[];
@@ -433,6 +437,7 @@ export function resolveSandboxServerOptions(
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
+    allowWebSockets: options.allowWebSockets ?? true,
     debug,
     machineType: options.machineType,
     accel: options.accel,
@@ -1097,6 +1102,7 @@ export class SandboxServer extends EventEmitter {
           mitmCertDir: this.options.mitmCertDir,
           maxHttpBodyBytes: this.options.maxHttpBodyBytes,
           maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,
+          allowWebSockets: this.options.allowWebSockets,
         })
       : null;
 

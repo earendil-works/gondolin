@@ -85,6 +85,7 @@ function bashUsage() {
   console.log("                                  If =VALUE is omitted, reads from $NAME");
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
+  console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
   console.log();
   console.log("Ingress:");
   console.log(
@@ -128,6 +129,7 @@ function execUsage() {
   console.log("                                  Add secret for specified hosts");
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
+  console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
 }
 
 type MountSpec = {
@@ -147,6 +149,9 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+
+  /** disable WebSocket upgrades (both egress and ingress) */
+  disableWebSockets?: boolean;
 
   /** dns mode (synthetic|trusted|open) */
   dnsMode?: "synthetic" | "trusted" | "open";
@@ -347,12 +352,18 @@ function buildVmOptions(common: CommonOptions) {
         }
       : undefined;
 
-  return {
+  const vmOptions: any = {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
     httpHooks,
     dns,
     env,
   };
+
+  if (common.disableWebSockets) {
+    vmOptions.allowWebSockets = false;
+  }
+
+  return vmOptions;
 }
 
 function parseExecArgs(argv: string[]): ExecArgs {
@@ -422,6 +433,10 @@ function parseExecArgs(argv: string[]): ExecArgs {
         if (!ip) fail("--dns-trusted-server requires an argument");
         if (net.isIP(ip) !== 4) fail("--dns-trusted-server must be a valid IPv4 address");
         args.common.dnsTrustedServers.push(ip);
+        return i;
+      }
+      case "--disable-websockets": {
+        args.common.disableWebSockets = true;
         return i;
       }
     }
@@ -762,6 +777,10 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.dnsTrustedServers.push(ip);
         break;
       }
+      case "--disable-websockets": {
+        args.disableWebSockets = true;
+        break;
+      }
       case "--listen": {
         args.listen = true;
         const spec = argv[i + 1];
@@ -853,6 +872,7 @@ async function runBash(argv: string[]) {
       ingressAccess = await vm.enableIngress({
         listenHost: args.listenHost,
         listenPort: args.listenPort,
+        allowWebSockets: args.disableWebSockets ? false : undefined,
       });
       process.stderr.write(`Ingress enabled: ${ingressAccess.url}\n`);
       process.stderr.write(
