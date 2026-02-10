@@ -76,9 +76,18 @@ function resolveAlpineConfig(config: BuildConfig): ResolvedAlpineConfig {
   };
 }
 
+function resolveConfigPath(value: string, configDir?: string): string {
+  if (path.isAbsolute(value)) return value;
+  return configDir ? path.resolve(configDir, value) : path.resolve(value);
+}
+
 export interface BuildOptions {
   /** output directory for the built assets */
   outputDir: string;
+
+  /** base directory to resolve relative paths in the build config against (default: process.cwd()) */
+  configDir?: string;
+
   /** whether to print progress to stderr (default: true) */
   verbose?: boolean;
   /** working directory for the build (default: temp directory) */
@@ -195,11 +204,15 @@ async function buildNative(
 ): Promise<BuildResult> {
   const outputDir = path.resolve(options.outputDir);
 
+  const configDir = options.configDir;
+
   // Step 1: Build or locate sandboxd, sandboxfs, sandboxssh, and sandboxingress binaries
-  let sandboxdPath = config.sandboxdPath;
-  let sandboxfsPath = config.sandboxfsPath;
-  let sandboxsshPath = config.sandboxsshPath;
-  let sandboxingressPath = config.sandboxingressPath;
+  let sandboxdPath = config.sandboxdPath ? resolveConfigPath(config.sandboxdPath, configDir) : undefined;
+  let sandboxfsPath = config.sandboxfsPath ? resolveConfigPath(config.sandboxfsPath, configDir) : undefined;
+  let sandboxsshPath = config.sandboxsshPath ? resolveConfigPath(config.sandboxsshPath, configDir) : undefined;
+  let sandboxingressPath = config.sandboxingressPath
+    ? resolveConfigPath(config.sandboxingressPath, configDir)
+    : undefined;
 
   if (!options.skipBinaries && !sandboxdPath && !sandboxfsPath) {
     const guestDir = findGuestDir();
@@ -259,13 +272,19 @@ async function buildNative(
   let initramfsInit: string | undefined;
   let rootfsInitExtra: string | undefined;
   if (config.init?.rootfsInit) {
-    rootfsInit = fs.readFileSync(path.resolve(config.init.rootfsInit), "utf8");
+    rootfsInit = fs.readFileSync(resolveConfigPath(config.init.rootfsInit, configDir), "utf8");
   }
   if (config.init?.initramfsInit) {
-    initramfsInit = fs.readFileSync(path.resolve(config.init.initramfsInit), "utf8");
+    initramfsInit = fs.readFileSync(
+      resolveConfigPath(config.init.initramfsInit, configDir),
+      "utf8"
+    );
   }
   if (config.init?.rootfsInitExtra) {
-    rootfsInitExtra = fs.readFileSync(path.resolve(config.init.rootfsInitExtra), "utf8");
+    rootfsInitExtra = fs.readFileSync(
+      resolveConfigPath(config.init.rootfsInitExtra, configDir),
+      "utf8"
+    );
   }
 
   // Compute Alpine URL if a custom mirror is set
@@ -417,37 +436,52 @@ async function buildInContainer(
   };
 
   if (containerConfig.init?.rootfsInit) {
-    copyExecutable(path.resolve(containerConfig.init.rootfsInit), "rootfs-init");
+    copyExecutable(
+      resolveConfigPath(containerConfig.init.rootfsInit, options.configDir),
+      "rootfs-init"
+    );
     containerConfig.init.rootfsInit = "/work/rootfs-init";
   }
   if (containerConfig.init?.initramfsInit) {
     copyExecutable(
-      path.resolve(containerConfig.init.initramfsInit),
+      resolveConfigPath(containerConfig.init.initramfsInit, options.configDir),
       "initramfs-init"
     );
     containerConfig.init.initramfsInit = "/work/initramfs-init";
   }
   if (containerConfig.init?.rootfsInitExtra) {
     copyExecutable(
-      path.resolve(containerConfig.init.rootfsInitExtra),
+      resolveConfigPath(containerConfig.init.rootfsInitExtra, options.configDir),
       "rootfs-init-extra"
     );
     containerConfig.init.rootfsInitExtra = "/work/rootfs-init-extra";
   }
   if (containerConfig.sandboxdPath) {
-    copyExecutable(path.resolve(containerConfig.sandboxdPath), "sandboxd");
+    copyExecutable(
+      resolveConfigPath(containerConfig.sandboxdPath, options.configDir),
+      "sandboxd"
+    );
     containerConfig.sandboxdPath = "/work/sandboxd";
   }
   if (containerConfig.sandboxfsPath) {
-    copyExecutable(path.resolve(containerConfig.sandboxfsPath), "sandboxfs");
+    copyExecutable(
+      resolveConfigPath(containerConfig.sandboxfsPath, options.configDir),
+      "sandboxfs"
+    );
     containerConfig.sandboxfsPath = "/work/sandboxfs";
   }
   if (containerConfig.sandboxsshPath) {
-    copyExecutable(path.resolve(containerConfig.sandboxsshPath), "sandboxssh");
+    copyExecutable(
+      resolveConfigPath(containerConfig.sandboxsshPath, options.configDir),
+      "sandboxssh"
+    );
     containerConfig.sandboxsshPath = "/work/sandboxssh";
   }
   if (containerConfig.sandboxingressPath) {
-    copyExecutable(path.resolve(containerConfig.sandboxingressPath), "sandboxingress");
+    copyExecutable(
+      resolveConfigPath(containerConfig.sandboxingressPath, options.configDir),
+      "sandboxingress"
+    );
     containerConfig.sandboxingressPath = "/work/sandboxingress";
   }
 

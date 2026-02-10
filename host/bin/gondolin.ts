@@ -1130,8 +1130,10 @@ async function runBuild(argv: string[]) {
 
   // Load or create config
   let config: BuildConfig;
+  let configDir: string | undefined;
   if (args.configFile) {
     const configPath = path.resolve(args.configFile);
+    configDir = path.dirname(configPath);
     if (!fs.existsSync(configPath)) {
       console.error(`Config file not found: ${configPath}`);
       process.exit(1);
@@ -1157,6 +1159,7 @@ async function runBuild(argv: string[]) {
   try {
     const result = await buildAssets(config, {
       outputDir: args.outputDir,
+      configDir,
       verbose: !args.quiet,
     });
 
