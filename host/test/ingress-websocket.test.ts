@@ -1,9 +1,48 @@
 import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
+import { Duplex } from "node:stream";
 
 import { IngressGateway } from "../src/ingress";
+
+class CaptureSocket extends EventEmitter {
+  remoteAddress = "203.0.113.1";
+  destroyed = false;
+  readonly writes: Buffer[] = [];
+
+  write(chunk: Buffer | string) {
+    this.writes.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(chunk));
+    return true;
+  }
+
+  destroy() {
+    this.destroyed = true;
+    this.emit("close");
+    return this;
+  }
+}
+
+class RequestCaptureDuplex extends Duplex {
+  readonly written: Buffer[] = [];
+  private responded = false;
+
+  _read() {
+    // no-op
+  }
+
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    this.written.push(Buffer.from(chunk));
+
+    if (!this.responded && Buffer.concat(this.written).includes(Buffer.from("\r\n\r\n"))) {
+      this.responded = true;
+      this.push(Buffer.from("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n", "latin1"));
+      this.push(null);
+    }
+
+    callback();
+  }
+}
 
 test("ingress: websocket upgrades are tunneled", async () => {
   const backendSockets: net.Socket[] = [];
@@ -113,4 +152,142 @@ test("ingress: websocket upgrades are tunneled", async () => {
   }
 
   await new Promise<void>((resolve) => backend.close(() => resolve()));
+});
+
+test("ingress: websocket upgrade rejects non-GET methods", async () => {
+  let opened = false;
+  const sandbox = {
+    openIngressStream: async () => {
+      opened = true;
+      throw new Error("should not be called");
+    },
+  } as any;
+
+  const listeners = {
+    getRoutes: () => [{ prefix: "/", port: 80, stripPrefix: true }],
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners);
+
+  const req = new EventEmitter() as any;
+  req.method = "POST";
+  req.url = "/";
+  req.headers = {
+    host: "example.local",
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-key": "x",
+    "sec-websocket-version": "13",
+  };
+
+  const socket = new CaptureSocket();
+  await (gateway as any).handleUpgrade(req, socket, Buffer.alloc(0));
+
+  const raw = Buffer.concat(socket.writes).toString("utf8");
+  assert.match(raw, /^HTTP\/1\.1 400 /);
+  assert.ok(raw.includes("websocket upgrade requires GET"));
+  assert.equal(opened, false);
+});
+
+test("ingress: websocket hooks cannot rewrite upgrade method away from GET", async () => {
+  let opened = false;
+  const sandbox = {
+    openIngressStream: async () => {
+      opened = true;
+      throw new Error("should not be called");
+    },
+  } as any;
+
+  const listeners = {
+    getRoutes: () => [{ prefix: "/", port: 80, stripPrefix: true }],
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners, {
+    hooks: {
+      onRequest: () => ({ method: "POST" }),
+    },
+  });
+
+  const req = new EventEmitter() as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = {
+    host: "example.local",
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-key": "x",
+    "sec-websocket-version": "13",
+  };
+
+  const socket = new CaptureSocket();
+  await (gateway as any).handleUpgrade(req, socket, Buffer.alloc(0));
+
+  const raw = Buffer.concat(socket.writes).toString("utf8");
+  assert.match(raw, /^HTTP\/1\.1 400 /);
+  assert.ok(raw.includes("websocket upgrade requires GET"));
+  assert.equal(opened, false);
+});
+
+test("ingress: malformed websocket upgrade URLs return 400", async () => {
+  const sandbox = {
+    openIngressStream: async () => {
+      throw new Error("should not be called");
+    },
+  } as any;
+
+  const listeners = {
+    getRoutes: () => [{ prefix: "/", port: 80, stripPrefix: true }],
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners);
+
+  const req = new EventEmitter() as any;
+  req.method = "GET";
+  req.url = "http://%";
+  req.headers = {
+    host: "example.local",
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-key": "x",
+    "sec-websocket-version": "13",
+  };
+
+  const socket = new CaptureSocket();
+  await (gateway as any).handleUpgrade(req, socket, Buffer.alloc(0));
+
+  const raw = Buffer.concat(socket.writes).toString("utf8");
+  assert.match(raw, /^HTTP\/1\.1 400 /);
+  assert.ok(raw.includes("bad request"));
+});
+
+test("ingress: websocket upgrade forwards joined host header values", async () => {
+  const upstream = new RequestCaptureDuplex();
+
+  const sandbox = {
+    openIngressStream: async () => upstream,
+  } as any;
+
+  const listeners = {
+    getRoutes: () => [{ prefix: "/", port: 8080, stripPrefix: true }],
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners);
+
+  const req = new EventEmitter() as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = {
+    host: ["first.example", "second.example"],
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-key": "x",
+    "sec-websocket-version": "13",
+  };
+
+  const socket = new CaptureSocket();
+  await (gateway as any).handleUpgrade(req, socket, Buffer.alloc(0));
+
+  const forwarded = Buffer.concat(upstream.written).toString("latin1").toLowerCase();
+  assert.match(forwarded, /\r\nhost: first\.example,second\.example\r\n/);
+  assert.doesNotMatch(forwarded, /\r\nhost: localhost\r\n/);
 });

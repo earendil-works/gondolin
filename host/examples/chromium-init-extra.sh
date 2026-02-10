@@ -23,7 +23,7 @@ export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 # Alpine's /usr/bin/chromium wrapper sources /etc/chromium/*.conf in lexical order.
 # We use a filename that sorts *after* chromium.conf so we can append to distro defaults.
 mkdir -p /etc/chromium
-rm -f /etc/chromium/99-gondolin.conf
+rm -f /etc/chromium/zz-gondolin.conf
 cat > /etc/chromium/zz-gondolin.conf <<'EOF'
 # Appended to any distro defaults from other .conf files
 CHROMIUM_FLAGS="$CHROMIUM_FLAGS --headless --no-sandbox --disable-gpu --ignore-certificate-errors --no-first-run --no-default-browser-check"

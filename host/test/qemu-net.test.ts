@@ -6,7 +6,6 @@ import test from "node:test";
 import crypto from "node:crypto";
 import tls from "node:tls";
 import net from "node:net";
-import dns from "node:dns";
 
 import forge from "node-forge";
 
@@ -194,37 +193,29 @@ test("qemu-net: stripHopByHopHeadersForWebSocket strips connection-nominated hea
 });
 
 test("qemu-net: resolveHostname picks first allowed DNS answer", async () => {
-  const originalLookup = dns.lookup;
+  const backend = makeBackend({
+    httpHooks: {
+      isAllowed: ({ ip }) => ip === "127.0.0.1",
+    },
+    dnsLookup: (
+      _hostname,
+      _options,
+      cb: (err: NodeJS.ErrnoException | null, addresses: { address: string; family: number }[]) => void
+    ) => {
+      cb(null, [
+        { address: "10.0.0.1", family: 4 },
+        { address: "127.0.0.1", family: 4 },
+      ]);
+    },
+  });
 
-  // Simulate a hostname that resolves to a blocked address first, then an allowed one.
-  (dns as any).lookup = (
-    _hostname: string,
-    _options: any,
-    cb: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
-  ) => {
-    cb(null, [
-      { address: "10.0.0.1", family: 4 },
-      { address: "127.0.0.1", family: 4 },
-    ]);
-  };
+  const resolved = await (backend as any).resolveHostname("example.com", {
+    protocol: "http",
+    port: 80,
+  });
 
-  try {
-    const backend = makeBackend({
-      httpHooks: {
-        isAllowed: ({ ip }) => ip === "127.0.0.1",
-      },
-    });
-
-    const resolved = await (backend as any).resolveHostname("example.com", {
-      protocol: "http",
-      port: 80,
-    });
-
-    assert.equal(resolved.address, "127.0.0.1");
-    assert.equal(resolved.family, 4);
-  } finally {
-    (dns as any).lookup = originalLookup;
-  }
+  assert.equal(resolved.address, "127.0.0.1");
+  assert.equal(resolved.family, 4);
 });
 
 test("qemu-net: handleHttpDataWithWriter sends 100-continue when body is pending", async () => {
@@ -645,6 +636,93 @@ test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
 
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
+
+test("qemu-net: websocket upstream connect timeout covers stalled tls handshake", async () => {
+  const serverSockets: net.Socket[] = [];
+  const server = net.createServer((sock) => {
+    serverSockets.push(sock);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const addr = server.address();
+    assert.ok(addr && typeof addr !== "string");
+
+    const backend = makeBackend({
+      webSocketUpstreamConnectTimeoutMs: 50,
+    });
+
+    await assert.rejects(
+      () =>
+        (backend as any).connectWebSocketUpstream({
+          protocol: "https",
+          hostname: "example.com",
+          address: "127.0.0.1",
+          port: addr.port,
+        }),
+      /websocket upstream connect timeout/i
+    );
+  } finally {
+    for (const s of serverSockets) {
+      try {
+        s.destroy();
+      } catch {
+        // ignore
+      }
+    }
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("qemu-net: websocket upstream header read times out", async () => {
+  const serverSockets: net.Socket[] = [];
+  const server = net.createServer((sock) => {
+    serverSockets.push(sock);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  let socket: net.Socket | null = null;
+
+  try {
+    const addr = server.address();
+    assert.ok(addr && typeof addr !== "string");
+
+    const backend = makeBackend({
+      webSocketUpstreamHeaderTimeoutMs: 50,
+    });
+
+    socket = net.connect(addr.port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      socket!.once("connect", () => resolve());
+      socket!.once("error", reject);
+    });
+
+    await assert.rejects(
+      () => (backend as any).readUpstreamHttpResponseHead(socket as net.Socket),
+      /websocket upstream header timeout/i
+    );
+  } finally {
+    try {
+      socket?.destroy();
+    } catch {
+      // ignore
+    }
+
+    for (const s of serverSockets) {
+      try {
+        s.destroy();
+      } catch {
+        // ignore
+      }
+    }
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 
 test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () => {
   const writes: Buffer[] = [];

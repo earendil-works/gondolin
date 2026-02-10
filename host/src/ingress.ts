@@ -1248,7 +1248,26 @@ export class IngressGateway {
         return;
       }
 
-      const url = new URL(req.url ?? "/", "http://gondolin.local");
+      let url: URL;
+      try {
+        url = new URL(req.url ?? "/", "http://gondolin.local");
+      } catch {
+        const body = Buffer.from("bad request\n", "utf8");
+        this.writeRawHttpResponse(
+          socket,
+          400,
+          "Bad Request",
+          {
+            "content-type": "text/plain",
+            "content-length": String(body.length),
+            connection: "close",
+          },
+          body
+        );
+        socket.destroy();
+        return;
+      }
+
       const route = this.pickRoute(url.pathname);
       if (!route) {
         const body = Buffer.from("no route\n", "utf8");
@@ -1272,6 +1291,23 @@ export class IngressGateway {
       const clientMethod = (req.method ?? "GET").toUpperCase();
       const path = url.pathname + url.search;
       const incoming = normalizeIncomingHeaders(req.headers);
+
+      if (clientMethod !== "GET") {
+        const body = Buffer.from("websocket upgrade requires GET\n", "utf8");
+        this.writeRawHttpResponse(
+          socket,
+          400,
+          "Bad Request",
+          {
+            "content-type": "text/plain",
+            "content-length": String(body.length),
+            connection: "close",
+          },
+          body
+        );
+        socket.destroy();
+        return;
+      }
 
       if (!this.isWebSocketUpgradeRequest(incoming)) {
         const body = Buffer.from("expected websocket upgrade\n", "utf8");
@@ -1315,7 +1351,7 @@ export class IngressGateway {
       delete hookRequest.headers["transfer-encoding"];
       delete hookRequest.headers["expect"];
 
-      const hostHeader = typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
+      const hostHeader = joinHeaderValue(incoming["host"]) || "localhost";
       hookRequest.headers["host"] = hostHeader;
 
       // Forwarded headers
@@ -1347,6 +1383,23 @@ export class IngressGateway {
       }
 
       hookRequest.method = (hookRequest.method ?? "GET").toUpperCase();
+
+      if (hookRequest.method !== "GET") {
+        const body = Buffer.from("websocket upgrade requires GET\n", "utf8");
+        this.writeRawHttpResponse(
+          socket,
+          400,
+          "Bad Request",
+          {
+            "content-type": "text/plain",
+            "content-length": String(body.length),
+            connection: "close",
+          },
+          body
+        );
+        socket.destroy();
+        return;
+      }
 
       if (hookRequest.backendHost !== "127.0.0.1" && hookRequest.backendHost !== "localhost") {
         throw new Error(`invalid ingress backend host: ${hookRequest.backendHost}`);

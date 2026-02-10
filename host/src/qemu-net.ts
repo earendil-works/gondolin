@@ -31,6 +31,9 @@ export const DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES = DEFAULT_MAX_HTTP_BODY_BYTES;
 
 const DEFAULT_MAX_TCP_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
 
+const DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS = 10_000;
+
 const DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES = 256;
 const DEFAULT_TLS_CONTEXT_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -579,6 +582,12 @@ export type QemuNetworkOptions = {
   /** max buffered guest->upstream tcp write bytes per session in `bytes` */
   maxTcpPendingWriteBytes?: number;
 
+  /** websocket upstream connect + tls handshake timeout in `ms` */
+  webSocketUpstreamConnectTimeoutMs?: number;
+
+  /** websocket upstream response header timeout in `ms` */
+  webSocketUpstreamHeaderTimeoutMs?: number;
+
   /** tls MITM context cache max entries */
   tlsContextCacheMaxEntries?: number;
 
@@ -587,6 +596,13 @@ export type QemuNetworkOptions = {
 
   /** @internal udp socket factory (tests) */
   udpSocketFactory?: () => dgram.Socket;
+
+  /** @internal dns lookup implementation for hostname resolution tests */
+  dnsLookup?: (
+    hostname: string,
+    options: dns.LookupAllOptions,
+    callback: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+  ) => void;
 };
 
 type CaCert = {
@@ -625,6 +641,8 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly maxHttpResponseBodyBytes: number;
   private readonly maxTcpPendingWriteBytes: number;
   private readonly allowWebSockets: boolean;
+  private readonly webSocketUpstreamConnectTimeoutMs: number;
+  private readonly webSocketUpstreamHeaderTimeoutMs: number;
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
 
@@ -655,6 +673,10 @@ export class QemuNetworkBackend extends EventEmitter {
       options.maxTcpPendingWriteBytes ?? DEFAULT_MAX_TCP_PENDING_WRITE_BYTES;
 
     this.allowWebSockets = options.allowWebSockets ?? true;
+    this.webSocketUpstreamConnectTimeoutMs =
+      options.webSocketUpstreamConnectTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS;
+    this.webSocketUpstreamHeaderTimeoutMs =
+      options.webSocketUpstreamHeaderTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS;
 
     this.tlsContextCacheMaxEntries =
       options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
@@ -2651,6 +2673,8 @@ export class QemuNetworkBackend extends EventEmitter {
     address: string;
     port: number;
   }): Promise<net.Socket> {
+    const timeoutMs = this.webSocketUpstreamConnectTimeoutMs;
+
     if (info.protocol === "https") {
       const socket = tls.connect({
         host: info.address,
@@ -2660,14 +2684,52 @@ export class QemuNetworkBackend extends EventEmitter {
       });
 
       await new Promise<void>((resolve, reject) => {
-        const onError = (err: Error) => {
-          socket.off("secureConnect", onConnect);
-          reject(err);
-        };
-        const onConnect = () => {
+        let settled = false;
+        let timer: NodeJS.Timeout | null = null;
+
+        const cleanup = () => {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
           socket.off("error", onError);
+          socket.off("secureConnect", onConnect);
+        };
+
+        const settleResolve = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
           resolve();
         };
+
+        const settleReject = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(err);
+        };
+
+        const onError = (err: Error) => {
+          settleReject(err);
+        };
+
+        const onConnect = () => {
+          settleResolve();
+        };
+
+        if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+          timer = setTimeout(() => {
+            const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
+            settleReject(err);
+            try {
+              socket.destroy();
+            } catch {
+              // ignore
+            }
+          }, timeoutMs);
+        }
+
         socket.once("error", onError);
         socket.once("secureConnect", onConnect);
       });
@@ -2679,14 +2741,52 @@ export class QemuNetworkBackend extends EventEmitter {
     socket.connect(info.port, info.address);
 
     await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => {
-        socket.off("connect", onConnect);
-        reject(err);
-      };
-      const onConnect = () => {
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         socket.off("error", onError);
+        socket.off("connect", onConnect);
+      };
+
+      const settleResolve = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve();
       };
+
+      const settleReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+
+      const onError = (err: Error) => {
+        settleReject(err);
+      };
+
+      const onConnect = () => {
+        settleResolve();
+      };
+
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
+          settleReject(err);
+          try {
+            socket.destroy();
+          } catch {
+            // ignore
+          }
+        }, timeoutMs);
+      }
+
       socket.once("error", onError);
       socket.once("connect", onConnect);
     });
@@ -2703,34 +2803,57 @@ export class QemuNetworkBackend extends EventEmitter {
     let buf = Buffer.alloc(0);
 
     return await new Promise((resolve, reject) => {
+      const timeoutMs = this.webSocketUpstreamHeaderTimeoutMs;
+      let timer: NodeJS.Timeout | null = null;
+      let settled = false;
+
       const cleanup = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         socket.off("data", onData);
         socket.off("error", onError);
         socket.off("close", onClose);
         socket.off("end", onEnd);
       };
 
-      const onError = (err: Error) => {
+      const settleReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(err);
       };
 
-      const onClose = () => {
+      const settleResolve = (value: {
+        statusCode: number;
+        statusMessage: string;
+        headers: Record<string, string | string[]>;
+        rest: Buffer;
+      }) => {
+        if (settled) return;
+        settled = true;
         cleanup();
-        reject(new Error("upstream closed before sending headers"));
+        resolve(value);
+      };
+
+      const onError = (err: Error) => {
+        settleReject(err);
+      };
+
+      const onClose = () => {
+        settleReject(new Error("upstream closed before sending headers"));
       };
 
       const onEnd = () => {
-        cleanup();
-        reject(new Error("upstream ended before sending headers"));
+        settleReject(new Error("upstream ended before sending headers"));
       };
 
       const onData = (chunk: Buffer) => {
         buf = buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
 
         if (buf.length > MAX_HTTP_HEADER_BYTES + 4) {
-          cleanup();
-          reject(new Error("upstream headers too large"));
+          settleReject(new Error("upstream headers too large"));
           return;
         }
 
@@ -2740,8 +2863,6 @@ export class QemuNetworkBackend extends EventEmitter {
         const head = buf.subarray(0, idx).toString("latin1");
         const rest = buf.subarray(idx + 4);
 
-        cleanup();
-
         try {
           socket.pause();
         } catch {
@@ -2750,13 +2871,13 @@ export class QemuNetworkBackend extends EventEmitter {
 
         const [statusLine, ...headerLines] = head.split("\r\n");
         if (!statusLine) {
-          reject(new Error("missing status line"));
+          settleReject(new Error("missing status line"));
           return;
         }
 
         const m = /^HTTP\/\d+\.\d+\s+(\d{3})\s*(.*)$/.exec(statusLine);
         if (!m) {
-          reject(new Error(`invalid http status line: ${JSON.stringify(statusLine)}`));
+          settleReject(new Error(`invalid http status line: ${JSON.stringify(statusLine)}`));
           return;
         }
 
@@ -2776,8 +2897,19 @@ export class QemuNetworkBackend extends EventEmitter {
           else headers[k] = [prev, v];
         }
 
-        resolve({ statusCode, statusMessage, headers, rest });
+        settleResolve({ statusCode, statusMessage, headers, rest });
       };
+
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          settleReject(new Error(`websocket upstream header timeout after ${timeoutMs}ms`));
+          try {
+            socket.destroy();
+          } catch {
+            // ignore
+          }
+        }, timeoutMs);
+      }
 
       socket.on("data", onData);
       socket.once("error", onError);
@@ -2950,7 +3082,8 @@ export class QemuNetworkBackend extends EventEmitter {
         : normalizeLookupEntries(
             // Use all addresses so policy checks can pick the first allowed entry.
             await new Promise<dns.LookupAddress[]>((resolve, reject) => {
-              dns.lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
+              const lookup = this.options.dnsLookup ?? dns.lookup.bind(dns);
+              lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
                 if (err) reject(err);
                 else resolve(addresses as dns.LookupAddress[]);
               });
