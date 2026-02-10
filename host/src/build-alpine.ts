@@ -54,6 +54,8 @@ export interface AlpineBuildOptions {
   rootfsInit?: string;
   /** initramfs init script content (built-in when undefined) */
   initramfsInit?: string;
+  /** extra shell script content appended to rootfs init before sandboxd starts */
+  rootfsInitExtra?: string;
   /** working directory for intermediate files */
   workDir: string;
   /** directory for caching downloaded files */
@@ -140,7 +142,21 @@ export async function buildAlpineImages(
   copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"));
   copyExecutable(sandboxingressBin, path.join(rootfsDir, "usr/bin/sandboxingress"));
 
-  const rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
+  let rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
+  if (opts.rootfsInitExtra) {
+    // Inject extra init content right before `exec /usr/bin/sandboxd`
+    const marker = "\nexec /usr/bin/sandboxd\n";
+    const idx = rootfsInitContent.lastIndexOf(marker);
+    if (idx !== -1) {
+      rootfsInitContent =
+        rootfsInitContent.slice(0, idx) +
+        "\n" + opts.rootfsInitExtra.trimEnd() + "\n" +
+        rootfsInitContent.slice(idx);
+    } else {
+      // No marker found — append before the final line
+      rootfsInitContent = rootfsInitContent.trimEnd() + "\n" + opts.rootfsInitExtra.trimEnd() + "\n";
+    }
+  }
   const initramfsInitContent = opts.initramfsInit ?? INITRAMFS_INIT_SCRIPT;
   writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent);
   writeExecutable(path.join(initramfsDir, "init"), initramfsInitContent);

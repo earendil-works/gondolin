@@ -71,6 +71,8 @@ export interface InitConfig {
   rootfsInit?: string;
   /** custom initramfs init script path (built-in when undefined) */
   initramfsInit?: string;
+  /** path to a shell script appended to the rootfs init before sandboxd starts */
+  rootfsInitExtra?: string;
 }
 
 /**
@@ -235,6 +237,9 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       return false;
     }
     if (!isOptionalString(init.initramfsInit)) {
+      return false;
+    }
+    if (!isOptionalString(init.rootfsInitExtra)) {
       return false;
     }
   }

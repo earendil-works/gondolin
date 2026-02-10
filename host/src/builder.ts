@@ -257,11 +257,15 @@ async function buildNative(
   // Read custom init scripts if provided
   let rootfsInit: string | undefined;
   let initramfsInit: string | undefined;
+  let rootfsInitExtra: string | undefined;
   if (config.init?.rootfsInit) {
     rootfsInit = fs.readFileSync(path.resolve(config.init.rootfsInit), "utf8");
   }
   if (config.init?.initramfsInit) {
     initramfsInit = fs.readFileSync(path.resolve(config.init.initramfsInit), "utf8");
+  }
+  if (config.init?.rootfsInitExtra) {
+    rootfsInitExtra = fs.readFileSync(path.resolve(config.init.rootfsInitExtra), "utf8");
   }
 
   // Compute Alpine URL if a custom mirror is set
@@ -286,6 +290,7 @@ async function buildNative(
     rootfsSizeMb: config.rootfs?.sizeMb,
     rootfsInit,
     initramfsInit,
+    rootfsInitExtra,
     workDir,
     cacheDir,
     log,
@@ -421,6 +426,13 @@ async function buildInContainer(
       "initramfs-init"
     );
     containerConfig.init.initramfsInit = "/work/initramfs-init";
+  }
+  if (containerConfig.init?.rootfsInitExtra) {
+    copyExecutable(
+      path.resolve(containerConfig.init.rootfsInitExtra),
+      "rootfs-init-extra"
+    );
+    containerConfig.init.rootfsInitExtra = "/work/rootfs-init-extra";
   }
   if (containerConfig.sandboxdPath) {
     copyExecutable(path.resolve(containerConfig.sandboxdPath), "sandboxd");
