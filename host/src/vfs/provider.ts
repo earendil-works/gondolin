@@ -1,5 +1,6 @@
 import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle } from "./node";
+import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node";
+import { delegateStatfsOrEnosys } from "./statfs";
 import { ERRNO, VirtualProviderClass } from "./utils";
 
 export type VfsHookContext = {
@@ -464,6 +465,13 @@ export class SandboxVfsProvider extends VirtualProviderClass implements VirtualP
       }
     }
     this.runAfterSync({ op: "truncate", path, size: length });
+  }
+
+  async statfs(path: string): Promise<VfsStatfs> {
+    await this.runBefore({ op: "statfs", path });
+    const result = await delegateStatfsOrEnosys(this.backend, path);
+    await this.runAfter({ op: "statfs", path, result });
+    return result;
   }
 
   async close() {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MemoryProvider } from "../src/vfs";
+import type { VfsStatfs } from "../src/vfs/node";
 import {
   MountRouterProvider,
   listMountPaths,
@@ -164,3 +165,74 @@ test("MountRouterProvider virtual child mount masks conflicting base entry", asy
   assert.ok(app);
   assert.equal(app!.isDirectory(), true);
 });
+
+test("MountRouterProvider statfs returns synthetic defaults for virtual dirs", async () => {
+  const dataProvider = new MemoryProvider();
+  const router = new MountRouterProvider({ "/data": dataProvider });
+
+  const statfs = await router.statfs("/");
+  assert.ok(statfs);
+  assert.equal(statfs.bsize, 4096);
+  assert.ok(statfs.blocks > 0);
+  assert.ok(statfs.bfree <= statfs.blocks);
+});
+
+test("MountRouterProvider statfs delegates to mounted provider", async () => {
+  const customStatfs: VfsStatfs = {
+    blocks: 1000, bfree: 500, bavail: 400,
+    files: 2000, ffree: 1500,
+    bsize: 4096, frsize: 4096, namelen: 255,
+  };
+
+  const dataProvider = Object.assign(new MemoryProvider(), {
+    statfs: async (_path: string) => customStatfs,
+  });
+
+  const router = new MountRouterProvider({ "/data": dataProvider });
+  const statfs = await router.statfs("/data");
+  assert.equal(statfs.blocks, 1000);
+  assert.equal(statfs.bfree, 500);
+  assert.equal(statfs.bavail, 400);
+});
+
+test("MountRouterProvider statfs on virtual root prefers mounted provider stats", async () => {
+  const customStatfs: VfsStatfs = {
+    blocks: 2222,
+    bfree: 1111,
+    bavail: 1000,
+    files: 3333,
+    ffree: 3000,
+    bsize: 4096,
+    frsize: 4096,
+    namelen: 255,
+  };
+
+  const workspaceProvider = Object.assign(new MemoryProvider(), {
+    statfs: async (_path: string) => customStatfs,
+  });
+
+  const router = new MountRouterProvider({ "/workspace": workspaceProvider, "/tmp": new MemoryProvider() });
+  const statfs = await router.statfs("/");
+  assert.equal(statfs.blocks, 2222);
+  assert.equal(statfs.bfree, 1111);
+  assert.equal(statfs.bavail, 1000);
+});
+
+test("MountRouterProvider statfs probe rethrows non-fallback errors", async () => {
+  const expected = createErrorWithErrno("EIO", 5);
+  const badProvider = Object.assign(new MemoryProvider(), {
+    statfs: async (_path: string) => {
+      throw expected;
+    },
+  });
+
+  const router = new MountRouterProvider({ "/workspace": badProvider });
+  await assert.rejects(() => router.statfs("/"), (error) => error === expected);
+});
+
+function createErrorWithErrno(code: string, errno: number) {
+  const error = new Error(code) as NodeJS.ErrnoException;
+  error.code = code;
+  error.errno = errno;
+  return error;
+}

@@ -113,3 +113,18 @@ test("RealFSProvider symlink, readlink, lstat, realpath", (t) => {
   const resolved = provider.realpathSync("/link.txt");
   assert.equal(resolved, "/target.txt");
 });
+
+test("RealFSProvider statfs reports host filesystem stats", async (t) => {
+  const root = makeTempDir(t);
+  const provider = new RealFSProvider(root);
+
+  assert.ok(provider.statfs, "RealFSProvider should expose statfs");
+  const statfs = await provider.statfs!("/");
+
+  assert.ok(statfs.blocks > 0);
+  assert.ok(statfs.bsize > 0);
+  assert.ok(statfs.frsize > 0);
+  assert.ok(statfs.bfree <= statfs.blocks);
+  assert.ok(statfs.bavail <= statfs.bfree);
+  assert.ok(statfs.ffree <= statfs.files);
+});

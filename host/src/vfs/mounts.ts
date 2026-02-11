@@ -1,7 +1,8 @@
 import fs from "node:fs";
 
 import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle } from "./node";
+import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node";
+import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs";
 import {
   createVirtualDirStats,
   ERRNO,
@@ -378,6 +379,38 @@ export class MountRouterProvider extends VirtualProviderClass implements Virtual
       return super.accessSync(mount.relativePath, mode);
     }
     this.ensureVirtualDir(entryPath, "access");
+  }
+
+  async statfs(entryPath: string): Promise<VfsStatfs> {
+    const mount = this.resolveMount(entryPath);
+    if (mount) {
+      const provider = mount.provider as { statfs?: (p: string) => Promise<VfsStatfs> };
+      if (typeof provider.statfs === "function") {
+        return provider.statfs(mount.relativePath);
+      }
+    }
+
+    // For virtual dirs like "/", prefer a real mounted provider's root stats
+    // so tools like `df` (which often resolve bind-mounted paths back to the
+    // backing superblock mount) can report meaningful values.
+    const normalized = normalizeVfsPath(entryPath);
+    const prefix = normalized === "/" ? "/" : `${normalized}/`;
+    for (const mountPath of this.mountPaths) {
+      if (!mountPath.startsWith(prefix)) continue;
+      const provider = this.mountMap.get(mountPath);
+      if (!provider) continue;
+      const withStatfs = provider as { statfs?: (p: string) => Promise<VfsStatfs> };
+      if (typeof withStatfs.statfs !== "function") continue;
+      try {
+        return await withStatfs.statfs("/");
+      } catch (error) {
+        if (!isStatfsProbeFallbackError(error)) {
+          throw error;
+        }
+        // Keep searching for another mounted provider that can supply stats.
+      }
+    }
+    return cloneSyntheticStatfs();
   }
 
   watch(entryPath: string, options?: object) {

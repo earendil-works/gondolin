@@ -3,7 +3,8 @@ import path from "path";
 import type { Dirent, Stats } from "node:fs";
 
 import { createErrnoError } from "./errors";
-import type { VirtualFileHandle, VirtualProvider } from "./node";
+import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node";
+import { cloneSyntheticStatfs, isErrnoValue, normalizeStatfs } from "./statfs";
 import type { FsRequest, FsResponse } from "../virtio-protocol";
 
 const { errno: ERRNO } = os.constants;
@@ -146,6 +147,8 @@ export class FsRpcService {
         return this.handleTruncate(req);
       case "release":
         return this.handleRelease(req);
+      case "statfs":
+        return this.handleStatfs(req);
       default:
         throw createErrnoError(ERRNO.ENOSYS, op);
     }
@@ -376,6 +379,24 @@ export class FsRpcService {
     this.handles.delete(fh);
     await entry.handle.close();
     return {};
+  }
+
+  private async handleStatfs(req: Record<string, unknown>) {
+    const ino = requireUint(req.ino, "statfs", "ino");
+    const entryPath = this.requirePath(ino, "statfs");
+    const provider = this.provider as { statfs?: (path: string) => Promise<VfsStatfs> };
+    if (typeof provider.statfs === "function") {
+      try {
+        const raw = await provider.statfs(entryPath);
+        return { statfs: normalizeStatfs(raw) };
+      } catch (error) {
+        if (isErrnoValue(error, ERRNO.ENOSYS)) {
+          return { statfs: cloneSyntheticStatfs() };
+        }
+        throw error;
+      }
+    }
+    return { statfs: cloneSyntheticStatfs() };
   }
 
   private async truncatePath(entryPath: string, size: number) {

@@ -1,5 +1,6 @@
 import { createErrnoError } from "./errors";
-import type { VirtualProvider } from "./node";
+import type { VirtualProvider, VfsStatfs } from "./node";
+import { delegateStatfsOrEnosys } from "./statfs";
 import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils";
 
 /**
@@ -143,6 +144,10 @@ export class ReadonlyProvider extends VirtualProviderClass implements VirtualPro
     return super.accessSync(path, mode);
   }
 
+  async statfs(path: string): Promise<VfsStatfs> {
+    return delegateStatfsOrEnosys(this.backend, path);
+  }
+
   watch(path: string, options?: object) {
     return this.backend.watch?.(path, options) ?? super.watch(path, options);
   }
@@ -170,4 +175,3 @@ export class ReadonlyProvider extends VirtualProviderClass implements VirtualPro
     }
   }
 }
-
