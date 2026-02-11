@@ -12,7 +12,7 @@
  * Notes:
  * - The prompt is shown once per hostname for the lifetime of the VM.
  * - While the prompt is open, the triggering request is blocked (awaiting the
- *   async `httpHooks.isAllowed()` decision).
+ *   async `httpHooks.isRequestAllowed()` decision).
  * - This only applies to HTTP/HTTPS traffic (the only kind of guest egress
  *   Gondolin supports).
  */
@@ -278,25 +278,37 @@ async function main() {
   let attach: ShellTerminalAttach | null = null;
 
   const { httpHooks } = createHttpHooks({
-    isAllowed: async (info) => {
-      const hostname = (info.hostname || "").toLowerCase();
+    isRequestAllowed: async (request) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(request.url);
+      } catch {
+        return false;
+      }
+
+      const protocol = parsed.protocol === "https:" ? "https" : parsed.protocol === "http:" ? "http" : null;
+      if (!protocol) return false;
+
+      const hostname = parsed.hostname.toLowerCase();
       if (!hostname) return false;
 
-      const existing = lookupDecision(hostname, info.port);
+      const port = parsed.port ? Number(parsed.port) : protocol === "https" ? 443 : 80;
+      if (!Number.isFinite(port) || port <= 0) return false;
+
+      const existing = lookupDecision(hostname, port);
       if (existing !== undefined) return existing;
 
-      const key = `${hostname}:${info.port}`;
+      const key = `${hostname}:${port}`;
       const inflight = pending.get(key);
       if (inflight) return inflight;
 
       const p = (async () => {
         // Ensure prompts are not concurrent (and pause terminal forwarding while asking).
         const run = async (): Promise<Decision> => {
-          const target = `${info.protocol.toUpperCase()} ${hostname}:${info.port}`;
+          const target = `${protocol.toUpperCase()} ${hostname}:${port}`;
           const wc = wildcardFor(hostname);
-          const wcLabel = wc ? `${wc}:${info.port}` : null;
-          const { method, url } = info.request;
-          const message = `Allow ${method} ${url} (${target})?`;
+          const wcLabel = wc ? `${wc}:${port}` : null;
+          const message = `Allow ${request.method} ${request.url} (${target})?`;
 
           // Prefer a real OS popup if available; otherwise fallback to a terminal prompt.
           if (attach) attach.pause();
@@ -333,7 +345,7 @@ async function main() {
           const allow = decision !== "deny";
           if (decision === "wildcard") {
             const wc = wildcardFor(hostname);
-            if (wc) decisions.set(`${wc}:${info.port}`, true);
+            if (wc) decisions.set(`${wc}:${port}`, true);
           }
           decisions.set(key, allow);
           return allow;

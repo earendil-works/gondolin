@@ -162,8 +162,10 @@ Key enforcement points:
 
 4. **Host allowlist and internal-range blocking**
 
-    - `createHttpHooks()` (see `host/src/http-hooks.ts`) produces an `httpHooks.isAllowed()` implementation.
-    - By default, it blocks internal ranges (`blockInternalRanges: true`), including:
+    - `createHttpHooks()` (see `host/src/http-hooks.ts`) produces separate policy hooks:
+        - `httpHooks.isRequestAllowed(request)` for request-content policy
+        - `httpHooks.isIpAllowed({ hostname, ip, family, port, protocol })` for destination IP policy
+    - By default, `isIpAllowed` blocks internal ranges (`blockInternalRanges: true`), including:
         - IPv4: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0/8, broadcast
         - IPv6: loopback, link-local, ULA, and IPv4-mapped variants
     - It can also require that the request hostname matches a configured allowlist (with `*` wildcards).
@@ -171,8 +173,9 @@ Key enforcement points:
 5. **DNS rebinding protection**
     Gondolin checks policy in *two* places:
 
-    - `ensureRequestAllowed()` resolves the hostname and checks `isAllowed({ hostname, ip, ... })`.
-    - When using the default `fetch`, Gondolin installs a custom undici dispatcher with a guarded `lookup()` (`createLookupGuard()`), which re-checks `isAllowed()` against the *actual resolved IPs used by the connection*.
+    - Before each outbound request, Gondolin evaluates request policy (`isRequestAllowed`) and hostname->IP policy (`isIpAllowed`) after resolving the hostname.
+    - When using the default `fetch`, Gondolin installs a custom undici dispatcher with a guarded `lookup()` (`createLookupGuard()`), which re-checks `isIpAllowed()` against IPs selected during connection establishment.
+    - With pooled keep-alive connections, this connect-time IP check runs when a new upstream connection is opened, and reused connections do not trigger a fresh connect-time check.
 
 6. **Redirect policy is enforced by the host**
 
@@ -181,7 +184,7 @@ Key enforcement points:
 
 **Guarantee:** the guest cannot open raw TCP tunnels, cannot use UDP (except DNS), and cannot
 reach blocked networks (e.g. localhost/metadata) *through DNS tricks or redirects*, as long
-as `httpHooks.isAllowed` enforces those rules.
+as `httpHooks.isRequestAllowed` / `httpHooks.isIpAllowed` enforce those rules.
 
 DNS within the system is supported because there is utility in it, but DNS resolutions are
 fully disregarded by the HTTP stack as the host will resolve it from scratch.

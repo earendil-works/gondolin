@@ -333,6 +333,44 @@ test("qemu-net: parseHttpRequest enforces maxHttpBodyBytes", () => {
   );
 });
 
+test("qemu-net: fetchAndRespond enforces request policy hook", async () => {
+  let fetchCalls = 0;
+
+  const fetchMock = async () => {
+    fetchCalls += 1;
+    return new Response("ok", {
+      status: 200,
+      headers: { "content-length": "2" },
+    });
+  };
+
+  const backend = makeBackend({
+    fetch: fetchMock as any,
+    httpHooks: {
+      isRequestAllowed: (request) => request.method !== "DELETE",
+      isIpAllowed: () => true,
+    },
+  });
+
+  (backend as any).resolveHostname = async () => ({ address: "203.0.113.1", family: 4 });
+
+  const request = {
+    method: "DELETE",
+    target: "/resource",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+    },
+    body: Buffer.alloc(0),
+  };
+
+  await assert.rejects(
+    () => (backend as any).fetchAndRespond(request, "http", () => {}),
+    (err: unknown) => err instanceof HttpRequestBlockedError && err.status === 403
+  );
+  assert.equal(fetchCalls, 0);
+});
+
 test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async () => {
   const writes: Buffer[] = [];
 
@@ -364,7 +402,7 @@ test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
 
@@ -404,7 +442,7 @@ test("qemu-net: fetchAndRespond rejects OPTIONS * (asterisk-form)", async () => 
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
 
@@ -434,7 +472,7 @@ test("qemu-net: fetchAndRespond rejects websocket upgrade requests", async () =>
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
 
@@ -473,7 +511,7 @@ test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () =>
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
   (backend as any).resolveHostname = async () => ({ address: "203.0.113.3", family: 4 });
@@ -510,7 +548,7 @@ test("qemu-net: fetchAndRespond suppresses body for 204 (forces content-length: 
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
   (backend as any).resolveHostname = async () => ({ address: "203.0.113.4", family: 4 });
@@ -547,7 +585,7 @@ test("qemu-net: fetchAndRespond suppresses body for 304 (forces content-length: 
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
   (backend as any).resolveHostname = async () => ({ address: "203.0.113.5", family: 4 });
@@ -597,7 +635,7 @@ test("qemu-net: fetchAndRespond streams chunked body when length unknown/encoded
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
   (backend as any).resolveHostname = async () => ({ address: "203.0.113.2", family: 4 });
@@ -649,7 +687,7 @@ test("qemu-net: fetchAndRespond preserves multiple Set-Cookie headers", async ()
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
       onResponse: async (resp) => {
         sawHook = true;
         assert.ok(Array.isArray(resp.headers["set-cookie"]));
@@ -709,7 +747,7 @@ test("qemu-net: fetchAndRespond handles HTTP/1.0 clients correctly (no chunked)"
   const backend = makeBackend({
     fetch: fetchMock as any,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
     },
   });
   (backend as any).resolveHostname = async () => ({ address: "203.0.113.20", family: 4 });
@@ -764,7 +802,7 @@ test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering
     fetch: fetchMock as any,
     maxHttpResponseBodyBytes: 4,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
       onResponse: async (resp) => {
         hookCalls += 1;
         return resp;
@@ -830,7 +868,7 @@ test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering
     fetch: fetchMock as any,
     maxHttpResponseBodyBytes: 4,
     httpHooks: {
-      isAllowed: () => true,
+      isIpAllowed: () => true,
       onResponse: async (resp) => {
         hookCalls += 1;
         return resp;
@@ -856,7 +894,7 @@ test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering
   assert.equal(cancelled, true);
 });
 
-test("qemu-net: createLookupGuard filters DNS results via isAllowed", async () => {
+test("qemu-net: createLookupGuard filters DNS results via isIpAllowed", async () => {
   // Fake DNS returns a private + public address when `all: true`, but only
   // a private address for the single-result lookup.
   const lookupMock = (
@@ -874,10 +912,10 @@ test("qemu-net: createLookupGuard filters DNS results via isAllowed", async () =
     cb(null, "127.0.0.1", 4);
   };
 
-  const isAllowed = async (info: any) => info.ip !== "127.0.0.1";
+  const isIpAllowed = async (info: any) => info.ip !== "127.0.0.1";
   const guarded = __test.createLookupGuard(
     { hostname: "example.com", port: 443, protocol: "https" },
-    isAllowed,
+    isIpAllowed,
     lookupMock as any
   );
 
@@ -1181,4 +1219,131 @@ test("qemu-net: dns synthetic mode replies without opening udp socket", () => {
   assert.equal(response.readUInt16BE(0), 0x2222);
   assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
   assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
+});
+
+test("qemu-net: shared checked dispatcher is reused per origin", () => {
+  const backend = makeBackend({
+    httpHooks: {
+      isIpAllowed: () => true,
+    },
+  });
+
+  const one = (backend as any).getCheckedDispatcher({
+    hostname: "example.com",
+    port: 443,
+    protocol: "https",
+  });
+  const two = (backend as any).getCheckedDispatcher({
+    hostname: "example.com",
+    port: 443,
+    protocol: "https",
+  });
+
+  assert.ok(one);
+  assert.equal(one, two);
+
+  const three = (backend as any).getCheckedDispatcher({
+    hostname: "example.org",
+    port: 443,
+    protocol: "https",
+  });
+
+  assert.ok(three);
+  assert.notEqual(one, three);
+  assert.equal((backend as any).sharedDispatchers.size, 2);
+
+  (backend as any).closeSharedDispatchers();
+  assert.equal((backend as any).sharedDispatchers.size, 0);
+});
+
+test("qemu-net: createLookupGuard invokes ip policy callback", async () => {
+  const seen: string[] = [];
+
+  const lookupMock = (
+    _hostname: string,
+    _options: any,
+    cb: (err: any, address: any, family?: number) => void
+  ) => cb(null, "93.184.216.34", 4);
+
+  const guarded = __test.createLookupGuard(
+    {
+      hostname: "example.com",
+      port: 443,
+      protocol: "https",
+    },
+    async (info: any) => {
+      seen.push(`${info.hostname}|${info.ip}|${info.protocol}|${info.port}`);
+      return true;
+    },
+    lookupMock as any
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    guarded("example.com", { family: 4 }, (err) => {
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+
+  assert.deepEqual(seen, ["example.com|93.184.216.34|https|443"]);
+});
+
+test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
+  let active = 0;
+  let maxActive = 0;
+
+  let releaseBlockedFetches: (() => void) | null = null;
+  const blockedFetches = new Promise<void>((resolve) => {
+    releaseBlockedFetches = resolve;
+  });
+
+  const fetchMock = async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await blockedFetches;
+    active = Math.max(0, active - 1);
+    return new Response("ok", {
+      status: 200,
+      headers: { "content-length": "2" },
+    });
+  };
+
+  const backend = makeBackend({
+    fetch: fetchMock as any,
+    httpHooks: {
+      isIpAllowed: () => true,
+    },
+  });
+
+  (backend as any).resolveHostname = async () => ({ address: "203.0.113.100", family: 4 });
+
+  const request = Buffer.from("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+  const runs: Promise<void>[] = [];
+  for (let i = 0; i < 180; i += 1) {
+    const session: any = { http: undefined };
+    runs.push(
+      (backend as any).handleHttpDataWithWriter(`k-${i}`, session, request, {
+        scheme: "http",
+        write: () => {},
+        finish: () => {},
+      })
+    );
+  }
+
+  const deadline = Date.now() + 10_000;
+  while (maxActive < 128) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for concurrency saturation (max=${maxActive})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(maxActive, 128);
+
+  if (!releaseBlockedFetches) {
+    throw new Error("missing fetch release callback");
+  }
+  releaseBlockedFetches();
+  await Promise.all(runs);
 });

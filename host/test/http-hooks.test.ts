@@ -9,7 +9,7 @@ test("http hooks allowlist patterns", async () => {
     allowedHosts: ["example.com", "*.example.org", "api.*.net"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -64,7 +64,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
 
   assert.deepEqual(allowedHosts, ["a**b.com"]);
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -116,7 +116,7 @@ test("http hooks allowlist '*' matches any hostname (but still blocks internal)"
     allowedHosts: ["*"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -147,7 +147,7 @@ test("http hooks block internal ranges by default", async () => {
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -166,7 +166,7 @@ test("http hooks block internal IPv6 ranges (loopback, ULA, link-local)", async 
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   const cases = [
     "::", // all zeros / unspecified
@@ -198,7 +198,7 @@ test("http hooks allow non-private IPv6 (including IPv4-suffix forms)", async ()
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   // IPv4-mapped *public* address
   assert.equal(
@@ -230,7 +230,7 @@ test("http hooks ignore invalid IP strings for internal-range checks", async () 
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   // net.isIP() returns 0 => treated as non-internal.
   assert.equal(
@@ -251,7 +251,7 @@ test("http hooks can allow internal ranges", async () => {
     blockInternalRanges: false,
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -262,6 +262,34 @@ test("http hooks can allow internal ranges", async () => {
       protocol: "http",
     }),
     true
+  );
+});
+
+test("http hooks can enforce request policy", async () => {
+  const { httpHooks } = createHttpHooks({
+    isRequestAllowed: (request) => request.method !== "DELETE",
+  });
+
+  const isRequestAllowed = httpHooks.isRequestAllowed!;
+
+  assert.equal(
+    await isRequestAllowed({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {},
+      body: null,
+    }),
+    true
+  );
+
+  assert.equal(
+    await isRequestAllowed({
+      method: "DELETE",
+      url: "https://example.com/data",
+      headers: {},
+      body: null,
+    }),
+    false
   );
 });
 

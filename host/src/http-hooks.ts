@@ -17,8 +17,10 @@ export type CreateHttpHooksOptions = {
   secrets?: Record<string, SecretDefinition>;
   /** whether to block internal ip ranges (default: true) */
   blockInternalRanges?: boolean;
-  /** custom allow callback */
-  isAllowed?: HttpHooks["isAllowed"];
+  /** custom request policy callback */
+  isRequestAllowed?: HttpHooks["isRequestAllowed"];
+  /** custom ip policy callback */
+  isIpAllowed?: HttpHooks["isIpAllowed"];
   /** request hook */
   onRequest?: HttpHooks["onRequest"];
   /** response hook */
@@ -63,20 +65,23 @@ export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHtt
   ]);
 
   const httpHooks: HttpHooks = {
-    isAllowed: async (info) => {
+    isRequestAllowed: async (request) => {
+      if (options.isRequestAllowed) {
+        return options.isRequestAllowed(request);
+      }
+      return true;
+    },
+    isIpAllowed: async (info) => {
       if (blockInternalRanges && isInternalAddress(info.ip)) {
         return false;
       }
 
-      // We only use the hostname for allowlist checks. The fetcher still uses
-      // the hostname (not the resolved IP), so DNS rebinding does not let the
-      // request target a different host. If you want to pin to resolved IPs,
-      // supply a custom isAllowed hook.
+      // We only use the hostname for allowlist checks.
       if (allowedHosts.length > 0 && !matchesAnyHost(info.hostname, allowedHosts)) {
         return false;
       }
-      if (options.isAllowed) {
-        return options.isAllowed(info);
+      if (options.isIpAllowed) {
+        return options.isIpAllowed(info);
       }
       return true;
     },
