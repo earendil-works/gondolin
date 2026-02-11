@@ -9,6 +9,9 @@ export type Architecture = "aarch64" | "x86_64";
 
 export type Distro = "alpine" | "nixos";
 
+/** environment variables as `KEY=VALUE` or a mapping */
+export type EnvInput = string[] | Record<string, string>;
+
 /**
  * Alpine Linux specific configuration.
  */
@@ -84,6 +87,9 @@ export interface BuildConfig {
 
   /** distribution to use */
   distro: Distro;
+
+  /** default environment variables baked into the guest image */
+  env?: EnvInput;
 
   /** alpine config (when distro is "alpine") */
   alpine?: AlpineConfig;
@@ -178,6 +184,15 @@ const isOptionalNumber = (value: unknown): boolean =>
 const isOptionalStringArray = (value: unknown): boolean =>
   value === undefined || isStringArray(value);
 
+const isEnvRecord = (value: unknown): value is Record<string, string> =>
+  isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+
+const isEnvInput = (value: unknown): value is EnvInput =>
+  isStringArray(value) || isEnvRecord(value);
+
+const isOptionalEnvInput = (value: unknown): boolean =>
+  value === undefined || isEnvInput(value);
+
 export function validateBuildConfig(config: unknown): config is BuildConfig {
   if (!isRecord(config)) {
     return false;
@@ -195,6 +210,10 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
   }
 
   // Optional top-level fields
+  if (!isOptionalEnvInput(cfg.env)) {
+    return false;
+  }
+
   if (cfg.container !== undefined) {
     if (!isRecord(cfg.container)) {
       return false;

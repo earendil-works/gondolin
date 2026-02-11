@@ -17,8 +17,10 @@ export type CreateHttpHooksOptions = {
   secrets?: Record<string, SecretDefinition>;
   /** whether to block internal ip ranges (default: true) */
   blockInternalRanges?: boolean;
-  /** custom allow callback */
-  isAllowed?: HttpHooks["isAllowed"];
+  /** custom request policy callback */
+  isRequestAllowed?: HttpHooks["isRequestAllowed"];
+  /** custom ip policy callback */
+  isIpAllowed?: HttpHooks["isIpAllowed"];
   /** request hook */
   onRequest?: HttpHooks["onRequest"];
   /** response hook */
@@ -63,20 +65,23 @@ export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHtt
   ]);
 
   const httpHooks: HttpHooks = {
-    isAllowed: async (info) => {
+    isRequestAllowed: async (request) => {
+      if (options.isRequestAllowed) {
+        return options.isRequestAllowed(request);
+      }
+      return true;
+    },
+    isIpAllowed: async (info) => {
       if (blockInternalRanges && isInternalAddress(info.ip)) {
         return false;
       }
 
-      // We only use the hostname for allowlist checks. The fetcher still uses
-      // the hostname (not the resolved IP), so DNS rebinding does not let the
-      // request target a different host. If you want to pin to resolved IPs,
-      // supply a custom isAllowed hook.
+      // We only use the hostname for allowlist checks.
       if (allowedHosts.length > 0 && !matchesAnyHost(info.hostname, allowedHosts)) {
         return false;
       }
-      if (options.isAllowed) {
-        return options.isAllowed(info);
+      if (options.isIpAllowed) {
+        return options.isIpAllowed(info);
       }
       return true;
     },
@@ -118,6 +123,7 @@ function replaceSecretPlaceholders(
   for (const [headerName, value] of Object.entries(headers)) {
     let updated = value;
 
+    // Plaintext placeholder replacement (eg: `Authorization: Bearer $TOKEN`).
     for (const entry of entries) {
       if (!updated.includes(entry.placeholder)) continue;
       if (!matchesAnyHost(hostname, entry.hosts)) {
@@ -128,10 +134,60 @@ function replaceSecretPlaceholders(
       updated = replaceAll(updated, entry.placeholder, entry.value);
     }
 
+    // Basic auth uses base64 encoding of `username:password`, so placeholders
+    // won't appear in the header value directly.
+    updated = replaceBasicAuthSecretPlaceholders(headerName, updated, hostname, entries);
+
     headers[headerName] = updated;
   }
 
   return headers;
+}
+
+function replaceBasicAuthSecretPlaceholders(
+  headerName: string,
+  headerValue: string,
+  hostname: string,
+  entries: SecretEntry[]
+): string {
+  // Only touch request headers that are expected to carry credentials.
+  if (!/^(authorization|proxy-authorization)$/i.test(headerName)) {
+    return headerValue;
+  }
+
+  const match = headerValue.match(/^(Basic)(\s+)(\S+)(\s*)$/i);
+  if (!match) return headerValue;
+
+  const scheme = match[1];
+  const whitespace = match[2];
+  const token = match[3];
+  const trailing = match[4] ?? "";
+
+  let decoded: string;
+  try {
+    decoded = Buffer.from(token, "base64").toString("utf8");
+  } catch {
+    return headerValue;
+  }
+
+  let updatedDecoded = decoded;
+  let changed = false;
+
+  for (const entry of entries) {
+    if (!updatedDecoded.includes(entry.placeholder)) continue;
+    if (!matchesAnyHost(hostname, entry.hosts)) {
+      throw new HttpRequestBlockedError(
+        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
+      );
+    }
+    updatedDecoded = replaceAll(updatedDecoded, entry.placeholder, entry.value);
+    changed = true;
+  }
+
+  if (!changed) return headerValue;
+
+  const updatedToken = Buffer.from(updatedDecoded, "utf8").toString("base64");
+  return `${scheme}${whitespace}${updatedToken}${trailing}`;
 }
 
 function matchesAnyHost(hostname: string, patterns: string[]): boolean {

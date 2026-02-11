@@ -51,8 +51,11 @@ await vm.close();
 ```
 
 The guest never sees the real API key. It only gets a placeholder.  The actual
-secret is injected by the host, only when making requests to approved hosts.  If
-prompt-injected code tries to exfiltrate that placeholder to an unauthorized
+secret is injected by the host, only when making requests to approved hosts.
+This includes Basic auth: placeholders inside the base64-encoded
+`username:password` are detected and substituted by the host.
+
+If prompt-injected code tries to exfiltrate that placeholder to an unauthorized
 server it won't be able to get it quite as easily.
 
 ## Quick Start

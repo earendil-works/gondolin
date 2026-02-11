@@ -42,6 +42,41 @@ const DEFAULT_SYNTHETIC_DNS_IPV4 = "192.0.2.1";
 const DEFAULT_SYNTHETIC_DNS_IPV6 = "2001:db8::1";
 const DEFAULT_SYNTHETIC_DNS_TTL_SECONDS = 60;
 
+const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
+const DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN = 16;
+const DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS = 512;
+const DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS = 30 * 1000;
+
+class AsyncSemaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {
+    if (!Number.isFinite(limit) || limit <= 0) {
+      throw new Error(`max concurrent operations must be > 0 (got ${limit})`);
+    }
+  }
+
+  async acquire(): Promise<() => void> {
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve) => {
+        this.waiters.push(resolve);
+      });
+    }
+
+    this.active += 1;
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active = Math.max(0, this.active - 1);
+      const next = this.waiters.shift();
+      if (next) next();
+    };
+  }
+}
+
 function normalizeIpv4Servers(servers?: string[]): string[] {
   const candidates = (servers && servers.length > 0 ? servers : dns.getServers())
     .map((server) => server.split("%")[0])
@@ -465,6 +500,11 @@ type TcpSession = {
   ws?: WebSocketState;
 };
 
+type SharedDispatcherEntry = {
+  dispatcher: Agent;
+  lastUsedAt: number;
+};
+
 export type HttpFetch = typeof undiciFetch;
 
 export type HttpHookRequest = {
@@ -492,7 +532,7 @@ export type HttpHookResponse = {
   body: Buffer;
 };
 
-export type HttpAllowInfo = {
+export type HttpIpAllowInfo = {
   /** request hostname */
   hostname: string;
   /** resolved ip address */
@@ -537,8 +577,10 @@ export class HttpRequestBlockedError extends Error {
 }
 
 export type HttpHooks = {
-  /** allow/deny callback */
-  isAllowed?: (info: HttpAllowInfo) => Promise<boolean> | boolean;
+  /** allow/deny callback for request content */
+  isRequestAllowed?: (request: HttpHookRequest) => Promise<boolean> | boolean;
+  /** allow/deny callback for resolved destination ip */
+  isIpAllowed?: (info: HttpIpAllowInfo) => Promise<boolean> | boolean;
   /** request rewrite hook */
   onRequest?: (request: HttpHookRequest) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
   /** response rewrite hook */
@@ -645,6 +687,8 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly webSocketUpstreamHeaderTimeoutMs: number;
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
+  private readonly httpConcurrency: AsyncSemaphore;
+  private readonly sharedDispatchers = new Map<string, SharedDispatcherEntry>();
 
   private readonly dnsMode: DnsMode;
   private readonly trustedDnsServers: string[];
@@ -677,6 +721,8 @@ export class QemuNetworkBackend extends EventEmitter {
       options.webSocketUpstreamConnectTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS;
     this.webSocketUpstreamHeaderTimeoutMs =
       options.webSocketUpstreamHeaderTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS;
+
+    this.httpConcurrency = new AsyncSemaphore(DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS);
 
     this.tlsContextCacheMaxEntries =
       options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
@@ -713,6 +759,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
   async close(): Promise<void> {
     this.detachSocket();
+    this.closeSharedDispatchers();
 
     if (this.eventLoopDelay) {
       try {
@@ -774,6 +821,7 @@ export class QemuNetworkBackend extends EventEmitter {
     }
     this.waitingDrain = false;
     this.cleanupSessions();
+    this.closeSharedDispatchers();
     this.stack?.reset();
   }
 
@@ -1709,6 +1757,7 @@ export class QemuNetworkBackend extends EventEmitter {
     httpSession.buffer.resetTo(parsed.remaining);
 
     let keepOpen = false;
+    let releaseHttpConcurrency: (() => void) | null = null;
 
     try {
       if (this.allowWebSockets && this.isWebSocketUpgradeRequest(parsed.request)) {
@@ -1735,6 +1784,7 @@ export class QemuNetworkBackend extends EventEmitter {
         return;
       }
 
+      releaseHttpConcurrency = await this.httpConcurrency.acquire();
       await this.fetchAndRespond(parsed.request, options.scheme, options.write);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -1750,17 +1800,20 @@ export class QemuNetworkBackend extends EventEmitter {
       }
 
       // Failed websocket upgrades should not leave the session in websocket mode.
-      session.ws = undefined;
-      if (session.socket) {
-        try {
-          session.socket.destroy();
-        } catch {
-          // ignore
+      if (session.ws) {
+        session.ws = undefined;
+        if (session.socket) {
+          try {
+            session.socket.destroy();
+          } catch {
+            // ignore
+          }
+          session.socket = null;
+          session.connected = false;
         }
-        session.socket = null;
-        session.connected = false;
       }
     } finally {
+      releaseHttpConcurrency?.();
       httpSession.processing = false;
 
       if (!keepOpen) {
@@ -2181,29 +2234,29 @@ export class QemuNetworkBackend extends EventEmitter {
         return;
       }
 
-      await this.ensureRequestAllowed(currentUrl, protocol, port);
+      await this.ensureRequestAllowed(currentRequest);
+      await this.ensureIpAllowed(currentUrl, protocol, port);
 
       const useDefaultFetch = this.options.fetch === undefined;
-      // The custom dispatcher re-checks isAllowed against the resolved IP to
-      // prevent DNS rebinding from bypassing internal range policies.
+      // The shared dispatcher re-checks IP policy whenever it opens
+      // new upstream connections.
       const dispatcher = useDefaultFetch
-        ? this.createCheckedDispatcher({
+        ? this.getCheckedDispatcher({
             hostname: currentUrl.hostname,
             port,
             protocol,
           })
         : null;
 
-      try {
-        const response = await fetcher(currentUrl.toString(), {
-          method: currentRequest.method,
-          headers: currentRequest.headers,
-          body: currentRequest.body ? new Uint8Array(currentRequest.body) : undefined,
-          redirect: "manual",
-          ...(dispatcher ? { dispatcher } : {}),
-        });
+      const response = await fetcher(currentUrl.toString(), {
+        method: currentRequest.method,
+        headers: currentRequest.headers,
+        body: currentRequest.body ? new Uint8Array(currentRequest.body) : undefined,
+        redirect: "manual",
+        ...(dispatcher ? { dispatcher } : {}),
+      });
 
-        const redirectUrl = getRedirectUrl(response, currentUrl);
+      const redirectUrl = getRedirectUrl(response, currentUrl);
         if (redirectUrl) {
           if (response.body) {
             await response.body.cancel();
@@ -2384,11 +2437,6 @@ export class QemuNetworkBackend extends EventEmitter {
 
         this.sendHttpResponse(write, hookResponse, httpVersion);
         return;
-      } finally {
-        if (dispatcher) {
-          dispatcher.close();
-        }
-      }
     }
 
   }
@@ -3094,14 +3142,14 @@ export class QemuNetworkBackend extends EventEmitter {
       throw new Error("DNS lookup returned no addresses");
     }
 
-    const isAllowed = this.options.httpHooks?.isAllowed;
-    if (!policy || !isAllowed) {
+    const isIpAllowed = this.options.httpHooks?.isIpAllowed;
+    if (!policy || !isIpAllowed) {
       const first = entries[0]!;
       return { address: first.address, family: first.family };
     }
 
     for (const entry of entries) {
-      const allowed = await isAllowed({
+      const allowed = await isIpAllowed({
         hostname,
         ip: entry.address,
         family: entry.family,
@@ -3116,12 +3164,16 @@ export class QemuNetworkBackend extends EventEmitter {
     throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
   }
 
-  private async ensureRequestAllowed(
-    parsedUrl: URL,
-    protocol: "http" | "https",
-    port: number
-  ) {
-    if (!this.options.httpHooks?.isAllowed) return;
+  private async ensureRequestAllowed(request: HttpHookRequest) {
+    if (!this.options.httpHooks?.isRequestAllowed) return;
+    const allowed = await this.options.httpHooks.isRequestAllowed(request);
+    if (!allowed) {
+      throw new HttpRequestBlockedError("blocked by request policy");
+    }
+  }
+
+  private async ensureIpAllowed(parsedUrl: URL, protocol: "http" | "https", port: number) {
+    if (!this.options.httpHooks?.isIpAllowed) return;
 
     // Resolve all A/AAAA records and ensure at least one address is permitted.
     // When using the default fetch, the guarded undici lookup will additionally
@@ -3143,16 +3195,86 @@ export class QemuNetworkBackend extends EventEmitter {
     return updated ?? cloned;
   }
 
-  private createCheckedDispatcher(info: {
+  private closeSharedDispatchers() {
+    for (const entry of this.sharedDispatchers.values()) {
+      try {
+        entry.dispatcher.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.sharedDispatchers.clear();
+  }
+
+  private pruneSharedDispatchers(now = Date.now()) {
+    if (this.sharedDispatchers.size === 0) return;
+
+    for (const [key, entry] of this.sharedDispatchers) {
+      if (now - entry.lastUsedAt <= DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS) continue;
+      this.sharedDispatchers.delete(key);
+      try {
+        entry.dispatcher.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private evictSharedDispatchersIfNeeded() {
+    while (this.sharedDispatchers.size > DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS) {
+      const oldestKey = this.sharedDispatchers.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      const oldest = this.sharedDispatchers.get(oldestKey);
+      this.sharedDispatchers.delete(oldestKey);
+      try {
+        oldest?.dispatcher.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private getCheckedDispatcher(info: {
     hostname: string;
     port: number;
     protocol: "http" | "https";
   }): Agent | null {
-    const isAllowed = this.options.httpHooks?.isAllowed;
-    if (!isAllowed) return null;
+    const isIpAllowed = this.options.httpHooks?.isIpAllowed;
+    if (!isIpAllowed) return null;
 
-    const lookupFn = createLookupGuard(info, isAllowed);
-    return new Agent({ connect: { lookup: lookupFn } });
+    this.pruneSharedDispatchers();
+
+    const key = `${info.protocol}://${info.hostname}:${info.port}`;
+    const cached = this.sharedDispatchers.get(key);
+    if (cached) {
+      cached.lastUsedAt = Date.now();
+      // LRU: move to map tail.
+      this.sharedDispatchers.delete(key);
+      this.sharedDispatchers.set(key, cached);
+      return cached.dispatcher;
+    }
+
+    const lookupFn = createLookupGuard(
+      {
+        hostname: info.hostname,
+        port: info.port,
+        protocol: info.protocol,
+      },
+      isIpAllowed
+    );
+
+    const dispatcher = new Agent({
+      connect: { lookup: lookupFn },
+      connections: DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN,
+    });
+
+    this.sharedDispatchers.set(key, {
+      dispatcher,
+      lastUsedAt: Date.now(),
+    });
+    this.evictSharedDispatchersIfNeeded();
+
+    return dispatcher;
   }
 
   private getMitmDir() {
@@ -3387,8 +3509,12 @@ type LookupFn = (
 ) => void;
 
 function createLookupGuard(
-  info: { hostname: string; port: number; protocol: "http" | "https" },
-  isAllowed: NonNullable<HttpHooks["isAllowed"]>,
+  info: {
+    hostname: string;
+    port: number;
+    protocol: "http" | "https";
+  },
+  isIpAllowed: NonNullable<HttpHooks["isIpAllowed"]>,
   lookupFn: LookupFn = (dns.lookup as unknown as LookupFn).bind(dns)
 ) {
   return (
@@ -3411,8 +3537,9 @@ function createLookupGuard(
         }
 
         const allowedEntries: LookupEntry[] = [];
+
         for (const entry of entries) {
-          const allowed = await isAllowed({
+          const allowed = await isIpAllowed({
             hostname: info.hostname,
             ip: entry.address,
             family: entry.family,

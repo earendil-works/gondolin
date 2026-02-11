@@ -9,7 +9,7 @@ test("http hooks allowlist patterns", async () => {
     allowedHosts: ["example.com", "*.example.org", "api.*.net"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -64,7 +64,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
 
   assert.deepEqual(allowedHosts, ["a**b.com"]);
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -116,7 +116,7 @@ test("http hooks allowlist '*' matches any hostname (but still blocks internal)"
     allowedHosts: ["*"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -147,7 +147,7 @@ test("http hooks block internal ranges by default", async () => {
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -166,7 +166,7 @@ test("http hooks block internal IPv6 ranges (loopback, ULA, link-local)", async 
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   const cases = [
     "::", // all zeros / unspecified
@@ -198,7 +198,7 @@ test("http hooks allow non-private IPv6 (including IPv4-suffix forms)", async ()
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   // IPv4-mapped *public* address
   assert.equal(
@@ -230,7 +230,7 @@ test("http hooks ignore invalid IP strings for internal-range checks", async () 
     allowedHosts: ["example.com"],
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   // net.isIP() returns 0 => treated as non-internal.
   assert.equal(
@@ -251,7 +251,7 @@ test("http hooks can allow internal ranges", async () => {
     blockInternalRanges: false,
   });
 
-  const isAllowed = httpHooks.isAllowed!;
+  const isAllowed = httpHooks.isIpAllowed!;
 
   assert.equal(
     await isAllowed({
@@ -262,6 +262,34 @@ test("http hooks can allow internal ranges", async () => {
       protocol: "http",
     }),
     true
+  );
+});
+
+test("http hooks can enforce request policy", async () => {
+  const { httpHooks } = createHttpHooks({
+    isRequestAllowed: (request) => request.method !== "DELETE",
+  });
+
+  const isRequestAllowed = httpHooks.isRequestAllowed!;
+
+  assert.equal(
+    await isRequestAllowed({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {},
+      body: null,
+    }),
+    true
+  );
+
+  assert.equal(
+    await isRequestAllowed({
+      method: "DELETE",
+      url: "https://example.com/data",
+      headers: {},
+      body: null,
+    }),
+    false
   );
 });
 
@@ -287,6 +315,69 @@ test("http hooks replace secret placeholders", async () => {
   });
 
   assert.equal(request.headers.authorization, "Bearer secret-value");
+});
+
+test("http hooks replace secret placeholders in basic auth", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      BASIC_USER: {
+        hosts: ["example.com"],
+        value: "alice",
+      },
+      BASIC_PASS: {
+        hosts: ["example.com"],
+        value: "s3cr3t",
+      },
+    },
+  });
+
+  const placeholderToken = Buffer.from(`${env.BASIC_USER}:${env.BASIC_PASS}`, "utf8").toString(
+    "base64"
+  );
+  const expectedToken = Buffer.from("alice:s3cr3t", "utf8").toString("base64");
+
+  const request = await httpHooks.onRequest!({
+    method: "GET",
+    url: "https://example.com/data",
+    headers: {
+      authorization: `Basic ${placeholderToken}`,
+    },
+    body: null,
+  });
+
+  assert.equal(request.headers.authorization, `Basic ${expectedToken}`);
+});
+
+test("http hooks reject basic auth secrets on disallowed hosts", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      BASIC_USER: {
+        hosts: ["example.com"],
+        value: "alice",
+      },
+      BASIC_PASS: {
+        hosts: ["example.com"],
+        value: "s3cr3t",
+      },
+    },
+  });
+
+  const placeholderToken = Buffer.from(`${env.BASIC_USER}:${env.BASIC_PASS}`, "utf8").toString(
+    "base64"
+  );
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!({
+        method: "GET",
+        url: "https://example.org/data",
+        headers: {
+          authorization: `Basic ${placeholderToken}`,
+        },
+        body: null,
+      }),
+    (err) => err instanceof HttpRequestBlockedError
+  );
 });
 
 test("http hooks reject secrets on disallowed hosts", async () => {

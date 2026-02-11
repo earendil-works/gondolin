@@ -70,7 +70,8 @@ injecting secrets without exposing them inside the VM.
   - Make a secret available inside the VM as an environment variable named `NAME`
   - The VM only sees a random placeholder value; the host replaces that
     placeholder with the real secret **when it appears in an outgoing HTTP
-    header**
+    header** (including `Authorization: Basic …`, where the base64 token is
+    decoded and placeholders inside `username:password` are substituted)
   - The secret is only permitted for the listed host(s)
   - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
@@ -91,6 +92,12 @@ gondolin exec --allow-host api.github.com -- curl -sS https://api.github.com/rat
 gondolin exec \
   --host-secret GITHUB_TOKEN@api.github.com \
   -- curl -sS -H 'Authorization: Bearer $GITHUB_TOKEN' https://api.github.com/user
+
+# Basic auth secret injection (username/password placeholders are base64 encoded)
+gondolin exec \
+  --host-secret BASIC_USER@example.com \
+  --host-secret BASIC_PASS@example.com \
+  -- curl -sS -u "$BASIC_USER:$BASIC_PASS" https://example.com/private
 
 # Allow multiple hosts / wildcards
 gondolin bash --allow-host "*.github.com" --allow-host api.openai.com

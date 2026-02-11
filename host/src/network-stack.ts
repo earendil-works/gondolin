@@ -217,8 +217,8 @@ export class NetworkStack extends EventEmitter {
 
   private readonly TX_QUEUE_MAX_BYTES: number;
 
-  private readonly TX_BUFFER_HIGH_WATER = 16 * 1024;
-  private readonly TX_BUFFER_LOW_WATER = 4 * 1024;
+  private readonly TX_BUFFER_HIGH_WATER = 512 * 1024;
+  private readonly TX_BUFFER_LOW_WATER = 128 * 1024;
   private readonly txPaused = new Set<string>();
 
   constructor(options: NetworkStackOptions) {
@@ -232,7 +232,7 @@ export class NetworkStack extends EventEmitter {
     this.dnsServers = normalizeDnsServers(options.dnsServers);
     this.callbacks = options.callbacks;
     this.allowTcpFlow = options.allowTcpFlow ?? (() => true);
-    this.TX_QUEUE_MAX_BYTES = options.txQueueMaxBytes ?? 4 * 1024 * 1024;
+    this.TX_QUEUE_MAX_BYTES = options.txQueueMaxBytes ?? 8 * 1024 * 1024;
   }
 
   reset() {

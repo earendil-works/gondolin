@@ -310,6 +310,7 @@ async function buildNative(
     rootfsInit,
     initramfsInit,
     rootfsInitExtra,
+    defaultEnv: config.env,
     workDir,
     cacheDir,
     log,

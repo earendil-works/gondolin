@@ -221,6 +221,10 @@ Policy is checked using host-side DNS resolution and is typically validated more
 This closes the common "resolve to public IP at check-time, then to private IP
 at connect-time" rebinding pattern.
 
+When upstream keep-alive pooling is in use, the connect-time check runs when a
+new upstream connection is opened; requests sent over a reused pooled
+connection do not trigger a fresh connect-time IP check.
+
 ### Redirect Handling
 
 Redirects are handled by the host (not blindly followed by the guest's TCP

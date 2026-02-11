@@ -369,6 +369,8 @@ const { httpHooks, env } = createHttpHooks({
     API_KEY: { hosts: ["api.example.com"], value: process.env.API_KEY! },
   },
   blockInternalRanges: true, // default: true
+  isRequestAllowed: (req) => req.method !== "DELETE",
+  isIpAllowed: ({ ip }) => !ip.startsWith("203.0.113."),
   onRequest: async (req) => {
     console.log(req.url);
     return req;
@@ -382,6 +384,7 @@ const { httpHooks, env } = createHttpHooks({
 
 Notable consequences:
 
+- Secret placeholders are substituted only in request headers (including `Authorization: Basic …`, where the base64 token is decoded and placeholders inside `username:password` are substituted).
 - ICMP echo requests in the guest "work", but are synthetic (you can ping any address).
 - HTTP redirects are resolved on the host and hidden from the guest (the guest only
   sees the final response), so redirects cannot escape the allowlist.

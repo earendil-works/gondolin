@@ -78,6 +78,11 @@ console.log("stderr:\n", result.stderr);
 await vm.close();
 ```
 
+The guest never sees the real secret values. It only gets placeholders.
+Placeholders are substituted by the host in outbound HTTP headers, including
+`Authorization: Basic …` (the base64 token is decoded and placeholders in
+`username:password` are replaced).
+
 > **Note:** Avoid mounting a `MemoryProvider` at `/` unless you also provide CA
 > certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
 > failures (e.g. `curl: (60)`).

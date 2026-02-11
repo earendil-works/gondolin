@@ -65,6 +65,9 @@ The file has the following structure:
 {
   "arch": "aarch64",
   "distro": "alpine",
+  "env": {
+    "FOO": "bar"
+  },
   "alpine": {
     "version": "3.23.0",
     "kernelPackage": "linux-virt",
@@ -94,12 +97,22 @@ The file has the following structure:
 |-------|------|-------------|
 | `arch` | `"aarch64"` \| `"x86_64"` | Target architecture |
 | `distro` | `"alpine"` | Distribution (only Alpine is currently supported) |
+| `env` | object \| string[] | Default environment variables baked into the guest image |
 | `alpine` | object | Alpine-specific configuration |
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
 | `container` | object | Container build settings (for cross-platform) |
 | `sandboxdPath` | string | Path to custom sandboxd binary |
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
+
+#### Baked-in environment (`env`)
+
+`env` lets you bake a default environment into the image at build time.
+These variables are exported by the guest init script right before `sandboxd`
+starts, so they become the default environment for all `exec` commands unless
+explicitly overridden.
+
+Because `env` is stored in the image, **do not put real secrets here**.
 
 ### Alpine Configuration
 

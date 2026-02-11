@@ -868,7 +868,7 @@ test("network-stack: TCP flow control pauses when tx buffer grows and resumes wh
   stack.handleTcpConnected({ key });
   drainAllQemuTx(stack);
 
-  stack.handleTcpData({ key, data: Buffer.alloc(20000, 0x61) });
+  stack.handleTcpData({ key, data: Buffer.alloc(700 * 1024, 0x61) });
   assert.equal(pauses.length, 1);
   assert.equal(pauses[0].key, key);
 
