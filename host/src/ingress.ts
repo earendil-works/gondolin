@@ -801,7 +801,7 @@ export class IngressGateway {
     });
 
     // Ensure we don't crash on client errors.
-    server.on("clientError", (err, socket) => {
+    server.on("clientError", (_err, socket) => {
       try {
         socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
       } catch {

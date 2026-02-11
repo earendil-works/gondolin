@@ -4,7 +4,6 @@ import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { Duplex, Readable } from "stream";
-import { randomUUID } from "crypto";
 
 import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
 import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
@@ -238,7 +237,6 @@ export class VM {
   private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
   private sshAccess: SshAccess | null = null;
   private gondolinEtc: ReturnType<typeof createGondolinEtcMount> | null = null;
-  private ingressGateway: IngressGateway | null = null;
   private ingressAccess: IngressAccess | null = null;
 
   /**
@@ -912,7 +910,6 @@ fi
     const gateway = new IngressGateway(this.server, this.gondolinEtc.listeners);
     const access = await gateway.listen(options);
 
-    this.ingressGateway = gateway;
     this.ingressAccess = access;
 
     return access;
@@ -1055,7 +1052,6 @@ fi
         // ignore
       } finally {
         this.ingressAccess = null;
-        this.ingressGateway = null;
       }
     }
     if (this.sshAccess) {

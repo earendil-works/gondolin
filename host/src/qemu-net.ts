@@ -1400,7 +1400,7 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private async handleHttpDataWithWriter(
-    key: string,
+    _key: string,
     session: TcpSession,
     data: Buffer,
     options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void }
