@@ -508,7 +508,8 @@ export class RpcFsBackend extends VirtualProviderClass implements VirtualProvide
     if (!entry) {
       throw createErrnoError(ERRNO.ENOENT, "open", entryPath);
     }
-    const response = await this.client.request("open", { ino: entry.ino, flags: flagInfo.numeric });
+    const openFlags = flagInfo.numeric & ~fs.constants.O_CREAT;
+    const response = await this.client.request("open", { ino: entry.ino, flags: openFlags });
     assertOk(response, "open", entryPath);
     const fh = response.p.res?.fh as number;
     if (flagInfo.truncate) {
@@ -832,4 +833,3 @@ function normalizePath(entryPath: string) {
   }
   return normalized === "" ? "/" : normalized;
 }
-
