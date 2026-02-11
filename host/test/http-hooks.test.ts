@@ -317,6 +317,72 @@ test("http hooks replace secret placeholders", async () => {
   assert.equal(request.headers.authorization, "Bearer secret-value");
 });
 
+test("http hooks keep placeholders in URL parameters by default", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  const originalUrl = `https://example.com/data?token=${env.API_KEY}`;
+  const request = await httpHooks.onRequest!({
+    method: "GET",
+    url: originalUrl,
+    headers: {},
+    body: null,
+  });
+
+  assert.equal(request.url, originalUrl);
+});
+
+test("http hooks can replace placeholders in URL parameters when enabled", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "s3cr3t+/=?",
+      },
+    },
+    replaceSecretsInQuery: true,
+  });
+
+  const request = await httpHooks.onRequest!({
+    method: "GET",
+    url: `https://example.com/data?token=${env.API_KEY}&ok=1`,
+    headers: {},
+    body: null,
+  });
+
+  assert.equal(new URL(request.url).searchParams.get("token"), "s3cr3t+/=?");
+  assert.equal(request.url.includes(env.API_KEY), false);
+});
+
+test("http hooks reject URL parameter secrets on disallowed hosts when enabled", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+    replaceSecretsInQuery: true,
+  });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!({
+        method: "GET",
+        url: `https://example.org/data?token=${env.API_KEY}`,
+        headers: {},
+        body: null,
+      }),
+    (err) => err instanceof HttpRequestBlockedError
+  );
+});
+
 test("http hooks replace secret placeholders in basic auth", async () => {
   const { httpHooks, env } = createHttpHooks({
     secrets: {

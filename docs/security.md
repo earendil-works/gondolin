@@ -203,6 +203,8 @@ Gondolin's secret strategy is:
   (`createHttpHooks().httpHooks.onRequest`) scans outbound headers and **replaces
   placeholders with real secret values** *only* if the destination hostname
   matches the secret's host allowlist.
+  - URL query parameter replacement is available only as an explicit opt-in
+    (`replaceSecretsInQuery: true`) because it increases reflection risk.
 
   - This includes `Authorization: Basic …` / `Proxy-Authorization: Basic …`: the
     base64 token is decoded as `username:password`, placeholders are substituted,
@@ -326,9 +328,11 @@ These are rules to not compromise the security guarantees of the system:
     - Do not mount `~/.aws`, `~/.config`, `.env`, etc. into the guest.
     - Do not pass real secrets in `VM.env`.
 
-2. **Secrets are only substituted in HTTP headers**
-    - If you put placeholders in a request body or URL, they will *not* be replaced.
-    - Design your client code to pass credentials in headers.
+2. **Secrets are substituted in HTTP headers by default**
+    - If you put placeholders in a request body, they will *not* be replaced.
+    - URL query parameter replacement is off by default; enable it explicitly with
+      `replaceSecretsInQuery: true` only when required.
+    - Design your client code to pass credentials in headers when possible.
     - `Authorization: Basic …` is supported: placeholders inside the decoded
       `username:password` are replaced before the header is sent.
 

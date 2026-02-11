@@ -384,7 +384,8 @@ const { httpHooks, env } = createHttpHooks({
 
 Notable consequences:
 
-- Secret placeholders are substituted only in request headers (including `Authorization: Basic …`, where the base64 token is decoded and placeholders inside `username:password` are substituted).
+- Secret placeholders are substituted in request headers by default (including `Authorization: Basic …`, where the base64 token is decoded and placeholders inside `username:password` are substituted).
+  - URL query parameter substitution is opt-in via `replaceSecretsInQuery: true` because it increases reflection risk.
 - ICMP echo requests in the guest "work", but are synthetic (you can ping any address).
 - HTTP redirects are resolved on the host and hidden from the guest (the guest only
   sees the final response), so redirects cannot escape the allowlist.

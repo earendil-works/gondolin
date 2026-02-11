@@ -15,6 +15,8 @@ export type CreateHttpHooksOptions = {
   allowedHosts?: string[];
   /** secret definitions keyed by env var name */
   secrets?: Record<string, SecretDefinition>;
+  /** placeholder replacement in URL query string (default: false) */
+  replaceSecretsInQuery?: boolean;
   /** whether to block internal ip ranges (default: true) */
   blockInternalRanges?: boolean;
   /** custom request policy callback */
@@ -87,8 +89,14 @@ export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHtt
     },
     onRequest: async (request) => {
       const hostname = getHostname(request);
-      const headers = replaceSecretPlaceholders(request, hostname, secretEntries);
-      let nextRequest: HttpHookRequest = { ...request, headers };
+      const headers = replaceSecretPlaceholdersInHeaders(request, hostname, secretEntries);
+      const url = replaceSecretPlaceholdersInUrlParameters(
+        request.url,
+        hostname,
+        secretEntries,
+        options.replaceSecretsInQuery ?? false
+      );
+      let nextRequest: HttpHookRequest = { ...request, url, headers };
 
       if (options.onRequest) {
         const updated = await options.onRequest(nextRequest);
@@ -111,7 +119,7 @@ function getHostname(request: HttpHookRequest): string {
   }
 }
 
-function replaceSecretPlaceholders(
+function replaceSecretPlaceholdersInHeaders(
   request: HttpHookRequest,
   hostname: string,
   entries: SecretEntry[]
@@ -124,15 +132,7 @@ function replaceSecretPlaceholders(
     let updated = value;
 
     // Plaintext placeholder replacement (eg: `Authorization: Bearer $TOKEN`).
-    for (const entry of entries) {
-      if (!updated.includes(entry.placeholder)) continue;
-      if (!matchesAnyHost(hostname, entry.hosts)) {
-        throw new HttpRequestBlockedError(
-          `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
-        );
-      }
-      updated = replaceAll(updated, entry.placeholder, entry.value);
-    }
+    updated = replaceSecretPlaceholdersInString(updated, hostname, entries);
 
     // Basic auth uses base64 encoding of `username:password`, so placeholders
     // won't appear in the header value directly.
@@ -142,6 +142,40 @@ function replaceSecretPlaceholders(
   }
 
   return headers;
+}
+
+function replaceSecretPlaceholdersInUrlParameters(
+  url: string,
+  hostname: string,
+  entries: SecretEntry[],
+  enabled: boolean
+): string {
+  if (!enabled || entries.length === 0) return url;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+
+  if (!parsed.search) return url;
+
+  const updatedParams = new URLSearchParams();
+  let changed = false;
+
+  for (const [name, value] of parsed.searchParams.entries()) {
+    const updatedName = replaceSecretPlaceholdersInString(name, hostname, entries);
+    const updatedValue = replaceSecretPlaceholdersInString(value, hostname, entries);
+    if (updatedName !== name || updatedValue !== value) changed = true;
+    updatedParams.append(updatedName, updatedValue);
+  }
+
+  if (!changed) return url;
+
+  const nextSearch = updatedParams.toString();
+  parsed.search = nextSearch ? `?${nextSearch}` : "";
+  return parsed.toString();
 }
 
 function replaceBasicAuthSecretPlaceholders(
@@ -170,24 +204,34 @@ function replaceBasicAuthSecretPlaceholders(
     return headerValue;
   }
 
-  let updatedDecoded = decoded;
-  let changed = false;
-
-  for (const entry of entries) {
-    if (!updatedDecoded.includes(entry.placeholder)) continue;
-    if (!matchesAnyHost(hostname, entry.hosts)) {
-      throw new HttpRequestBlockedError(
-        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
-      );
-    }
-    updatedDecoded = replaceAll(updatedDecoded, entry.placeholder, entry.value);
-    changed = true;
-  }
-
-  if (!changed) return headerValue;
+  const updatedDecoded = replaceSecretPlaceholdersInString(decoded, hostname, entries);
+  if (updatedDecoded === decoded) return headerValue;
 
   const updatedToken = Buffer.from(updatedDecoded, "utf8").toString("base64");
   return `${scheme}${whitespace}${updatedToken}${trailing}`;
+}
+
+function replaceSecretPlaceholdersInString(
+  value: string,
+  hostname: string,
+  entries: SecretEntry[]
+): string {
+  let updated = value;
+
+  for (const entry of entries) {
+    if (!updated.includes(entry.placeholder)) continue;
+    assertSecretAllowedForHost(entry, hostname);
+    updated = replaceAll(updated, entry.placeholder, entry.value);
+  }
+
+  return updated;
+}
+
+function assertSecretAllowedForHost(entry: SecretEntry, hostname: string): void {
+  if (matchesAnyHost(hostname, entry.hosts)) return;
+  throw new HttpRequestBlockedError(
+    `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
+  );
 }
 
 function matchesAnyHost(hostname: string, patterns: string[]): boolean {

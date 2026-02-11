@@ -83,6 +83,10 @@ Placeholders are substituted by the host in outbound HTTP headers, including
 `Authorization: Basic …` (the base64 token is decoded and placeholders in
 `username:password` are replaced).
 
+By default, placeholders in URL query parameters are not substituted. You can
+opt in with `replaceSecretsInQuery: true`, but this increases reflection
+risk and should only be used when required.
+
 > **Note:** Avoid mounting a `MemoryProvider` at `/` unless you also provide CA
 > certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
 > failures (e.g. `curl: (60)`).
