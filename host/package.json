@@ -24,7 +24,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "start": "node dist/bin/gondolin.js exec",
     "dev": "tsx bin/gondolin.ts exec",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=2 test/*.test.ts",
     "bash": "tsx bin/gondolin.ts bash",
     "gondolin": "tsx bin/gondolin.ts"
   },

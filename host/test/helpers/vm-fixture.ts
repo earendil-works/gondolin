@@ -172,13 +172,19 @@ export async function closeAllVms(): Promise<void> {
  * The timer is unref'd so it does not *itself* keep node alive — it only
  * fires when something else (the QEMU pipe) is holding the event loop open.
  *
- * Note: this must be long enough that the rest of the test suite can finish
- * running; otherwise it can trigger while later tests are still executing.
+ * Each call refreshes the deadline so early-finishing files don't force-exit
+ * while later tests are still running.
  */
+let forceExitTimer: NodeJS.Timeout | null = null;
+
 export function scheduleForceExit(ms = 120000): void {
-  const timer = setTimeout(() => {
+  if (forceExitTimer) {
+    clearTimeout(forceExitTimer);
+  }
+
+  forceExitTimer = setTimeout(() => {
     console.error("[vm-fixture] force-exiting — VM cleanup timed out");
     process.exit(1);
   }, ms);
-  timer.unref();
+  forceExitTimer.unref();
 }
