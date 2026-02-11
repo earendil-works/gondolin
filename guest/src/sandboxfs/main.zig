@@ -17,6 +17,7 @@ const FuseOp = struct {
     pub const OPEN: u32 = 14;
     pub const READ: u32 = 15;
     pub const WRITE: u32 = 16;
+    pub const STATFS: u32 = 17;
     pub const RELEASE: u32 = 18;
     pub const INIT: u32 = 26;
     pub const OPENDIR: u32 = 27;
@@ -83,6 +84,23 @@ const FuseDirent = extern struct {
     off: u64,
     namelen: u32,
     type: u32,
+};
+
+const FuseKstatfs = extern struct {
+    blocks: u64,
+    bfree: u64,
+    bavail: u64,
+    files: u64,
+    ffree: u64,
+    bsize: u32,
+    namelen: u32,
+    frsize: u32,
+    padding: u32,
+    spare: [6]u32,
+};
+
+const FuseStatfsOut = extern struct {
+    st: FuseKstatfs,
 };
 
 const FuseInHeader = struct {
@@ -247,6 +265,7 @@ const SandboxFs = struct {
             FuseOp.WRITE => try self.handleWrite(header, payload),
             FuseOp.CREATE => try self.handleCreate(header, payload),
             FuseOp.RELEASE => try self.handleRelease(header, payload),
+            FuseOp.STATFS => try self.handleStatfs(header),
             FuseOp.FORGET => return,
             else => try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS),
         }
@@ -701,6 +720,36 @@ const SandboxFs = struct {
 
         try sendResponse(self.fuse_fd, header.unique, 0, &.{});
     }
+
+    fn handleStatfs(self: *SandboxFs, header: FuseInHeader) !void {
+        if (self.rpc) |*rpc| {
+            var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
+            var response = try rpc.request("statfs", &fields);
+            defer response.deinit();
+
+            if (response.err != 0) {
+                const errno = errnoFromResponse(response.err);
+                if (errno == std.os.linux.E.NOSYS) {
+                    const out = defaultStatfs();
+                    try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
+                    return;
+                }
+                try sendError(self.fuse_fd, header.unique, errno);
+                return;
+            }
+
+            const res_map = response.res orelse return error.InvalidResponse;
+            const statfs_val = cbor.getMapValue(res_map, "statfs") orelse return error.InvalidResponse;
+            const statfs_map = try expectMap(statfs_val);
+
+            const out = statfsFromMap(statfs_map);
+            try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
+            return;
+        }
+
+        const out = defaultStatfs();
+        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
+    }
 };
 
 pub fn main() !void {
@@ -1131,6 +1180,7 @@ fn getMapU64(map: []cbor.Entry, key: []const u8) ?u64 {
 
 fn getMapU32(map: []cbor.Entry, key: []const u8) ?u32 {
     const value = getMapU64(map, key) orelse return null;
+    if (value > std.math.maxInt(u32)) return null;
     return @intCast(value);
 }
 
@@ -1237,4 +1287,32 @@ fn defaultDirAttr(ino: u64) FuseAttr {
         .blksize = 4096,
         .padding = 0,
     };
+}
+
+fn defaultStatfs() FuseStatfsOut {
+    return .{ .st = .{
+        .blocks = 16_777_216,
+        .bfree = 16_777_216,
+        .bavail = 16_777_216,
+        .files = 16_777_216,
+        .ffree = 16_777_216,
+        .bsize = 4096,
+        .namelen = 255,
+        .frsize = 4096,
+        .padding = 0,
+        .spare = .{0} ** 6,
+    } };
+}
+
+fn statfsFromMap(statfs_map: []cbor.Entry) FuseStatfsOut {
+    var out = defaultStatfs();
+    out.st.blocks = getMapU64(statfs_map, "blocks") orelse out.st.blocks;
+    out.st.bfree = getMapU64(statfs_map, "bfree") orelse out.st.bfree;
+    out.st.bavail = getMapU64(statfs_map, "bavail") orelse out.st.bavail;
+    out.st.files = getMapU64(statfs_map, "files") orelse out.st.files;
+    out.st.ffree = getMapU64(statfs_map, "ffree") orelse out.st.ffree;
+    out.st.bsize = getMapU32(statfs_map, "bsize") orelse out.st.bsize;
+    out.st.namelen = getMapU32(statfs_map, "namelen") orelse out.st.namelen;
+    out.st.frsize = getMapU32(statfs_map, "frsize") orelse out.st.frsize;
+    return out;
 }

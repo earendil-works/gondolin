@@ -349,6 +349,29 @@ test("ReadonlyProvider blocks write operations", { timeout: timeoutMs }, async (
   );
 });
 
+test("fuse statfs supports df on /data", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(fuseVmKey, fuseVmOptions, async (vm) => {
+    await vm.start();
+
+    const result = await withTimeout(
+      vm.exec(["/bin/sh", "-c", "df -k /data"]),
+      timeoutMs
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`df failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    }
+    assert.ok(result.stdout.includes("/data"), "df output should include /data mount line");
+    assert.ok(!result.stdout.includes("Function not implemented"), "df should not report ENOSYS");
+
+    // Parse the second line to verify non-zero total blocks
+    const lines = result.stdout.trim().split("\n");
+    assert.ok(lines.length >= 2, "df should produce at least two lines");
+    const fields = lines[1].split(/\s+/);
+    const totalBlocks = Number(fields[1]);
+    assert.ok(totalBlocks > 0, `total blocks should be non-zero, got ${totalBlocks}`);
+  });
+});
+
 test("ReadonlyProvider works in VM guest", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   await withVm(sharedVmKey, sharedVmOptions, async (vm) => {
     const handle = await roInnerProvider.open("/host-file.txt", "w+");

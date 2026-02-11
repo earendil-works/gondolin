@@ -6,6 +6,7 @@ const {
 } = primordials;
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { VirtualProvider } = require('internal/vfs/provider');
 const { VirtualFileHandle } = require('internal/vfs/file_handle');
@@ -14,6 +15,8 @@ const {
     ERR_INVALID_ARG_VALUE,
   },
 } = require('internal/errors');
+
+const { errno: ERRNO } = os.constants;
 
 /**
  * A file handle that wraps a real file descriptor.
@@ -377,6 +380,30 @@ class RealFSProvider extends VirtualProvider {
     const srcRealPath = this._resolvePath(srcVfsPath);
     const destRealPath = this._resolvePath(destVfsPath);
     return fs.promises.copyFile(srcRealPath, destRealPath, mode);
+  }
+
+  async statfs(vfsPath) {
+    if (typeof fs.promises.statfs !== 'function') {
+      const err = new Error('ENOSYS: statfs');
+      err.code = 'ENOSYS';
+      err.errno = ERRNO.ENOSYS;
+      throw err;
+    }
+
+    const realPath = this._resolvePath(vfsPath);
+    const stats = await fs.promises.statfs(realPath);
+    const bsize = Number(stats.bsize ?? 4096);
+
+    return {
+      blocks: Number(stats.blocks ?? 0),
+      bfree: Number(stats.bfree ?? 0),
+      bavail: Number(stats.bavail ?? 0),
+      files: Number(stats.files ?? 0),
+      ffree: Number(stats.ffree ?? 0),
+      bsize,
+      frsize: Number(stats.frsize ?? bsize),
+      namelen: Number(stats.namelen ?? 255),
+    };
   }
 }
 

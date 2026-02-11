@@ -2,7 +2,8 @@ import path from "node:path";
 import type { Dirent } from "node:fs";
 
 import { createErrnoError } from "./errors";
-import type { VirtualFileHandle, VirtualProvider } from "./node";
+import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node";
+import { delegateStatfsOrEnosys } from "./statfs";
 import { ERRNO, isWriteFlag, normalizeVfsPath, VirtualProviderClass } from "./utils";
 import { MemoryProvider } from "./node";
 
@@ -576,6 +577,11 @@ export class ShadowProvider extends VirtualProviderClass implements VirtualProvi
       return this.backend.accessSync(p, mode);
     }
     return super.accessSync(p, mode);
+  }
+
+  async statfs(entryPath: string): Promise<VfsStatfs> {
+    const normalizedPath = normalizeVfsPath(entryPath);
+    return delegateStatfsOrEnosys(this.backend, normalizedPath);
   }
 
   watch(entryPath: string, options?: object) {

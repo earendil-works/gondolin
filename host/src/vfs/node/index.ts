@@ -3,6 +3,26 @@
 import type { Dirent, Stats } from 'node:fs';
 import loader from './loader';
 
+/** Filesystem-level statistics returned by the optional `statfs` provider method. */
+export type VfsStatfs = {
+  /** total data blocks in filesystem */
+  blocks: number;
+  /** free blocks in filesystem */
+  bfree: number;
+  /** free blocks available to unprivileged user */
+  bavail: number;
+  /** total file nodes (inodes) */
+  files: number;
+  /** free file nodes */
+  ffree: number;
+  /** filesystem block size in bytes */
+  bsize: number;
+  /** fragment size in bytes */
+  frsize: number;
+  /** maximum length of filenames */
+  namelen: number;
+};
+
 export type VirtualFileHandle = {
   read(buffer: Buffer, offset: number, length: number, position?: number | null): Promise<{ bytesRead: number; buffer: Buffer }>;
   readSync(buffer: Buffer, offset: number, length: number, position?: number | null): number;
@@ -64,6 +84,7 @@ export type VirtualProvider = {
   readlinkSync?(path: string, options?: object): string;
   symlink?(target: string, path: string, type?: string): Promise<void>;
   symlinkSync?(target: string, path: string, type?: string): void;
+  statfs?(path: string): Promise<VfsStatfs>;
   watch?(path: string, options?: object): unknown;
   watchAsync?(path: string, options?: object): unknown;
   watchFile?(path: string, options?: object, listener?: (...args: unknown[]) => void): unknown;

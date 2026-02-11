@@ -360,6 +360,43 @@ test("fs rpc normalizeError includes message and maps unknown errors to EIO", as
   await service2.close();
 });
 
+test("fs rpc statfs returns valid stats for root inode", async () => {
+  const service = createService();
+
+  const res = await send(service, "statfs", { ino: 1 });
+  assert.equal(res.p.err, 0);
+
+  const statfs = res.p.res?.statfs as Record<string, number>;
+  assert.ok(statfs);
+  assert.ok(statfs.blocks > 0);
+  assert.ok(statfs.bfree <= statfs.blocks);
+  assert.ok(statfs.bavail <= statfs.bfree);
+  assert.ok(statfs.ffree <= statfs.files);
+  assert.equal(statfs.bsize, 4096);
+  assert.equal(statfs.frsize, 4096);
+  assert.equal(statfs.namelen, 255);
+
+  await service.close();
+});
+
+test("fs rpc statfs returns ENOENT for unknown inode", async () => {
+  const service = createService();
+
+  const res = await send(service, "statfs", { ino: 9999 });
+  assert.equal(res.p.err, ERRNO.ENOENT);
+
+  await service.close();
+});
+
+test("fs rpc statfs increments metrics", async () => {
+  const service = createService();
+
+  await send(service, "statfs", { ino: 1 });
+  assert.equal(service.metrics.ops.statfs, 1);
+
+  await service.close();
+});
+
 test("fs rpc service.close closes all open handles", async () => {
   const { service, getCloseCount } = createTrackedService();
 

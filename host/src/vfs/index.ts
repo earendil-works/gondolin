@@ -5,7 +5,7 @@ export {
   MemoryProvider,
   RealFSProvider,
 } from "./node";
-export type { VirtualFileHandle } from "./node";
+export type { VirtualFileHandle, VfsStatfs } from "./node";
 
 export { SandboxVfsProvider } from "./provider";
 export type { VfsHooks, VfsHookContext } from "./provider";

@@ -50,6 +50,7 @@ export {
   formatVirtualEntries,
   FsRpcService,
   type VirtualFileHandle,
+  type VfsStatfs,
   type VfsHooks,
   type VfsHookContext,
   type FsRpcMetrics,
