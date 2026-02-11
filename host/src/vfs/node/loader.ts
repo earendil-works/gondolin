@@ -23,7 +23,7 @@ function findVendorPath(): string {
 
 const VENDOR_VFS_PATH = findVendorPath();
 
-function createRequire(parentPath: string) {
+function createRequire() {
   return function vfsRequire(id: string) {
     if (id.startsWith('internal/vfs/')) {
       const modulePath = path.join(VENDOR_VFS_PATH, id.slice('internal/vfs/'.length) + '.js');
@@ -61,7 +61,7 @@ function loadModule(modulePath: string) {
   ) => void;
 
   const moduleDir = path.dirname(modulePath);
-  fn(mod.exports, createRequire(modulePath), mod, modulePath, moduleDir, primordials, internalBinding);
+  fn(mod.exports, createRequire(), mod, modulePath, moduleDir, primordials, internalBinding);
 
   return mod.exports;
 }

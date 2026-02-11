@@ -22,5 +22,4 @@ export {
   createVirtualDirStats,
   formatVirtualEntries,
 } from "./utils";
-export { FsRpcClient, RpcFsBackend, RpcFileHandle } from "./rpc";
 export { FsRpcService, type FsRpcMetrics, MAX_RPC_DATA } from "./rpc-service";

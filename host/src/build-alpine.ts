@@ -16,7 +16,6 @@ import path from "path";
 import { createGunzip } from "zlib";
 import { pipeline } from "stream/promises";
 import { execFileSync } from "child_process";
-import { Readable } from "stream";
 
 import type { Architecture } from "./build-config";
 

@@ -194,167 +194,21 @@ const DefaultTtls = struct {
     pub const entry_ms: u64 = 1000;
 };
 
-const LruCache = struct {
-    const EntryValue = struct {
-        attr: FuseAttr,
-        kind: u32,
-    };
-
-    const Node = struct {
-        key: u64,
-        value: EntryValue,
-        link: std.DoublyLinkedList.Node = .{},
-    };
-
-    allocator: std.mem.Allocator,
-    max_entries: usize,
-    list: std.DoublyLinkedList = .{},
-    map: std.AutoHashMap(u64, *Node),
-
-    pub fn init(allocator: std.mem.Allocator, max_entries: usize) LruCache {
-        return .{ .allocator = allocator, .max_entries = max_entries, .map = std.AutoHashMap(u64, *Node).init(allocator) };
-    }
-
-    pub fn deinit(self: *LruCache) void {
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.map.deinit();
-    }
-
-    pub fn put(self: *LruCache, key: u64, value: EntryValue) !void {
-        if (self.map.get(key)) |node| {
-            node.value = value;
-            self.touch(node);
-            return;
-        }
-
-        const node = try self.allocator.create(Node);
-        node.* = .{ .key = key, .value = value, .link = .{} };
-        self.list.prepend(&node.link);
-        try self.map.put(key, node);
-        try self.evictIfNeeded();
-    }
-
-    pub fn get(self: *LruCache, key: u64) ?EntryValue {
-        if (self.map.get(key)) |node| {
-            self.touch(node);
-            return node.value;
-        }
-        return null;
-    }
-
-    pub fn remove(self: *LruCache, key: u64) void {
-        if (self.map.fetchRemove(key)) |entry| {
-            self.list.remove(&entry.value.link);
-            self.allocator.destroy(entry.value);
-        }
-    }
-
-    fn touch(self: *LruCache, node: *Node) void {
-        self.list.remove(&node.link);
-        self.list.prepend(&node.link);
-    }
-
-    fn evictIfNeeded(self: *LruCache) !void {
-        while (self.map.count() > self.max_entries) {
-            const tail_link = self.list.pop() orelse return;
-            const tail: *Node = @fieldParentPtr("link", tail_link);
-            _ = self.map.remove(tail.key);
-            self.allocator.destroy(tail);
-        }
-    }
-};
-
-const HandleCache = struct {
-    const Node = struct {
-        key: u64,
-        value: u64,
-        link: std.DoublyLinkedList.Node = .{},
-    };
-
-    allocator: std.mem.Allocator,
-    max_entries: usize,
-    list: std.DoublyLinkedList = .{},
-    map: std.AutoHashMap(u64, *Node),
-
-    pub fn init(allocator: std.mem.Allocator, max_entries: usize) HandleCache {
-        return .{ .allocator = allocator, .max_entries = max_entries, .map = std.AutoHashMap(u64, *Node).init(allocator) };
-    }
-
-    pub fn deinit(self: *HandleCache) void {
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.map.deinit();
-    }
-
-    pub fn put(self: *HandleCache, key: u64, value: u64) !void {
-        if (self.map.get(key)) |node| {
-            node.value = value;
-            self.touch(node);
-            return;
-        }
-
-        const node = try self.allocator.create(Node);
-        node.* = .{ .key = key, .value = value, .link = .{} };
-        self.list.prepend(&node.link);
-        try self.map.put(key, node);
-        try self.evictIfNeeded();
-    }
-
-    pub fn get(self: *HandleCache, key: u64) ?u64 {
-        if (self.map.get(key)) |node| {
-            self.touch(node);
-            return node.value;
-        }
-        return null;
-    }
-
-    pub fn remove(self: *HandleCache, key: u64) void {
-        if (self.map.fetchRemove(key)) |entry| {
-            self.list.remove(&entry.value.link);
-            self.allocator.destroy(entry.value);
-        }
-    }
-
-    fn touch(self: *HandleCache, node: *Node) void {
-        self.list.remove(&node.link);
-        self.list.prepend(&node.link);
-    }
-
-    fn evictIfNeeded(self: *HandleCache) !void {
-        while (self.map.count() > self.max_entries) {
-            const tail_link = self.list.pop() orelse return;
-            const tail: *Node = @fieldParentPtr("link", tail_link);
-            _ = self.map.remove(tail.key);
-            self.allocator.destroy(tail);
-        }
-    }
-};
-
 const SandboxFs = struct {
     allocator: std.mem.Allocator,
     fuse_fd: std.posix.fd_t,
     rpc: ?fs_rpc.FsRpcClient,
-    inode_cache: LruCache,
-    handle_cache: HandleCache,
 
     pub fn init(allocator: std.mem.Allocator, fuse_fd: std.posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
         return .{
             .allocator = allocator,
             .fuse_fd = fuse_fd,
             .rpc = rpc,
-            .inode_cache = LruCache.init(allocator, 512),
-            .handle_cache = HandleCache.init(allocator, 512),
         };
     }
 
     pub fn deinit(self: *SandboxFs) void {
-        self.inode_cache.deinit();
-        self.handle_cache.deinit();
+        _ = self;
     }
 
     pub fn run(self: *SandboxFs) !void {
@@ -441,8 +295,6 @@ const SandboxFs = struct {
             const entry_map = try expectMap(entry_val);
             const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
 
-            try self.inode_cache.put(entry.attr.ino, .{ .attr = entry.attr, .kind = entry.attr.mode & 0xf000 });
-
             try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
             return;
         }
@@ -473,8 +325,6 @@ const SandboxFs = struct {
             const attr_map = try expectMap(attr_val);
             const attr = try parseAttr(attr_map, header.nodeid);
             const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
-
-            try self.inode_cache.put(attr.ino, .{ .attr = attr, .kind = attr.mode & 0xf000 });
 
             const out = buildAttrOut(attr, attr_ttl_ms);
             try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
@@ -525,8 +375,6 @@ const SandboxFs = struct {
         const attr = try parseAttr(attr_map, header.nodeid);
         const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
 
-        try self.inode_cache.put(attr.ino, .{ .attr = attr, .kind = attr.mode & 0xf000 });
-
         const out = buildAttrOut(attr, attr_ttl_ms);
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
     }
@@ -557,8 +405,6 @@ const SandboxFs = struct {
         const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
         const entry_map = try expectMap(entry_val);
         const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-
-        try self.inode_cache.put(entry.attr.ino, .{ .attr = entry.attr, .kind = entry.attr.mode & 0xf000 });
 
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
@@ -637,8 +483,6 @@ const SandboxFs = struct {
         const res_map = response.res orelse return error.InvalidResponse;
         const fh = getMapU64(res_map, "fh") orelse return error.InvalidResponse;
         const open_flags = getMapU32(res_map, "open_flags") orelse 0;
-        try self.handle_cache.put(fh, header.nodeid);
-
         const out = FuseOpenOut{ .fh = fh, .open_flags = open_flags, .padding = 0 };
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
     }
@@ -830,8 +674,6 @@ const SandboxFs = struct {
         const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
         const fh = getMapU64(res_map, "fh") orelse return error.InvalidResponse;
         const open_flags = getMapU32(res_map, "open_flags") orelse 0;
-        try self.handle_cache.put(fh, entry.attr.ino);
-
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
         try buf.appendSlice(self.allocator, std.mem.asBytes(&entry.out));
@@ -857,7 +699,6 @@ const SandboxFs = struct {
             return;
         }
 
-        self.handle_cache.remove(release.fh);
         try sendResponse(self.fuse_fd, header.unique, 0, &.{});
     }
 };

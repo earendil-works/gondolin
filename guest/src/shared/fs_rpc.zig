@@ -3,7 +3,6 @@ const cbor = @import("cbor.zig");
 const protocol = @import("protocol.zig");
 
 pub const RpcError = error{
-    InvalidType,
     MissingField,
     UnexpectedType,
     InvalidValue,
@@ -11,10 +10,8 @@ pub const RpcError = error{
 
 pub const FieldValue = union(enum) {
     UInt: u64,
-    Int: i64,
     Text: []const u8,
     Bytes: []const u8,
-    Bool: bool,
 };
 
 pub const Field = struct {
@@ -31,14 +28,10 @@ pub const FsResponse = struct {
     frame: []u8,
     /// decoded cbor root value
     root: cbor.Value,
-    /// operation name
-    op: []const u8,
     /// posix errno (0 = success)
     err: i32,
     /// result map entries (when present)
     res: ?[]cbor.Entry,
-    /// optional error detail
-    message: ?[]const u8,
 
     pub fn deinit(self: *FsResponse) void {
         cbor.freeValue(self.allocator, self.root);
@@ -80,13 +73,21 @@ pub const FsRpcClient = struct {
             return RpcError.UnexpectedType;
         }
 
+        const response_id = try expectU32(cbor.getMapValue(map, "id") orelse return RpcError.MissingField);
+        if (response_id != id) {
+            return RpcError.InvalidValue;
+        }
+
         const payload_val = cbor.getMapValue(map, "p") orelse return RpcError.MissingField;
         const payload_map = try expectMap(payload_val);
-        const op_val = try expectText(cbor.getMapValue(payload_map, "op") orelse return RpcError.MissingField);
+        const response_op = try expectText(cbor.getMapValue(payload_map, "op") orelse return RpcError.MissingField);
+        if (!std.mem.eql(u8, response_op, op)) {
+            return RpcError.InvalidValue;
+        }
+
         const err_val = cbor.getMapValue(payload_map, "err") orelse return RpcError.MissingField;
         const err_int = try expectInt(err_val);
         const res_val = cbor.getMapValue(payload_map, "res");
-        const message_val = cbor.getMapValue(payload_map, "message");
 
         var res_map: ?[]cbor.Entry = null;
         if (res_val) |value| {
@@ -96,23 +97,12 @@ pub const FsRpcClient = struct {
             }
         }
 
-        var message_text: ?[]const u8 = null;
-        if (message_val) |value| {
-            switch (value) {
-                .Null => message_text = null,
-                .Text => |text| message_text = text,
-                else => return RpcError.UnexpectedType,
-            }
-        }
-
         return FsResponse{
             .allocator = self.allocator,
             .frame = frame,
             .root = root,
-            .op = op_val,
             .err = @intCast(err_int),
             .res = res_map,
-            .message = message_text,
         };
     }
 };
@@ -146,10 +136,8 @@ fn encodeRequest(allocator: std.mem.Allocator, id: u32, op: []const u8, fields: 
 fn writeFieldValue(writer: anytype, value: FieldValue) !void {
     switch (value) {
         .UInt => |v| try cbor.writeUInt(writer, v),
-        .Int => |v| try cbor.writeInt(writer, v),
         .Text => |v| try cbor.writeText(writer, v),
         .Bytes => |v| try cbor.writeBytes(writer, v),
-        .Bool => |v| try cbor.writeBool(writer, v),
     }
 }
 
@@ -165,6 +153,14 @@ fn expectText(value: cbor.Value) ![]const u8 {
         .Text => |text| text,
         else => RpcError.UnexpectedType,
     };
+}
+
+fn expectU32(value: cbor.Value) !u32 {
+    const int = try expectInt(value);
+    if (int < 0 or int > std.math.maxInt(u32)) {
+        return RpcError.InvalidValue;
+    }
+    return @intCast(int);
 }
 
 fn expectInt(value: cbor.Value) !i64 {

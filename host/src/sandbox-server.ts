@@ -7,7 +7,6 @@ import { execFile } from "child_process";
 import { EventEmitter } from "events";
 import { Duplex } from "stream";
 
-
 import {
   FrameReader,
   IncomingMessage,
@@ -68,20 +67,7 @@ const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
-const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
-const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
-  "GONDOLIN_VFS_READY_TIMEOUT_MS",
-  DEFAULT_VFS_READY_TIMEOUT_MS
-);
 const { errno: ERRNO } = os.constants;
-
-function resolveEnvNumber(name: string, fallback: number) {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
-}
 
 /**
  * sandbox server options
@@ -1706,14 +1692,6 @@ export class SandboxServer extends EventEmitter {
     this.emit("state", state);
   }
 
-  private startVfsReadyTimer() {
-    if (VFS_READY_TIMEOUT_MS <= 0 || this.vfsReadyTimer) return;
-    this.vfsReadyTimer = setTimeout(() => {
-      this.vfsReadyTimer = null;
-      this.handleVfsReadyTimeout();
-    }, VFS_READY_TIMEOUT_MS);
-  }
-
   private clearVfsReadyTimer() {
     if (!this.vfsReadyTimer) return;
     clearTimeout(this.vfsReadyTimer);
@@ -1750,13 +1728,6 @@ export class SandboxServer extends EventEmitter {
       });
       this.closeClient(this.activeClient);
     }
-  }
-
-  private handleVfsReadyTimeout() {
-    this.handleVfsError(
-      `vfs not ready after ${VFS_READY_TIMEOUT_MS}ms`,
-      "vfs_timeout"
-    );
   }
 
   async start(): Promise<void> {

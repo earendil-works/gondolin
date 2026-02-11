@@ -1,5 +1,5 @@
 import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle } from "./node";
+import type { VirtualProvider } from "./node";
 import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils";
 
 /**
