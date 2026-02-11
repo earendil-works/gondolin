@@ -654,11 +654,28 @@ function copyInitramfsModules(srcDir: string, dstDir: string): void {
     }
   }
 
-  // Required modules for boot
-  const required = [
-    "kernel/drivers/block/virtio_blk.ko.gz",
-    "kernel/fs/ext4/ext4.ko.gz",
+  const requiredBases = [
+    "kernel/drivers/block/virtio_blk.ko",
+    "kernel/fs/ext4/ext4.ko",
+    "kernel/crypto/crc32c_generic.ko",
+    "kernel/lib/libcrc32c.ko",
   ];
+  const suffixes = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"];
+
+  const resolveModule = (base: string): string | null => {
+    for (const entry of deps.keys()) {
+      if (entry.startsWith(base)) return entry;
+    }
+    for (const suffix of suffixes) {
+      const candidate = `${base}${suffix.slice(3)}`;
+      if (fs.existsSync(path.join(srcDir, candidate))) return candidate;
+    }
+    return null;
+  };
+
+  const required = requiredBases
+    .map((base) => resolveModule(base))
+    .filter((entry): entry is string => Boolean(entry));
 
   // Resolve transitive dependencies
   const needed = new Set<string>();
@@ -1191,3 +1208,12 @@ mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
 
 exec switch_root /newroot /init
 `;
+
+/**
+ * Internal helpers exposed only for unit tests.
+ *
+ * This surface is not part of the public API and may change at any time.
+ */
+export const __test = {
+  copyInitramfsModules,
+};
