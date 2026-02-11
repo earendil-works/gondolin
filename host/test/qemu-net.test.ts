@@ -481,6 +481,56 @@ test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async
   assert.ok(responseText.endsWith("ok"));
 });
 
+test("qemu-net: fetchAndRespond drops auth headers on cross-origin redirects", async () => {
+  const calls: Array<{ url: string; init: any }> = [];
+
+  const fetchMock = async (url: string, init: any) => {
+    calls.push({ url, init });
+
+    if (calls.length === 1) {
+      return new Response(null, {
+        status: 307,
+        headers: { location: "https://storage.example.net/blob" },
+      });
+    }
+
+    const headers = init.headers as Record<string, string>;
+    assert.equal(headers.authorization, undefined);
+    assert.equal(headers.cookie, undefined);
+
+    return new Response("ok", {
+      status: 200,
+      headers: { "content-length": "2" },
+    });
+  };
+
+  const backend = makeBackend({
+    fetch: fetchMock as any,
+    httpHooks: {
+      isIpAllowed: () => true,
+    },
+  });
+
+  // Avoid real DNS in ensureRequestAllowed()
+  (backend as any).resolveHostname = async () => ({ address: "203.0.113.1", family: 4 });
+
+  const request = {
+    method: "GET",
+    target: "/start",
+    version: "HTTP/1.1",
+    headers: {
+      host: "registry.example.com",
+      authorization: "Bearer token",
+      cookie: "session=secret",
+    },
+    body: Buffer.alloc(0),
+  };
+
+  await (backend as any).fetchAndRespond(request, "https", () => {});
+
+  assert.equal(calls.length, 2);
+});
+
 test("qemu-net: fetchAndRespond rejects OPTIONS * (asterisk-form)", async () => {
   const writes: Buffer[] = [];
 

@@ -1,0 +1,33 @@
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": [
+      "linux-virt",
+      "rng-tools",
+      "bash",
+      "ca-certificates",
+      "curl",
+      "nodejs",
+      "npm",
+      "uv",
+      "python3",
+      "openssh",
+      "docker",
+      "docker-cli",
+      "containerd",
+      "runc",
+      "iptables"
+    ],
+    "initramfsPackages": []
+  },
+  "rootfs": {
+    "label": "gondolin-root"
+  },
+  "init": {
+    "rootfsInitExtra": "docker-init-extra.sh"
+  }
+}

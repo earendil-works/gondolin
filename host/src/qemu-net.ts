@@ -13,7 +13,12 @@ import type { ReadableStream as WebReadableStream } from "stream/web";
 import { monitorEventLoopDelay, performance } from "perf_hooks";
 import forge from "node-forge";
 
-import { loadOrCreateMitmCa, resolveMitmCertDir } from "./mitm";
+import {
+  generatePositiveSerialNumber,
+  isNonNegativeSerialNumberHex,
+  loadOrCreateMitmCa,
+  resolveMitmCertDir,
+} from "./mitm";
 import { buildSyntheticDnsResponse, isProbablyDnsPacket, parseDnsQuery } from "./dns";
 import { Agent, fetch as undiciFetch } from "undici";
 
@@ -2266,7 +2271,12 @@ export class QemuNetworkBackend extends EventEmitter {
             throw new HttpRequestBlockedError("too many redirects", 508, "Loop Detected");
           }
 
-          pendingRequest = applyRedirectRequest(pendingRequest, response.status, redirectUrl);
+          pendingRequest = applyRedirectRequest(
+            currentRequest,
+            response.status,
+            currentUrl,
+            redirectUrl
+          );
           continue;
         }
 
@@ -3394,6 +3404,10 @@ export class QemuNetworkBackend extends EventEmitter {
         fsp.readFile(keyPath, "utf8"),
         fsp.readFile(certPath, "utf8"),
       ]);
+      const cert = forge.pki.certificateFromPem(certPem);
+      if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
+        throw new Error("persisted mitm leaf cert has an unsafe serial number");
+      }
       return { keyPem, certPem };
     } catch {
       // Generate new leaf certificate
@@ -3401,7 +3415,7 @@ export class QemuNetworkBackend extends EventEmitter {
       const cert = forge.pki.createCertificate();
 
       cert.publicKey = keys.publicKey;
-      cert.serialNumber = generateSerialNumber();
+      cert.serialNumber = generatePositiveSerialNumber();
       const now = new Date(Date.now() - 5 * 60 * 1000);
       cert.validity.notBefore = now;
       cert.validity.notAfter = new Date(now);
@@ -3607,10 +3621,6 @@ function normalizeLookupFailure(options: dns.LookupOneOptions | dns.LookupAllOpt
   return options.all ? [] : "";
 }
 
-function generateSerialNumber(): string {
-  return crypto.randomBytes(16).toString("hex");
-}
-
 function getUrlProtocol(url: URL): "http" | "https" | null {
   if (url.protocol === "https:") return "https";
   if (url.protocol === "http:") return "http";
@@ -3636,6 +3646,7 @@ function getRedirectUrl(response: FetchResponse, currentUrl: URL): URL | null {
 function applyRedirectRequest(
   request: HttpHookRequest,
   status: number,
+  sourceUrl: URL,
   redirectUrl: URL
 ): HttpHookRequest {
   let method = request.method;
@@ -3654,6 +3665,14 @@ function applyRedirectRequest(
     headers.host = redirectUrl.host;
   }
 
+  if (!isSameOrigin(sourceUrl, redirectUrl)) {
+    // Do not forward credentials across origins.
+    // This matches browser/fetch redirect behavior and avoids leaking registry
+    // Bearer tokens into object-storage signed URLs.
+    delete headers.authorization;
+    delete headers.cookie;
+  }
+
   if (!body || method === "GET" || method === "HEAD") {
     delete headers["content-length"];
     delete headers["content-type"];
@@ -3666,6 +3685,21 @@ function applyRedirectRequest(
     headers,
     body,
   };
+}
+
+function normalizeOriginPort(url: URL): string {
+  if (url.port) return url.port;
+  if (url.protocol === "https:") return "443";
+  if (url.protocol === "http:") return "80";
+  return "";
+}
+
+function isSameOrigin(a: URL, b: URL): boolean {
+  return (
+    a.protocol === b.protocol &&
+    a.hostname.toLowerCase() === b.hostname.toLowerCase() &&
+    normalizeOriginPort(a) === normalizeOriginPort(b)
+  );
 }
 
 /** @internal */

@@ -37,9 +37,14 @@ export async function loadOrCreateMitmCa(mitmDir: string): Promise<MitmCa> {
       fsp.readFile(caKeyPath, "utf8"),
       fsp.readFile(caCertPath, "utf8"),
     ]);
+    const key = forge.pki.privateKeyFromPem(keyPem);
+    const cert = forge.pki.certificateFromPem(certPem);
+    if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
+      throw new Error("persisted mitm ca cert has an unsafe serial number");
+    }
     return {
-      key: forge.pki.privateKeyFromPem(keyPem),
-      cert: forge.pki.certificateFromPem(certPem),
+      key,
+      cert,
       keyPem,
       certPem,
     };
@@ -62,9 +67,14 @@ export function loadOrCreateMitmCaSync(mitmDir: string): MitmCa {
   try {
     const keyPem = fs.readFileSync(caKeyPath, "utf8");
     const certPem = fs.readFileSync(caCertPath, "utf8");
+    const key = forge.pki.privateKeyFromPem(keyPem);
+    const cert = forge.pki.certificateFromPem(certPem);
+    if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
+      throw new Error("persisted mitm ca cert has an unsafe serial number");
+    }
     return {
-      key: forge.pki.privateKeyFromPem(keyPem),
-      cert: forge.pki.certificateFromPem(certPem),
+      key,
+      cert,
       keyPem,
       certPem,
     };
@@ -76,12 +86,30 @@ export function loadOrCreateMitmCaSync(mitmDir: string): MitmCa {
   }
 }
 
+export function generatePositiveSerialNumber(byteLength = 16): string {
+  const bytes = crypto.randomBytes(byteLength);
+  bytes[0] &= 0x7f;
+  if (bytes.every((value) => value === 0)) {
+    bytes[bytes.length - 1] = 1;
+  }
+  return bytes.toString("hex");
+}
+
+export function isNonNegativeSerialNumberHex(serialNumber: string): boolean {
+  const normalized = serialNumber.trim().toLowerCase();
+  if (!/^[0-9a-f]+$/.test(normalized)) {
+    return false;
+  }
+  const firstByteHex = normalized.length > 1 ? normalized.slice(0, 2) : `0${normalized}`;
+  return parseInt(firstByteHex, 16) < 0x80;
+}
+
 function generateMitmCa(): MitmCa {
   const keys = forge.pki.rsa.generateKeyPair(2048);
   const cert = forge.pki.createCertificate();
 
   cert.publicKey = keys.publicKey;
-  cert.serialNumber = crypto.randomBytes(16).toString("hex");
+  cert.serialNumber = generatePositiveSerialNumber();
   const now = new Date(Date.now() - 5 * 60 * 1000);
   cert.validity.notBefore = now;
   cert.validity.notAfter = new Date(now);
