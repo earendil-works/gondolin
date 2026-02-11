@@ -99,6 +99,15 @@ export type RealFSProvider = VirtualProvider & {
   readonly rootPath: string;
 };
 
+export type VirtualFileSystemOptions = {
+  /** enable require/import module hooks */
+  moduleHooks?: boolean;
+  /** enable process.cwd/process.chdir virtualization */
+  virtualCwd?: boolean;
+  /** intercept only paths that exist in the provider */
+  overlay?: boolean;
+};
+
 export type VirtualFileSystem = {
   readonly provider: VirtualProvider;
   readonly mountPoint: string | null;
@@ -168,21 +177,35 @@ export type VirtualFileSystem = {
   };
 };
 
-export type VirtualProviderConstructor = new (...args: any[]) => VirtualProvider;
-export type MemoryProviderConstructor = new (...args: any[]) => MemoryProvider;
-export type RealFSProviderConstructor = new (...args: any[]) => RealFSProvider;
-export type VirtualFileSystemConstructor = new (...args: any[]) => VirtualFileSystem;
+export type VirtualProviderConstructor = new () => VirtualProvider;
+export type MemoryProviderConstructor = new () => MemoryProvider;
+export type RealFSProviderConstructor = new (rootPath: string) => RealFSProvider;
+export interface VirtualFileSystemConstructor {
+  new (): VirtualFileSystem;
+  new (options: VirtualFileSystemOptions): VirtualFileSystem;
+  new (provider: VirtualProvider, options?: VirtualFileSystemOptions): VirtualFileSystem;
+}
 
 const { VirtualFileSystem } = loader.load('file_system') as { VirtualFileSystem: VirtualFileSystemConstructor };
 const { VirtualProvider } = loader.load('provider') as { VirtualProvider: VirtualProviderConstructor };
 const { MemoryProvider } = loader.loadProvider('memory') as { MemoryProvider: MemoryProviderConstructor };
 const { RealFSProvider } = loader.loadProvider('real') as { RealFSProvider: RealFSProviderConstructor };
 
-function create(providerOrOptions?: VirtualProvider | object, options?: object) {
-  if (providerOrOptions && typeof providerOrOptions === 'object' && 'openSync' in providerOrOptions) {
-    return new VirtualFileSystem(providerOrOptions as VirtualProvider, options);
+function isVirtualProvider(value: unknown): value is VirtualProvider {
+  return !!value && typeof value === 'object' && typeof (value as { openSync?: unknown }).openSync === 'function';
+}
+
+function create(): VirtualFileSystem;
+function create(options: VirtualFileSystemOptions): VirtualFileSystem;
+function create(provider: VirtualProvider, options?: VirtualFileSystemOptions): VirtualFileSystem;
+function create(providerOrOptions?: VirtualProvider | VirtualFileSystemOptions, options?: VirtualFileSystemOptions) {
+  if (isVirtualProvider(providerOrOptions)) {
+    return new VirtualFileSystem(providerOrOptions, options);
   }
-  return new VirtualFileSystem(providerOrOptions as object | undefined);
+  if (providerOrOptions === undefined) {
+    return new VirtualFileSystem();
+  }
+  return new VirtualFileSystem(providerOrOptions);
 }
 
 export { create, VirtualFileSystem, VirtualProvider, MemoryProvider, RealFSProvider };

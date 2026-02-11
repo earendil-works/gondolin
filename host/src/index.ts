@@ -51,6 +51,7 @@ export {
   FsRpcService,
   type VirtualFileHandle,
   type VfsStatfs,
+  type VirtualFileSystemOptions,
   type VfsHooks,
   type VfsHookContext,
   type FsRpcMetrics,
