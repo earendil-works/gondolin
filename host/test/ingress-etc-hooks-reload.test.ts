@@ -24,10 +24,19 @@ function writeListenersLikeGuest(root: VirtualProvider, text: string) {
 }
 
 async function waitForChanged(listeners: GondolinListeners, timeoutMs = 1000) {
-  await Promise.race([
-    once(listeners, "changed"),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for listeners changed")), timeoutMs)),
-  ]);
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      once(listeners, "changed"),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("timed out waiting for listeners changed")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 test("/etc/gondolin/listeners: guest writes can update routes repeatedly", async () => {

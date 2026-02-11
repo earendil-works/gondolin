@@ -215,12 +215,20 @@ export class SandboxController extends EventEmitter {
     }, 3000);
 
     // Hard cap on waiting for the child to exit.
-    await Promise.race([
-      waitForExit,
-      new Promise<void>((resolve) => setTimeout(resolve, closeTimeoutMs)),
-    ]);
-
-    clearTimeout(sigkillTimer);
+    let closeTimeoutTimer: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        waitForExit,
+        new Promise<void>((resolve) => {
+          closeTimeoutTimer = setTimeout(resolve, closeTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (closeTimeoutTimer) {
+        clearTimeout(closeTimeoutTimer);
+      }
+      clearTimeout(sigkillTimer);
+    }
 
     // If the child is still around, do not keep the event loop alive waiting for it.
     if (!exited) {

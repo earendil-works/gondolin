@@ -107,10 +107,19 @@ export async function withVm<T>(
 
 /** Try to close a VM, giving up after {@link ms} milliseconds. */
 async function closeWithTimeout(vm: VM, ms = 5000): Promise<void> {
-  await Promise.race([
-    vm.close(),
-    new Promise<void>((resolve) => setTimeout(resolve, ms)),
-  ]);
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      vm.close(),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 export async function closeVm(key: string): Promise<void> {
@@ -128,16 +137,23 @@ export async function closeVm(key: string): Promise<void> {
   const inflight = pending.get(key);
   pending.delete(key);
   if (inflight) {
+    let timeout: NodeJS.Timeout | null = null;
     try {
       const created = await Promise.race([
         inflight,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => resolve(null), 5000);
+        }),
       ]);
       if (created) {
         await closeWithTimeout(created.vm);
       }
     } catch {
       // VM.create() itself failed — nothing to clean up
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
   }
 }
@@ -150,14 +166,21 @@ export async function closeAllVms(): Promise<void> {
   await Promise.all(entries.map(({ vm }) => closeWithTimeout(vm)));
   await Promise.all(
     inflightEntries.map(async (p) => {
+      let timeout: NodeJS.Timeout | null = null;
       try {
         const entry = await Promise.race([
           p,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          new Promise<null>((resolve) => {
+            timeout = setTimeout(() => resolve(null), 5000);
+          }),
         ]);
         if (entry) await closeWithTimeout(entry.vm);
       } catch {
         // ignore
+      } finally {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
       }
     })
   );
