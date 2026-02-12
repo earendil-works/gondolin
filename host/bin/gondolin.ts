@@ -91,6 +91,9 @@ function bashUsage() {
   console.log(
     "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
   );
+  console.log(
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
+  );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log(
     "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
@@ -144,6 +147,9 @@ function execUsage() {
   console.log(
     "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
   );
+  console.log(
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
+  );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log(
     "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
@@ -196,6 +202,9 @@ type CommonOptions = {
 
   /** ssh-agent socket path (defaults to $SSH_AUTH_SOCK) */
   sshAgent?: string;
+
+  /** OpenSSH known_hosts file paths for upstream host key verification */
+  sshKnownHostsFiles: string[];
 
   /** ssh credentials for host-side proxy auth */
   sshCredentials: SshCredentialSpec[];
@@ -585,6 +594,8 @@ function buildVmOptions(common: CommonOptions) {
             allowedHosts: common.sshAllowedHosts,
             credentials: sshCredentials,
             agent: common.sshAgent,
+            knownHostsFile:
+              common.sshKnownHostsFiles.length > 0 ? common.sshKnownHostsFiles : undefined,
           }
         : undefined,
     env,
@@ -609,6 +620,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
       sshAllowedHosts: [],
       sshCredentials: [],
       sshAgent: undefined,
+      sshKnownHostsFiles: [],
     },
   };
   let current: Command | null = null;
@@ -691,6 +703,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
         } else {
           args.common.sshAgent = resolveSshAgent();
         }
+        return i;
+      }
+      case "--ssh-known-hosts": {
+        const file = optionArgs[++i];
+        if (!file) fail("--ssh-known-hosts requires a path argument");
+        args.common.sshKnownHostsFiles.push(file);
         return i;
       }
       case "--ssh-credential": {
@@ -984,6 +1002,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     sshAllowedHosts: [],
     sshCredentials: [],
     sshAgent: undefined,
+    sshKnownHostsFiles: [],
     ssh: false,
     listen: false,
   };
@@ -1075,6 +1094,15 @@ function parseBashArgs(argv: string[]): BashArgs {
         } else {
           args.sshAgent = resolveSshAgent();
         }
+        break;
+      }
+      case "--ssh-known-hosts": {
+        const file = argv[++i];
+        if (!file) {
+          console.error("--ssh-known-hosts requires a path argument");
+          process.exit(1);
+        }
+        args.sshKnownHostsFiles.push(file);
         break;
       }
       case "--ssh-credential": {

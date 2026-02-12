@@ -219,7 +219,7 @@ function escapeRegExp(value: string): string {
 
 function matchOpenSshHostPattern(hostname: string, pattern: string): boolean {
   const hn = hostname.toLowerCase();
-  const pat = pattern.toLowerCase();
+  const pat = pattern.startsWith("|1|") ? pattern : pattern.toLowerCase();
 
   // Hashed hostnames: "|1|<salt-b64>|<hmac-b64>"
   if (pat.startsWith("|1|")) {
@@ -928,11 +928,11 @@ export type SshOptions = {
   credentials?: Record<string, SshCredential>;
   /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
   agent?: string;
-  /** OpenSSH known_hosts file path(s) used for default host key verification when `agent` is set */
+  /** OpenSSH known_hosts file path(s) used for default host key verification when `hostVerifier` is not set */
   knownHostsFile?: string | string[];
   /** guest-facing ssh host key */
   hostKey?: string | Buffer;
-  /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `agent` + `knownHostsFile`/default known_hosts is used) */
+  /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `knownHostsFile`/default known_hosts is used) */
   hostVerifier?: (hostname: string, key: Buffer) => boolean;
 };
 
@@ -1137,9 +1137,13 @@ export class QemuNetworkBackend extends EventEmitter {
           : null;
     let sshHostVerifier = options.ssh?.hostVerifier ?? null;
 
-    // When using the host SSH agent for upstream auth, default to OpenSSH host key
-    // verification via the local known_hosts file(s) unless an explicit verifier is provided.
-    if (this.sshAllowedHosts.length > 0 && !sshHostVerifier && this.sshAgent) {
+    // Default to OpenSSH host key verification via known_hosts unless an explicit verifier
+    // is provided. This protects against DNS poisoning / MITM for both agent and raw key auth.
+    if (
+      this.sshAllowedHosts.length > 0 &&
+      !sshHostVerifier &&
+      (this.sshAgent || this.sshCredentials.length > 0)
+    ) {
       const knownHostsFiles = normalizeSshKnownHostsFiles(options.ssh?.knownHostsFile);
       try {
         sshHostVerifier = createOpenSshKnownHostsHostVerifier(knownHostsFiles);
@@ -1166,11 +1170,11 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
       throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
     }
-    if (this.sshAllowedHosts.length > 0 && !this.sshHostVerifier) {
-      throw new Error("ssh egress requires ssh.hostVerifier to validate upstream host keys");
-    }
     if (this.sshAllowedHosts.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
       throw new Error("ssh egress requires at least one credential or ssh agent (direct ssh is not supported)");
+    }
+    if (this.sshAllowedHosts.length > 0 && !this.sshHostVerifier) {
+      throw new Error("ssh egress requires ssh.hostVerifier to validate upstream host keys");
     }
   }
 
@@ -2085,7 +2089,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const connectConfig: import("ssh2").ConnectConfig = {
       host: hostname,
       port: 22,
-      username: (credential?.username ?? guestUsername) || "git",
+      username: credential ? (credential.username ?? "git") : guestUsername || "git",
     };
 
     if (credential) {

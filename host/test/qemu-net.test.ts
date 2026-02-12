@@ -1815,14 +1815,14 @@ test("qemu-net: ssh egress requires upstream host key verification", () => {
   );
 });
 
-test("qemu-net: ssh agent defaults to known_hosts verification", () => {
+test("qemu-net: ssh auth defaults to known_hosts verification", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-${process.pid}-`));
   const knownHostsPath = path.join(dir, "known_hosts");
   const keyBlob = Buffer.from("test-host-key-blob", "utf8");
 
   fs.writeFileSync(knownHostsPath, `github.com ssh-ed25519 ${keyBlob.toString("base64")}\n`);
 
-  const backend = makeBackend({
+  const backendAgent = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
     ssh: {
       allowedHosts: ["github.com"],
@@ -1831,11 +1831,48 @@ test("qemu-net: ssh agent defaults to known_hosts verification", () => {
     },
   });
 
+  const backendCred = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      credentials: { "github.com": { privateKey: "FAKE" } },
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  for (const backend of [backendAgent, backendCred]) {
+    const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer) => boolean) | null;
+    assert.equal(typeof verifier, "function");
+    assert.equal(verifier!("github.com", keyBlob), true);
+    assert.equal(verifier!("github.com", Buffer.from("nope")), false);
+    assert.equal(verifier!("gitlab.com", keyBlob), false);
+  }
+});
+
+test("qemu-net: known_hosts hashed host patterns are supported", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-hash-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+  const host = "github.com";
+  const salt = Buffer.from("0123456789abcdef0123", "utf8");
+  const hmac = crypto.createHmac("sha1", salt).update(host, "utf8").digest();
+  const hashedHost = `|1|${salt.toString("base64")}|${hmac.toString("base64")}`;
+
+  fs.writeFileSync(knownHostsPath, `${hashedHost} ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: [host],
+      credentials: { [host]: { privateKey: "FAKE" } },
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
   const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer) => boolean) | null;
   assert.equal(typeof verifier, "function");
-  assert.equal(verifier!("github.com", keyBlob), true);
-  assert.equal(verifier!("github.com", Buffer.from("nope")), false);
-  assert.equal(verifier!("gitlab.com", keyBlob), false);
+  assert.equal(verifier!(host, keyBlob), true);
 });
 
 test("qemu-net: ssh egress requires credential or ssh agent", () => {
