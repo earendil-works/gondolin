@@ -747,11 +747,36 @@ export class NetworkStack extends EventEmitter {
     }
 
     if (payload.length > 0) {
+      // Basic TCP reassembly / retransmit handling:
+      // - only accept in-order bytes starting at `session.myAck`
+      // - ignore pure retransmits (seq+len <= myAck)
+      // - ignore out-of-order segments (seq > myAck)
+      //
+      // This matters for SSH in particular: duplicating bytes can desync the
+      // protocol and trigger errors like "Bad packet length".
+      const expectedSeq = session.myAck;
+
+      if (seq > expectedSeq) {
+        // Out-of-order: re-ACK what we've already seen.
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      const skip = Math.max(0, expectedSeq - seq);
+      if (skip >= payload.length) {
+        // Pure retransmit (or segment contains only already-acked bytes)
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        if (!FIN) {
+          return;
+        }
+      }
+
+      const newPayload = payload.subarray(skip);
       let sendBuffer: Buffer | null = null;
-      const nextAck = session.myAck + payload.length;
+      const nextAck = expectedSeq + newPayload.length;
 
       if (!session.flowProtocol) {
-        session.pendingData = Buffer.concat([session.pendingData, payload]);
+        session.pendingData = Buffer.concat([session.pendingData, newPayload]);
         const classification = this.classifyTcpFlow(session.pendingData, session.dstPort);
 
         if (classification.status === "need-more") {
@@ -793,22 +818,42 @@ export class NetworkStack extends EventEmitter {
           session.pendingData = Buffer.alloc(0);
         }
       } else {
-        sendBuffer = payload;
+        sendBuffer = newPayload;
       }
 
-      session.vmSeq += payload.length;
+      session.vmSeq = nextAck;
       session.myAck = nextAck;
 
       if (sendBuffer && sendBuffer.length > 0) {
         this.callbacks.onTcpSend({ key, data: Buffer.from(sendBuffer) });
       }
 
-      this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+      // ACK payload immediately unless FIN is also set (FIN handling below will ACK).
+      if (!FIN) {
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+      }
     }
 
     if (FIN) {
+      // FIN consumes one sequence number, so only accept it once the sequence
+      // space up to the FIN is fully received.
+      const finSeq = seq + payload.length;
+      if (finSeq > session.myAck) {
+        // Out-of-order FIN: keep ACKing the last in-order byte.
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      if (finSeq < session.myAck) {
+        // Duplicate FIN (already acked)
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      // finSeq === session.myAck
       this.callbacks.onTcpClose({ key, destroy: false });
       session.myAck++;
+
       this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
       if (session.state === "CLOSED_BY_REMOTE" || session.state === "FIN_WAIT") {
         this.clearPauseState(key);
