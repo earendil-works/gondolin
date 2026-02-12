@@ -2,7 +2,6 @@
 import fs from "fs";
 import net from "net";
 import path from "path";
-import readline from "node:readline";
 
 import { VM } from "../src/vm";
 import type { VirtualProvider } from "../src/vfs";
@@ -96,7 +95,7 @@ function bashUsage() {
   );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log(
-    "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
   );
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
   console.log();
@@ -152,7 +151,7 @@ function execUsage() {
   );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log(
-    "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
   );
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
 }
@@ -175,8 +174,6 @@ type SshCredentialSpec = {
   keyPath: string;
   /** private key passphrase (optional) */
   passphrase?: string;
-  /** prompt for passphrase on startup */
-  passphraseAsk?: boolean;
 };
 
 type CommonOptions = {
@@ -302,10 +299,10 @@ function parseHostSecret(spec: string): SecretSpec {
 
 function parseSshCredential(spec: string): SshCredentialSpec {
   // Format:
-  //   HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV][,passphrase-ask]
-  //   USER@HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV][,passphrase-ask]
+  //   HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
+  //   USER@HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
   //
-  // Prefer passphrase-env (or passphrase-ask) to avoid leaking secrets into shell history.
+  // Prefer passphrase-env to avoid leaking secrets into shell history.
   const eq = spec.indexOf("=");
   if (eq === -1) {
     throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
@@ -325,7 +322,6 @@ function parseSshCredential(spec: string): SshCredentialSpec {
 
   let passphrase: string | undefined;
   let passphraseEnv: string | undefined;
-  let passphraseAsk = false;
 
   for (const optRaw of opts) {
     const opt = optRaw.trim();
@@ -340,8 +336,9 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     }
 
     if (opt === "passphrase-ask") {
-      passphraseAsk = true;
-      continue;
+      throw new Error(
+        `Invalid --ssh-credential option: ${opt} (interactive prompting is not supported; use passphrase-env=ENV)`
+      );
     }
 
     if (opt.startsWith("passphrase=")) {
@@ -350,12 +347,6 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     }
 
     throw new Error(`Invalid --ssh-credential option: ${opt}`);
-  }
-
-  if (passphraseAsk && (passphraseEnv || passphrase !== undefined)) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase-ask with passphrase/passphrase-env)`
-    );
   }
 
   if (passphraseEnv && passphrase !== undefined) {
@@ -376,7 +367,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
 
   const at = left.indexOf("@");
   if (at === -1) {
-    return { host: left, keyPath, passphrase, passphraseAsk };
+    return { host: left, keyPath, passphrase };
   }
 
   const username = left.slice(0, at).trim();
@@ -387,7 +378,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     );
   }
 
-  return { host, username, keyPath, passphrase, passphraseAsk };
+  return { host, username, keyPath, passphrase };
 }
 
 function resolveSshAgent(explicit?: string): string {
@@ -396,41 +387,6 @@ function resolveSshAgent(explicit?: string): string {
     throw new Error("--ssh-agent requires a socket path or $SSH_AUTH_SOCK");
   }
   return sock;
-}
-
-async function promptHidden(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY) {
-    throw new Error("passphrase-ask requires a TTY stdin");
-  }
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stderr,
-    terminal: true,
-  });
-
-  // Suppress terminal echo
-  (rl as any)._writeToOutput = () => {};
-
-  return await new Promise<string>((resolve) => {
-    rl.question(prompt, (answer) => {
-      rl.close();
-      process.stderr.write("\n");
-      resolve(answer);
-    });
-  });
-}
-
-async function maybePromptSshCredentialPassphrases(common: CommonOptions): Promise<void> {
-  for (const cred of common.sshCredentials) {
-    if (!cred.passphraseAsk) continue;
-    if (cred.passphrase !== undefined) continue;
-
-    const userPrefix = cred.username ? `${cred.username}@` : "";
-    cred.passphrase = await promptHidden(
-      `SSH key passphrase for ${userPrefix}${cred.host} (${cred.keyPath}): `
-    );
-  }
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {
@@ -845,7 +801,6 @@ function buildCommandPayload(command: Command) {
 }
 
 async function runExecVm(args: ExecArgs) {
-  await maybePromptSshCredentialPassphrases(args.common);
   const vmOptions = buildVmOptions(args.common);
   let vm: VM | null = null;
   let exitCode = 0;
@@ -1190,7 +1145,6 @@ function parseBashArgs(argv: string[]): BashArgs {
 
 async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
-  await maybePromptSshCredentialPassphrases(args);
   const vmOptions = buildVmOptions(args);
   let vm: VM | null = null;
   let ingressAccess: { url: string; close(): Promise<void> } | null = null;
