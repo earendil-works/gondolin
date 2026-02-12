@@ -88,6 +88,7 @@ export type {
   DnsOptions,
   SyntheticDnsHostMappingMode,
   SshOptions,
+  SshCredential,
   HttpIpAllowInfo,
   HttpHooks,
   HttpHookRequest,

@@ -103,6 +103,12 @@ const vm = await VM.create({
   },
   ssh: {
     allowedHosts: ["github.com"],
+    credentials: {
+      "github.com": {
+        username: "git",
+        privateKey: process.env.GITHUB_DEPLOY_KEY!,
+      },
+    },
   },
 });
 ```
@@ -110,8 +116,16 @@ const vm = await VM.create({
 `syntheticHostMapping: "per-host"` is required so the host can map outbound
 TCP connections on port `22` back to the intended hostname.
 
-Current behavior is allowlist + routing only; SSH authentication still happens
-inside the guest.
+When credentials are configured, the host terminates the guest SSH session and
+proxies `exec` requests (including Git smart-protocol commands) to the real
+upstream host using host-side keys. The private key is never visible in the
+guest.
+
+If no matching credential is configured for a host, SSH falls back to direct
+passthrough unless `ssh.requireCredentials` is set.
+
+Because this is SSH termination, the guest sees a host-provided SSH host key;
+configure guest `known_hosts` (or disable strict checking explicitly) as needed.
 
 ## License and Links
 

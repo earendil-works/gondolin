@@ -21,6 +21,15 @@ import {
 } from "./mitm";
 import { buildSyntheticDnsResponse, isLocalhostDnsName, isProbablyDnsPacket, parseDnsQuery } from "./dns";
 import { Agent, fetch as undiciFetch } from "undici";
+import {
+  Client as SshClient,
+  Server as SshServer,
+  type AuthContext as SshAuthContext,
+  type ClientChannel as SshClientChannel,
+  type Connection as SshServerConnection,
+  type ServerChannel as SshServerChannel,
+  type Session as SshServerSession,
+} from "ssh2";
 
 const MAX_HTTP_REDIRECTS = 10;
 const MAX_HTTP_HEADER_BYTES = 64 * 1024;
@@ -99,6 +108,29 @@ function normalizeIpv4Servers(servers?: string[]): string[] {
   }
 
   return unique;
+}
+
+function generateSshHostKey(): string {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519", {
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  return privateKey;
+}
+
+function normalizeSshCredentials(credentials?: Record<string, SshCredential>): ResolvedSshCredential[] {
+  const entries: ResolvedSshCredential[] = [];
+  for (const [pattern, credential] of Object.entries(credentials ?? {})) {
+    const normalizedPattern = normalizeHostnamePattern(pattern);
+    if (!normalizedPattern) continue;
+    entries.push({
+      pattern: normalizedPattern,
+      username: credential.username,
+      privateKey: credential.privateKey,
+      passphrase: credential.passphrase,
+    });
+  }
+  return entries;
 }
 
 class SyntheticDnsHostMap {
@@ -510,6 +542,41 @@ class GuestTlsStream extends Duplex {
   }
 }
 
+class GuestSshStream extends Duplex {
+  constructor(
+    private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>,
+    private readonly onServerEnd: () => void | Promise<void>
+  ) {
+    super();
+  }
+
+  pushFromGuest(data: Buffer) {
+    this.push(data);
+  }
+
+  endFromGuest() {
+    this.push(null);
+  }
+
+  _read() {
+    // data is pushed via pushFromGuest
+  }
+
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    Promise.resolve(this.onServerWrite(Buffer.from(chunk))).then(
+      () => callback(),
+      (err) => callback(err as Error)
+    );
+  }
+
+  _final(callback: (error?: Error | null) => void) {
+    Promise.resolve(this.onServerEnd()).then(
+      () => callback(),
+      (err) => callback(err as Error)
+    );
+  }
+}
+
 type TlsSession = {
   stream: GuestTlsStream;
   socket: tls.TLSSocket;
@@ -527,6 +594,28 @@ type WebSocketState = {
   pendingBytes: number;
 };
 
+type ResolvedSshCredential = {
+  /** matched host pattern */
+  pattern: string;
+  /** upstream ssh username */
+  username?: string;
+  /** private key in OpenSSH/PEM format */
+  privateKey: string | Buffer;
+  /** private key passphrase */
+  passphrase?: string | Buffer;
+};
+
+type SshProxySession = {
+  /** guest-side injected transport stream */
+  stream: GuestSshStream;
+  /** per-flow ssh server */
+  server: SshServer;
+  /** guest-side ssh server connection */
+  connection: SshServerConnection | null;
+  /** upstream ssh client connection */
+  upstream: SshClient | null;
+};
+
 type TcpSession = {
   socket: net.Socket | null;
   srcIP: string;
@@ -537,6 +626,10 @@ type TcpSession = {
   connectIP: string;
   /** synthetic hostname derived from destination synthetic dns ip */
   syntheticHostname: string | null;
+  /** resolved upstream credential for ssh proxying */
+  sshCredential: ResolvedSshCredential | null;
+  /** active ssh proxy state when host-side credentials are used */
+  sshProxy?: SshProxySession;
   flowControlPaused: boolean;
   protocol: TcpFlowProtocol | null;
   connected: boolean;
@@ -619,9 +712,26 @@ export type DnsOptions = {
   syntheticHostMapping?: SyntheticDnsHostMappingMode;
 };
 
+export type SshCredential = {
+  /** upstream ssh username */
+  username?: string;
+  /** private key in OpenSSH/PEM format */
+  privateKey: string | Buffer;
+  /** private key passphrase */
+  passphrase?: string | Buffer;
+};
+
 export type SshOptions = {
   /** allowed ssh host patterns */
   allowedHosts: string[];
+  /** host pattern -> upstream private-key credential */
+  credentials?: Record<string, SshCredential>;
+  /** require matching credentials for all allowlisted hosts */
+  requireCredentials?: boolean;
+  /** guest-facing ssh host key */
+  hostKey?: string | Buffer;
+  /** upstream host key verifier callback */
+  hostVerifier?: (hostname: string, key: Buffer) => boolean;
 };
 
 export class HttpRequestBlockedError extends Error {
@@ -768,6 +878,10 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
   private readonly sshAllowedHosts: string[];
+  private readonly sshCredentials: ResolvedSshCredential[];
+  private readonly sshRequireCredentials: boolean;
+  private readonly sshHostKey: string;
+  private readonly sshHostVerifier: ((hostname: string, key: Buffer) => boolean) | null;
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
@@ -811,6 +925,16 @@ export class QemuNetworkBackend extends EventEmitter {
     };
 
     this.sshAllowedHosts = uniqueHostPatterns(options.ssh?.allowedHosts ?? []);
+    this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
+    this.sshRequireCredentials = options.ssh?.requireCredentials ?? false;
+    this.sshHostKey =
+      typeof options.ssh?.hostKey === "string"
+        ? options.ssh.hostKey
+        : options.ssh?.hostKey
+          ? options.ssh.hostKey.toString("utf8")
+          : generateSshHostKey();
+    this.sshHostVerifier = options.ssh?.hostVerifier ?? null;
+
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
       (this.sshAllowedHosts.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
@@ -822,6 +946,9 @@ export class QemuNetworkBackend extends EventEmitter {
     }
     if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
       throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
+    }
+    if (this.sshRequireCredentials && this.sshCredentials.length === 0) {
+      throw new Error("ssh egress with requireCredentials requires at least one credential");
     }
   }
 
@@ -1169,6 +1296,7 @@ export class QemuNetworkBackend extends EventEmitter {
       } catch {
         // ignore
       }
+      this.closeSshProxySession(session.sshProxy);
     }
     this.tcpSessions.clear();
   }
@@ -1294,6 +1422,15 @@ export class QemuNetworkBackend extends EventEmitter {
     session.socket.send(message.payload, session.upstreamPort, session.upstreamIP);
   }
 
+  private resolveSshCredential(hostname: string): ResolvedSshCredential | null {
+    for (const credential of this.sshCredentials) {
+      if (matchHostname(hostname, credential.pattern)) {
+        return credential;
+      }
+    }
+    return null;
+  }
+
   private isSshFlowAllowed(key: string, dstIP: string, dstPort: number): boolean {
     if (dstPort !== 22) return false;
     if (this.sshAllowedHosts.length === 0) return false;
@@ -1303,8 +1440,14 @@ export class QemuNetworkBackend extends EventEmitter {
     if (!hostname) return false;
     if (!matchesAnyHost(hostname, this.sshAllowedHosts)) return false;
 
+    const credential = this.resolveSshCredential(hostname);
+    if (this.sshRequireCredentials && !credential) {
+      return false;
+    }
+
     if (session) {
       session.connectIP = hostname;
+      session.sshCredential = credential;
     }
 
     return true;
@@ -1327,6 +1470,7 @@ export class QemuNetworkBackend extends EventEmitter {
       dstPort: message.dstPort,
       connectIP,
       syntheticHostname,
+      sshCredential: null,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -1351,6 +1495,8 @@ export class QemuNetworkBackend extends EventEmitter {
     } catch {
       // ignore
     }
+    this.closeSshProxySession(session.sshProxy);
+    session.sshProxy = undefined;
 
     session.pendingWrites = [];
     session.pendingWriteBytes = 0;
@@ -1388,6 +1534,11 @@ export class QemuNetworkBackend extends EventEmitter {
 
     if (session.protocol === "tls") {
       this.handleTlsData(message.key, session, message.data);
+      return;
+    }
+
+    if (session.protocol === "ssh" && session.sshCredential) {
+      this.handleSshProxyData(message.key, session, message.data);
       return;
     }
 
@@ -1430,6 +1581,9 @@ export class QemuNetworkBackend extends EventEmitter {
         }
         session.tls = undefined;
       }
+      this.closeSshProxySession(session.sshProxy);
+      session.sshProxy = undefined;
+
       if (session.socket) {
         if (message.destroy) {
           session.socket.destroy();
@@ -1482,6 +1636,287 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
+  private closeSshProxySession(proxy?: SshProxySession) {
+    if (!proxy) return;
+    try {
+      proxy.connection?.end();
+    } catch {
+      // ignore
+    }
+    try {
+      proxy.upstream?.end();
+    } catch {
+      // ignore
+    }
+    try {
+      proxy.server.close();
+    } catch {
+      // ignore
+    }
+    try {
+      proxy.stream.destroy();
+    } catch {
+      // ignore
+    }
+  }
+
+  private ensureSshProxySession(key: string, session: TcpSession): SshProxySession {
+    const existing = session.sshProxy;
+    if (existing) return existing;
+
+    if (!session.sshCredential || !session.syntheticHostname) {
+      throw new Error("ssh proxy requires credential and synthetic hostname");
+    }
+
+    const stream = new GuestSshStream(
+      async (chunk) => {
+        this.stack?.handleTcpData({ key, data: chunk });
+        this.flush();
+        await this.waitForFlowResume(key);
+      },
+      async () => {
+        this.stack?.handleTcpEnd({ key });
+        this.flush();
+      }
+    );
+
+    const server = new SshServer({
+      hostKeys: [this.sshHostKey],
+      ident: "SSH-2.0-gondolin-ssh-proxy",
+    });
+
+    const proxy: SshProxySession = {
+      stream,
+      server,
+      connection: null,
+      upstream: null,
+    };
+
+    const onProxyError = (err: unknown) => {
+      this.abortTcpSession(key, session, `ssh-proxy-error (${formatError(err)})`);
+    };
+
+    server.on("error", onProxyError);
+    stream.on("error", onProxyError);
+
+    server.on("connection", (connection) => {
+      proxy.connection = connection;
+      let guestUsername = "";
+
+      connection.on("authentication", (context: SshAuthContext) => {
+        guestUsername = context.username || guestUsername;
+        context.accept();
+      });
+
+      connection.on("error", onProxyError);
+
+      connection.on("ready", () => {
+        connection.on("session", (acceptSession) => {
+          const sshSession = acceptSession();
+          this.attachSshSessionHandlers({
+            key,
+            session,
+            proxy,
+            sshSession,
+            guestUsername,
+          });
+        });
+      });
+    });
+
+    server.injectSocket(stream as any);
+    session.sshProxy = proxy;
+
+    if (this.options.debug) {
+      this.emitDebug(`ssh proxy start ${session.srcIP}:${session.srcPort} -> ${session.syntheticHostname}:22`);
+    }
+
+    return proxy;
+  }
+
+  private attachSshSessionHandlers(options: {
+    key: string;
+    session: TcpSession;
+    proxy: SshProxySession;
+    sshSession: SshServerSession;
+    guestUsername: string;
+  }) {
+    const { key, session, proxy, sshSession, guestUsername } = options;
+
+    sshSession.on("pty", (accept) => accept());
+    sshSession.on("window-change", (accept) => accept());
+    sshSession.on("env", (accept) => accept());
+
+    sshSession.on("shell", (_accept, reject) => {
+      reject();
+    });
+
+    sshSession.on("exec", (accept, _reject, info) => {
+      const guestChannel = accept();
+      this.bridgeSshExecChannel({
+        key,
+        session,
+        proxy,
+        guestChannel,
+        command: info.command,
+        guestUsername,
+      }).catch((err) => {
+        try {
+          guestChannel.stderr.write(Buffer.from(`gondolin ssh proxy error: ${formatError(err)}\n`, "utf8"));
+        } catch {
+          // ignore
+        }
+        try {
+          guestChannel.exit(255);
+        } catch {
+          // ignore
+        }
+        try {
+          guestChannel.close();
+        } catch {
+          // ignore
+        }
+      });
+    });
+
+    sshSession.on("subsystem", (_accept, reject) => {
+      reject();
+    });
+  }
+
+  private async bridgeSshExecChannel(options: {
+    key: string;
+    session: TcpSession;
+    proxy: SshProxySession;
+    guestChannel: SshServerChannel;
+    command: string;
+    guestUsername: string;
+  }) {
+    const { key, session, proxy, guestChannel, command, guestUsername } = options;
+    const hostname = session.syntheticHostname;
+    const credential = session.sshCredential;
+    if (!hostname || !credential) {
+      throw new Error("missing ssh proxy hostname/credential");
+    }
+
+    const upstream = new SshClient();
+    proxy.upstream = upstream;
+
+    const connectConfig: import("ssh2").ConnectConfig = {
+      host: hostname,
+      port: 22,
+      username: (credential.username ?? guestUsername) || "git",
+      privateKey: credential.privateKey,
+      passphrase: credential.passphrase,
+    };
+
+    if (this.sshHostVerifier) {
+      connectConfig.hostVerifier = (key: Buffer) => this.sshHostVerifier!(hostname, key);
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settleResolve = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const settleReject = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
+
+      upstream.once("ready", settleResolve);
+      upstream.once("error", settleReject);
+      upstream.once("close", () => settleReject(new Error("upstream ssh closed before ready")));
+      upstream.connect(connectConfig);
+    });
+
+    const upstreamChannel = await new Promise<SshClientChannel>((resolve, reject) => {
+      upstream.exec(command, (err, channel) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(channel);
+      });
+    });
+
+    if (this.options.debug) {
+      this.emitDebug(`ssh proxy exec ${hostname} ${JSON.stringify(command)}`);
+    }
+
+    upstreamChannel.on("data", (data: Buffer) => {
+      guestChannel.write(data);
+    });
+
+    upstreamChannel.stderr.on("data", (data: Buffer) => {
+      guestChannel.stderr.write(data);
+    });
+
+    upstreamChannel.on("exit", (code: number | null, signal?: string) => {
+      if (typeof code === "number") {
+        guestChannel.exit(code);
+      } else if (signal) {
+        guestChannel.exit(signal);
+      }
+    });
+
+    upstreamChannel.on("close", () => {
+      try {
+        guestChannel.close();
+      } catch {
+        // ignore
+      }
+      try {
+        upstream.end();
+      } catch {
+        // ignore
+      }
+      if (proxy.upstream === upstream) {
+        proxy.upstream = null;
+      }
+    });
+
+    guestChannel.on("data", (data: Buffer) => {
+      upstreamChannel.write(data);
+    });
+
+    guestChannel.on("eof", () => {
+      upstreamChannel.end();
+    });
+
+    guestChannel.on("close", () => {
+      upstreamChannel.close();
+    });
+
+    guestChannel.on("signal", (signalName: string) => {
+      try {
+        upstreamChannel.signal(signalName);
+      } catch {
+        // ignore
+      }
+    });
+
+    upstreamChannel.on("error", (err: Error) => {
+      this.abortTcpSession(key, session, `ssh-upstream-channel-error (${formatError(err)})`);
+    });
+
+    upstream.on("error", (err: Error) => {
+      this.abortTcpSession(key, session, `ssh-upstream-error (${formatError(err)})`);
+    });
+  }
+
+  private handleSshProxyData(key: string, session: TcpSession, data: Buffer) {
+    try {
+      const proxy = this.ensureSshProxySession(key, session);
+      proxy.stream.pushFromGuest(data);
+    } catch (err) {
+      this.abortTcpSession(key, session, `ssh-proxy-init-error (${formatError(err)})`);
+    }
+  }
+
   private ensureTcpSocket(key: string, session: TcpSession) {
     if (session.socket) return;
 
@@ -1510,12 +1945,14 @@ export class QemuNetworkBackend extends EventEmitter {
     socket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
       this.resolveFlowResume(key);
+      this.closeSshProxySession(session.sshProxy);
       this.tcpSessions.delete(key);
     });
 
     socket.on("error", () => {
       this.stack?.handleTcpError({ key });
       this.resolveFlowResume(key);
+      this.closeSshProxySession(session.sshProxy);
       this.tcpSessions.delete(key);
     });
   }
@@ -3902,6 +4339,11 @@ function applyRedirectRequest(
     headers,
     body,
   };
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 function uniqueHostPatterns(patterns: string[]): string[] {

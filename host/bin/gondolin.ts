@@ -87,6 +87,7 @@ function bashUsage() {
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
   console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
+  console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
   console.log();
   console.log("Ingress:");
@@ -133,6 +134,7 @@ function execUsage() {
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
   console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
+  console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
 }
 
@@ -146,6 +148,12 @@ type SecretSpec = {
   name: string;
   value: string;
   hosts: string[];
+};
+
+type SshCredentialSpec = {
+  host: string;
+  username?: string;
+  keyPath: string;
 };
 
 type CommonOptions = {
@@ -168,6 +176,9 @@ type CommonOptions = {
 
   /** allowed ssh host patterns for outbound ssh */
   sshAllowedHosts: string[];
+
+  /** ssh credentials for host-side proxy auth */
+  sshCredentials: SshCredentialSpec[];
 
   /** enable ssh (bash command only) */
   ssh?: boolean;
@@ -258,6 +269,35 @@ function parseHostSecret(spec: string): SecretSpec {
   }
 
   return { name, value, hosts };
+}
+
+function parseSshCredential(spec: string): SshCredentialSpec {
+  // Format: HOST=KEY_PATH or USER@HOST=KEY_PATH
+  const eq = spec.indexOf("=");
+  if (eq === -1) {
+    throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
+  }
+
+  const left = spec.slice(0, eq).trim();
+  const keyPath = spec.slice(eq + 1).trim();
+  if (!left || !keyPath) {
+    throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
+  }
+
+  const at = left.indexOf("@");
+  if (at === -1) {
+    return { host: left, keyPath };
+  }
+
+  const username = left.slice(0, at).trim();
+  const host = left.slice(at + 1).trim();
+  if (!username || !host) {
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (expected USER@HOST=KEY_PATH)`
+    );
+  }
+
+  return { host, username, keyPath };
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {
@@ -358,6 +398,14 @@ function buildVmOptions(common: CommonOptions) {
     throw new Error("--dns-synthetic-host-mapping requires --dns synthetic");
   }
 
+  if (common.sshCredentials.length > 0) {
+    for (const credential of common.sshCredentials) {
+      if (!common.sshAllowedHosts.includes(credential.host)) {
+        common.sshAllowedHosts.push(credential.host);
+      }
+    }
+  }
+
   if (common.sshAllowedHosts.length > 0) {
     if (common.dnsMode && common.dnsMode !== "synthetic") {
       throw new Error("--ssh-allow-host requires --dns synthetic");
@@ -369,6 +417,25 @@ function buildVmOptions(common: CommonOptions) {
       common.dnsSyntheticHostMapping = "per-host";
     }
   }
+
+  const sshCredentials =
+    common.sshCredentials.length > 0
+      ? Object.fromEntries(
+          common.sshCredentials.map((credential) => {
+            const resolvedPath = path.resolve(credential.keyPath);
+            if (!fs.existsSync(resolvedPath)) {
+              throw new Error(`SSH key file does not exist: ${credential.keyPath}`);
+            }
+            return [
+              credential.host,
+              {
+                username: credential.username,
+                privateKey: fs.readFileSync(resolvedPath, "utf8"),
+              },
+            ];
+          })
+        )
+      : undefined;
 
   const dns =
     common.dnsMode || common.dnsTrustedServers.length > 0 || common.dnsSyntheticHostMapping
@@ -383,7 +450,14 @@ function buildVmOptions(common: CommonOptions) {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
     httpHooks,
     dns,
-    ssh: common.sshAllowedHosts.length > 0 ? { allowedHosts: common.sshAllowedHosts } : undefined,
+    ssh:
+      common.sshAllowedHosts.length > 0
+        ? {
+            allowedHosts: common.sshAllowedHosts,
+            credentials: sshCredentials,
+            requireCredentials: Boolean(sshCredentials),
+          }
+        : undefined,
     env,
   };
 
@@ -404,6 +478,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
       secrets: [],
       dnsTrustedServers: [],
       sshAllowedHosts: [],
+      sshCredentials: [],
     },
   };
   let current: Command | null = null;
@@ -476,6 +551,16 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const host = optionArgs[++i];
         if (!host) fail("--ssh-allow-host requires a host argument");
         args.common.sshAllowedHosts.push(host);
+        return i;
+      }
+      case "--ssh-credential": {
+        const spec = optionArgs[++i];
+        if (!spec) fail("--ssh-credential requires an argument");
+        try {
+          args.common.sshCredentials.push(parseSshCredential(spec));
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
+        }
         return i;
       }
       case "--disable-websockets": {
@@ -756,6 +841,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     secrets: [],
     dnsTrustedServers: [],
     sshAllowedHosts: [],
+    sshCredentials: [],
     ssh: false,
     listen: false,
   };
@@ -837,6 +923,20 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.sshAllowedHosts.push(host);
+        break;
+      }
+      case "--ssh-credential": {
+        const spec = argv[++i];
+        if (!spec) {
+          console.error("--ssh-credential requires an argument");
+          process.exit(1);
+        }
+        try {
+          args.sshCredentials.push(parseSshCredential(spec));
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
         break;
       }
       case "--disable-websockets": {

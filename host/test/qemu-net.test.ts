@@ -1702,6 +1702,112 @@ test("qemu-net: ssh egress rejects single synthetic host mapping", () => {
   );
 });
 
+test("qemu-net: ssh requireCredentials enforces credential presence", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        ssh: { allowedHosts: ["github.com"], requireCredentials: true },
+      }),
+    /requires at least one credential/i
+  );
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      requireCredentials: true,
+      credentials: {
+        "github.com": {
+          username: "git",
+          privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
+        },
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-cred",
+    srcIP: "192.168.127.3",
+    srcPort: 42000,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("github.com", 0x4444),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const githubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-cred",
+    srcIP: "192.168.127.3",
+    srcPort: 50003,
+    dstIP: githubIp,
+    dstPort: 22,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-cred", githubIp, 22), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-cred").sshCredential.pattern, "github.com");
+});
+
+test("qemu-net: ssh flows with credentials use proxy path", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      credentials: {
+        "github.com": {
+          username: "git",
+          privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
+        },
+      },
+    },
+  });
+
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 50004,
+    dstIP: "198.19.0.10",
+    dstPort: 22,
+    connectIP: "github.com",
+    syntheticHostname: "github.com",
+    sshCredential: {
+      pattern: "github.com",
+      username: "git",
+      privateKey: "k",
+    },
+    flowControlPaused: false,
+    protocol: "ssh",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  (backend as any).tcpSessions.set("tcp-proxy", session);
+
+  let usedProxy = 0;
+  let usedSocket = 0;
+  (backend as any).handleSshProxyData = () => {
+    usedProxy += 1;
+  };
+  (backend as any).ensureTcpSocket = () => {
+    usedSocket += 1;
+  };
+
+  (backend as any).handleTcpSend({ key: "tcp-proxy", data: Buffer.from("SSH-2.0-test\r\n", "ascii") });
+
+  assert.equal(usedProxy, 1);
+  assert.equal(usedSocket, 0);
+});
+
 test("qemu-net: shared checked dispatcher is reused per origin", () => {
   const backend = makeBackend({
     httpHooks: {
