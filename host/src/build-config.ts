@@ -79,6 +79,14 @@ export interface InitConfig {
 }
 
 /**
+ * Post-build command configuration.
+ */
+export interface PostBuildConfig {
+  /** shell commands executed in rootfs after package installation */
+  commands?: string[];
+}
+
+/**
  * Build configuration for generating custom VM assets.
  */
 export interface BuildConfig {
@@ -105,6 +113,9 @@ export interface BuildConfig {
 
   /** custom init scripts */
   init?: InitConfig;
+
+  /** commands executed in rootfs after package installation */
+  postBuild?: PostBuildConfig;
 
   /** custom sandboxd binary path (built-in when undefined) */
   sandboxdPath?: string;
@@ -259,6 +270,16 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       return false;
     }
     if (!isOptionalString(init.rootfsInitExtra)) {
+      return false;
+    }
+  }
+
+  if (cfg.postBuild !== undefined) {
+    if (!isRecord(cfg.postBuild)) {
+      return false;
+    }
+    const postBuild = cfg.postBuild as Record<string, unknown>;
+    if (!isOptionalStringArray(postBuild.commands)) {
       return false;
     }
   }

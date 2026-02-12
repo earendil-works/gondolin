@@ -1,0 +1,34 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { parseBuildConfig, validateBuildConfig } from "../src/build-config";
+
+test("build-config: accepts postBuild.commands", () => {
+  const cfg = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    postBuild: {
+      commands: ["pip3 install llm llm-anthropic"],
+    },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.deepEqual(parsed.postBuild?.commands, ["pip3 install llm llm-anthropic"]);
+});
+
+test("build-config: rejects invalid postBuild.commands", () => {
+  const invalid = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    postBuild: {
+      commands: [42],
+    },
+  };
+
+  assert.equal(validateBuildConfig(invalid), false);
+  assert.throws(() => parseBuildConfig(JSON.stringify(invalid)), /Invalid build configuration/);
+});

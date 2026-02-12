@@ -81,6 +81,10 @@ function resolveConfigPath(value: string, configDir?: string): string {
   return configDir ? path.resolve(configDir, value) : path.resolve(value);
 }
 
+function hasPostBuildCommands(config: BuildConfig): boolean {
+  return (config.postBuild?.commands?.length ?? 0) > 0;
+}
+
 export interface BuildOptions {
   /** output directory for the built assets */
   outputDir: string;
@@ -153,6 +157,12 @@ export async function buildAssets(
 function shouldUseContainer(config: BuildConfig): boolean {
   // Force container if explicitly configured
   if (config.container?.force) {
+    return true;
+  }
+
+  // postBuild commands execute inside the target rootfs and therefore require
+  // a Linux userspace environment.
+  if (hasPostBuildCommands(config) && process.platform !== "linux") {
     return true;
   }
 
@@ -310,6 +320,7 @@ async function buildNative(
     rootfsInit,
     initramfsInit,
     rootfsInitExtra,
+    postBuildCommands: config.postBuild?.commands ?? [],
     defaultEnv: config.env,
     workDir,
     cacheDir,

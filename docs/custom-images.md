@@ -22,6 +22,13 @@ gondolin build --config build-config.json --output ./my-assets
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
+Prebuilt example config with `postBuild.commands` (installs `llm` + plugin via pip):
+
+```bash
+gondolin build --config host/examples/llm.json --output ./llm-assets
+GONDOLIN_GUEST_DIR=./llm-assets gondolin exec -- llm --help
+```
+
 ## Build Requirements
 
 Building custom images requires the following tools:
@@ -87,6 +94,11 @@ The file has the following structure:
   },
   "rootfs": {
     "label": "gondolin-root"
+  },
+  "postBuild": {
+    "commands": [
+      "pip3 install llm llm-anthropic"
+    ]
   }
 }
 ```
@@ -101,6 +113,7 @@ The file has the following structure:
 | `alpine` | object | Alpine-specific configuration |
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
+| `postBuild` | object | Post-package commands executed in the rootfs |
 | `container` | object | Container build settings (for cross-platform) |
 | `sandboxdPath` | string | Path to custom sandboxd binary |
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
@@ -139,6 +152,23 @@ Because `env` is stored in the image, **do not put real secrets here**.
 |-------|------|-------------|
 | `rootfsInit` | string | Path to custom rootfs init script |
 | `initramfsInit` | string | Path to custom initramfs init script |
+
+### Post-Build Configuration
+
+Run shell commands inside the built rootfs after APK packages are extracted.
+This is useful for package managers like `pip` that need to install files into
+`/usr` during image creation.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `commands` | string[] | `[]` | Commands executed in order via `/bin/sh -lc` inside chroot |
+
+Notes:
+
+- Commands run in a Linux chroot environment
+- Native Linux builds need root privileges for chroot (or use `container.force=true`)
+- On macOS, builds with `postBuild.commands` automatically use a container
+- The build runtime architecture must match `arch` when using post-build commands
 
 ### Container Configuration
 

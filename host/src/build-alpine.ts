@@ -55,6 +55,8 @@ export interface AlpineBuildOptions {
   initramfsInit?: string;
   /** extra shell script content appended to rootfs init before sandboxd starts */
   rootfsInitExtra?: string;
+  /** shell commands executed in rootfs after package installation */
+  postBuildCommands?: string[];
   /** default environment variables baked into the guest image */
   defaultEnv?: Record<string, string> | string[];
   /** working directory for intermediate files */
@@ -84,6 +86,7 @@ export async function buildAlpineImages(
     alpineBranch,
     rootfsPackages,
     initramfsPackages,
+    postBuildCommands = [],
     sandboxdBin,
     sandboxfsBin,
     sandboxsshBin,
@@ -135,6 +138,10 @@ export async function buildAlpineImages(
   if (initramfsPackages.length > 0) {
     log(`Installing initramfs packages: ${initramfsPackages.join(" ")}`);
     await installPackages(initramfsDir, initramfsPackages, arch, cacheDir, log);
+  }
+
+  if (postBuildCommands.length > 0) {
+    runPostBuildCommands(rootfsDir, postBuildCommands, arch, log);
   }
 
   // Step 4 — install sandboxd, sandboxfs, sandboxssh, init scripts
@@ -607,6 +614,107 @@ async function installPackages(
     const entries = parseTar(raw);
     extractEntries(entries, targetDir);
   }
+}
+
+function runPostBuildCommands(
+  rootfsDir: string,
+  commands: string[],
+  targetArch: Architecture,
+  log: (msg: string) => void
+): void {
+  if (process.platform !== "linux") {
+    throw new Error(
+      "postBuild.commands requires a Linux build environment. Set container.force=true when building on macOS."
+    );
+  }
+
+  const runtimeArch = detectRuntimeArch();
+  if (runtimeArch !== targetArch) {
+    throw new Error(
+      `postBuild.commands cannot run for arch '${targetArch}' on runtime arch '${runtimeArch}'. ` +
+        "Build with matching --arch or disable postBuild.commands."
+    );
+  }
+
+  if (typeof process.getuid === "function" && process.getuid() !== 0) {
+    throw new Error(
+      "postBuild.commands requires root privileges to chroot into the image. " +
+        "Run inside a container (container.force=true) or as root."
+    );
+  }
+
+  const root = path.resolve(rootfsDir);
+  const shellPath = path.join(root, "bin/sh");
+  if (!fs.existsSync(shellPath)) {
+    throw new Error(`postBuild.commands requires ${shellPath}`);
+  }
+
+  const cleanupResolvConf = ensureResolvConf(root);
+  try {
+    for (let i = 0; i < commands.length; i += 1) {
+      const command = commands[i];
+      if (!command.trim()) {
+        continue;
+      }
+
+      log(`[postBuild] (${i + 1}/${commands.length}) ${command}`);
+
+      try {
+        const stdout = execFileSync("chroot", [root, "/bin/sh", "-lc", command], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        if (stdout) {
+          process.stderr.write(stdout);
+        }
+      } catch (err) {
+        const e = err as {
+          stdout?: unknown;
+          stderr?: unknown;
+          status?: unknown;
+        };
+        const stdout = typeof e.stdout === "string" ? e.stdout : "";
+        const stderr = typeof e.stderr === "string" ? e.stderr : "";
+
+        throw new Error(
+          `postBuild command failed (${i + 1}/${commands.length}): ${command}\n` +
+            `exit: ${String(e.status ?? "?")}\n` +
+            (stdout || stderr ? `${stdout}${stderr}` : "")
+        );
+      }
+    }
+  } finally {
+    cleanupResolvConf();
+  }
+}
+
+function detectRuntimeArch(): Architecture {
+  if (process.arch === "arm64") {
+    return "aarch64";
+  }
+  if (process.arch === "x64") {
+    return "x86_64";
+  }
+  throw new Error(`Unsupported runtime architecture for postBuild.commands: ${process.arch}`);
+}
+
+function ensureResolvConf(rootfsDir: string): () => void {
+  const rootfsResolv = path.join(rootfsDir, "etc/resolv.conf");
+  if (fs.existsSync(rootfsResolv)) {
+    return () => {};
+  }
+
+  const hostResolv = "/etc/resolv.conf";
+  if (!fs.existsSync(hostResolv)) {
+    return () => {};
+  }
+
+  fs.mkdirSync(path.dirname(rootfsResolv), { recursive: true });
+  fs.copyFileSync(hostResolv, rootfsResolv);
+
+  return () => {
+    fs.rmSync(rootfsResolv, { force: true });
+  };
 }
 
 // ---------------------------------------------------------------------------
