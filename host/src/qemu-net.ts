@@ -568,10 +568,6 @@ class GuestSshStream extends Duplex {
     this.push(data);
   }
 
-  endFromGuest() {
-    this.push(null);
-  }
-
   _read() {
     // data is pushed via pushFromGuest
   }
@@ -642,8 +638,6 @@ type TcpSession = {
   syntheticHostname: string | null;
   /** resolved upstream credential for ssh proxying */
   sshCredential: ResolvedSshCredential | null;
-  /** ssh proxy auth method */
-  sshProxyAuth: "credential" | "agent" | null;
   /** active ssh proxy state when host-side credentials are used */
   sshProxy?: SshProxySession;
   flowControlPaused: boolean;
@@ -742,8 +736,6 @@ export type SshOptions = {
   allowedHosts: string[];
   /** host pattern -> upstream private-key credential */
   credentials?: Record<string, SshCredential>;
-  /** @deprecated ignored; ssh egress always requires a credential or ssh agent */
-  requireCredentials?: boolean;
   /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
   agent?: string;
   /** guest-facing ssh host key */
@@ -898,7 +890,7 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshAllowedHosts: string[];
   private readonly sshCredentials: ResolvedSshCredential[];
   private readonly sshAgent: string | null;
-  private readonly sshHostKey: string;
+  private sshHostKey: string | null;
   private readonly sshHostVerifier: ((hostname: string, key: Buffer) => boolean) | null;
 
   constructor(private readonly options: QemuNetworkOptions) {
@@ -950,7 +942,7 @@ export class QemuNetworkBackend extends EventEmitter {
         ? options.ssh.hostKey
         : options.ssh?.hostKey
           ? options.ssh.hostKey.toString("utf8")
-          : generateSshHostKey();
+          : null;
     this.sshHostVerifier = options.ssh?.hostVerifier ?? null;
 
     this.syntheticDnsHostMapping =
@@ -1485,7 +1477,6 @@ export class QemuNetworkBackend extends EventEmitter {
       session.connectIP = hostname;
       session.syntheticHostname = hostname;
       session.sshCredential = credential;
-      session.sshProxyAuth = credential ? "credential" : "agent";
     }
 
     return true;
@@ -1509,7 +1500,6 @@ export class QemuNetworkBackend extends EventEmitter {
       connectIP,
       syntheticHostname,
       sshCredential: null,
-      sshProxyAuth: null,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -1699,6 +1689,14 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
+  private getOrCreateSshHostKey(): string {
+    if (this.sshHostKey !== null) {
+      return this.sshHostKey;
+    }
+    this.sshHostKey = generateSshHostKey();
+    return this.sshHostKey;
+  }
+
   private ensureSshProxySession(key: string, session: TcpSession): SshProxySession {
     const existing = session.sshProxy;
     if (existing) return existing;
@@ -1723,7 +1721,7 @@ export class QemuNetworkBackend extends EventEmitter {
     );
 
     const server = new SshServer({
-      hostKeys: [this.sshHostKey],
+      hostKeys: [this.getOrCreateSshHostKey()],
       ident: "SSH-2.0-gondolin-ssh-proxy",
     });
 

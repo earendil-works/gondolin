@@ -22,6 +22,21 @@ function makeBackend(options?: Partial<ConstructorParameters<typeof QemuNetworkB
   });
 }
 
+test("qemu-net: ssh host key generation is lazy", () => {
+  const backend = makeBackend();
+  assert.equal((backend as any).sshHostKey, null);
+
+  const backendWithSsh = makeBackend({
+    ssh: {
+      allowedHosts: ["example.com"],
+      credentials: {
+        "example.com": { privateKey: "FAKE" },
+      },
+    },
+  });
+  assert.equal((backendWithSsh as any).sshHostKey, null);
+});
+
 test("qemu-net: trusted dns mode requires ipv4 resolvers (no silent fallback)", () => {
   assert.throws(
     () => makeBackend({ dns: { mode: "trusted", trustedServers: ["::1"] } as any }),
