@@ -86,15 +86,16 @@ function bashUsage() {
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
-  console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
-  console.log("  --ssh-allow-port PORT           Allow outbound SSH to port (repeatable; default: 22)");
+  console.log("  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)");
   console.log(
     "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
   );
   console.log(
     "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
   );
-  console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
+  console.log(
+    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)"
+  );
   console.log(
     "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
   );
@@ -143,15 +144,16 @@ function execUsage() {
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
-  console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
-  console.log("  --ssh-allow-port PORT           Allow outbound SSH to port (repeatable; default: 22)");
+  console.log("  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)");
   console.log(
     "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
   );
   console.log(
     "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
   );
-  console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
+  console.log(
+    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)"
+  );
   console.log(
     "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
   );
@@ -198,9 +200,6 @@ type CommonOptions = {
 
   /** allowed ssh host patterns for outbound ssh */
   sshAllowedHosts: string[];
-
-  /** allowed destination ports for outbound ssh */
-  sshAllowedPorts: number[];
 
   /** ssh-agent socket path (defaults to $SSH_AUTH_SOCK) */
   sshAgent?: string;
@@ -553,7 +552,6 @@ function buildVmOptions(common: CommonOptions) {
       common.sshAllowedHosts.length > 0
         ? {
             allowedHosts: common.sshAllowedHosts,
-            allowedPorts: common.sshAllowedPorts.length > 0 ? common.sshAllowedPorts : undefined,
             credentials: sshCredentials,
             agent: common.sshAgent,
             knownHostsFile:
@@ -580,7 +578,6 @@ function parseExecArgs(argv: string[]): ExecArgs {
       secrets: [],
       dnsTrustedServers: [],
       sshAllowedHosts: [],
-      sshAllowedPorts: [],
       sshCredentials: [],
       sshAgent: undefined,
       sshKnownHostsFiles: [],
@@ -656,16 +653,6 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const host = optionArgs[++i];
         if (!host) fail("--ssh-allow-host requires a host argument");
         args.common.sshAllowedHosts.push(host);
-        return i;
-      }
-      case "--ssh-allow-port": {
-        const raw = optionArgs[++i];
-        if (!raw) fail("--ssh-allow-port requires a port argument");
-        const port = Number(raw);
-        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-          fail("--ssh-allow-port must be an integer between 1 and 65535");
-        }
-        args.common.sshAllowedPorts.push(port);
         return i;
       }
       case "--ssh-agent": {
@@ -972,7 +959,6 @@ function parseBashArgs(argv: string[]): BashArgs {
     secrets: [],
     dnsTrustedServers: [],
     sshAllowedHosts: [],
-    sshAllowedPorts: [],
     sshCredentials: [],
     sshAgent: undefined,
     sshKnownHostsFiles: [],
@@ -1057,20 +1043,6 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.sshAllowedHosts.push(host);
-        break;
-      }
-      case "--ssh-allow-port": {
-        const raw = argv[++i];
-        if (!raw) {
-          console.error("--ssh-allow-port requires a port argument");
-          process.exit(1);
-        }
-        const port = Number(raw);
-        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-          console.error("--ssh-allow-port must be an integer between 1 and 65535");
-          process.exit(1);
-        }
-        args.sshAllowedPorts.push(port);
         break;
       }
       case "--ssh-agent": {

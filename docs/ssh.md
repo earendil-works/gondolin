@@ -108,7 +108,7 @@ This is primarily intended for workflows like **git over SSH**.
 
 How it works:
 
-- The guest connects to `HOST:PORT` as usual (default `22`, or any configured `ssh.allowedPorts`).
+- The guest connects to `HOST:PORT` as usual (default `22`; non-standard ports are enabled by allowlisting `HOST:PORT`)
 - The host intercepts that TCP flow (SSH is only allowed when explicitly
   configured) and terminates it in an in-process SSH server.
 - For each guest `exec` request, the host opens an upstream SSH connection to
@@ -145,8 +145,7 @@ const vm = await VM.create({
   },
   ssh: {
     allowedHosts: ["github.com"],
-    // allow non-standard ssh ports (default: [22])
-    // allowedPorts: [22, 443],
+    // Non-standard ports can be allowlisted as "HOST:PORT" (e.g. "ssh.github.com:443")
     agent: process.env.SSH_AUTH_SOCK,
     knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
 

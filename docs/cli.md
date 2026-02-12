@@ -113,7 +113,7 @@ an in-process SSH server, and the host opens the real upstream SSH connection
 
 Restrictions and properties:
 
-- Destination ports are configurable (default: `22`) via `--ssh-allow-port` / `ssh.allowedPorts`
+- Non-standard ports are supported by suffixing `:PORT` in `--ssh-allow-host` (default: `22`)
 - Only non-interactive `exec` channels are supported
   - interactive shells are denied
   - SSH subsystems (such as `sftp`) are denied
@@ -123,10 +123,8 @@ Restrictions and properties:
 
 CLI flags:
 
-- `--ssh-allow-host HOST_PATTERN`
-  - Allow outbound SSH to the given host(s) (repeatable)
-- `--ssh-allow-port PORT`
-  - Allow outbound SSH to the given destination port (repeatable, default: 22)
+- `--ssh-allow-host HOST_PATTERN[:PORT]`
+  - Allow outbound SSH to the given host+port (repeatable, default port: 22)
 - `--ssh-agent [SOCK]`
   - Use a host ssh-agent socket (defaults to `$SSH_AUTH_SOCK`)
 - `--ssh-known-hosts PATH`
@@ -134,8 +132,8 @@ CLI flags:
 - `--ssh-credential SPEC`
   - Host-side SSH private key for upstream authentication
   - Format:
-    - `HOST=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
-    - `USER@HOST=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+    - `HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+    - `USER@HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
 
 Example (git over ssh using your host ssh-agent):
 
@@ -150,8 +148,7 @@ Example (git over ssh on a non-standard port):
 
 ```bash
 gondolin bash \
-  --ssh-allow-host ssh.github.com \
-  --ssh-allow-port 443 \
+  --ssh-allow-host ssh.github.com:443 \
   --ssh-agent \
   --ssh-known-hosts ~/.ssh/known_hosts
 ```

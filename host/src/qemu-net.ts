@@ -70,7 +70,6 @@ const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
 const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
-const DEFAULT_SSH_ALLOWED_PORTS = [22];
 
 class AsyncSemaphore {
   private active = 0;
@@ -128,39 +127,86 @@ function generateSshHostKey(): string {
   return privateKey;
 }
 
+type SshAllowedTarget = {
+  /** normalized host pattern */
+  pattern: string;
+  /** destination port */
+  port: number;
+};
+
+function parseSshTargetPattern(raw: string): SshAllowedTarget | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  let hostPattern = trimmed;
+  let port = 22;
+
+  // Support bracket form: [host]:port
+  if (hostPattern.startsWith("[")) {
+    const end = hostPattern.indexOf("]");
+    if (end === -1) return null;
+    const host = hostPattern.slice(1, end);
+    const rest = hostPattern.slice(end + 1);
+    if (!host) return null;
+    hostPattern = host;
+
+    if (rest) {
+      if (!rest.startsWith(":")) return null;
+      const portStr = rest.slice(1);
+      if (!/^[0-9]+$/.test(portStr)) return null;
+      port = Number.parseInt(portStr, 10);
+    }
+  } else {
+    const idx = hostPattern.lastIndexOf(":");
+    if (idx !== -1) {
+      const maybePort = hostPattern.slice(idx + 1);
+      if (/^[0-9]+$/.test(maybePort)) {
+        port = Number.parseInt(maybePort, 10);
+        hostPattern = hostPattern.slice(0, idx);
+      }
+    }
+  }
+
+  const normalizedPattern = normalizeHostnamePattern(hostPattern);
+  if (!normalizedPattern) return null;
+
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return null;
+  }
+
+  return { pattern: normalizedPattern, port };
+}
+
+function normalizeSshAllowedTargets(targets?: string[]): SshAllowedTarget[] {
+  const out: SshAllowedTarget[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of targets ?? []) {
+    const parsed = parseSshTargetPattern(raw);
+    if (!parsed) continue;
+    const key = `${parsed.pattern}:${parsed.port}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(parsed);
+  }
+
+  return out;
+}
+
 function normalizeSshCredentials(credentials?: Record<string, SshCredential>): ResolvedSshCredential[] {
   const entries: ResolvedSshCredential[] = [];
-  for (const [pattern, credential] of Object.entries(credentials ?? {})) {
-    const normalizedPattern = normalizeHostnamePattern(pattern);
-    if (!normalizedPattern) continue;
+  for (const [rawPattern, credential] of Object.entries(credentials ?? {})) {
+    const target = parseSshTargetPattern(rawPattern);
+    if (!target) continue;
     entries.push({
-      pattern: normalizedPattern,
+      pattern: target.pattern,
+      port: target.port,
       username: credential.username,
       privateKey: credential.privateKey,
       passphrase: credential.passphrase,
     });
   }
   return entries;
-}
-
-function normalizeSshAllowedPorts(ports?: number[]): number[] {
-  const candidates = (ports && ports.length > 0 ? ports : DEFAULT_SSH_ALLOWED_PORTS).map((p) => Number(p));
-  if (candidates.length === 0) {
-    throw new Error("ssh.allowedPorts must be a non-empty list of ports");
-  }
-
-  const unique: number[] = [];
-  const seen = new Set<number>();
-  for (const port of candidates) {
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new Error(`ssh.allowedPorts contains an invalid port: ${port}`);
-    }
-    if (seen.has(port)) continue;
-    seen.add(port);
-    unique.push(port);
-  }
-
-  return unique;
 }
 
 type OpenSshKnownHostsEntry = {
@@ -305,7 +351,7 @@ function hostMatchesOpenSshKnownHostsList(hostname: string, patterns: string[], 
 
 function createOpenSshKnownHostsHostVerifier(
   files: string[]
-): (hostname: string, key: Buffer, port?: number) => boolean {
+): (hostname: string, key: Buffer, port: number) => boolean {
   const entries: OpenSshKnownHostsEntry[] = [];
   const loadedFiles: string[] = [];
 
@@ -324,10 +370,10 @@ function createOpenSshKnownHostsHostVerifier(
     throw new Error(`no OpenSSH known_hosts files found (tried ${files.join(", ")})`);
   }
 
-  return (hostname: string, key: Buffer, port?: number) => {
+  return (hostname: string, key: Buffer, port: number) => {
     const host = hostname.trim().toLowerCase();
     if (!host) return false;
-    const sshPort = port ?? 22;
+    const sshPort = Number.isInteger(port) && port > 0 ? port : 22;
 
     for (const entry of entries) {
       if (!hostMatchesOpenSshKnownHostsList(host, entry.hostPatterns, sshPort)) {
@@ -825,6 +871,8 @@ type WebSocketState = {
 type ResolvedSshCredential = {
   /** matched host pattern */
   pattern: string;
+  /** destination port */
+  port: number;
   /** upstream ssh username */
   username?: string;
   /** private key in OpenSSH/PEM format */
@@ -950,10 +998,8 @@ export type SshCredential = {
 };
 
 export type SshOptions = {
-  /** allowed ssh host patterns */
+  /** allowed ssh host patterns (optionally with ":PORT" suffix to allow non-standard ports) */
   allowedHosts: string[];
-  /** allowed upstream ssh destination ports */
-  allowedPorts?: number[];
   /** host pattern -> upstream private-key credential */
   credentials?: Record<string, SshCredential>;
   /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
@@ -1121,9 +1167,9 @@ export class QemuNetworkBackend extends EventEmitter {
   };
   private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
-  private readonly sshAllowedHosts: string[];
-  private readonly sshAllowedPorts: number[];
-  private readonly sshAllowedPortsSet: ReadonlySet<number>;
+  private readonly sshAllowedTargets: SshAllowedTarget[];
+  private readonly sshSniffPorts: number[];
+  private readonly sshSniffPortsSet: ReadonlySet<number>;
   private readonly sshCredentials: ResolvedSshCredential[];
   private readonly sshAgent: string | null;
   private sshHostKey: string | null;
@@ -1176,9 +1222,9 @@ export class QemuNetworkBackend extends EventEmitter {
       ttlSeconds: options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
     };
 
-    this.sshAllowedHosts = uniqueHostPatterns(options.ssh?.allowedHosts ?? []);
-    this.sshAllowedPorts = normalizeSshAllowedPorts(options.ssh?.allowedPorts);
-    this.sshAllowedPortsSet = new Set(this.sshAllowedPorts);
+    this.sshAllowedTargets = normalizeSshAllowedTargets(options.ssh?.allowedHosts);
+    this.sshSniffPorts = Array.from(new Set(this.sshAllowedTargets.map((t) => t.port)));
+    this.sshSniffPortsSet = new Set(this.sshSniffPorts);
     this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
     this.sshAgent = options.ssh?.agent ?? null;
     this.sshHostKey =
@@ -1192,7 +1238,7 @@ export class QemuNetworkBackend extends EventEmitter {
     // Default to OpenSSH host key verification via known_hosts unless an explicit verifier
     // is provided. This protects against DNS poisoning / MITM for both agent and raw key auth.
     if (
-      this.sshAllowedHosts.length > 0 &&
+      this.sshAllowedTargets.length > 0 &&
       !sshHostVerifier &&
       (this.sshAgent || this.sshCredentials.length > 0)
     ) {
@@ -1249,20 +1295,20 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
-      (this.sshAllowedHosts.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+      (this.sshAllowedTargets.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
     this.syntheticDnsHostMap =
       this.syntheticDnsHostMapping === "per-host" ? new SyntheticDnsHostMap() : null;
 
-    if (this.sshAllowedHosts.length > 0 && this.dnsMode !== "synthetic") {
+    if (this.sshAllowedTargets.length > 0 && this.dnsMode !== "synthetic") {
       throw new Error("ssh egress requires dns mode 'synthetic'");
     }
-    if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
+    if (this.sshAllowedTargets.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
       throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
     }
-    if (this.sshAllowedHosts.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
+    if (this.sshAllowedTargets.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
       throw new Error("ssh egress requires at least one credential or ssh agent (direct ssh is not supported)");
     }
-    if (this.sshAllowedHosts.length > 0 && !this.sshHostVerifier) {
+    if (this.sshAllowedTargets.length > 0 && !this.sshHostVerifier) {
       throw new Error("ssh egress requires ssh.hostVerifier to validate upstream host keys");
     }
   }
@@ -1360,7 +1406,7 @@ export class QemuNetworkBackend extends EventEmitter {
       gatewayMac: this.options.gatewayMac,
       vmMac: this.options.vmMac,
       dnsServers,
-      sshPorts: this.sshAllowedPorts,
+      sshPorts: this.sshSniffPorts,
       callbacks: {
         onUdpSend: (message) => this.handleUdpSend(message),
         onTcpConnect: (message) => this.handleTcpConnect(message),
@@ -1752,9 +1798,11 @@ export class QemuNetworkBackend extends EventEmitter {
     session.socket.send(message.payload, session.upstreamPort, session.upstreamIP);
   }
 
-  private resolveSshCredential(hostname: string): ResolvedSshCredential | null {
+  private resolveSshCredential(hostname: string, port: number): ResolvedSshCredential | null {
+    const normalized = hostname.toLowerCase();
     for (const credential of this.sshCredentials) {
-      if (matchHostname(hostname, credential.pattern)) {
+      if (credential.port !== port) continue;
+      if (matchHostname(normalized, credential.pattern)) {
         return credential;
       }
     }
@@ -1762,15 +1810,20 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private isSshFlowAllowed(key: string, dstIP: string, dstPort: number): boolean {
-    if (!this.sshAllowedPortsSet.has(dstPort)) return false;
-    if (this.sshAllowedHosts.length === 0) return false;
+    if (this.sshAllowedTargets.length === 0) return false;
 
     const session = this.tcpSessions.get(key);
-    const hostname = session?.syntheticHostname ?? this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ?? null;
+    const hostname =
+      session?.syntheticHostname ?? this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ?? null;
     if (!hostname) return false;
-    if (!matchesAnyHost(hostname, this.sshAllowedHosts)) return false;
 
-    const credential = this.resolveSshCredential(hostname);
+    const normalized = hostname.toLowerCase();
+    const allowed = this.sshAllowedTargets.some(
+      (target) => target.port === dstPort && matchHostname(normalized, target.pattern)
+    );
+    if (!allowed) return false;
+
+    const credential = this.resolveSshCredential(hostname, dstPort);
     const canUseAgent = Boolean(this.sshAgent);
 
     // SSH egress is always proxied via the host; without a credential or agent we can't
@@ -1793,7 +1846,7 @@ export class QemuNetworkBackend extends EventEmitter {
     let connectIP =
       message.dstIP === (this.options.gatewayIP ?? "192.168.127.1") ? "127.0.0.1" : message.dstIP;
 
-    if (syntheticHostname && this.sshAllowedPortsSet.has(message.dstPort)) {
+    if (syntheticHostname && this.sshSniffPortsSet.has(message.dstPort)) {
       connectIP = syntheticHostname;
     }
 
