@@ -1699,7 +1699,7 @@ test("qemu-net: dns synthetic per-host mapping assigns stable unique IPv4 addres
 test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
-    ssh: { allowedHosts: ["github.com"] },
+    ssh: { allowedHosts: ["github.com"], agent: "/tmp/fake-ssh-agent.sock" },
   });
 
   const responses: any[] = [];
@@ -1748,7 +1748,7 @@ test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
 test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic" },
-    ssh: { allowedHosts: ["github.com"] },
+    ssh: { allowedHosts: ["github.com"], agent: "/tmp/fake-ssh-agent.sock" },
   });
   assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
 });
@@ -1775,21 +1775,20 @@ test("qemu-net: ssh egress rejects single synthetic host mapping", () => {
   );
 });
 
-test("qemu-net: ssh requireCredentials enforces credential presence", () => {
+test("qemu-net: ssh egress requires credential or ssh agent", () => {
   assert.throws(
     () =>
       makeBackend({
         dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
-        ssh: { allowedHosts: ["github.com"], requireCredentials: true },
+        ssh: { allowedHosts: ["github.com"] },
       }),
-    /requires at least one credential/i
+    /requires at least one credential|requires at least one credential or ssh agent/i
   );
 
   const backend = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
     ssh: {
       allowedHosts: ["github.com"],
-      requireCredentials: true,
       credentials: {
         "github.com": {
           username: "git",
@@ -1830,12 +1829,11 @@ test("qemu-net: ssh requireCredentials enforces credential presence", () => {
   assert.equal((backend as any).tcpSessions.get("tcp-cred").sshCredential.pattern, "github.com");
 });
 
-test("qemu-net: ssh requireCredentials allows ssh agent", () => {
+test("qemu-net: ssh egress allows ssh agent", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
     ssh: {
       allowedHosts: ["github.com"],
-      requireCredentials: true,
       agent: "/tmp/fake-ssh-agent.sock",
     },
   });

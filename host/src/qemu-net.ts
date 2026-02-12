@@ -742,7 +742,7 @@ export type SshOptions = {
   allowedHosts: string[];
   /** host pattern -> upstream private-key credential */
   credentials?: Record<string, SshCredential>;
-  /** require matching credentials (or ssh agent) for all allowlisted hosts */
+  /** @deprecated ignored; ssh egress always requires a credential or ssh agent */
   requireCredentials?: boolean;
   /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
   agent?: string;
@@ -897,7 +897,6 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
   private readonly sshAllowedHosts: string[];
   private readonly sshCredentials: ResolvedSshCredential[];
-  private readonly sshRequireCredentials: boolean;
   private readonly sshAgent: string | null;
   private readonly sshHostKey: string;
   private readonly sshHostVerifier: ((hostname: string, key: Buffer) => boolean) | null;
@@ -945,7 +944,6 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.sshAllowedHosts = uniqueHostPatterns(options.ssh?.allowedHosts ?? []);
     this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
-    this.sshRequireCredentials = options.ssh?.requireCredentials ?? false;
     this.sshAgent = options.ssh?.agent ?? null;
     this.sshHostKey =
       typeof options.ssh?.hostKey === "string"
@@ -967,8 +965,8 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
       throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
     }
-    if (this.sshRequireCredentials && this.sshCredentials.length === 0 && !this.sshAgent) {
-      throw new Error("ssh egress with requireCredentials requires at least one credential or ssh agent");
+    if (this.sshAllowedHosts.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
+      throw new Error("ssh egress requires at least one credential or ssh agent (direct ssh is not supported)");
     }
   }
 
@@ -1477,14 +1475,17 @@ export class QemuNetworkBackend extends EventEmitter {
     const credential = this.resolveSshCredential(hostname);
     const canUseAgent = Boolean(this.sshAgent);
 
-    if (this.sshRequireCredentials && !credential && !canUseAgent) {
+    // SSH egress is always proxied via the host; without a credential or agent we can't
+    // authenticate upstream and must deny the flow.
+    if (!credential && !canUseAgent) {
       return false;
     }
 
     if (session) {
       session.connectIP = hostname;
+      session.syntheticHostname = hostname;
       session.sshCredential = credential;
-      session.sshProxyAuth = credential ? "credential" : canUseAgent ? "agent" : null;
+      session.sshProxyAuth = credential ? "credential" : "agent";
     }
 
     return true;
@@ -1575,7 +1576,7 @@ export class QemuNetworkBackend extends EventEmitter {
       return;
     }
 
-    if (session.protocol === "ssh" && session.sshProxyAuth) {
+    if (session.protocol === "ssh") {
       this.handleSshProxyData(message.key, session, message.data);
       return;
     }

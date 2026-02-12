@@ -126,8 +126,8 @@ session and proxies `exec` requests (including Git smart-protocol commands) to t
 real upstream host using host-side authentication. The private key is never
 visible in the guest.
 
-If no matching credential is configured for a host and no `ssh.agent` is set, SSH
-falls back to direct passthrough unless `ssh.requireCredentials` is set.
+If no matching credential is configured for a host and no `ssh.agent` is set, the
+SSH flow is blocked (direct passthrough is not supported).
 
 Because this is SSH termination, the guest sees a host-provided SSH host key;
 configure guest `known_hosts` (or disable strict checking explicitly) as needed.

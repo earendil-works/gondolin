@@ -584,7 +584,6 @@ function buildVmOptions(common: CommonOptions) {
         ? {
             allowedHosts: common.sshAllowedHosts,
             credentials: sshCredentials,
-            requireCredentials: Boolean(sshCredentials),
             agent: common.sshAgent,
           }
         : undefined,
