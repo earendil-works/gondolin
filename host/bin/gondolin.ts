@@ -76,6 +76,7 @@ function bashUsage() {
   console.log("Command Options:");
   console.log("  --cmd CMD                       Run custom command interactively");
   console.log("  --cwd PATH                      Working directory for the command");
+  console.log("  --env KEY=VALUE                 Set environment variable (can repeat)");
   console.log();
   console.log("VFS Options:");
   console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
@@ -712,6 +713,8 @@ type BashArgs = CommonOptions & {
   cmd?: string;
   /** working directory for the command */
   cwd?: string;
+  /** environment variables */
+  env?: string[];
 };
 
 function parseBashArgs(argv: string[]): BashArgs {
@@ -723,6 +726,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     dnsTrustedServers: [],
     ssh: false,
     listen: false,
+    env: [],
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -859,6 +863,15 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.cwd = cwd;
         break;
       }
+      case "--env": {
+        const env = argv[++i];
+        if (!env) {
+          console.error("--env requires an argument");
+          process.exit(1);
+        }
+        args.env!.push(env);
+        break;
+      }
       case "--help":
       case "-h":
         bashUsage();
@@ -912,7 +925,8 @@ async function runBash(argv: string[]) {
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command: args.cmd ? [args.cmd] : undefined
+      command: args.cmd ? [args.cmd] : undefined,
+      env: args.env && args.env.length > 0 ? args.env : undefined
     });
 
     const stdin = process.stdin as NodeJS.ReadStream;
