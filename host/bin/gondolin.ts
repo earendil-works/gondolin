@@ -73,6 +73,10 @@ function bashUsage() {
   console.log("Start an interactive bash session in the sandbox.");
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
+  console.log("Command Options:");
+  console.log("  --cmd CMD                       Run custom command interactively");
+  console.log("  --cwd PATH                      Working directory for the command");
+  console.log();
   console.log("VFS Options:");
   console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
   console.log("                                  Append :ro for read-only mount");
@@ -103,6 +107,7 @@ function bashUsage() {
   console.log("  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp");
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
+  console.log("  gondolin bash --cmd claude --cwd /workspace");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --ssh");
@@ -703,6 +708,10 @@ type BashArgs = CommonOptions & {
   listenHost?: string;
   /** host port to bind ingress gateway (0 = ephemeral) */
   listenPort?: number;
+  /** custom command to run instead of bash */
+  cmd?: string;
+  /** working directory for the command */
+  cwd?: string;
 };
 
 function parseBashArgs(argv: string[]): BashArgs {
@@ -832,6 +841,24 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.sshListen = host;
         break;
       }
+      case "--cmd": {
+        const cmd = argv[++i];
+        if (!cmd) {
+          console.error("--cmd requires an argument");
+          process.exit(1);
+        }
+        args.cmd = cmd;
+        break;
+      }
+      case "--cwd": {
+        const cwd = argv[++i];
+        if (!cwd) {
+          console.error("--cwd requires an argument");
+          process.exit(1);
+        }
+        args.cwd = cwd;
+        break;
+      }
       case "--help":
       case "-h":
         bashUsage();
@@ -880,9 +907,13 @@ async function runBash(argv: string[]) {
       );
     }
 
-    // Start the shell without using ExecProcess.attach() so we can implement
+    // Start the shell (or custom command) without using ExecProcess.attach() so we can implement
     // a CLI-local escape hatch (Ctrl-]) that always regains control.
-    const proc = vm.shell({ attach: false });
+    const proc = vm.shell({
+      attach: false,
+      cwd: args.cwd,
+      command: args.cmd ? [args.cmd] : undefined
+    });
 
     const stdin = process.stdin as NodeJS.ReadStream;
     const stdout = process.stdout as NodeJS.WriteStream;
