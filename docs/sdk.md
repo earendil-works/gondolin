@@ -426,7 +426,7 @@ const { httpHooks, env } = createHttpHooks({
 
 ### SSH egress (optional)
 
-You can optionally allow outbound SSH (port `22`) from the guest to an allowlist.
+You can optionally allow outbound SSH (default port `22`, configurable via `ssh.allowedPorts`) from the guest to an allowlist.
 This is useful for git-over-SSH (e.g. cloning private repos) without granting the
 guest arbitrary TCP access.
 
@@ -443,6 +443,7 @@ const vm = await VM.create({
   },
   ssh: {
     allowedHosts: ["github.com"],
+    // allowedPorts: [22, 443],
 
     // Authenticate upstream using host ssh-agent OR a configured private key
     agent: process.env.SSH_AUTH_SOCK,

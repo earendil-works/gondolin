@@ -176,6 +176,8 @@ export type NetworkStackOptions = {
   callbacks: NetworkCallbacks;
   /** policy callback for allowing a sniffed tcp flow */
   allowTcpFlow?: (info: TcpFlowInfo) => boolean;
+  /** tcp ports that should be classified as SSH when the banner matches */
+  sshPorts?: number[];
   /** qemu tx buffer hard cap in `bytes` (includes the 4-byte length prefix) */
   txQueueMaxBytes?: number;
 };
@@ -208,6 +210,7 @@ export class NetworkStack extends EventEmitter {
 
   private readonly callbacks: NetworkCallbacks;
   private readonly allowTcpFlow: (info: TcpFlowInfo) => boolean;
+  private readonly sshPorts: ReadonlySet<number>;
   private readonly natTable = new Map<string, TcpSession>();
 
   private readonly MAX_FLOW_SNIFF = 8 * 1024;
@@ -238,6 +241,7 @@ export class NetworkStack extends EventEmitter {
     this.dnsServers = normalizeDnsServers(options.dnsServers);
     this.callbacks = options.callbacks;
     this.allowTcpFlow = options.allowTcpFlow ?? (() => true);
+    this.sshPorts = new Set((options.sshPorts && options.sshPorts.length > 0 ? options.sshPorts : [22]).filter((p) => Number.isInteger(p) && p > 0 && p <= 65535));
     this.TX_QUEUE_MAX_BYTES = options.txQueueMaxBytes ?? 8 * 1024 * 1024;
   }
 
@@ -641,7 +645,7 @@ export class NetworkStack extends EventEmitter {
       return { status: "need-more" } as const;
     }
 
-    if (dstPort === 22) {
+    if (this.sshPorts.has(dstPort)) {
       const snippet = data.toString("ascii", 0, Math.min(data.length, 4));
       if (snippet === "SSH-") {
         return { status: "ssh" } as const;

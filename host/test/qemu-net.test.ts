@@ -1765,6 +1765,89 @@ test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
   assert.equal((backend as any).isSshFlowAllowed("tcp-gitlab", gitlabIp, 22), false);
 });
 
+test("qemu-net: ssh flows can be enabled on non-standard ports", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com"],
+      allowedPorts: [22, 443],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-ssh-port",
+    srcIP: "192.168.127.3",
+    srcPort: 41123,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("ssh.github.com", 0x4010),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const sshGithubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-ssh-443",
+    srcIP: "192.168.127.3",
+    srcPort: 50011,
+    dstIP: sshGithubIp,
+    dstPort: 443,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-ssh-443", sshGithubIp, 443), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-ssh-443").connectIP, "ssh.github.com");
+});
+
+test("qemu-net: ssh flows on non-allowed ports are blocked", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com"],
+      // default allowedPorts is [22]
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-ssh-port2",
+    srcIP: "192.168.127.3",
+    srcPort: 41124,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("ssh.github.com", 0x4011),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const sshGithubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-ssh-443-blocked",
+    srcIP: "192.168.127.3",
+    srcPort: 50012,
+    dstIP: sshGithubIp,
+    dstPort: 443,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-ssh-443-blocked", sshGithubIp, 443), false);
+});
+
 test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic" },
@@ -1841,12 +1924,36 @@ test("qemu-net: ssh auth defaults to known_hosts verification", () => {
   });
 
   for (const backend of [backendAgent, backendCred]) {
-    const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer) => boolean) | null;
+    const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port?: number) => boolean) | null;
     assert.equal(typeof verifier, "function");
     assert.equal(verifier!("github.com", keyBlob), true);
     assert.equal(verifier!("github.com", Buffer.from("nope")), false);
     assert.equal(verifier!("gitlab.com", keyBlob), false);
   }
+});
+
+test("qemu-net: known_hosts port entries are respected", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-port-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+
+  fs.writeFileSync(knownHostsPath, `[ssh.github.com]:443 ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com"],
+      allowedPorts: [443],
+      agent: "/tmp/fake-ssh-agent.sock",
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port?: number) => boolean) | null;
+  assert.equal(typeof verifier, "function");
+  assert.equal(verifier!("ssh.github.com", keyBlob, 443), true);
+  // Default port (22) lookup should not match a port-specific entry
+  assert.equal(verifier!("ssh.github.com", keyBlob), false);
 });
 
 test("qemu-net: known_hosts hashed host patterns are supported", () => {
@@ -1870,7 +1977,7 @@ test("qemu-net: known_hosts hashed host patterns are supported", () => {
     },
   });
 
-  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer) => boolean) | null;
+  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port?: number) => boolean) | null;
   assert.equal(typeof verifier, "function");
   assert.equal(verifier!(host, keyBlob), true);
 });

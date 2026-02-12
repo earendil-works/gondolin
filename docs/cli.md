@@ -113,7 +113,7 @@ an in-process SSH server, and the host opens the real upstream SSH connection
 
 Restrictions and properties:
 
-- Only destination port `22` is supported
+- Destination ports are configurable (default: `22`) via `--ssh-allow-port` / `ssh.allowedPorts`
 - Only non-interactive `exec` channels are supported
   - interactive shells are denied
   - SSH subsystems (such as `sftp`) are denied
@@ -125,6 +125,8 @@ CLI flags:
 
 - `--ssh-allow-host HOST_PATTERN`
   - Allow outbound SSH to the given host(s) (repeatable)
+- `--ssh-allow-port PORT`
+  - Allow outbound SSH to the given destination port (repeatable, default: 22)
 - `--ssh-agent [SOCK]`
   - Use a host ssh-agent socket (defaults to `$SSH_AUTH_SOCK`)
 - `--ssh-known-hosts PATH`
@@ -140,6 +142,16 @@ Example (git over ssh using your host ssh-agent):
 ```bash
 gondolin bash \
   --ssh-allow-host github.com \
+  --ssh-agent \
+  --ssh-known-hosts ~/.ssh/known_hosts
+```
+
+Example (git over ssh on a non-standard port):
+
+```bash
+gondolin bash \
+  --ssh-allow-host ssh.github.com \
+  --ssh-allow-port 443 \
   --ssh-agent \
   --ssh-known-hosts ~/.ssh/known_hosts
 ```

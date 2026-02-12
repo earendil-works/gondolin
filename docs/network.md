@@ -176,7 +176,7 @@ guest can use normal SSH tooling (for example `git clone git@github.com:...`).
 
 Key properties:
 
-- SSH is only allowed to allowlisted hostnames on port `22`
+- SSH is only allowed to allowlisted hostnames on configured ports (default: `22`)
 - SSH requires `dns.mode: "synthetic"` with `dns.syntheticHostMapping: "per-host"`
   so the host can derive the intended hostname from the synthetic destination IP
 - The host verifies upstream host keys (OpenSSH `known_hosts` by default)
