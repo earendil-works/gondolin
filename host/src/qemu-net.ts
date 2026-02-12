@@ -65,6 +65,12 @@ const DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN = 16;
 const DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS = 512;
 const DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS = 30 * 1000;
 
+const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION = 4;
+const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
+const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
+const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
+const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
+
 class AsyncSemaphore {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
@@ -930,6 +936,18 @@ export type SshOptions = {
   agent?: string;
   /** OpenSSH known_hosts file path(s) used for default host key verification when `hostVerifier` is not set */
   knownHostsFile?: string | string[];
+
+  /** max concurrent upstream ssh connections per guest tcp flow */
+  maxUpstreamConnectionsPerTcpSession?: number;
+  /** max concurrent upstream ssh connections across all guest flows */
+  maxUpstreamConnectionsTotal?: number;
+  /** upstream ssh connect+handshake timeout in `ms` */
+  upstreamReadyTimeoutMs?: number;
+  /** upstream ssh keepalive interval in `ms` */
+  upstreamKeepaliveIntervalMs?: number;
+  /** upstream ssh keepalive probes before disconnect */
+  upstreamKeepaliveCountMax?: number;
+
   /** guest-facing ssh host key */
   hostKey?: string | Buffer;
   /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `knownHostsFile`/default known_hosts is used) */
@@ -1084,6 +1102,12 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshAgent: string | null;
   private sshHostKey: string | null;
   private readonly sshHostVerifier: ((hostname: string, key: Buffer) => boolean) | null;
+  private readonly sshMaxUpstreamConnectionsPerTcpSession: number;
+  private readonly sshMaxUpstreamConnectionsTotal: number;
+  private readonly sshUpstreamReadyTimeoutMs: number;
+  private readonly sshUpstreamKeepaliveIntervalMs: number;
+  private readonly sshUpstreamKeepaliveCountMax: number;
+  private readonly sshUpstreams = new Set<SshClient>();
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
@@ -1157,6 +1181,43 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     this.sshHostVerifier = sshHostVerifier;
+
+    const sshMaxPerSession =
+      options.ssh?.maxUpstreamConnectionsPerTcpSession ??
+      DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION;
+    if (!Number.isInteger(sshMaxPerSession) || sshMaxPerSession <= 0) {
+      throw new Error("ssh.maxUpstreamConnectionsPerTcpSession must be an integer > 0");
+    }
+
+    const sshMaxTotal =
+      options.ssh?.maxUpstreamConnectionsTotal ?? DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL;
+    if (!Number.isInteger(sshMaxTotal) || sshMaxTotal <= 0) {
+      throw new Error("ssh.maxUpstreamConnectionsTotal must be an integer > 0");
+    }
+
+    const sshReadyTimeoutMs =
+      options.ssh?.upstreamReadyTimeoutMs ?? DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS;
+    if (!Number.isInteger(sshReadyTimeoutMs) || sshReadyTimeoutMs <= 0) {
+      throw new Error("ssh.upstreamReadyTimeoutMs must be an integer > 0");
+    }
+
+    const sshKeepaliveIntervalMs =
+      options.ssh?.upstreamKeepaliveIntervalMs ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS;
+    if (!Number.isInteger(sshKeepaliveIntervalMs) || sshKeepaliveIntervalMs < 0) {
+      throw new Error("ssh.upstreamKeepaliveIntervalMs must be an integer >= 0");
+    }
+
+    const sshKeepaliveCountMax =
+      options.ssh?.upstreamKeepaliveCountMax ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX;
+    if (!Number.isInteger(sshKeepaliveCountMax) || sshKeepaliveCountMax < 0) {
+      throw new Error("ssh.upstreamKeepaliveCountMax must be an integer >= 0");
+    }
+
+    this.sshMaxUpstreamConnectionsPerTcpSession = sshMaxPerSession;
+    this.sshMaxUpstreamConnectionsTotal = sshMaxTotal;
+    this.sshUpstreamReadyTimeoutMs = sshReadyTimeoutMs;
+    this.sshUpstreamKeepaliveIntervalMs = sshKeepaliveIntervalMs;
+    this.sshUpstreamKeepaliveCountMax = sshKeepaliveCountMax;
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
@@ -1892,6 +1953,7 @@ export class QemuNetworkBackend extends EventEmitter {
     // A guest SSH connection can spawn multiple exec channels concurrently.
     // Each exec uses its own upstream SshClient, so make sure we close all of them.
     for (const upstream of proxy.upstreams) {
+      this.sshUpstreams.delete(upstream);
       try {
         upstream.end();
       } catch {
@@ -2076,11 +2138,24 @@ export class QemuNetworkBackend extends EventEmitter {
       throw new Error("missing ssh proxy credential/agent");
     }
 
+    if (proxy.upstreams.size >= this.sshMaxUpstreamConnectionsPerTcpSession) {
+      throw new Error(
+        `too many concurrent upstream ssh connections for this guest flow (limit ${this.sshMaxUpstreamConnectionsPerTcpSession})`
+      );
+    }
+    if (this.sshUpstreams.size >= this.sshMaxUpstreamConnectionsTotal) {
+      throw new Error(
+        `too many concurrent upstream ssh connections on host (limit ${this.sshMaxUpstreamConnectionsTotal})`
+      );
+    }
+
     const upstream = new SshClient();
     proxy.upstreams.add(upstream);
+    this.sshUpstreams.add(upstream);
 
     const removeUpstream = () => {
       proxy.upstreams.delete(upstream);
+      this.sshUpstreams.delete(upstream);
     };
 
     // Ensure we don't retain references if the client closes unexpectedly.
@@ -2090,6 +2165,9 @@ export class QemuNetworkBackend extends EventEmitter {
       host: hostname,
       port: 22,
       username: credential ? (credential.username ?? "git") : guestUsername || "git",
+      readyTimeout: this.sshUpstreamReadyTimeoutMs,
+      keepaliveInterval: this.sshUpstreamKeepaliveIntervalMs,
+      keepaliveCountMax: this.sshUpstreamKeepaliveCountMax,
     };
 
     if (credential) {
