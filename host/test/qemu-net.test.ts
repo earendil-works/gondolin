@@ -32,6 +32,7 @@ test("qemu-net: ssh host key generation is lazy", () => {
       credentials: {
         "example.com": { privateKey: "FAKE" },
       },
+      hostVerifier: () => true,
     },
   });
   assert.equal((backendWithSsh as any).sshHostKey, null);
@@ -1714,7 +1715,11 @@ test("qemu-net: dns synthetic per-host mapping assigns stable unique IPv4 addres
 test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
-    ssh: { allowedHosts: ["github.com"], agent: "/tmp/fake-ssh-agent.sock" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
   });
 
   const responses: any[] = [];
@@ -1763,7 +1768,11 @@ test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
 test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic" },
-    ssh: { allowedHosts: ["github.com"], agent: "/tmp/fake-ssh-agent.sock" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
   });
   assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
 });
@@ -1790,12 +1799,54 @@ test("qemu-net: ssh egress rejects single synthetic host mapping", () => {
   );
 });
 
+test("qemu-net: ssh egress requires upstream host key verification", () => {
+  const missingKnownHosts = path.join(os.tmpdir(), `gondolin-missing-known-hosts-${crypto.randomUUID()}`);
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        ssh: {
+          allowedHosts: ["github.com"],
+          agent: "/tmp/fake-ssh-agent.sock",
+          knownHostsFile: missingKnownHosts,
+        },
+      }),
+    /ssh\.hostVerifier to validate upstream host keys/i
+  );
+});
+
+test("qemu-net: ssh agent defaults to known_hosts verification", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+
+  fs.writeFileSync(knownHostsPath, `github.com ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer) => boolean) | null;
+  assert.equal(typeof verifier, "function");
+  assert.equal(verifier!("github.com", keyBlob), true);
+  assert.equal(verifier!("github.com", Buffer.from("nope")), false);
+  assert.equal(verifier!("gitlab.com", keyBlob), false);
+});
+
 test("qemu-net: ssh egress requires credential or ssh agent", () => {
   assert.throws(
     () =>
       makeBackend({
         dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
-        ssh: { allowedHosts: ["github.com"] },
+        ssh: {
+          allowedHosts: ["github.com"],
+          hostVerifier: () => true,
+        },
       }),
     /requires at least one credential|requires at least one credential or ssh agent/i
   );
@@ -1810,6 +1861,7 @@ test("qemu-net: ssh egress requires credential or ssh agent", () => {
           privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
         },
       },
+      hostVerifier: () => true,
     },
   });
 
@@ -1850,6 +1902,7 @@ test("qemu-net: ssh egress allows ssh agent", () => {
     ssh: {
       allowedHosts: ["github.com"],
       agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
     },
   });
 
@@ -1867,6 +1920,7 @@ test("qemu-net: ssh flows with credentials use proxy path", () => {
           privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
         },
       },
+      hostVerifier: () => true,
     },
   });
 
@@ -1914,6 +1968,7 @@ test("qemu-net: ssh flows with agent use proxy path", () => {
     ssh: {
       allowedHosts: ["github.com"],
       agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
     },
   });
 
