@@ -99,3 +99,60 @@ command without the recommended options.
 - Port forwarding is intentionally disabled. If you need host <-> guest
   connectivity for a specific service, prefer purpose-built host APIs instead of
   SSH tunnels.
+
+## Outbound SSH (Guest -> Upstream)
+
+Separate from `vm.enableSsh()` (host -> guest SSH access), Gondolin can also
+allow **outbound** SSH from the guest to specific allowlisted upstream hosts.
+This is primarily intended for workflows like **git over SSH**.
+
+How it works:
+
+- The guest connects to `HOST:22` as usual.
+- The host intercepts that TCP flow (SSH is only allowed when explicitly
+  configured) and terminates it in an in-process SSH server.
+- For each guest `exec` request, the host opens an upstream SSH connection to
+  the real destination using either:
+    - a host ssh-agent, or
+    - a configured private key
+- Upstream host keys are verified on the host via OpenSSH `known_hosts` (or a
+  custom verifier).
+
+Limitations:
+
+- Only non-interactive `exec` channels are supported
+    - interactive shells are denied
+    - subsystems (such as `sftp`) are denied
+- Upstream connections are resource-capped and time-bounded to avoid
+  guest-triggerable host DoS
+
+### CLI
+
+See the SSH egress flags in the CLI reference: [CLI](./cli.md).
+
+### SDK
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  ssh: {
+    allowedHosts: ["github.com"],
+    agent: process.env.SSH_AUTH_SOCK,
+    knownHostsFile: "~/.ssh/known_hosts",
+
+    // Optional safety/perf knobs:
+    // maxUpstreamConnectionsPerTcpSession: 4,
+    // maxUpstreamConnectionsTotal: 64,
+    // upstreamReadyTimeoutMs: 15_000,
+    // upstreamKeepaliveIntervalMs: 10_000,
+    // upstreamKeepaliveCountMax: 3,
+  },
+});
+
+// Now commands like `git clone git@github.com:org/repo.git` can work inside the guest
+```

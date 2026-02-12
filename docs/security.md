@@ -275,12 +275,13 @@ firewalling is correct, Gondolin narrows egress to a small set of patterns:
 - DNS queries (UDP/53)
 - HTTP/1.x requests
 - TLS handshakes that can be terminated locally
+- Optional allowlisted SSH sessions (proxied by the host, exec-only)
 
 Everything else is dropped before it becomes a real host socket.
 
 This means:
 - No arbitrary TCP tunnels
-- No SSH/SOCKS/VPN/proxy protocols
+- No generic SSH/SOCKS/VPN/proxy protocols (SSH egress is only allowed when explicitly enabled + allowlisted, and is proxied/limited)
 - No custom binary protocols
 
 ### Make the Host the Policy Enforcement Point

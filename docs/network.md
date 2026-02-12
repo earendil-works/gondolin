@@ -154,16 +154,46 @@ and classifies it:
 
 - **HTTP**: looks like an HTTP/1.x request line
 - **TLS**: looks like a TLS ClientHello
+- **SSH**: looks like an SSH client banner (`SSH-2.0-...`) and is only allowed
+  when SSH egress is explicitly enabled + allowlisted
 - Anything else: **blocked**
 
-This is the core mechanism that prevents arbitrary TCP tunneling.  The guest can
-open TCP sockets, but only connections that quickly turn into HTTP or TLS will
-be bridged.
+This is the core mechanism that prevents arbitrary TCP tunneling. The guest can
+open TCP sockets, but only connections that quickly turn into HTTP, TLS, or
+configured SSH will be forwarded.
 
 Design notes:
 
 - HTTP `CONNECT` is explicitly denied. This prevents using HTTP as a generic tunnel.
+- SSH egress (when enabled) is proxied by the host and intentionally limited to
+  non-interactive `exec` usage.
 - Protocol classification is deliberately conservative.
+
+## Outbound SSH Egress (Optional)
+
+If SSH egress is enabled (via `VM.create({ ssh: ... })` or the CLI flags), the
+guest can use normal SSH tooling (for example `git clone git@github.com:...`).
+
+Key properties:
+
+- SSH is only allowed to allowlisted hostnames on port `22`
+- SSH requires `dns.mode: "synthetic"` with `dns.syntheticHostMapping: "per-host"`
+  so the host can derive the intended hostname from the synthetic destination IP
+- The host verifies upstream host keys (OpenSSH `known_hosts` by default)
+- The guest never receives the host's private key material; upstream auth happens
+  on the host (ssh-agent or configured key)
+
+The SSH proxy is intentionally constrained:
+
+- only `exec` channels are supported
+- interactive shells and SSH subsystems (such as `sftp`) are denied
+
+To keep behavior predictable and bound resource usage, the host applies
+connection caps and timeouts (configurable via `ssh.*` options):
+
+- max concurrent upstream SSH connections per guest TCP flow
+- max concurrent upstream SSH connections total (across all flows)
+- bounded handshake (`readyTimeout`) and SSH keepalives
 
 ## HTTP Bridging
 
@@ -275,7 +305,7 @@ Common limitations include:
 - WebSocket upgrades are supported, but after the `101` response the connection becomes an opaque tunnel (only the handshake is mediated/hookable). Disable via `allowWebSockets: false` / `--disable-websockets`
 - No HTTP `CONNECT`
 - No generic UDP (DNS-only)
-- No arbitrary TCP protocols
+- No arbitrary TCP protocols (SSH is only allowed when explicitly enabled + proxied)
 - Limited handling for unusual IP behaviors (e.g. fragmentation is not a target feature)
 
 If your workload needs general networking, Gondolin's security properties will
