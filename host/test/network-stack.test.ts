@@ -756,6 +756,54 @@ test("network-stack: TCP flow rejects CONNECT and unknown protocols", () => {
   assert.equal(denies[0].reason, "unknown-protocol");
 });
 
+test("network-stack: SSH banner on port 22 is classified as ssh", () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+  const flows: any[] = [];
+  const sends: any[] = [];
+  const closes: any[] = [];
+  let key = "";
+
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    dnsServers: ["8.8.8.8"],
+    allowTcpFlow: (info) => {
+      flows.push(info);
+      return info.protocol === "ssh";
+    },
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => (key = m.key),
+      onTcpSend: (m) => sends.push(m),
+      onTcpClose: (m) => closes.push(m),
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([198, 19, 0, 10]);
+
+  stack.handleTCP(buildTcpSegment({ srcPort: 40005, dstPort: 22, seq: 1, ack: 0, flags: 0x02 }), srcIP, dstIP);
+  stack.handleTcpConnected({ key });
+  drainAllQemuTx(stack);
+
+  const banner = Buffer.from("SSH-2.0-OpenSSH_9.0\r\n", "ascii");
+  stack.handleTCP(
+    buildTcpSegment({ srcPort: 40005, dstPort: 22, seq: 2, ack: 0, flags: 0x18, payload: banner }),
+    srcIP,
+    dstIP
+  );
+
+  assert.equal(flows.length, 1);
+  assert.equal(flows[0].protocol, "ssh");
+  assert.equal(sends.length, 1);
+  assert.deepEqual(sends[0].data, banner);
+  assert.equal(closes.length, 0);
+});
+
 test("network-stack: TCP sniff-limit exceeded rejects incomplete HTTP request line", () => {
   const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
   const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);

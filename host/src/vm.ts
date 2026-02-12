@@ -25,7 +25,7 @@ import {
   type SandboxConnection,
 } from "./sandbox-server";
 import type { SandboxState } from "./sandbox-controller";
-import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
+import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
 import {
   MemoryProvider,
   SandboxVfsProvider,
@@ -113,6 +113,8 @@ export type VMOptions = {
 
   /** dns configuration */
   dns?: DnsOptions;
+  /** ssh egress configuration */
+  ssh?: SshOptions;
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
@@ -328,6 +330,9 @@ export class VM {
     if (options.dns && sandboxOptions.dns === undefined) {
       sandboxOptions.dns = options.dns;
     }
+    if (options.ssh && sandboxOptions.ssh === undefined) {
+      sandboxOptions.ssh = options.ssh;
+    }
     if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
       sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
@@ -443,6 +448,9 @@ export class VM {
     }
     if (options.dns && sandboxOptions.dns === undefined) {
       sandboxOptions.dns = options.dns;
+    }
+    if (options.ssh && sandboxOptions.ssh === undefined) {
+      sandboxOptions.ssh = options.ssh;
     }
     if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
       sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;

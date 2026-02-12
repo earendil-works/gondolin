@@ -91,6 +91,28 @@ risk and should only be used when required.
 > certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
 > failures (e.g. `curl: (60)`).
 
+## Outbound SSH host allowlist
+
+SSH egress can be enabled with an explicit host allowlist:
+
+```ts
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  ssh: {
+    allowedHosts: ["github.com"],
+  },
+});
+```
+
+`syntheticHostMapping: "per-host"` is required so the host can map outbound
+TCP connections on port `22` back to the intended hostname.
+
+Current behavior is allowlist + routing only; SSH authentication still happens
+inside the guest.
+
 ## License and Links
 
 - [Documentation](https://earendil-works.github.io/gondolin/)

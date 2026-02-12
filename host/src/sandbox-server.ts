@@ -38,7 +38,7 @@ import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
 } from "./qemu-net";
-import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
+import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
 import {
   debugFlagsToArray,
@@ -168,6 +168,9 @@ export type SandboxServerOptions = {
   /** dns configuration */
   dns?: DnsOptions;
 
+  /** ssh egress configuration */
+  ssh?: SshOptions;
+
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
@@ -257,6 +260,9 @@ export type ResolvedSandboxServerOptions = {
 
   /** dns configuration */
   dns?: DnsOptions;
+
+  /** ssh egress configuration */
+  ssh?: SshOptions;
 
   /** mitm ca directory path */
   mitmCertDir?: string;
@@ -474,6 +480,7 @@ export function resolveSandboxServerOptions(
     fetch: options.fetch,
     httpHooks: options.httpHooks,
     dns: options.dns,
+    ssh: options.ssh,
     mitmCertDir: options.mitmCertDir,
     vfsProvider: options.vfsProvider ?? null,
   };
@@ -1153,6 +1160,7 @@ export class SandboxServer extends EventEmitter {
           fetch: this.options.fetch,
           httpHooks: this.options.httpHooks,
           dns: this.options.dns,
+          ssh: this.options.ssh,
           mitmCertDir: this.options.mitmCertDir,
           maxHttpBodyBytes: this.options.maxHttpBodyBytes,
           maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,

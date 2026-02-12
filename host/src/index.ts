@@ -83,7 +83,16 @@ export {
 } from "./http-hooks";
 
 // Network types
-export type { DnsMode, DnsOptions, HttpIpAllowInfo, HttpHooks, HttpHookRequest, HttpFetch } from "./qemu-net";
+export type {
+  DnsMode,
+  DnsOptions,
+  SyntheticDnsHostMappingMode,
+  SshOptions,
+  HttpIpAllowInfo,
+  HttpHooks,
+  HttpHookRequest,
+  HttpFetch,
+} from "./qemu-net";
 export { HttpRequestBlockedError } from "./qemu-net";
 
 // Debug helpers

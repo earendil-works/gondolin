@@ -114,7 +114,7 @@ export type TcpResumeMessage = {
   key: string;
 };
 
-export type TcpFlowProtocol = "http" | "tls";
+export type TcpFlowProtocol = "http" | "tls" | "ssh";
 
 export type TcpFlowInfo = {
   /** nat/session key */
@@ -615,7 +615,7 @@ export class NetworkStack extends EventEmitter {
     return { method, target, version };
   }
 
-  private classifyTcpFlow(data: Buffer) {
+  private classifyTcpFlow(data: Buffer, dstPort: number) {
     if (data.length === 0) {
       return { status: "need-more" } as const;
     }
@@ -639,6 +639,16 @@ export class NetworkStack extends EventEmitter {
 
     if (prefix.status === "partial") {
       return { status: "need-more" } as const;
+    }
+
+    if (dstPort === 22) {
+      const snippet = data.toString("ascii", 0, Math.min(data.length, 4));
+      if (snippet === "SSH-") {
+        return { status: "ssh" } as const;
+      }
+      if ("SSH-".startsWith(snippet)) {
+        return { status: "need-more" } as const;
+      }
     }
 
     if (data.length < 4) {
@@ -738,7 +748,7 @@ export class NetworkStack extends EventEmitter {
 
       if (!session.flowProtocol) {
         session.pendingData = Buffer.concat([session.pendingData, payload]);
-        const classification = this.classifyTcpFlow(session.pendingData);
+        const classification = this.classifyTcpFlow(session.pendingData, session.dstPort);
 
         if (classification.status === "need-more") {
           if (session.pendingData.length >= this.MAX_FLOW_SNIFF) {
@@ -757,6 +767,8 @@ export class NetworkStack extends EventEmitter {
           session.httpMethod = classification.method;
         } else if (classification.status === "tls") {
           session.flowProtocol = "tls";
+        } else if (classification.status === "ssh") {
+          session.flowProtocol = "ssh";
         }
 
         if (session.flowProtocol) {

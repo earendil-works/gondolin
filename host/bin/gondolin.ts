@@ -85,6 +85,8 @@ function bashUsage() {
   console.log("                                  If =VALUE is omitted, reads from $NAME");
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
+  console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
+  console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
   console.log();
   console.log("Ingress:");
@@ -129,6 +131,8 @@ function execUsage() {
   console.log("                                  Add secret for specified hosts");
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
+  console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
+  console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
 }
 
@@ -158,6 +162,12 @@ type CommonOptions = {
 
   /** trusted dns server ipv4 addresses */
   dnsTrustedServers: string[];
+
+  /** synthetic dns hostname mapping mode */
+  dnsSyntheticHostMapping?: "single" | "per-host";
+
+  /** allowed ssh host patterns for outbound ssh */
+  sshAllowedHosts: string[];
 
   /** enable ssh (bash command only) */
   ssh?: boolean;
@@ -344,11 +354,28 @@ function buildVmOptions(common: CommonOptions) {
     }
   }
 
+  if (common.dnsSyntheticHostMapping && common.dnsMode && common.dnsMode !== "synthetic") {
+    throw new Error("--dns-synthetic-host-mapping requires --dns synthetic");
+  }
+
+  if (common.sshAllowedHosts.length > 0) {
+    if (common.dnsMode && common.dnsMode !== "synthetic") {
+      throw new Error("--ssh-allow-host requires --dns synthetic");
+    }
+    if (!common.dnsMode) {
+      common.dnsMode = "synthetic";
+    }
+    if (!common.dnsSyntheticHostMapping) {
+      common.dnsSyntheticHostMapping = "per-host";
+    }
+  }
+
   const dns =
-    common.dnsMode || common.dnsTrustedServers.length > 0
+    common.dnsMode || common.dnsTrustedServers.length > 0 || common.dnsSyntheticHostMapping
       ? {
           mode: common.dnsMode,
           trustedServers: common.dnsTrustedServers,
+          syntheticHostMapping: common.dnsSyntheticHostMapping,
         }
       : undefined;
 
@@ -356,6 +383,7 @@ function buildVmOptions(common: CommonOptions) {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
     httpHooks,
     dns,
+    ssh: common.sshAllowedHosts.length > 0 ? { allowedHosts: common.sshAllowedHosts } : undefined,
     env,
   };
 
@@ -375,6 +403,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
       allowedHosts: [],
       secrets: [],
       dnsTrustedServers: [],
+      sshAllowedHosts: [],
     },
   };
   let current: Command | null = null;
@@ -433,6 +462,20 @@ function parseExecArgs(argv: string[]): ExecArgs {
         if (!ip) fail("--dns-trusted-server requires an argument");
         if (net.isIP(ip) !== 4) fail("--dns-trusted-server must be a valid IPv4 address");
         args.common.dnsTrustedServers.push(ip);
+        return i;
+      }
+      case "--dns-synthetic-host-mapping": {
+        const mode = optionArgs[++i] as any;
+        if (mode !== "single" && mode !== "per-host") {
+          fail("--dns-synthetic-host-mapping must be one of: single, per-host");
+        }
+        args.common.dnsSyntheticHostMapping = mode;
+        return i;
+      }
+      case "--ssh-allow-host": {
+        const host = optionArgs[++i];
+        if (!host) fail("--ssh-allow-host requires a host argument");
+        args.common.sshAllowedHosts.push(host);
         return i;
       }
       case "--disable-websockets": {
@@ -712,6 +755,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     allowedHosts: [],
     secrets: [],
     dnsTrustedServers: [],
+    sshAllowedHosts: [],
     ssh: false,
     listen: false,
   };
@@ -775,6 +819,24 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.dnsTrustedServers.push(ip);
+        break;
+      }
+      case "--dns-synthetic-host-mapping": {
+        const mode = argv[++i] as any;
+        if (mode !== "single" && mode !== "per-host") {
+          console.error("--dns-synthetic-host-mapping must be one of: single, per-host");
+          process.exit(1);
+        }
+        args.dnsSyntheticHostMapping = mode;
+        break;
+      }
+      case "--ssh-allow-host": {
+        const host = argv[++i];
+        if (!host) {
+          console.error("--ssh-allow-host requires a host argument");
+          process.exit(1);
+        }
+        args.sshAllowedHosts.push(host);
         break;
       }
       case "--disable-websockets": {

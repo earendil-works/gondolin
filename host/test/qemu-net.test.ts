@@ -1587,6 +1587,121 @@ test("qemu-net: dns synthetic mode replies without opening udp socket", () => {
   assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
 });
 
+test("qemu-net: dns synthetic per-host mapping assigns stable unique IPv4 addresses", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+  };
+
+  const sendQuery = (name: string, id: number) => {
+    (backend as any).handleUdpSend({
+      key: `udp-${id}`,
+      srcIP: "192.168.127.3",
+      srcPort: 40000 + id,
+      dstIP: "192.168.127.1",
+      dstPort: 53,
+      payload: buildQueryA(name, id),
+    });
+    const response = responses[responses.length - 1]?.data as Buffer;
+    const parts = [...response.subarray(response.length - 4)];
+    return `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+  };
+
+  const exampleIp = sendQuery("example.com", 0x3001);
+  const githubIp = sendQuery("github.com", 0x3002);
+  const exampleIpAgain = sendQuery("example.com", 0x3003);
+
+  assert.equal(exampleIpAgain, exampleIp);
+  assert.notEqual(exampleIp, githubIp);
+  assert.ok(exampleIp.startsWith("198.19."));
+  assert.ok(githubIp.startsWith("198.19."));
+  assert.equal((backend as any).syntheticDnsHostMap.lookupHostByIp(exampleIp), "example.com");
+  assert.equal((backend as any).syntheticDnsHostMap.lookupHostByIp(githubIp), "github.com");
+});
+
+test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: { allowedHosts: ["github.com"] },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  const resolveSynthetic = (name: string, id: number) => {
+    (backend as any).handleUdpSend({
+      key: `udp-${id}`,
+      srcIP: "192.168.127.3",
+      srcPort: 41000 + id,
+      dstIP: "192.168.127.1",
+      dstPort: 53,
+      payload: buildQueryA(name, id),
+    });
+    const response = responses[responses.length - 1]?.data as Buffer;
+    const parts = [...response.subarray(response.length - 4)];
+    return `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+  };
+
+  const githubIp = resolveSynthetic("github.com", 0x4001);
+  const gitlabIp = resolveSynthetic("gitlab.com", 0x4002);
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-github",
+    srcIP: "192.168.127.3",
+    srcPort: 50001,
+    dstIP: githubIp,
+    dstPort: 22,
+  });
+  assert.equal((backend as any).isSshFlowAllowed("tcp-github", githubIp, 22), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-github").connectIP, "github.com");
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-gitlab",
+    srcIP: "192.168.127.3",
+    srcPort: 50002,
+    dstIP: gitlabIp,
+    dstPort: 22,
+  });
+  assert.equal((backend as any).isSshFlowAllowed("tcp-gitlab", gitlabIp, 22), false);
+});
+
+test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic" },
+    ssh: { allowedHosts: ["github.com"] },
+  });
+  assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
+});
+
+test("qemu-net: ssh egress requires synthetic dns mode", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "trusted", trustedServers: ["1.1.1.1"] },
+        ssh: { allowedHosts: ["github.com"] },
+      }),
+    /ssh egress requires dns mode 'synthetic'/i
+  );
+});
+
+test("qemu-net: ssh egress rejects single synthetic host mapping", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "single" },
+        ssh: { allowedHosts: ["github.com"] },
+      }),
+    /ssh egress requires dns syntheticHostMapping='per-host'/i
+  );
+});
+
 test("qemu-net: shared checked dispatcher is reused per origin", () => {
   const backend = makeBackend({
     httpHooks: {

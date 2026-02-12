@@ -19,7 +19,7 @@ import {
   loadOrCreateMitmCa,
   resolveMitmCertDir,
 } from "./mitm";
-import { buildSyntheticDnsResponse, isProbablyDnsPacket, parseDnsQuery } from "./dns";
+import { buildSyntheticDnsResponse, isLocalhostDnsName, isProbablyDnsPacket, parseDnsQuery } from "./dns";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const MAX_HTTP_REDIRECTS = 10;
@@ -46,6 +46,9 @@ const DEFAULT_DNS_MODE: DnsMode = "synthetic";
 const DEFAULT_SYNTHETIC_DNS_IPV4 = "192.0.2.1";
 const DEFAULT_SYNTHETIC_DNS_IPV6 = "2001:db8::1";
 const DEFAULT_SYNTHETIC_DNS_TTL_SECONDS = 60;
+const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode = "single";
+const SYNTHETIC_DNS_HOSTMAP_PREFIX_A = 198;
+const SYNTHETIC_DNS_HOSTMAP_PREFIX_B = 19;
 
 const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
 const DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN = 16;
@@ -96,6 +99,43 @@ function normalizeIpv4Servers(servers?: string[]): string[] {
   }
 
   return unique;
+}
+
+class SyntheticDnsHostMap {
+  private readonly hostToIp = new Map<string, string>();
+  private readonly ipToHost = new Map<string, string>();
+  private nextHostId = 1;
+
+  allocate(hostname: string): string {
+    const normalized = hostname.trim().toLowerCase();
+    if (!normalized) {
+      throw new Error("synthetic dns host mapping requires a non-empty hostname");
+    }
+
+    const existing = this.hostToIp.get(normalized);
+    if (existing) return existing;
+
+    const hostsPerBucket = 254;
+    const maxHosts = 0x100 * hostsPerBucket;
+    if (this.nextHostId > maxHosts) {
+      throw new Error("synthetic dns host mapping exhausted");
+    }
+
+    const index = this.nextHostId - 1;
+    const hi = Math.floor(index / hostsPerBucket) & 0xff;
+    const lo = (index % hostsPerBucket) + 1;
+    this.nextHostId += 1;
+
+    const ip = `${SYNTHETIC_DNS_HOSTMAP_PREFIX_A}.${SYNTHETIC_DNS_HOSTMAP_PREFIX_B}.${hi}.${lo}`;
+
+    this.hostToIp.set(normalized, ip);
+    this.ipToHost.set(ip, normalized);
+    return ip;
+  }
+
+  lookupHostByIp(ip: string): string | null {
+    return this.ipToHost.get(ip) ?? null;
+  }
 }
 
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
@@ -493,7 +533,10 @@ type TcpSession = {
   srcPort: number;
   dstIP: string;
   dstPort: number;
+  /** upstream host/ip used by the host socket connect */
   connectIP: string;
+  /** synthetic hostname derived from destination synthetic dns ip */
+  syntheticHostname: string | null;
   flowControlPaused: boolean;
   protocol: TcpFlowProtocol | null;
   connected: boolean;
@@ -554,6 +597,8 @@ export type HttpIpAllowInfo = {
 
 export type DnsMode = "open" | "trusted" | "synthetic";
 
+export type SyntheticDnsHostMappingMode = "single" | "per-host";
+
 export type DnsOptions = {
   /** dns mode */
   mode?: DnsMode;
@@ -569,6 +614,14 @@ export type DnsOptions = {
 
   /** synthetic response ttl in `seconds` (mode="synthetic") */
   syntheticTtlSeconds?: number;
+
+  /** synthetic hostname mapping strategy (mode="synthetic") */
+  syntheticHostMapping?: SyntheticDnsHostMappingMode;
+};
+
+export type SshOptions = {
+  /** allowed ssh host patterns */
+  allowedHosts: string[];
 };
 
 export class HttpRequestBlockedError extends Error {
@@ -613,6 +666,9 @@ export type QemuNetworkOptions = {
 
   /** dns configuration */
   dns?: DnsOptions;
+
+  /** ssh egress configuration */
+  ssh?: SshOptions;
 
   /** http fetch implementation */
   fetch?: HttpFetch;
@@ -709,6 +765,9 @@ export class QemuNetworkBackend extends EventEmitter {
     /** synthetic response ttl in `seconds` */
     ttlSeconds: number;
   };
+  private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
+  private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
+  private readonly sshAllowedHosts: string[];
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
@@ -750,6 +809,20 @@ export class QemuNetworkBackend extends EventEmitter {
       ipv6: options.dns?.syntheticIPv6 ?? DEFAULT_SYNTHETIC_DNS_IPV6,
       ttlSeconds: options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
     };
+
+    this.sshAllowedHosts = uniqueHostPatterns(options.ssh?.allowedHosts ?? []);
+    this.syntheticDnsHostMapping =
+      options.dns?.syntheticHostMapping ??
+      (this.sshAllowedHosts.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+    this.syntheticDnsHostMap =
+      this.syntheticDnsHostMapping === "per-host" ? new SyntheticDnsHostMap() : null;
+
+    if (this.sshAllowedHosts.length > 0 && this.dnsMode !== "synthetic") {
+      throw new Error("ssh egress requires dns mode 'synthetic'");
+    }
+    if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
+      throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
+    }
   }
 
   start() {
@@ -854,6 +927,24 @@ export class QemuNetworkBackend extends EventEmitter {
         onTcpResume: (message) => this.handleTcpResume(message),
       },
       allowTcpFlow: (info) => {
+        if (info.protocol === "ssh") {
+          const allowed = this.isSshFlowAllowed(info.key, info.dstIP, info.dstPort);
+          if (!allowed) {
+            if (this.options.debug) {
+              this.emitDebug(
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+              );
+            }
+            return false;
+          }
+
+          const session = this.tcpSessions.get(info.key);
+          if (session) {
+            session.protocol = "ssh";
+          }
+          return true;
+        }
+
         if (info.protocol !== "http" && info.protocol !== "tls") {
           if (this.options.debug) {
             this.emitDebug(
@@ -1100,7 +1191,15 @@ export class QemuNetworkBackend extends EventEmitter {
     const query = parseDnsQuery(message.payload);
     if (!query) return;
 
-    const response = buildSyntheticDnsResponse(query, this.syntheticDnsOptions);
+    const mappedIpv4 =
+      this.syntheticDnsHostMapping === "per-host" && !isLocalhostDnsName(query.firstQuestion.name)
+        ? this.syntheticDnsHostMap?.allocate(query.firstQuestion.name)
+        : null;
+
+    const response = buildSyntheticDnsResponse(query, {
+      ...this.syntheticDnsOptions,
+      ipv4: mappedIpv4 ?? this.syntheticDnsOptions.ipv4,
+    });
 
     this.stack?.handleUdpResponse({
       data: response,
@@ -1195,9 +1294,30 @@ export class QemuNetworkBackend extends EventEmitter {
     session.socket.send(message.payload, session.upstreamPort, session.upstreamIP);
   }
 
+  private isSshFlowAllowed(key: string, dstIP: string, dstPort: number): boolean {
+    if (dstPort !== 22) return false;
+    if (this.sshAllowedHosts.length === 0) return false;
+
+    const session = this.tcpSessions.get(key);
+    const hostname = session?.syntheticHostname ?? this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ?? null;
+    if (!hostname) return false;
+    if (!matchesAnyHost(hostname, this.sshAllowedHosts)) return false;
+
+    if (session) {
+      session.connectIP = hostname;
+    }
+
+    return true;
+  }
+
   private handleTcpConnect(message: TcpConnectMessage) {
-    const connectIP =
+    const syntheticHostname = this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
+    let connectIP =
       message.dstIP === (this.options.gatewayIP ?? "192.168.127.1") ? "127.0.0.1" : message.dstIP;
+
+    if (syntheticHostname && message.dstPort === 22) {
+      connectIP = syntheticHostname;
+    }
 
     const session: TcpSession = {
       socket: null,
@@ -1206,6 +1326,7 @@ export class QemuNetworkBackend extends EventEmitter {
       dstIP: message.dstIP,
       dstPort: message.dstPort,
       connectIP,
+      syntheticHostname,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -3781,6 +3902,40 @@ function applyRedirectRequest(
     headers,
     body,
   };
+}
+
+function uniqueHostPatterns(patterns: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of patterns) {
+    const normalized = normalizeHostnamePattern(raw);
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeHostnamePattern(pattern: string): string {
+  return pattern.trim().toLowerCase();
+}
+
+function matchesAnyHost(hostname: string, patterns: string[]): boolean {
+  const normalized = hostname.toLowerCase();
+  return patterns.some((pattern) => matchHostname(normalized, pattern));
+}
+
+function matchHostname(hostname: string, pattern: string): boolean {
+  if (!pattern) return false;
+  if (pattern === "*") return true;
+
+  const escaped = pattern
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  const regex = new RegExp(`^${escaped}$`, "i");
+  return regex.test(hostname);
 }
 
 function normalizeOriginPort(url: URL): string {
