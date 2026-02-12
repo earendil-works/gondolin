@@ -163,6 +163,22 @@ gondolin bash \
   --ssh-known-hosts ~/.ssh/known_hosts
 ```
 
+Inside the guest, OpenSSH is talking to the **host-side SSH proxy**, so you may see:
+
+- a host key prompt / `Permanently added ...` message (the proxy host key is ephemeral)
+- the OpenSSH post-quantum key exchange warning
+
+For non-interactive tools like `git`, you can suppress prompts and these warnings:
+
+```sh
+export GIT_SSH_COMMAND='ssh \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR'
+```
+
 ## Commands
 
 ### `gondolin bash`

@@ -126,6 +126,29 @@ Limitations:
 - Upstream connections are resource-capped and time-bounded to avoid
   guest-triggerable host DoS
 
+### Guest SSH client options (git)
+
+The guest’s OpenSSH client is connecting to Gondolin’s **host-side SSH proxy**.
+That proxy uses an ephemeral host key and does not currently support
+post-quantum key exchange, so OpenSSH may show:
+
+- `Permanently added ...` / host key prompts
+- `** WARNING: connection is not using a post-quantum key exchange algorithm.`
+
+For non-interactive tools like `git`, you can suppress prompts and these warnings:
+
+```sh
+export GIT_SSH_COMMAND='ssh \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR'
+```
+
+This only affects the guest->proxy SSH client UX. Upstream host key verification
+still happens on the host (via `known_hosts` / `--ssh-known-hosts`).
+
 ### CLI
 
 See the SSH egress flags in the CLI reference: [CLI](./cli.md).
