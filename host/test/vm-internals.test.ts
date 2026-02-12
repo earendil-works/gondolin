@@ -138,6 +138,78 @@ test("vm internals: mergeEnvInputs and buildShellEnv normalize TERM", () => {
   }
 });
 
+test("vm internals: file helpers short-circuit VFS mounts", async () => {
+  const provider = new MemoryProvider();
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: {
+      mounts: {
+        "/workspace": provider,
+      },
+    },
+  });
+
+  try {
+    (vm as any).start = async () => {
+      throw new Error("start should not be called for VFS shortcut");
+    };
+
+    await vm.writeFile("/workspace/hello.txt", "hello world");
+
+    const text = await vm.readFile("/workspace/hello.txt", { encoding: "utf-8" });
+    assert.equal(text, "hello world");
+
+    const stream = await vm.readFileStream("/workspace/hello.txt");
+    assert.equal(stream.readableObjectMode, false);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    assert.equal(Buffer.concat(chunks).toString("utf-8"), "hello world");
+
+    await vm.writeFile("/data/workspace/from-fuse.txt", "fuse-path");
+    const fromFuse = await vm.readFile("/workspace/from-fuse.txt", { encoding: "utf-8" });
+    assert.equal(fromFuse, "fuse-path");
+
+    await vm.deleteFile("/workspace/hello.txt");
+    await assert.rejects(
+      () => provider.stat("/hello.txt"),
+      (err: unknown) => {
+        const e = err as NodeJS.ErrnoException;
+        return e.code === "ENOENT" || e.code === "ERRNO_2" || e.errno === 2 || e.errno === -2;
+      }
+    );
+
+    await provider.mkdir("/dir");
+    await assert.rejects(() => vm.deleteFile("/workspace/dir"), /failed to delete guest file/);
+    await vm.deleteFile("/workspace/dir", { recursive: true });
+  } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: file helpers still use VM path for non-VFS files", async () => {
+  const provider = new MemoryProvider();
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: {
+      mounts: {
+        "/workspace": provider,
+      },
+    },
+  });
+
+  try {
+    (vm as any).start = async () => {
+      throw new Error("start called");
+    };
+
+    await assert.rejects(() => vm.readFile("/tmp/not-vfs"), /start called/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("vm internals: pending stdin and pty resize flush after markSessionReady", async () => {
   const { vm, cleanup } = makeVm({ vfs: null });
   try {

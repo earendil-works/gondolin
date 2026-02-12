@@ -62,6 +62,7 @@ import {
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
+const DEFAULT_VFS_FILE_CHUNK_SIZE = 64 * 1024;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
@@ -294,6 +295,7 @@ export class VM {
   private vfs: SandboxVfsProvider | null;
   private readonly fuseMount: string;
   private readonly fuseBinds: string[];
+  private readonly shortcutBindMounts: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
   private qemuChecked = false;
@@ -429,6 +431,10 @@ export class VM {
       this.fuseBinds = fuseConfig.fuseBinds;
       sandboxOptions.vfsProvider = this.vfs;
     }
+    this.shortcutBindMounts = this.fuseBinds
+      .filter((mountPath) => mountPath !== this.fuseMount)
+      .sort((a, b) => b.length - a.length);
+
     if (options.fetch && sandboxOptions.fetch === undefined) {
       sandboxOptions.fetch = options.fetch;
     }
@@ -604,6 +610,16 @@ export class VM {
       throw new Error("filePath must be a non-empty string");
     }
 
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
+    if (vfsPath) {
+      try {
+        return this.readFileStreamFromVfs(vfsPath, options);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to stream guest file '${filePath}': ${detail}`);
+      }
+    }
+
     await this.start();
 
     const server = this.server;
@@ -611,9 +627,6 @@ export class VM {
       throw new Error("sandbox server is not available");
     }
 
-    // XXX: For absolute paths that map to known VFS mounts we could short-circuit
-    // this RPC and read directly from `this.vfs` (the same provider wired into sandboxfs)
-    // to avoid guest round-trips
     try {
       return await server.readGuestFileStream(filePath, {
         cwd: options.cwd,
@@ -640,25 +653,36 @@ export class VM {
       throw new Error("filePath must be a non-empty string");
     }
 
-    await this.start();
-
-    const server = this.server;
-    if (!server) {
-      throw new Error("sandbox server is not available");
-    }
-
-    // XXX: Same short-circuit idea as readFileStream(): if `filePath` is on a
-    // mounted host VFS path we could use `this.vfs` directly instead of RPC
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
     let data: Buffer;
-    try {
-      data = await server.readGuestFile(filePath, {
-        cwd: options.cwd,
-        chunkSize: options.chunkSize,
-        signal: options.signal,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(`failed to read guest file '${filePath}': ${detail}`);
+    if (vfsPath) {
+      try {
+        data = await this.readFileFromVfs(vfsPath, {
+          chunkSize: options.chunkSize,
+          signal: options.signal,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to read guest file '${filePath}': ${detail}`);
+      }
+    } else {
+      await this.start();
+
+      const server = this.server;
+      if (!server) {
+        throw new Error("sandbox server is not available");
+      }
+
+      try {
+        data = await server.readGuestFile(filePath, {
+          cwd: options.cwd,
+          chunkSize: options.chunkSize,
+          signal: options.signal,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to read guest file '${filePath}': ${detail}`);
+      }
     }
 
     if ("encoding" in options && options.encoding) {
@@ -682,17 +706,26 @@ export class VM {
       throw new Error("filePath must be a non-empty string");
     }
 
-    await this.start();
-
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
     const payload = typeof data === "string" ? Buffer.from(data, options.encoding ?? "utf-8") : data;
+
+    if (vfsPath) {
+      try {
+        await this.writeFileToVfs(vfsPath, payload, options.signal);
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to write guest file '${filePath}': ${detail}`);
+      }
+    }
+
+    await this.start();
 
     const server = this.server;
     if (!server) {
       throw new Error("sandbox server is not available");
     }
 
-    // XXX: For writes to known mounted VFS paths we could route to `this.vfs`
-    // directly and skip the guest file RPC path
     try {
       await server.writeGuestFile(filePath, payload, {
         cwd: options.cwd,
@@ -712,6 +745,21 @@ export class VM {
       throw new Error("filePath must be a non-empty string");
     }
 
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
+    if (vfsPath) {
+      try {
+        await this.deleteVfsPath(vfsPath, {
+          force: options.force,
+          recursive: options.recursive,
+          signal: options.signal,
+        });
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to delete guest file '${filePath}': ${detail}`);
+      }
+    }
+
     await this.start();
 
     const server = this.server;
@@ -719,8 +767,6 @@ export class VM {
       throw new Error("sandbox server is not available");
     }
 
-    // XXX: Deletions under mounted VFS paths could also be short-circuited to
-    // `this.vfs` to avoid bouncing through guest RPC
     try {
       await server.deleteGuestFile(filePath, {
         force: options.force,
@@ -732,6 +778,180 @@ export class VM {
       const detail = err instanceof Error ? err.message : String(err);
       throw new Error(`failed to delete guest file '${filePath}': ${detail}`);
     }
+  }
+
+  private resolveVfsShortcutPath(filePath: string, cwd?: string): string | null {
+    if (!this.vfs) return null;
+
+    const absolutePath = resolveAbsoluteGuestPath(filePath, cwd);
+    if (!absolutePath) return null;
+
+    for (const mountPath of this.shortcutBindMounts) {
+      if (isPathWithinMount(absolutePath, mountPath)) {
+        return absolutePath;
+      }
+    }
+
+    if (isPathWithinMount(absolutePath, this.fuseMount)) {
+      return mapFuseGuestPathToVfsPath(absolutePath, this.fuseMount);
+    }
+
+    return null;
+  }
+
+  private readFileStreamFromVfs(filePath: string, options: VmReadFileStreamOptions): Readable {
+    assertNotAborted(options.signal, "file read aborted");
+    const chunkSize =
+      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ?? DEFAULT_VFS_FILE_CHUNK_SIZE;
+    const highWaterMark = normalizePositiveInt(options.highWaterMark);
+    const stream = Readable.from(
+      this.iterateVfsFileChunks(filePath, chunkSize, options.signal),
+      highWaterMark ? { objectMode: false, highWaterMark } : { objectMode: false }
+    );
+    stream.on("error", () => {
+      // keep process alive if caller does not attach an error handler
+    });
+    return stream;
+  }
+
+  private async readFileFromVfs(
+    filePath: string,
+    options: { chunkSize?: number; signal?: AbortSignal }
+  ): Promise<Buffer> {
+    const chunkSize =
+      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ?? DEFAULT_VFS_FILE_CHUNK_SIZE;
+    const chunks: Buffer[] = [];
+    for await (const chunk of this.iterateVfsFileChunks(filePath, chunkSize, options.signal)) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  private async *iterateVfsFileChunks(
+    filePath: string,
+    chunkSize: number,
+    signal?: AbortSignal
+  ): AsyncIterable<Buffer> {
+    const vfs = this.vfs;
+    if (!vfs) {
+      throw new Error("vfs provider is not available");
+    }
+
+    assertNotAborted(signal, "file read aborted");
+    const handle = await vfs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(chunkSize);
+      let offset = 0;
+
+      while (true) {
+        assertNotAborted(signal, "file read aborted");
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+        if (bytesRead === 0) {
+          return;
+        }
+
+        offset += bytesRead;
+        yield Buffer.from(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async writeFileToVfs(filePath: string, input: VmWriteFileInput, signal?: AbortSignal): Promise<void> {
+    const vfs = this.vfs;
+    if (!vfs) {
+      throw new Error("vfs provider is not available");
+    }
+
+    assertNotAborted(signal, "file write aborted");
+    const handle = await vfs.open(filePath, "w");
+    try {
+      let position = 0;
+      for await (const chunk of toFileBufferIterable(input)) {
+        assertNotAborted(signal, "file write aborted");
+
+        let offset = 0;
+        while (offset < chunk.length) {
+          const { bytesWritten } = await handle.write(
+            chunk,
+            offset,
+            chunk.length - offset,
+            position + offset
+          );
+          if (bytesWritten <= 0) {
+            throw new Error("short write");
+          }
+          offset += bytesWritten;
+        }
+
+        position += chunk.length;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async deleteVfsPath(
+    filePath: string,
+    options: { force?: boolean; recursive?: boolean; signal?: AbortSignal }
+  ): Promise<void> {
+    const vfs = this.vfs;
+    if (!vfs) {
+      throw new Error("vfs provider is not available");
+    }
+
+    try {
+      assertNotAborted(options.signal, "file delete aborted");
+      if (!options.recursive) {
+        await vfs.unlink(filePath);
+        return;
+      }
+
+      const stats = await vfs.lstat(filePath);
+      if (stats.isDirectory()) {
+        await this.deleteVfsTree(filePath, options.signal);
+      } else {
+        await vfs.unlink(filePath);
+      }
+    } catch (err) {
+      if (options.force && isNoEntryError(err)) {
+        return;
+      }
+      throw err;
+    }
+  }
+
+  private async deleteVfsTree(filePath: string, signal?: AbortSignal): Promise<void> {
+    const vfs = this.vfs;
+    if (!vfs) {
+      throw new Error("vfs provider is not available");
+    }
+
+    assertNotAborted(signal, "file delete aborted");
+    const entries = await vfs.readdir(filePath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      assertNotAborted(signal, "file delete aborted");
+      const name = typeof entry === "string" ? entry : entry.name;
+      if (!name || name === "." || name === "..") {
+        continue;
+      }
+
+      const childPath = path.posix.join(filePath, name);
+      const isDir =
+        typeof entry === "string"
+          ? (await vfs.lstat(childPath)).isDirectory()
+          : entry.isDirectory() && !entry.isSymbolicLink();
+
+      if (isDir) {
+        await this.deleteVfsTree(childPath, signal);
+      } else {
+        await vfs.unlink(childPath);
+      }
+    }
+
+    await vfs.rmdir(filePath);
   }
 
   /**
@@ -1811,6 +2031,114 @@ fi
     }
     this.connection.send(message);
   }
+}
+
+function normalizeGuestPath(inputPath: string): string {
+  let normalized = path.posix.normalize(inputPath);
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+function resolveAbsoluteGuestPath(filePath: string, cwd?: string): string | null {
+  if (filePath.startsWith("/")) {
+    return normalizeGuestPath(filePath);
+  }
+  if (!cwd || !cwd.startsWith("/")) {
+    return null;
+  }
+  return normalizeGuestPath(path.posix.join(cwd, filePath));
+}
+
+function isPathWithinMount(filePath: string, mountPath: string): boolean {
+  if (filePath === mountPath) return true;
+  if (mountPath === "/") return filePath.startsWith("/");
+  return filePath.startsWith(`${mountPath}/`);
+}
+
+function mapFuseGuestPathToVfsPath(filePath: string, fuseMount: string): string {
+  if (fuseMount === "/") {
+    return filePath;
+  }
+  if (filePath === fuseMount) {
+    return "/";
+  }
+  return filePath.slice(fuseMount.length);
+}
+
+function normalizePositiveInt(value: number | undefined, fallback?: number): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.trunc(value);
+}
+
+function assertNotAborted(signal: AbortSignal | undefined, message: string): void {
+  if (signal?.aborted) {
+    throw new Error(message);
+  }
+}
+
+function isNoEntryError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const error = err as NodeJS.ErrnoException;
+  return (
+    error.code === "ENOENT" ||
+    error.code === "ERRNO_2" ||
+    error.errno === 2 ||
+    error.errno === -2
+  );
+}
+
+async function* toFileBufferIterable(input: VmWriteFileInput): AsyncIterable<Buffer> {
+  if (typeof input === "string") {
+    yield Buffer.from(input, "utf-8");
+    return;
+  }
+
+  if (Buffer.isBuffer(input)) {
+    yield input;
+    return;
+  }
+
+  if (input instanceof Uint8Array) {
+    yield Buffer.from(input);
+    return;
+  }
+
+  if (input instanceof Readable) {
+    for await (const chunk of input) {
+      if (typeof chunk === "string") {
+        yield Buffer.from(chunk, "utf-8");
+      } else if (Buffer.isBuffer(chunk)) {
+        yield chunk;
+      } else if (chunk instanceof Uint8Array) {
+        yield Buffer.from(chunk);
+      } else {
+        throw new Error("unsupported readable chunk type");
+      }
+    }
+    return;
+  }
+
+  if (typeof (input as any)?.[Symbol.asyncIterator] === "function") {
+    for await (const chunk of input as AsyncIterable<Buffer | Uint8Array>) {
+      if (Buffer.isBuffer(chunk)) {
+        yield chunk;
+      } else if (chunk instanceof Uint8Array) {
+        yield Buffer.from(chunk);
+      } else {
+        throw new Error("unsupported async iterable chunk type");
+      }
+    }
+    return;
+  }
+
+  throw new Error("unsupported write input type");
 }
 
 function normalizeCommand(command: ExecInput, options: ExecOptions): {
