@@ -13,6 +13,7 @@
 //!
 //! ## Message Types
 //! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize, exec_window
+//! Guest file I/O: file_read_request, file_read_data, file_read_done, file_write_request, file_write_data, file_write_done, file_delete_request, file_delete_done
 //! Filesystem: fs_request, fs_response
 //! TCP: tcp_open, tcp_opened, tcp_data, tcp_eof, tcp_close
 //! Status: vfs_ready, vfs_error
@@ -68,6 +69,48 @@ pub const ExecWindow = struct {
     stdout: u32,
     /// additional stderr credits in `bytes`
     stderr: u32,
+};
+
+pub const FileReadRequest = struct {
+    /// correlation id
+    id: u32,
+    /// target path
+    path: []const u8,
+    /// working directory for relative paths
+    cwd: ?[]const u8,
+    /// preferred read chunk size in `bytes`
+    chunk_size: u32,
+};
+
+pub const FileWriteRequest = struct {
+    /// correlation id
+    id: u32,
+    /// target path
+    path: []const u8,
+    /// working directory for relative paths
+    cwd: ?[]const u8,
+    /// whether to truncate existing file
+    truncate: bool,
+};
+
+pub const FileWriteData = struct {
+    /// file chunk
+    data: []const u8,
+    /// whether this chunk closes the write stream
+    eof: bool,
+};
+
+pub const FileDeleteRequest = struct {
+    /// correlation id
+    id: u32,
+    /// target path
+    path: []const u8,
+    /// working directory for relative paths
+    cwd: ?[]const u8,
+    /// ignore missing paths
+    force: bool,
+    /// recursive delete for directories
+    recursive: bool,
 };
 
 pub const InputMessage = union(enum) {
@@ -243,6 +286,34 @@ pub fn decodeExecRequest(allocator: std.mem.Allocator, frame: []const u8) !ExecR
     return parseExecRequest(allocator, root);
 }
 
+pub fn decodeFileReadRequest(allocator: std.mem.Allocator, frame: []const u8) !FileReadRequest {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+    return parseFileReadRequest(root);
+}
+
+pub fn decodeFileWriteRequest(allocator: std.mem.Allocator, frame: []const u8) !FileWriteRequest {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+    return parseFileWriteRequest(root);
+}
+
+pub fn decodeFileWriteData(allocator: std.mem.Allocator, frame: []const u8, expected_id: u32) !FileWriteData {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+    return parseFileWriteData(root, expected_id);
+}
+
+pub fn decodeFileDeleteRequest(allocator: std.mem.Allocator, frame: []const u8) !FileDeleteRequest {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+    return parseFileDeleteRequest(root);
+}
+
 pub fn decodeStdinData(allocator: std.mem.Allocator, frame: []const u8, expected_id: u32) !StdinData {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
@@ -318,6 +389,84 @@ pub fn encodeExecResponse(
         try cbor.writeText(w, "signal");
         try cbor.writeInt(w, sig);
     }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeFileReadData(
+    allocator: std.mem.Allocator,
+    id: u32,
+    data: []const u8,
+) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "file_read_data");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 1);
+    try cbor.writeText(w, "data");
+    try cbor.writeBytes(w, data);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeFileReadDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "file_read_done");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 0);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeFileWriteDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "file_write_done");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 0);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn encodeFileDeleteDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "file_delete_done");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 0);
 
     return try buf.toOwnedSlice(allocator);
 }
@@ -724,6 +873,142 @@ fn parseTcpMessage(allocator: std.mem.Allocator, root: cbor.Value) !TcpMessage {
     }
 
     return ProtocolError.UnexpectedType;
+}
+
+fn parseFileReadRequest(root: cbor.Value) !FileReadRequest {
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+    if (!std.mem.eql(u8, msg_type, "file_read_request")) {
+        return ProtocolError.UnexpectedType;
+    }
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    const path = try expectText(cbor.getMapValue(payload, "path") orelse return ProtocolError.MissingField);
+
+    var cwd: ?[]const u8 = null;
+    if (cbor.getMapValue(payload, "cwd")) |cwd_val| {
+        cwd = try expectText(cwd_val);
+    }
+
+    var chunk_size: u32 = 64 * 1024;
+    if (cbor.getMapValue(payload, "chunk_size")) |chunk_val| {
+        chunk_size = try expectU32(chunk_val);
+    }
+
+    if (chunk_size == 0) chunk_size = 64 * 1024;
+    const min_chunk: u32 = 1024;
+    const max_chunk: u32 = 1024 * 1024;
+    if (chunk_size < min_chunk) chunk_size = min_chunk;
+    if (chunk_size > max_chunk) chunk_size = max_chunk;
+
+    return .{
+        .id = id,
+        .path = path,
+        .cwd = cwd,
+        .chunk_size = chunk_size,
+    };
+}
+
+fn parseFileWriteRequest(root: cbor.Value) !FileWriteRequest {
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+    if (!std.mem.eql(u8, msg_type, "file_write_request")) {
+        return ProtocolError.UnexpectedType;
+    }
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    const path = try expectText(cbor.getMapValue(payload, "path") orelse return ProtocolError.MissingField);
+
+    var cwd: ?[]const u8 = null;
+    if (cbor.getMapValue(payload, "cwd")) |cwd_val| {
+        cwd = try expectText(cwd_val);
+    }
+
+    var truncate = true;
+    if (cbor.getMapValue(payload, "truncate")) |truncate_val| {
+        truncate = try expectBool(truncate_val);
+    }
+
+    return .{
+        .id = id,
+        .path = path,
+        .cwd = cwd,
+        .truncate = truncate,
+    };
+}
+
+fn parseFileWriteData(root: cbor.Value, expected_id: u32) !FileWriteData {
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+    if (!std.mem.eql(u8, msg_type, "file_write_data")) {
+        return ProtocolError.UnexpectedType;
+    }
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+    if (id != expected_id) return ProtocolError.InvalidValue;
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    const data_val = cbor.getMapValue(payload, "data") orelse return ProtocolError.MissingField;
+    const data = try expectBytes(data_val);
+
+    var eof = false;
+    if (cbor.getMapValue(payload, "eof")) |eof_val| {
+        eof = try expectBool(eof_val);
+    }
+
+    return .{ .data = data, .eof = eof };
+}
+
+fn parseFileDeleteRequest(root: cbor.Value) !FileDeleteRequest {
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+    if (!std.mem.eql(u8, msg_type, "file_delete_request")) {
+        return ProtocolError.UnexpectedType;
+    }
+
+    const id_val = cbor.getMapValue(map, "id") orelse return ProtocolError.MissingField;
+    const id = try expectU32(id_val);
+
+    const payload_val = cbor.getMapValue(map, "p") orelse return ProtocolError.MissingField;
+    const payload = try expectMap(payload_val);
+
+    const path = try expectText(cbor.getMapValue(payload, "path") orelse return ProtocolError.MissingField);
+
+    var cwd: ?[]const u8 = null;
+    if (cbor.getMapValue(payload, "cwd")) |cwd_val| {
+        cwd = try expectText(cwd_val);
+    }
+
+    var force = false;
+    if (cbor.getMapValue(payload, "force")) |force_val| {
+        force = try expectBool(force_val);
+    }
+
+    var recursive = false;
+    if (cbor.getMapValue(payload, "recursive")) |recursive_val| {
+        recursive = try expectBool(recursive_val);
+    }
+
+    return .{
+        .id = id,
+        .path = path,
+        .cwd = cwd,
+        .force = force,
+        .recursive = recursive,
+    };
 }
 
 fn parseTextArray(allocator: std.mem.Allocator, value: ?cbor.Value) ![]const []const u8 {

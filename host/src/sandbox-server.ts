@@ -5,7 +5,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { EventEmitter } from "events";
-import { Duplex } from "stream";
+import { Duplex, PassThrough, Readable } from "stream";
 
 import {
   FrameReader,
@@ -14,6 +14,10 @@ import {
   buildPtyResize,
   buildStdinData,
   buildExecWindow,
+  buildFileDeleteRequest,
+  buildFileReadRequest,
+  buildFileWriteData,
+  buildFileWriteRequest,
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol";
@@ -260,6 +264,34 @@ export type ResolvedSandboxServerOptions = {
   vfsProvider: VirtualProvider | null;
 };
 
+export type GuestFileReadOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** preferred chunk size in `bytes` */
+  chunkSize?: number;
+  /** abort signal for the read request */
+  signal?: AbortSignal;
+  /** stream highWaterMark in `bytes` */
+  highWaterMark?: number;
+};
+
+export type GuestFileWriteOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the write request */
+  signal?: AbortSignal;
+};
+
+export type GuestFileDeleteOptions = {
+  /** ignore missing paths */
+  force?: boolean;
+  /** recursive delete for directories */
+  recursive?: boolean;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the delete request */
+  signal?: AbortSignal;
+};
 
 /**
  * Resolve imagePath to GuestAssets.
@@ -822,6 +854,37 @@ export type SandboxConnection = {
   close: () => void;
 };
 
+type FileReadOperation = {
+  /** file operation kind */
+  kind: "read";
+  /** output stream for read chunks */
+  stream: PassThrough;
+  /** resolve callback for completion */
+  resolve: () => void;
+  /** reject callback for errors */
+  reject: (err: Error) => void;
+};
+
+type FileDoneOperation = {
+  /** file operation kind */
+  kind: "write" | "delete";
+  /** resolve callback for completion */
+  resolve: () => void;
+  /** reject callback for errors */
+  reject: (err: Error) => void;
+};
+
+type FileOperation = FileReadOperation | FileDoneOperation;
+
+type BridgeWritableWaiter = {
+  /** resolve callback when the bridge accepts more data */
+  resolve: () => void;
+  /** reject callback when waiting is aborted */
+  reject: (err: Error) => void;
+  /** abort listener cleanup */
+  cleanup?: () => void;
+};
+
 class LocalSandboxClient implements SandboxClient {
   private closed = false;
 
@@ -946,6 +1009,10 @@ export class SandboxServer extends EventEmitter {
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
   private pendingExecWindows = new Map<number, { stdout: number; stderr: number }>();
+  private nextFileOpId = 1;
+  private activeFileOpId: number | null = null;
+  private fileOps = new Map<number, FileOperation>();
+  private bridgeWritableWaiters: BridgeWritableWaiter[] = [];
   private execWindowFlushScheduled = false;
   private execIoFlushScheduled = false;
   private startPromise: Promise<void> | null = null;
@@ -1061,6 +1128,7 @@ export class SandboxServer extends EventEmitter {
     this.bridge.onWritable = () => {
       this.scheduleExecWindowFlush();
       this.scheduleExecIoFlush();
+      this.flushBridgeWritableWaiters();
     };
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
@@ -1232,7 +1300,9 @@ export class SandboxServer extends EventEmitter {
             ? ` stream=${(message as any).p?.stream} bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
             : message.t === "exec_response"
               ? ` exit=${(message as any).p?.exit_code}`
-              : "";
+              : message.t === "file_read_data"
+                ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+                : "";
         this.emitDebug("protocol", `virtio rx t=${message.t} id=${id}${extra}`);
       }
       if (!isValidRequestId(message.id)) {
@@ -1278,6 +1348,23 @@ export class SandboxServer extends EventEmitter {
           this.activeExecId = null;
           this.pumpExecQueue();
         }
+      } else if (message.t === "file_read_data") {
+        const op = this.fileOps.get(message.id);
+        if (!op || op.kind !== "read") return;
+
+        const data = message.p.data;
+        if (!Buffer.isBuffer(data)) {
+          this.rejectFileOperation(message.id, new Error("invalid file_read_data payload"));
+          return;
+        }
+
+        op.stream.write(data);
+      } else if (message.t === "file_read_done") {
+        this.resolveFileOperation(message.id);
+      } else if (message.t === "file_write_done") {
+        this.resolveFileOperation(message.id);
+      } else if (message.t === "file_delete_done") {
+        this.resolveFileOperation(message.id);
       } else if (message.t === "error") {
         const client = this.inflight.get(message.id);
         if (client) {
@@ -1287,16 +1374,24 @@ export class SandboxServer extends EventEmitter {
             code: message.p.code,
             message: message.p.message,
           });
-        }
-        this.inflight.delete(message.id);
-        this.stdinAllowed.delete(message.id);
-        this.pendingExecWindows.delete(message.id);
-        this.clearQueuedStdin(message.id);
-        this.queuedPtyResize.delete(message.id);
 
-        if (this.activeExecId === message.id) {
-          this.activeExecId = null;
-          this.pumpExecQueue();
+          this.inflight.delete(message.id);
+          this.stdinAllowed.delete(message.id);
+          this.pendingExecWindows.delete(message.id);
+          this.clearQueuedStdin(message.id);
+          this.queuedPtyResize.delete(message.id);
+
+          if (this.activeExecId === message.id) {
+            this.activeExecId = null;
+            this.pumpExecQueue();
+          }
+        } else if (this.fileOps.has(message.id)) {
+          this.rejectFileOperation(message.id, new Error(`${message.p.code}: ${message.p.message}`));
+        } else if (message.id === 0 && this.activeFileOpId !== null) {
+          this.rejectFileOperation(
+            this.activeFileOpId,
+            new Error(`${message.p.code}: ${message.p.message}`)
+          );
         }
       } else if (message.t === "vfs_ready") {
         this.handleVfsReady();
@@ -1531,6 +1626,218 @@ export class SandboxServer extends EventEmitter {
       send: (message) => this.handleClientMessage(client, message),
       close: () => this.closeClient(client),
     };
+  }
+
+  /**
+   * Create a readable stream for a guest file.
+   */
+  async readGuestFileStream(filePath: string, options: GuestFileReadOptions = {}): Promise<Readable> {
+    this.assertGuestPath(filePath, "filePath");
+    await this.start();
+    await this.waitForExecIdle(options.signal);
+
+    const id = this.allocateFileOpId();
+    const highWaterMark =
+      typeof options.highWaterMark === "number" && Number.isFinite(options.highWaterMark) && options.highWaterMark > 0
+        ? Math.trunc(options.highWaterMark)
+        : undefined;
+
+    let resolveDone!: () => void;
+    let rejectDone!: (err: Error) => void;
+    const done = new Promise<void>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+    void done.catch(() => {});
+
+    const stream = new PassThrough(highWaterMark ? { highWaterMark } : undefined);
+    stream.on("error", () => {
+      // keep process alive if caller does not attach an error handler
+    });
+
+    this.fileOps.set(id, {
+      kind: "read",
+      stream,
+      resolve: resolveDone,
+      reject: rejectDone,
+    });
+    this.activeFileOpId = id;
+
+    let abortCleanup: (() => void) | null = null;
+    if (options.signal) {
+      const onAbort = () => {
+        const err = new Error("file read aborted");
+        this.rejectFileOperation(id, err);
+      };
+      if (options.signal.aborted) {
+        onAbort();
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        abortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
+      }
+    }
+
+    void done.then(
+      () => {
+        abortCleanup?.();
+      },
+      () => {
+        abortCleanup?.();
+      }
+    );
+
+    try {
+      await this.sendControlMessage(
+        buildFileReadRequest(id, {
+          path: filePath,
+          cwd: options.cwd,
+          chunk_size: options.chunkSize,
+        }),
+        options.signal
+      );
+
+      // The guest may reject unsupported requests immediately (e.g. older
+      // sandboxd versions). Surface that as a direct throw instead of returning
+      // a dead stream.
+      if (!this.fileOps.has(id)) {
+        await done;
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.rejectFileOperation(id, error);
+      throw error;
+    }
+
+    return stream;
+  }
+
+  /**
+   * Read an entire guest file into a Buffer.
+   */
+  async readGuestFile(filePath: string, options: GuestFileReadOptions = {}): Promise<Buffer> {
+    const stream = await this.readGuestFileStream(filePath, options);
+    const chunks: Buffer[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      stream.once("end", resolve);
+      stream.once("error", reject);
+    });
+
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * Write file content to the guest.
+   */
+  async writeGuestFile(
+    filePath: string,
+    input: Buffer | Uint8Array | string | Readable | AsyncIterable<Buffer | Uint8Array | string>,
+    options: GuestFileWriteOptions = {}
+  ): Promise<void> {
+    this.assertGuestPath(filePath, "filePath");
+    await this.start();
+    await this.waitForExecIdle(options.signal);
+
+    const id = this.allocateFileOpId();
+
+    let resolveDone!: () => void;
+    let rejectDone!: (err: Error) => void;
+    const done = new Promise<void>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+
+    this.fileOps.set(id, {
+      kind: "write",
+      resolve: resolveDone,
+      reject: rejectDone,
+    });
+    this.activeFileOpId = id;
+
+    const CHUNK = 64 * 1024;
+    let requestStarted = false;
+    let eofSent = false;
+
+    try {
+      await this.sendControlMessage(
+        buildFileWriteRequest(id, {
+          path: filePath,
+          cwd: options.cwd,
+          truncate: true,
+        }),
+        options.signal
+      );
+      requestStarted = true;
+
+      for await (const chunk of toBufferIterable(input)) {
+        for (let offset = 0; offset < chunk.length; offset += CHUNK) {
+          const slice = chunk.subarray(offset, offset + CHUNK);
+          await this.sendControlMessage(buildFileWriteData(id, slice), options.signal);
+        }
+      }
+
+      await this.sendControlMessage(buildFileWriteData(id, Buffer.alloc(0), true), options.signal);
+      eofSent = true;
+
+      await done;
+    } catch (err) {
+      if (requestStarted && !eofSent) {
+        try {
+          await this.sendControlMessage(buildFileWriteData(id, Buffer.alloc(0), true), undefined);
+        } catch {
+          // ignore
+        }
+      }
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.rejectFileOperation(id, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a guest file or directory.
+   */
+  async deleteGuestFile(filePath: string, options: GuestFileDeleteOptions = {}): Promise<void> {
+    this.assertGuestPath(filePath, "filePath");
+    await this.start();
+    await this.waitForExecIdle(options.signal);
+
+    const id = this.allocateFileOpId();
+
+    let resolveDone!: () => void;
+    let rejectDone!: (err: Error) => void;
+    const done = new Promise<void>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+
+    this.fileOps.set(id, {
+      kind: "delete",
+      resolve: resolveDone,
+      reject: rejectDone,
+    });
+    this.activeFileOpId = id;
+
+    try {
+      await this.sendControlMessage(
+        buildFileDeleteRequest(id, {
+          path: filePath,
+          cwd: options.cwd,
+          force: options.force,
+          recursive: options.recursive,
+        }),
+        options.signal
+      );
+
+      await done;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.rejectFileOperation(id, error);
+      throw error;
+    }
   }
 
   /**
@@ -1817,6 +2124,128 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
+  private assertGuestPath(value: string, field: string): void {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`${field} must be a non-empty string`);
+    }
+    if (value.includes("\0")) {
+      throw new Error(`${field} contains null bytes`);
+    }
+  }
+
+  private allocateFileOpId(): number {
+    let id = this.nextFileOpId;
+    for (let i = 0; i <= MAX_REQUEST_ID; i += 1) {
+      if (!this.inflight.has(id) && !this.fileOps.has(id)) {
+        this.nextFileOpId = id + 1;
+        if (this.nextFileOpId > MAX_REQUEST_ID) this.nextFileOpId = 1;
+        return id;
+      }
+      id += 1;
+      if (id > MAX_REQUEST_ID) id = 1;
+    }
+    throw new Error("no available request ids for file operations");
+  }
+
+  private async waitForExecIdle(signal?: AbortSignal): Promise<void> {
+    while (this.activeExecId !== null || this.activeFileOpId !== null || this.execQueue.length > 0) {
+      if (signal?.aborted) {
+        throw new Error("operation aborted");
+      }
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 10);
+        t.unref?.();
+      });
+    }
+  }
+
+  private flushBridgeWritableWaiters() {
+    if (this.bridgeWritableWaiters.length === 0) return;
+    const waiters = this.bridgeWritableWaiters;
+    this.bridgeWritableWaiters = [];
+    for (const waiter of waiters) {
+      try {
+        waiter.cleanup?.();
+      } catch {
+        // ignore
+      }
+      waiter.resolve();
+    }
+  }
+
+  private async waitForBridgeWritable(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error("operation aborted");
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const waiter: BridgeWritableWaiter = {
+        resolve: () => resolve(),
+        reject,
+      };
+
+      if (signal) {
+        const onAbort = () => {
+          this.bridgeWritableWaiters = this.bridgeWritableWaiters.filter((entry) => entry !== waiter);
+          reject(new Error("operation aborted"));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        waiter.cleanup = () => signal.removeEventListener("abort", onAbort);
+      }
+
+      this.bridgeWritableWaiters.push(waiter);
+    });
+  }
+
+  private async sendControlMessage(message: object, signal?: AbortSignal): Promise<void> {
+    while (!this.bridge.send(message)) {
+      await this.waitForBridgeWritable(signal);
+    }
+  }
+
+  private resolveFileOperation(id: number): void {
+    const op = this.fileOps.get(id);
+    if (!op) return;
+    this.fileOps.delete(id);
+
+    if (op.kind === "read") {
+      op.stream.end();
+    }
+
+    op.resolve();
+
+    if (this.activeFileOpId === id) {
+      this.activeFileOpId = null;
+      this.pumpExecQueue();
+    }
+  }
+
+  private rejectFileOperation(id: number, err: Error): void {
+    const op = this.fileOps.get(id);
+    if (!op) return;
+    this.fileOps.delete(id);
+
+    if (op.kind === "read") {
+      queueMicrotask(() => {
+        op.stream.destroy(err);
+      });
+    }
+
+    op.reject(err);
+
+    if (this.activeFileOpId === id) {
+      this.activeFileOpId = null;
+      this.pumpExecQueue();
+    }
+  }
+
+  private failFileOperations(message: string): void {
+    const err = new Error(message);
+    for (const id of Array.from(this.fileOps.keys())) {
+      this.rejectFileOperation(id, err);
+    }
+  }
+
   private disconnectClient(client: SandboxClient) {
     if (this.activeClient === client) {
       this.activeClient = null;
@@ -1989,7 +2418,7 @@ export class SandboxServer extends EventEmitter {
   }
 
   private pumpExecQueue(): void {
-    if (this.activeExecId !== null) return;
+    if (this.activeExecId !== null || this.activeFileOpId !== null) return;
 
     while (this.execQueue.length > 0) {
       const next = this.execQueue.shift()!;
@@ -2069,7 +2498,7 @@ export class SandboxServer extends EventEmitter {
 
     const entry = { client, message, payload };
 
-    if (this.activeExecId !== null) {
+    if (this.activeExecId !== null || this.activeFileOpId !== null) {
       if (this.execQueue.length >= this.options.maxQueuedExecs) {
         sendError(client, {
           type: "error",
@@ -2485,6 +2914,21 @@ export class SandboxServer extends EventEmitter {
     this.queuedStdinBytes.clear();
     this.queuedStdinBytesTotal = 0;
     this.queuedPtyResize.clear();
+
+    this.failFileOperations(message);
+
+    if (this.bridgeWritableWaiters.length > 0) {
+      const waiters = this.bridgeWritableWaiters;
+      this.bridgeWritableWaiters = [];
+      for (const waiter of waiters) {
+        try {
+          waiter.cleanup?.();
+        } catch {
+          // ignore
+        }
+        waiter.reject(new Error(message));
+      }
+    }
   }
 }
 
@@ -2545,4 +2989,55 @@ function buildSandboxfsAppend(baseAppend: string, config: SandboxFsConfig) {
     pieces.push(`sandboxfs.bind=${config.fuseBinds.join(",")}`);
   }
   return pieces.filter((piece) => piece.length > 0).join(" ").trim();
+}
+
+async function* toBufferIterable(
+  input: Buffer | Uint8Array | string | Readable | AsyncIterable<Buffer | Uint8Array | string>
+): AsyncIterable<Buffer> {
+  if (typeof input === "string") {
+    yield Buffer.from(input, "utf-8");
+    return;
+  }
+
+  if (Buffer.isBuffer(input)) {
+    yield input;
+    return;
+  }
+
+  if (input instanceof Uint8Array) {
+    yield Buffer.from(input);
+    return;
+  }
+
+  if (input instanceof Readable) {
+    for await (const chunk of input) {
+      if (typeof chunk === "string") {
+        yield Buffer.from(chunk, "utf-8");
+      } else if (Buffer.isBuffer(chunk)) {
+        yield chunk;
+      } else if (chunk instanceof Uint8Array) {
+        yield Buffer.from(chunk);
+      } else {
+        throw new Error("unsupported readable chunk type");
+      }
+    }
+    return;
+  }
+
+  if (typeof (input as any)?.[Symbol.asyncIterator] === "function") {
+    for await (const chunk of input as AsyncIterable<Buffer | Uint8Array | string>) {
+      if (typeof chunk === "string") {
+        yield Buffer.from(chunk, "utf-8");
+      } else if (Buffer.isBuffer(chunk)) {
+        yield chunk;
+      } else if (chunk instanceof Uint8Array) {
+        yield Buffer.from(chunk);
+      } else {
+        throw new Error("unsupported async iterable chunk type");
+      }
+    }
+    return;
+  }
+
+  throw new Error("unsupported write input type");
 }

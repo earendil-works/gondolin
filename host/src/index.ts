@@ -6,7 +6,20 @@
  */
 
 // Main VM interface
-export { VM, type VMOptions, type VMState, type EnableSshOptions, type SshAccess } from "./vm";
+export {
+  VM,
+  type VMOptions,
+  type VMState,
+  type EnableSshOptions,
+  type SshAccess,
+  type VmReadFileOptions,
+  type VmReadFileBufferOptions,
+  type VmReadFileTextOptions,
+  type VmReadFileStreamOptions,
+  type VmWriteFileInput,
+  type VmWriteFileOptions,
+  type VmDeleteFileOptions,
+} from "./vm";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 export {
   type ExecOptions,
@@ -23,6 +36,9 @@ export {
   type SandboxServerOptions,
   type ResolvedSandboxServerOptions,
   type SandboxConnection,
+  type GuestFileReadOptions,
+  type GuestFileWriteOptions,
+  type GuestFileDeleteOptions,
 } from "./sandbox-server";
 
 // VFS (Virtual File System) providers

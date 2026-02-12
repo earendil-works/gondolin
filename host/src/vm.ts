@@ -176,6 +176,68 @@ export type SshAccess = {
   close(): Promise<void>;
 };
 
+export type VmReadFileBufferOptions = {
+  /** decoded output disabled (returns Buffer) */
+  encoding?: null;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** preferred chunk size in `bytes` */
+  chunkSize?: number;
+  /** abort signal for the read command */
+  signal?: AbortSignal;
+};
+
+export type VmReadFileTextOptions = {
+  /** text encoding for returned data */
+  encoding: BufferEncoding;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** preferred chunk size in `bytes` */
+  chunkSize?: number;
+  /** abort signal for the read command */
+  signal?: AbortSignal;
+};
+
+export type VmReadFileStreamOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** preferred chunk size in `bytes` */
+  chunkSize?: number;
+  /** stream highWaterMark in `bytes` */
+  highWaterMark?: number;
+  /** abort signal for the read request */
+  signal?: AbortSignal;
+};
+
+export type VmReadFileOptions = VmReadFileBufferOptions | VmReadFileTextOptions;
+
+export type VmWriteFileInput =
+  | string
+  | Buffer
+  | Uint8Array
+  | Readable
+  | AsyncIterable<Buffer | Uint8Array>;
+
+export type VmWriteFileOptions = {
+  /** string encoding for top-level text input */
+  encoding?: BufferEncoding;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the write command */
+  signal?: AbortSignal;
+};
+
+export type VmDeleteFileOptions = {
+  /** ignore missing path errors */
+  force?: boolean;
+  /** allow recursive directory deletion */
+  recursive?: boolean;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the delete command */
+  signal?: AbortSignal;
+};
+
 // Re-export types from exec.ts
 export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
@@ -532,6 +594,144 @@ export class VM {
   exec(command: ExecInput, options: ExecOptions = {}): ExecProcess {
     const proc = this.execInternal(command, options);
     return proc;
+  }
+
+  /**
+   * Create a readable stream for a guest file.
+   */
+  async readFileStream(filePath: string, options: VmReadFileStreamOptions = {}): Promise<Readable> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    await this.start();
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    // XXX: For absolute paths that map to known VFS mounts we could short-circuit
+    // this RPC and read directly from `this.vfs` (the same provider wired into sandboxfs)
+    // to avoid guest round-trips
+    try {
+      return await server.readGuestFileStream(filePath, {
+        cwd: options.cwd,
+        chunkSize: options.chunkSize,
+        highWaterMark: options.highWaterMark,
+        signal: options.signal,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to stream guest file '${filePath}': ${detail}`);
+    }
+  }
+
+  /**
+   * Read a file from inside the running guest.
+   */
+  readFile(filePath: string, options: VmReadFileTextOptions): Promise<string>;
+  readFile(filePath: string, options?: VmReadFileBufferOptions): Promise<Buffer>;
+  async readFile(
+    filePath: string,
+    options: VmReadFileOptions = {}
+  ): Promise<string | Buffer> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    await this.start();
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    // XXX: Same short-circuit idea as readFileStream(): if `filePath` is on a
+    // mounted host VFS path we could use `this.vfs` directly instead of RPC
+    let data: Buffer;
+    try {
+      data = await server.readGuestFile(filePath, {
+        cwd: options.cwd,
+        chunkSize: options.chunkSize,
+        signal: options.signal,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to read guest file '${filePath}': ${detail}`);
+    }
+
+    if ("encoding" in options && options.encoding) {
+      return data.toString(options.encoding);
+    }
+
+    return data;
+  }
+
+  /**
+   * Write file content inside the running guest.
+   *
+   * Existing files are truncated.
+   */
+  async writeFile(
+    filePath: string,
+    data: VmWriteFileInput,
+    options: VmWriteFileOptions = {}
+  ): Promise<void> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    await this.start();
+
+    const payload = typeof data === "string" ? Buffer.from(data, options.encoding ?? "utf-8") : data;
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    // XXX: For writes to known mounted VFS paths we could route to `this.vfs`
+    // directly and skip the guest file RPC path
+    try {
+      await server.writeGuestFile(filePath, payload, {
+        cwd: options.cwd,
+        signal: options.signal,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to write guest file '${filePath}': ${detail}`);
+    }
+  }
+
+  /**
+   * Delete a file or directory inside the running guest.
+   */
+  async deleteFile(filePath: string, options: VmDeleteFileOptions = {}): Promise<void> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    await this.start();
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    // XXX: Deletions under mounted VFS paths could also be short-circuited to
+    // `this.vfs` to avoid bouncing through guest RPC
+    try {
+      await server.deleteGuestFile(filePath, {
+        force: options.force,
+        recursive: options.recursive,
+        cwd: options.cwd,
+        signal: options.signal,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to delete guest file '${filePath}': ${detail}`);
+    }
   }
 
   /**

@@ -35,6 +35,102 @@ test("exec string form runs in /bin/sh -lc", { skip: skipVmTests, timeout: timeo
   });
 });
 
+test("readFile reads text files from guest rootfs", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const osRelease = await vm.readFile("/etc/os-release", { encoding: "utf-8" });
+    assert.match(osRelease, /^NAME=/m);
+  });
+});
+
+test("readFile returns a Buffer by default", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const data = await vm.readFile("/bin/sh");
+    assert.ok(Buffer.isBuffer(data));
+    assert.ok(data.length > 0);
+  });
+});
+
+test("readFile throws when the path is missing", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    await assert.rejects(() => vm.readFile("/definitely-not-a-real-file"), /failed to read guest file/);
+  });
+});
+
+test("writeFile writes text content", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    await vm.writeFile("/tmp/gondolin-write-text.txt", "hello-write\n");
+    const text = await vm.readFile("/tmp/gondolin-write-text.txt", { encoding: "utf-8" });
+    assert.equal(text, "hello-write\n");
+  });
+});
+
+test("writeFile writes binary content", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const payload = Buffer.from([0x00, 0x01, 0x02, 0xff]);
+    await vm.writeFile("/tmp/gondolin-write-bin.bin", payload);
+    const stored = await vm.readFile("/tmp/gondolin-write-bin.bin");
+    assert.deepEqual(stored, payload);
+  });
+});
+
+test("deleteFile removes files", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    await vm.writeFile("/tmp/gondolin-delete.txt", "gone");
+    await vm.deleteFile("/tmp/gondolin-delete.txt");
+    await assert.rejects(() => vm.readFile("/tmp/gondolin-delete.txt"), /failed to read guest file/);
+  });
+});
+
+test("deleteFile supports force for missing paths", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    await vm.deleteFile("/tmp/gondolin-does-not-exist", { force: true });
+  });
+});
+
+test("deleteFile supports recursive directories", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    await vm.exec(["/bin/sh", "-c", "mkdir -p /tmp/gondolin-dir/sub && echo ok > /tmp/gondolin-dir/sub/file.txt"]);
+    await vm.deleteFile("/tmp/gondolin-dir", { recursive: true });
+    const check = await vm.exec(["/bin/sh", "-c", "test ! -e /tmp/gondolin-dir; echo $?"], { stdout: "buffer" });
+    assert.equal(check.stdout.trim(), "0");
+  });
+});
+
+test("writeFile supports Readable stream input", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const stream = Readable.from([Buffer.from("hello"), Buffer.from("-stream")]);
+    await vm.writeFile("/tmp/gondolin-write-stream.txt", stream);
+    const text = await vm.readFile("/tmp/gondolin-write-stream.txt", { encoding: "utf-8" });
+    assert.equal(text, "hello-stream");
+  });
+});
+
+test("readFileStream streams large files", { skip: skipVmTests, timeout: timeoutMs }, async () => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    const payload = Buffer.alloc(512 * 1024, 0x61);
+    await vm.writeFile("/tmp/gondolin-stream.bin", payload);
+
+    const stream = await vm.readFileStream("/tmp/gondolin-stream.bin", { chunkSize: 32 * 1024 });
+    let total = 0;
+
+    for await (const chunk of stream) {
+      total += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    }
+
+    assert.equal(total, payload.length);
+  });
+});
+
 test("exec supports async iterable stdin", { skip: skipVmTests, timeout: timeoutMs }, async () => {
   async function* input() {
     yield Buffer.from("hello");

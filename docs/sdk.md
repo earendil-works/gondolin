@@ -213,6 +213,48 @@ that the guest process is terminated.
 `vm.shell()` is a convenience wrapper around `vm.exec()` for interactive
 sessions (PTY + stdin enabled), optionally attaching to the current terminal.
 
+### `vm.readFile()`, `vm.readFileStream()`, `vm.writeFile()`, and `vm.deleteFile()`
+
+These helpers provide host-driven file operations inside the guest.  These allow
+file systme access also to non VFS mounts which can be accessed on the node side
+directly.
+
+```ts
+import { Readable } from "node:stream";
+
+// Read text
+const osRelease = await vm.readFile("/etc/os-release", { encoding: "utf-8" });
+
+// Stream-read a large file
+const stream = await vm.readFileStream("/var/log/messages");
+for await (const chunk of stream) {
+  process.stdout.write(chunk);
+}
+
+// Write text (overwrites existing file)
+await vm.writeFile("/tmp/hello.txt", "hello from host\n");
+
+// Stream-write from a Node readable
+await vm.writeFile("/tmp/payload.bin", Readable.from([
+  Buffer.from([0xde, 0xad]),
+  Buffer.from([0xbe, 0xef]),
+]));
+
+// Delete file
+await vm.deleteFile("/tmp/hello.txt");
+
+// Delete recursively / ignore missing path
+await vm.deleteFile("/tmp/some-dir", { recursive: true, force: true });
+```
+
+Notes:
+
+- `readFile()` reads any path visible in the **running guest filesystem** (including rootfs paths under `/`)
+- `readFile()` returns a `Buffer` by default; pass `encoding` to get a `string`
+- `readFileStream()` streams file bytes as a Node readable stream
+- `writeFile()` truncates existing files before writing and accepts `string`, `Buffer`, `Uint8Array`, `Readable`, or `AsyncIterable`
+- `deleteFile()` supports `force` and `recursive`
+
 ### `vm.enableSsh()`
 
 For workflows that prefer SSH tooling (scp/rsync/ssh port forwards), you can

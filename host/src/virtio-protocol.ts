@@ -179,6 +179,53 @@ export type TcpClose = {
   p: Record<string, never>;
 };
 
+export type FileReadData = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_read_data";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** raw file bytes */
+    data: Buffer;
+  };
+};
+
+export type FileReadDone = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_read_done";
+  /** request id */
+  id: number;
+  /** payload */
+  p: Record<string, never>;
+};
+
+export type FileWriteDone = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_write_done";
+  /** request id */
+  id: number;
+  /** payload */
+  p: Record<string, never>;
+};
+
+export type FileDeleteDone = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_delete_done";
+  /** request id */
+  id: number;
+  /** payload */
+  p: Record<string, never>;
+};
+
 export type IncomingMessage =
   | ExecOutput
   | ExecResponse
@@ -191,7 +238,11 @@ export type IncomingMessage =
   | TcpOpened
   | TcpData
   | TcpEof
-  | TcpClose;
+  | TcpClose
+  | FileReadData
+  | FileReadDone
+  | FileWriteDone
+  | FileDeleteDone;
 
 export type ExecRequest = {
   /** protocol version */
@@ -267,6 +318,78 @@ export type ExecWindow = {
     stdout?: number;
     /** additional stderr credits in `bytes` */
     stderr?: number;
+  };
+};
+
+export type FileReadRequest = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_read_request";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** target path */
+    path: string;
+    /** working directory for relative paths */
+    cwd?: string;
+    /** preferred chunk size in `bytes` */
+    chunk_size?: number;
+  };
+};
+
+export type FileWriteRequest = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_write_request";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** target path */
+    path: string;
+    /** working directory for relative paths */
+    cwd?: string;
+    /** whether to truncate existing file */
+    truncate?: boolean;
+  };
+};
+
+export type FileWriteData = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_write_data";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** file chunk */
+    data: Buffer;
+    /** whether this chunk closes the write stream */
+    eof?: boolean;
+  };
+};
+
+export type FileDeleteRequest = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "file_delete_request";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** target path */
+    path: string;
+    /** working directory for relative paths */
+    cwd?: string;
+    /** ignore missing paths */
+    force?: boolean;
+    /** recursive delete for directories */
+    recursive?: boolean;
   };
 };
 
@@ -371,6 +494,64 @@ export function buildExecWindow(id: number, stdout?: number, stderr?: number): E
   return {
     v: 1,
     t: "exec_window",
+    id,
+    p,
+  };
+}
+
+export function buildFileReadRequest(
+  id: number,
+  payload: FileReadRequest["p"]
+): FileReadRequest {
+  const p: FileReadRequest["p"] = { path: payload.path };
+  if (payload.cwd !== undefined) p.cwd = payload.cwd;
+  if (payload.chunk_size !== undefined) p.chunk_size = payload.chunk_size;
+  return {
+    v: 1,
+    t: "file_read_request",
+    id,
+    p,
+  };
+}
+
+export function buildFileWriteRequest(
+  id: number,
+  payload: FileWriteRequest["p"]
+): FileWriteRequest {
+  const p: FileWriteRequest["p"] = { path: payload.path };
+  if (payload.cwd !== undefined) p.cwd = payload.cwd;
+  if (payload.truncate !== undefined) p.truncate = payload.truncate;
+  return {
+    v: 1,
+    t: "file_write_request",
+    id,
+    p,
+  };
+}
+
+export function buildFileWriteData(id: number, data: Buffer, eof?: boolean): FileWriteData {
+  return {
+    v: 1,
+    t: "file_write_data",
+    id,
+    p: {
+      data,
+      ...(eof ? { eof } : {}),
+    },
+  };
+}
+
+export function buildFileDeleteRequest(
+  id: number,
+  payload: FileDeleteRequest["p"]
+): FileDeleteRequest {
+  const p: FileDeleteRequest["p"] = { path: payload.path };
+  if (payload.cwd !== undefined) p.cwd = payload.cwd;
+  if (payload.force !== undefined) p.force = payload.force;
+  if (payload.recursive !== undefined) p.recursive = payload.recursive;
+  return {
+    v: 1,
+    t: "file_delete_request",
     id,
     p,
   };

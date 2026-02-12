@@ -49,21 +49,82 @@ pub fn main() !void {
 
         waiting_for_reconnect = false;
         log.info("received frame ({} bytes)", .{frame.len});
-        const req = protocol.decodeExecRequest(allocator, frame) catch |err| {
-            log.err("invalid exec_request: {s}", .{@errorName(err)});
-            _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "invalid exec_request") catch {};
-            continue;
+
+        const exec_req = protocol.decodeExecRequest(allocator, frame) catch |err| switch (err) {
+            protocol.ProtocolError.UnexpectedType => null,
+            else => {
+                log.err("invalid exec_request: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "invalid exec_request") catch {};
+                continue;
+            },
         };
-        log.info("exec request id={} cmd={s}", .{ req.id, req.cmd });
-        defer {
-            allocator.free(req.argv);
-            allocator.free(req.env);
+
+        if (exec_req) |req| {
+            log.info("exec request id={} cmd={s}", .{ req.id, req.cmd });
+            defer {
+                allocator.free(req.argv);
+                allocator.free(req.env);
+            }
+
+            handleExec(allocator, virtio_fd, req) catch |err| {
+                log.err("exec handling failed: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, req.id, "exec_failed", "failed to execute") catch {};
+            };
+            continue;
         }
 
-        handleExec(allocator, virtio_fd, req) catch |err| {
-            log.err("exec handling failed: {s}", .{@errorName(err)});
-            _ = protocol.sendError(allocator, virtio_fd, req.id, "exec_failed", "failed to execute") catch {};
+        const file_read_req = protocol.decodeFileReadRequest(allocator, frame) catch |err| switch (err) {
+            protocol.ProtocolError.UnexpectedType => null,
+            else => {
+                log.err("invalid file_read_request: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "invalid file_read_request") catch {};
+                continue;
+            },
         };
+
+        if (file_read_req) |req| {
+            handleFileRead(allocator, virtio_fd, req) catch |err| {
+                log.err("file read failed: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, req.id, "file_read_failed", @errorName(err)) catch {};
+            };
+            continue;
+        }
+
+        const file_write_req = protocol.decodeFileWriteRequest(allocator, frame) catch |err| switch (err) {
+            protocol.ProtocolError.UnexpectedType => null,
+            else => {
+                log.err("invalid file_write_request: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "invalid file_write_request") catch {};
+                continue;
+            },
+        };
+
+        if (file_write_req) |req| {
+            handleFileWrite(allocator, virtio_fd, req) catch |err| {
+                log.err("file write failed: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, req.id, "file_write_failed", @errorName(err)) catch {};
+            };
+            continue;
+        }
+
+        const file_delete_req = protocol.decodeFileDeleteRequest(allocator, frame) catch |err| switch (err) {
+            protocol.ProtocolError.UnexpectedType => null,
+            else => {
+                log.err("invalid file_delete_request: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "invalid file_delete_request") catch {};
+                continue;
+            },
+        };
+
+        if (file_delete_req) |req| {
+            handleFileDelete(allocator, virtio_fd, req) catch |err| {
+                log.err("file delete failed: {s}", .{@errorName(err)});
+                _ = protocol.sendError(allocator, virtio_fd, req.id, "file_delete_failed", @errorName(err)) catch {};
+            };
+            continue;
+        }
+
+        _ = protocol.sendError(allocator, virtio_fd, 0, "invalid_request", "unsupported request type") catch {};
     }
 }
 
@@ -172,6 +233,95 @@ fn waitForVirtioData(virtio_fd: std.posix.fd_t) void {
 
         if ((revents & std.posix.POLL.IN) != 0) return;
     }
+}
+
+fn resolveRequestPath(
+    allocator: std.mem.Allocator,
+    request_path: []const u8,
+    cwd: ?[]const u8,
+) ![]u8 {
+    if (request_path.len == 0) return protocol.ProtocolError.InvalidValue;
+    if (std.fs.path.isAbsolute(request_path)) {
+        return allocator.dupe(u8, request_path);
+    }
+
+    const base = cwd orelse return protocol.ProtocolError.InvalidValue;
+    if (!std.fs.path.isAbsolute(base)) return protocol.ProtocolError.InvalidValue;
+
+    return std.fs.path.resolve(allocator, &[_][]const u8{ base, request_path });
+}
+
+fn handleFileRead(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: protocol.FileReadRequest) !void {
+    const resolved_path = try resolveRequestPath(allocator, req.path, req.cwd);
+    defer allocator.free(resolved_path);
+
+    var file = try std.fs.openFileAbsolute(resolved_path, .{});
+    defer file.close();
+
+    const chunk_size: usize = @intCast(req.chunk_size);
+    const buffer = try allocator.alloc(u8, chunk_size);
+    defer allocator.free(buffer);
+
+    while (true) {
+        const n = try file.read(buffer);
+        if (n == 0) break;
+
+        const payload = try protocol.encodeFileReadData(allocator, req.id, buffer[0..n]);
+        defer allocator.free(payload);
+        try protocol.writeFrame(virtio_fd, payload);
+    }
+
+    const done_payload = try protocol.encodeFileReadDone(allocator, req.id);
+    defer allocator.free(done_payload);
+    try protocol.writeFrame(virtio_fd, done_payload);
+}
+
+fn handleFileWrite(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: protocol.FileWriteRequest) !void {
+    const resolved_path = try resolveRequestPath(allocator, req.path, req.cwd);
+    defer allocator.free(resolved_path);
+
+    var file = try std.fs.createFileAbsolute(resolved_path, .{ .truncate = req.truncate });
+    defer file.close();
+
+    while (true) {
+        const frame = try protocol.readFrame(allocator, virtio_fd);
+        defer allocator.free(frame);
+
+        const input = try protocol.decodeFileWriteData(allocator, frame, req.id);
+        if (input.data.len > 0) {
+            try file.writeAll(input.data);
+        }
+        if (input.eof) break;
+    }
+
+    const done_payload = try protocol.encodeFileWriteDone(allocator, req.id);
+    defer allocator.free(done_payload);
+    try protocol.writeFrame(virtio_fd, done_payload);
+}
+
+fn handleFileDelete(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: protocol.FileDeleteRequest) !void {
+    const resolved_path = try resolveRequestPath(allocator, req.path, req.cwd);
+    defer allocator.free(resolved_path);
+
+    if (req.recursive) {
+        std.fs.deleteTreeAbsolute(resolved_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                if (!req.force) return err;
+            },
+            else => return err,
+        };
+    } else {
+        std.fs.deleteFileAbsolute(resolved_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                if (!req.force) return err;
+            },
+            else => return err,
+        };
+    }
+
+    const done_payload = try protocol.encodeFileDeleteDone(allocator, req.id);
+    defer allocator.free(done_payload);
+    try protocol.writeFrame(virtio_fd, done_payload);
 }
 
 fn handleExec(allocator: std.mem.Allocator, virtio_fd: std.posix.fd_t, req: protocol.ExecRequest) !void {
