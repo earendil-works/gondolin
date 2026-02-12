@@ -29,6 +29,79 @@ test("qemu-net: trusted dns mode requires ipv4 resolvers (no silent fallback)", 
   );
 });
 
+function buildDnsQueryA(name: string, id = 0x1234): Buffer {
+  const labels = name.split(".").filter(Boolean);
+  const qnameParts: Buffer[] = [];
+  for (const label of labels) {
+    const b = Buffer.from(label, "ascii");
+    qnameParts.push(Buffer.from([b.length]));
+    qnameParts.push(b);
+  }
+  qnameParts.push(Buffer.from([0]));
+  const qname = Buffer.concat(qnameParts);
+
+  const tail = Buffer.alloc(4);
+  tail.writeUInt16BE(1, 0); // A
+  tail.writeUInt16BE(1, 2); // IN
+
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(id, 0);
+  header.writeUInt16BE(0x0100, 2); // RD
+  header.writeUInt16BE(1, 4); // QDCOUNT
+  header.writeUInt16BE(0, 6);
+  header.writeUInt16BE(0, 8);
+  header.writeUInt16BE(0, 10);
+
+  return Buffer.concat([header, qname, tail]);
+}
+
+function runSyntheticDns(backend: QemuNetworkBackend, payload: Buffer): Buffer {
+  let response: Buffer | null = null;
+  (backend as any).stack = {
+    handleUdpResponse: (message: { data: Buffer }) => {
+      response = Buffer.from(message.data);
+    },
+  };
+
+  (backend as any).handleUdpSend({
+    key: "dns",
+    srcIP: "192.168.127.2",
+    srcPort: 55555,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload,
+  });
+
+  assert.ok(response, "expected synthetic dns response");
+  return response;
+}
+
+test("qemu-net: synthetic per-host dns mapping does not throw on root query", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const response = runSyntheticDns(backend, buildDnsQueryA("."));
+  assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
+  assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
+});
+
+test("qemu-net: synthetic per-host dns mapping does not throw on mapping exhaustion", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const hostMap = (backend as any).syntheticDnsHostMap;
+  assert.ok(hostMap);
+  // Force the allocator into an exhausted state without allocating ~65k entries.
+  hostMap.nextHostId = 65024 + 1;
+
+  const response = runSyntheticDns(backend, buildDnsQueryA("example.com", 0x9999));
+  assert.equal(response.readUInt16BE(0), 0x9999);
+  assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
+  assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
+});
+
 test("qemu-net: parseHttpRequest parses content-length and preserves remaining", () => {
   const backend = makeBackend({ maxHttpBodyBytes: 1024 });
   const buf = Buffer.from(

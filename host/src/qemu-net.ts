@@ -140,10 +140,22 @@ class SyntheticDnsHostMap {
   private readonly ipToHost = new Map<string, string>();
   private nextHostId = 1;
 
-  allocate(hostname: string): string {
+  /**
+   * Allocate (or retrieve) a stable synthetic IPv4 for a hostname.
+   *
+   * Returns null for invalid/unsupported hostnames or if the mapping space is exhausted.
+   * This method must be safe to call on untrusted guest input.
+   */
+  allocate(hostname: string): string | null {
     const normalized = hostname.trim().toLowerCase();
     if (!normalized) {
-      throw new Error("synthetic dns host mapping requires a non-empty hostname");
+      return null;
+    }
+
+    // DNS names are limited to 253 chars in presentation format (without trailing dot).
+    // Treat anything larger as invalid to avoid unbounded memory usage.
+    if (normalized.length > 253) {
+      return null;
     }
 
     const existing = this.hostToIp.get(normalized);
@@ -152,7 +164,7 @@ class SyntheticDnsHostMap {
     const hostsPerBucket = 254;
     const maxHosts = 0x100 * hostsPerBucket;
     if (this.nextHostId > maxHosts) {
-      throw new Error("synthetic dns host mapping exhausted");
+      return null;
     }
 
     const index = this.nextHostId - 1;
@@ -1327,10 +1339,24 @@ export class QemuNetworkBackend extends EventEmitter {
     const query = parseDnsQuery(message.payload);
     if (!query) return;
 
-    const mappedIpv4 =
-      this.syntheticDnsHostMapping === "per-host" && !isLocalhostDnsName(query.firstQuestion.name)
-        ? this.syntheticDnsHostMap?.allocate(query.firstQuestion.name)
-        : null;
+    let mappedIpv4: string | null = null;
+    if (
+      this.syntheticDnsHostMapping === "per-host" &&
+      !isLocalhostDnsName(query.firstQuestion.name)
+    ) {
+      try {
+        mappedIpv4 = this.syntheticDnsHostMap?.allocate(query.firstQuestion.name) ?? null;
+      } catch (err) {
+        // Treat mapping failures as untrusted input; fall back to the default synthetic IP.
+        // This avoids guest-triggerable process-level crashes.
+        mappedIpv4 = null;
+        if (this.options.debug) {
+          this.emitDebug(
+            `dns synthetic hostmap failed name=${JSON.stringify(query.firstQuestion.name)} err=${formatError(err)}`
+          );
+        }
+      }
+    }
 
     const response = buildSyntheticDnsResponse(query, {
       ...this.syntheticDnsOptions,
