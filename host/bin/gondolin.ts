@@ -2,6 +2,7 @@
 import fs from "fs";
 import net from "net";
 import path from "path";
+import readline from "node:readline";
 
 import { VM } from "../src/vm";
 import type { VirtualProvider } from "../src/vfs";
@@ -87,7 +88,13 @@ function bashUsage() {
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
   console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
+  console.log(
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
+  );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
+  console.log(
+    "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
+  );
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
   console.log();
   console.log("Ingress:");
@@ -134,7 +141,13 @@ function execUsage() {
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
   console.log("  --ssh-allow-host HOST           Allow outbound SSH to host (repeatable)");
+  console.log(
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
+  );
   console.log("  --ssh-credential SPEC           Host-side SSH key (HOST=PATH or USER@HOST=PATH)");
+  console.log(
+    "                                  Optional: append ,passphrase-env=ENV, ,passphrase=..., or ,passphrase-ask"
+  );
   console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
 }
 
@@ -154,6 +167,10 @@ type SshCredentialSpec = {
   host: string;
   username?: string;
   keyPath: string;
+  /** private key passphrase (optional) */
+  passphrase?: string;
+  /** prompt for passphrase on startup */
+  passphraseAsk?: boolean;
 };
 
 type CommonOptions = {
@@ -176,6 +193,9 @@ type CommonOptions = {
 
   /** allowed ssh host patterns for outbound ssh */
   sshAllowedHosts: string[];
+
+  /** ssh-agent socket path (defaults to $SSH_AUTH_SOCK) */
+  sshAgent?: string;
 
   /** ssh credentials for host-side proxy auth */
   sshCredentials: SshCredentialSpec[];
@@ -272,21 +292,82 @@ function parseHostSecret(spec: string): SecretSpec {
 }
 
 function parseSshCredential(spec: string): SshCredentialSpec {
-  // Format: HOST=KEY_PATH or USER@HOST=KEY_PATH
+  // Format:
+  //   HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV][,passphrase-ask]
+  //   USER@HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV][,passphrase-ask]
+  //
+  // Prefer passphrase-env (or passphrase-ask) to avoid leaking secrets into shell history.
   const eq = spec.indexOf("=");
   if (eq === -1) {
     throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
   }
 
   const left = spec.slice(0, eq).trim();
-  const keyPath = spec.slice(eq + 1).trim();
-  if (!left || !keyPath) {
+  const right = spec.slice(eq + 1).trim();
+  if (!left || !right) {
     throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
+  }
+
+  const [keyPathRaw, ...opts] = right.split(",");
+  const keyPath = keyPathRaw.trim();
+  if (!keyPath) {
+    throw new Error(`Invalid --ssh-credential format: ${spec} (missing KEY_PATH)`);
+  }
+
+  let passphrase: string | undefined;
+  let passphraseEnv: string | undefined;
+  let passphraseAsk = false;
+
+  for (const optRaw of opts) {
+    const opt = optRaw.trim();
+    if (!opt) continue;
+
+    if (opt.startsWith("passphrase-env=")) {
+      passphraseEnv = opt.slice("passphrase-env=".length);
+      if (!passphraseEnv) {
+        throw new Error(`Invalid --ssh-credential option: ${opt} (missing env var name)`);
+      }
+      continue;
+    }
+
+    if (opt === "passphrase-ask") {
+      passphraseAsk = true;
+      continue;
+    }
+
+    if (opt.startsWith("passphrase=")) {
+      passphrase = opt.slice("passphrase=".length);
+      continue;
+    }
+
+    throw new Error(`Invalid --ssh-credential option: ${opt}`);
+  }
+
+  if (passphraseAsk && (passphraseEnv || passphrase !== undefined)) {
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase-ask with passphrase/passphrase-env)`
+    );
+  }
+
+  if (passphraseEnv && passphrase !== undefined) {
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase and passphrase-env)`
+    );
+  }
+
+  if (passphraseEnv) {
+    const envValue = process.env[passphraseEnv];
+    if (envValue === undefined) {
+      throw new Error(
+        `--ssh-credential passphrase env var '${passphraseEnv}' is not set (for ${left})`
+      );
+    }
+    passphrase = envValue;
   }
 
   const at = left.indexOf("@");
   if (at === -1) {
-    return { host: left, keyPath };
+    return { host: left, keyPath, passphrase, passphraseAsk };
   }
 
   const username = left.slice(0, at).trim();
@@ -297,7 +378,50 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     );
   }
 
-  return { host, username, keyPath };
+  return { host, username, keyPath, passphrase, passphraseAsk };
+}
+
+function resolveSshAgent(explicit?: string): string {
+  const sock = (explicit ?? process.env.SSH_AUTH_SOCK)?.trim();
+  if (!sock) {
+    throw new Error("--ssh-agent requires a socket path or $SSH_AUTH_SOCK");
+  }
+  return sock;
+}
+
+async function promptHidden(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new Error("passphrase-ask requires a TTY stdin");
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stderr,
+    terminal: true,
+  });
+
+  // Suppress terminal echo
+  (rl as any)._writeToOutput = () => {};
+
+  return await new Promise<string>((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      process.stderr.write("\n");
+      resolve(answer);
+    });
+  });
+}
+
+async function maybePromptSshCredentialPassphrases(common: CommonOptions): Promise<void> {
+  for (const cred of common.sshCredentials) {
+    if (!cred.passphraseAsk) continue;
+    if (cred.passphrase !== undefined) continue;
+
+    const userPrefix = cred.username ? `${cred.username}@` : "";
+    cred.passphrase = await promptHidden(
+      `SSH key passphrase for ${userPrefix}${cred.host} (${cred.keyPath}): `
+    );
+  }
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {
@@ -406,6 +530,10 @@ function buildVmOptions(common: CommonOptions) {
     }
   }
 
+  if (common.sshAgent && common.sshAllowedHosts.length === 0) {
+    throw new Error("--ssh-agent requires at least one --ssh-allow-host (or --ssh-credential)");
+  }
+
   if (common.sshAllowedHosts.length > 0) {
     if (common.dnsMode && common.dnsMode !== "synthetic") {
       throw new Error("--ssh-allow-host requires --dns synthetic");
@@ -431,6 +559,7 @@ function buildVmOptions(common: CommonOptions) {
               {
                 username: credential.username,
                 privateKey: fs.readFileSync(resolvedPath, "utf8"),
+                passphrase: credential.passphrase,
               },
             ];
           })
@@ -456,6 +585,7 @@ function buildVmOptions(common: CommonOptions) {
             allowedHosts: common.sshAllowedHosts,
             credentials: sshCredentials,
             requireCredentials: Boolean(sshCredentials),
+            agent: common.sshAgent,
           }
         : undefined,
     env,
@@ -479,6 +609,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
       dnsTrustedServers: [],
       sshAllowedHosts: [],
       sshCredentials: [],
+      sshAgent: undefined,
     },
   };
   let current: Command | null = null;
@@ -551,6 +682,16 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const host = optionArgs[++i];
         if (!host) fail("--ssh-allow-host requires a host argument");
         args.common.sshAllowedHosts.push(host);
+        return i;
+      }
+      case "--ssh-agent": {
+        const next = optionArgs[i + 1];
+        if (next && !next.startsWith("--") && next !== "-h" && next !== "--") {
+          i += 1;
+          args.common.sshAgent = resolveSshAgent(next);
+        } else {
+          args.common.sshAgent = resolveSshAgent();
+        }
         return i;
       }
       case "--ssh-credential": {
@@ -687,6 +828,7 @@ function buildCommandPayload(command: Command) {
 }
 
 async function runExecVm(args: ExecArgs) {
+  await maybePromptSshCredentialPassphrases(args.common);
   const vmOptions = buildVmOptions(args.common);
   let vm: VM | null = null;
   let exitCode = 0;
@@ -842,6 +984,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     dnsTrustedServers: [],
     sshAllowedHosts: [],
     sshCredentials: [],
+    sshAgent: undefined,
     ssh: false,
     listen: false,
   };
@@ -923,6 +1066,16 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.sshAllowedHosts.push(host);
+        break;
+      }
+      case "--ssh-agent": {
+        const next = argv[i + 1];
+        if (next && !next.startsWith("--") && next !== "-h") {
+          i += 1;
+          args.sshAgent = resolveSshAgent(next);
+        } else {
+          args.sshAgent = resolveSshAgent();
+        }
         break;
       }
       case "--ssh-credential": {
@@ -1010,6 +1163,7 @@ function parseBashArgs(argv: string[]): BashArgs {
 
 async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
+  await maybePromptSshCredentialPassphrases(args);
   const vmOptions = buildVmOptions(args);
   let vm: VM | null = null;
   let ingressAccess: { url: string; close(): Promise<void> } | null = null;

@@ -1757,6 +1757,19 @@ test("qemu-net: ssh requireCredentials enforces credential presence", () => {
   assert.equal((backend as any).tcpSessions.get("tcp-cred").sshCredential.pattern, "github.com");
 });
 
+test("qemu-net: ssh requireCredentials allows ssh agent", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      requireCredentials: true,
+      agent: "/tmp/fake-ssh-agent.sock",
+    },
+  });
+
+  assert.ok(backend);
+});
+
 test("qemu-net: ssh flows with credentials use proxy path", () => {
   const backend = makeBackend({
     dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
@@ -1784,6 +1797,7 @@ test("qemu-net: ssh flows with credentials use proxy path", () => {
       username: "git",
       privateKey: "k",
     },
+    sshProxyAuth: "credential",
     flowControlPaused: false,
     protocol: "ssh",
     connected: false,
@@ -1803,6 +1817,52 @@ test("qemu-net: ssh flows with credentials use proxy path", () => {
   };
 
   (backend as any).handleTcpSend({ key: "tcp-proxy", data: Buffer.from("SSH-2.0-test\r\n", "ascii") });
+
+  assert.equal(usedProxy, 1);
+  assert.equal(usedSocket, 0);
+});
+
+test("qemu-net: ssh flows with agent use proxy path", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+    },
+  });
+
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 50005,
+    dstIP: "198.19.0.11",
+    dstPort: 22,
+    connectIP: "github.com",
+    syntheticHostname: "github.com",
+    sshCredential: null,
+    sshProxyAuth: "agent",
+    flowControlPaused: false,
+    protocol: "ssh",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  (backend as any).tcpSessions.set("tcp-proxy-agent", session);
+
+  let usedProxy = 0;
+  let usedSocket = 0;
+  (backend as any).handleSshProxyData = () => {
+    usedProxy += 1;
+  };
+  (backend as any).ensureTcpSocket = () => {
+    usedSocket += 1;
+  };
+
+  (backend as any).handleTcpSend({
+    key: "tcp-proxy-agent",
+    data: Buffer.from("SSH-2.0-test\r\n", "ascii"),
+  });
 
   assert.equal(usedProxy, 1);
   assert.equal(usedSocket, 0);

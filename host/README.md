@@ -103,6 +103,11 @@ const vm = await VM.create({
   },
   ssh: {
     allowedHosts: ["github.com"],
+
+    // Option A: use an ssh-agent (recommended for encrypted keys)
+    agent: process.env.SSH_AUTH_SOCK,
+
+    // Option B: provide a raw private key
     credentials: {
       "github.com": {
         username: "git",
@@ -116,13 +121,13 @@ const vm = await VM.create({
 `syntheticHostMapping: "per-host"` is required so the host can map outbound
 TCP connections on port `22` back to the intended hostname.
 
-When credentials are configured, the host terminates the guest SSH session and
-proxies `exec` requests (including Git smart-protocol commands) to the real
-upstream host using host-side keys. The private key is never visible in the
-guest.
+When credentials or an SSH agent are configured, the host terminates the guest SSH
+session and proxies `exec` requests (including Git smart-protocol commands) to the
+real upstream host using host-side authentication. The private key is never
+visible in the guest.
 
-If no matching credential is configured for a host, SSH falls back to direct
-passthrough unless `ssh.requireCredentials` is set.
+If no matching credential is configured for a host and no `ssh.agent` is set, SSH
+falls back to direct passthrough unless `ssh.requireCredentials` is set.
 
 Because this is SSH termination, the guest sees a host-provided SSH host key;
 configure guest `known_hosts` (or disable strict checking explicitly) as needed.

@@ -111,8 +111,10 @@ function normalizeIpv4Servers(servers?: string[]): string[] {
 }
 
 function generateSshHostKey(): string {
-  const { privateKey } = crypto.generateKeyPairSync("ed25519", {
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+  // ssh2 Server hostKeys expects PEM PKCS#1 RSA keys (ed25519 pkcs8 is not supported)
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 3072,
+    privateKeyEncoding: { format: "pem", type: "pkcs1" },
     publicKeyEncoding: { format: "pem", type: "spki" },
   });
   return privateKey;
@@ -628,6 +630,8 @@ type TcpSession = {
   syntheticHostname: string | null;
   /** resolved upstream credential for ssh proxying */
   sshCredential: ResolvedSshCredential | null;
+  /** ssh proxy auth method */
+  sshProxyAuth: "credential" | "agent" | null;
   /** active ssh proxy state when host-side credentials are used */
   sshProxy?: SshProxySession;
   flowControlPaused: boolean;
@@ -726,8 +730,10 @@ export type SshOptions = {
   allowedHosts: string[];
   /** host pattern -> upstream private-key credential */
   credentials?: Record<string, SshCredential>;
-  /** require matching credentials for all allowlisted hosts */
+  /** require matching credentials (or ssh agent) for all allowlisted hosts */
   requireCredentials?: boolean;
+  /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
+  agent?: string;
   /** guest-facing ssh host key */
   hostKey?: string | Buffer;
   /** upstream host key verifier callback */
@@ -880,6 +886,7 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshAllowedHosts: string[];
   private readonly sshCredentials: ResolvedSshCredential[];
   private readonly sshRequireCredentials: boolean;
+  private readonly sshAgent: string | null;
   private readonly sshHostKey: string;
   private readonly sshHostVerifier: ((hostname: string, key: Buffer) => boolean) | null;
 
@@ -927,6 +934,7 @@ export class QemuNetworkBackend extends EventEmitter {
     this.sshAllowedHosts = uniqueHostPatterns(options.ssh?.allowedHosts ?? []);
     this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
     this.sshRequireCredentials = options.ssh?.requireCredentials ?? false;
+    this.sshAgent = options.ssh?.agent ?? null;
     this.sshHostKey =
       typeof options.ssh?.hostKey === "string"
         ? options.ssh.hostKey
@@ -947,8 +955,8 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.sshAllowedHosts.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
       throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
     }
-    if (this.sshRequireCredentials && this.sshCredentials.length === 0) {
-      throw new Error("ssh egress with requireCredentials requires at least one credential");
+    if (this.sshRequireCredentials && this.sshCredentials.length === 0 && !this.sshAgent) {
+      throw new Error("ssh egress with requireCredentials requires at least one credential or ssh agent");
     }
   }
 
@@ -1441,13 +1449,16 @@ export class QemuNetworkBackend extends EventEmitter {
     if (!matchesAnyHost(hostname, this.sshAllowedHosts)) return false;
 
     const credential = this.resolveSshCredential(hostname);
-    if (this.sshRequireCredentials && !credential) {
+    const canUseAgent = Boolean(this.sshAgent);
+
+    if (this.sshRequireCredentials && !credential && !canUseAgent) {
       return false;
     }
 
     if (session) {
       session.connectIP = hostname;
       session.sshCredential = credential;
+      session.sshProxyAuth = credential ? "credential" : canUseAgent ? "agent" : null;
     }
 
     return true;
@@ -1471,6 +1482,7 @@ export class QemuNetworkBackend extends EventEmitter {
       connectIP,
       syntheticHostname,
       sshCredential: null,
+      sshProxyAuth: null,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -1537,7 +1549,7 @@ export class QemuNetworkBackend extends EventEmitter {
       return;
     }
 
-    if (session.protocol === "ssh" && session.sshCredential) {
+    if (session.protocol === "ssh" && session.sshProxyAuth) {
       this.handleSshProxyData(message.key, session, message.data);
       return;
     }
@@ -1664,8 +1676,11 @@ export class QemuNetworkBackend extends EventEmitter {
     const existing = session.sshProxy;
     if (existing) return existing;
 
-    if (!session.sshCredential || !session.syntheticHostname) {
-      throw new Error("ssh proxy requires credential and synthetic hostname");
+    if (!session.syntheticHostname) {
+      throw new Error("ssh proxy requires synthetic hostname");
+    }
+    if (!session.sshCredential && !this.sshAgent) {
+      throw new Error("ssh proxy requires credential or ssh agent");
     }
 
     const stream = new GuestSshStream(
@@ -1743,15 +1758,26 @@ export class QemuNetworkBackend extends EventEmitter {
   }) {
     const { key, session, proxy, sshSession, guestUsername } = options;
 
-    sshSession.on("pty", (accept) => accept());
-    sshSession.on("window-change", (accept) => accept());
-    sshSession.on("env", (accept) => accept());
+    sshSession.on("pty", (accept) => {
+      if (typeof accept === "function") accept();
+    });
+    sshSession.on("window-change", (accept) => {
+      if (typeof accept === "function") accept();
+    });
+    sshSession.on("env", (accept) => {
+      if (typeof accept === "function") accept();
+    });
 
-    sshSession.on("shell", (_accept, reject) => {
-      reject();
+    sshSession.on("shell", (accept) => {
+      if (typeof accept !== "function") return;
+      const ch = accept();
+      ch.stderr.write("gondolin ssh proxy: interactive shells are not supported\n");
+      ch.exit(1);
+      ch.close();
     });
 
     sshSession.on("exec", (accept, _reject, info) => {
+      if (typeof accept !== "function") return;
       const guestChannel = accept();
       this.bridgeSshExecChannel({
         key,
@@ -1795,8 +1821,11 @@ export class QemuNetworkBackend extends EventEmitter {
     const { key, session, proxy, guestChannel, command, guestUsername } = options;
     const hostname = session.syntheticHostname;
     const credential = session.sshCredential;
-    if (!hostname || !credential) {
-      throw new Error("missing ssh proxy hostname/credential");
+    if (!hostname) {
+      throw new Error("missing ssh proxy hostname");
+    }
+    if (!credential && !this.sshAgent) {
+      throw new Error("missing ssh proxy credential/agent");
     }
 
     const upstream = new SshClient();
@@ -1805,10 +1834,15 @@ export class QemuNetworkBackend extends EventEmitter {
     const connectConfig: import("ssh2").ConnectConfig = {
       host: hostname,
       port: 22,
-      username: (credential.username ?? guestUsername) || "git",
-      privateKey: credential.privateKey,
-      passphrase: credential.passphrase,
+      username: (credential?.username ?? guestUsername) || "git",
     };
+
+    if (credential) {
+      connectConfig.privateKey = credential.privateKey;
+      connectConfig.passphrase = credential.passphrase;
+    } else if (this.sshAgent) {
+      connectConfig.agent = this.sshAgent;
+    }
 
     if (this.sshHostVerifier) {
       connectConfig.hostVerifier = (key: Buffer) => this.sshHostVerifier!(hostname, key);
