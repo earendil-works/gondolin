@@ -119,6 +119,7 @@ Restrictions and properties:
   - SSH subsystems (such as `sftp`) are denied
 - Upstream host keys are verified on the host (via OpenSSH `known_hosts`)
 - Interactive passphrase prompting is not supported; prefer `passphrase-env`
+- Note: in shells, `~/.ssh/known_hosts` is only expanded when unquoted (otherwise use `$HOME/.ssh/known_hosts`)
 
 CLI flags:
 

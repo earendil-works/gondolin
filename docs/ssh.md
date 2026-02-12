@@ -133,6 +133,9 @@ See the SSH egress flags in the CLI reference: [CLI](./cli.md).
 ### SDK
 
 ```ts
+import os from "node:os";
+import path from "node:path";
+
 import { VM } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
@@ -143,7 +146,7 @@ const vm = await VM.create({
   ssh: {
     allowedHosts: ["github.com"],
     agent: process.env.SSH_AUTH_SOCK,
-    knownHostsFile: "~/.ssh/known_hosts",
+    knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
 
     // Optional safety/perf knobs:
     // maxUpstreamConnectionsPerTcpSession: 4,

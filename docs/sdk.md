@@ -431,6 +431,9 @@ This is useful for git-over-SSH (e.g. cloning private repos) without granting th
 guest arbitrary TCP access.
 
 ```ts
+import os from "node:os";
+import path from "node:path";
+
 import { VM } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
@@ -446,7 +449,7 @@ const vm = await VM.create({
     // credentials: { "github.com": { username: "git", privateKey: "..." } },
 
     // Verify upstream host keys (recommended)
-    knownHostsFile: "~/.ssh/known_hosts",
+    knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
 
     // Optional safety knobs:
     // maxUpstreamConnectionsPerTcpSession: 4,
