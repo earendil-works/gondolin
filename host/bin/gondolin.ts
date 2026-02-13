@@ -68,14 +68,13 @@ function usage() {
 }
 
 function bashUsage() {
-  console.log("Usage: gondolin bash [options]");
+  console.log("Usage: gondolin bash [options] [-- COMMAND [ARGS...]]");
   console.log();
   console.log("Start an interactive bash session in the sandbox.");
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("Command Options:");
-  console.log("  --cmd CMD                       Run custom command interactively");
-  console.log("  --arg ARG                       Argument for custom command (can repeat)");
+  console.log("  --                              Everything after -- is treated as command + args");
   console.log("  --cwd PATH                      Working directory for the command");
   console.log("  --env KEY=VALUE                 Set environment variable (can repeat)");
   console.log();
@@ -985,6 +984,16 @@ function parseBashArgs(argv: string[]): BashArgs {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+
+    // Handle -- delimiter for command + args
+    if (arg === "--") {
+      if (i + 1 < argv.length) {
+        args.cmd = argv[i + 1];
+        args.cmdArgs = argv.slice(i + 2);
+      }
+      break; // Stop processing arguments
+    }
+
     switch (arg) {
       case "--mount-hostfs": {
         const spec = argv[++i];
@@ -1150,24 +1159,6 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.sshListen = host;
         break;
       }
-      case "--cmd": {
-        const cmd = argv[++i];
-        if (!cmd) {
-          console.error("--cmd requires an argument");
-          process.exit(1);
-        }
-        args.cmd = cmd;
-        break;
-      }
-      case "--arg": {
-        const arg = argv[++i];
-        if (!arg) {
-          console.error("--arg requires an argument");
-          process.exit(1);
-        }
-        args.cmdArgs!.push(arg);
-        break;
-      }
       case "--cwd": {
         const cwd = argv[++i];
         if (!cwd) {
@@ -1195,11 +1186,6 @@ function parseBashArgs(argv: string[]): BashArgs {
         bashUsage();
         process.exit(1);
     }
-  }
-
-  if (args.cmdArgs && args.cmdArgs.length > 0 && !args.cmd) {
-    console.error("--arg can only be used with --cmd");
-    process.exit(1);
   }
 
   return args;
