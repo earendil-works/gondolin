@@ -444,6 +444,16 @@ export function resolveSandboxServerOptions(
   const rootDiskFormat = options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
   const rootDiskSnapshot = options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
 
+  const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
+  const maxQueuedStdinBytes = Math.max(
+    options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
+    maxStdinBytes
+  );
+  const maxTotalQueuedStdinBytes = Math.max(
+    options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
+    maxQueuedStdinBytes
+  );
+
   return {
     qemuPath,
     kernelPath,
@@ -469,10 +479,9 @@ export function resolveSandboxServerOptions(
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
-    maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
-    maxQueuedStdinBytes: options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
-    maxTotalQueuedStdinBytes:
-      options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
+    maxStdinBytes,
+    maxQueuedStdinBytes,
+    maxTotalQueuedStdinBytes,
     maxQueuedExecs: options.maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
