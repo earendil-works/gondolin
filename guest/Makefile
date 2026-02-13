@@ -1,4 +1,4 @@
-.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-cbor-repro fuzz-protocol-repro fuzz-clean
+.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-clean
 
 RUN_PARALLEL ?= ../scripts/run-parallel
 
@@ -107,6 +107,10 @@ fuzz-cbor-last:
 # Prints the newest corpus file produced by the protocol fuzzer
 fuzz-protocol-last:
 	$(MAKE) -C fuzz print-protocol-last
+
+# Prints the newest corpus file produced by the sandbox behavior fuzzer
+fuzz-sandbox-last:
+	$(MAKE) -C fuzz print-sandbox-last
 
 # Runs the CBOR repro runner in a VM (defaults to newest corpus file)
 fuzz-cbor-repro:

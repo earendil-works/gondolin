@@ -197,6 +197,7 @@ test "sandbox behavior (file requests)" {
     }
 
     const seed_stream = try buildSeedStream(std.testing.allocator, root_dir);
+    defer std.testing.allocator.free(seed_stream);
 
     const seeds: []const []const u8 = &.{seed_stream};
     try std.testing.fuzz({}, testOne, .{ .corpus = seeds });
@@ -206,9 +207,13 @@ fn testOne(_: void, input: []const u8) anyerror!void {
     const slice = if (input.len > 64 * 1024) input[0 .. 64 * 1024] else input;
 
     // Sanitize the framed input to avoid OOM / blocking reads due to bogus length prefixes.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    //
+    // Note: in fuzz mode the Zig test runner already resets/leak-checks `std.testing.allocator`
+    // per input. Using an arena on top keeps per-iteration allocations bounded without
+    // tripping the runner's "error logs detected" guard on allocator leak reports.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const owned = try allocator.alloc(u8, slice.len);
     defer allocator.free(owned);

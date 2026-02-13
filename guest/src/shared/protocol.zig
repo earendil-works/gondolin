@@ -293,57 +293,81 @@ pub const FrameWriter = struct {
 pub fn decodeExecRequest(allocator: std.mem.Allocator, frame: []const u8) !ExecRequest {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseExecRequest(allocator, root);
+    errdefer cbor.freeValue(allocator, root);
+
+    const req = try parseExecRequest(allocator, root);
+    cbor.freeValue(allocator, root);
+    return req;
 }
 
 pub fn decodeFileReadRequest(allocator: std.mem.Allocator, frame: []const u8) !FileReadRequest {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseFileReadRequest(root);
+    errdefer cbor.freeValue(allocator, root);
+
+    const req = try parseFileReadRequest(root);
+    cbor.freeValue(allocator, root);
+    return req;
 }
 
 pub fn decodeFileWriteRequest(allocator: std.mem.Allocator, frame: []const u8) !FileWriteRequest {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseFileWriteRequest(root);
+    errdefer cbor.freeValue(allocator, root);
+
+    const req = try parseFileWriteRequest(root);
+    cbor.freeValue(allocator, root);
+    return req;
 }
 
 pub fn decodeFileWriteData(allocator: std.mem.Allocator, frame: []const u8, expected_id: u32) !FileWriteData {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseFileWriteData(root, expected_id);
+    errdefer cbor.freeValue(allocator, root);
+
+    const msg = try parseFileWriteData(root, expected_id);
+    cbor.freeValue(allocator, root);
+    return msg;
 }
 
 pub fn decodeFileDeleteRequest(allocator: std.mem.Allocator, frame: []const u8) !FileDeleteRequest {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseFileDeleteRequest(root);
+    errdefer cbor.freeValue(allocator, root);
+
+    const req = try parseFileDeleteRequest(root);
+    cbor.freeValue(allocator, root);
+    return req;
 }
 
 pub fn decodeStdinData(allocator: std.mem.Allocator, frame: []const u8, expected_id: u32) !StdinData {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseStdinData(root, expected_id);
+    errdefer cbor.freeValue(allocator, root);
+
+    const msg = try parseStdinData(root, expected_id);
+    cbor.freeValue(allocator, root);
+    return msg;
 }
 
 pub fn decodeInputMessage(allocator: std.mem.Allocator, frame: []const u8, expected_id: u32) !InputMessage {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseInputMessage(root, expected_id);
+    errdefer cbor.freeValue(allocator, root);
+
+    const msg = try parseInputMessage(root, expected_id);
+    cbor.freeValue(allocator, root);
+    return msg;
 }
 
 pub fn decodeRoutedInputMessage(allocator: std.mem.Allocator, frame: []const u8) !RoutedInputMessage {
     var dec = cbor.Decoder.init(allocator, frame);
     const root = try dec.decodeValue();
-    defer cbor.freeValue(allocator, root);
-    return parseRoutedInputMessage(root);
+    errdefer cbor.freeValue(allocator, root);
+
+    const msg = try parseRoutedInputMessage(root);
+    cbor.freeValue(allocator, root);
+    return msg;
 }
 
 pub fn decodeTcpMessage(allocator: std.mem.Allocator, frame: []const u8) !TcpMessage {

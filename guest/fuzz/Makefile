@@ -1,7 +1,7 @@
 .PHONY: help fuzz cbor protocol sandbox \
 	repro-cbor repro-protocol \
 	run-cbor run-protocol run-sandbox \
-	print-cbor-last print-protocol-last \
+	print-cbor-last print-protocol-last print-sandbox-last \
 	run-repro-cbor run-repro-protocol clean
 
 ZIG ?= zig
@@ -64,6 +64,7 @@ help:
 	@echo "Repro / debugging helpers:"
 	@echo "  make print-cbor-last                       # prints newest corpus file path"
 	@echo "  make print-protocol-last                   # prints newest corpus file path"
+	@echo "  make print-sandbox-last                    # prints newest corpus file path"
 	@echo "  make repro-cbor                            # builds repro runner binary"
 	@echo "  make repro-protocol                        # builds repro runner binary"
 	@echo "  make run-repro-cbor [FILE=path]            # runs repro in VM (defaults to newest)"
@@ -164,6 +165,20 @@ print-protocol-last:
 			exit 1; \
 		fi; \
 		echo "guest/fuzz/cache/f/protocol_decode/$$f"
+
+print-sandbox-last:
+	@set -e; \
+		corpus_dir="$(CACHE_DIR)/f/sandbox_behavior"; \
+		if [ ! -d "$$corpus_dir" ]; then \
+			echo "missing corpus dir: $$corpus_dir" >&2; \
+			exit 1; \
+		fi; \
+		f=$$(ls "$$corpus_dir" | LC_ALL=C sort -n | tail -n 1); \
+		if [ -z "$$f" ]; then \
+			echo "corpus dir is empty: $$corpus_dir" >&2; \
+			exit 1; \
+		fi; \
+		echo "guest/fuzz/cache/f/sandbox_behavior/$$f"
 
 run-repro-cbor: $(OUT_DIR)/cbor-repro
 	@set -e; \
