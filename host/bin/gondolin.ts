@@ -75,6 +75,7 @@ function bashUsage() {
   console.log();
   console.log("Command Options:");
   console.log("  --cmd CMD                       Run custom command interactively");
+  console.log("  --arg ARG                       Argument for custom command (can repeat)");
   console.log("  --cwd PATH                      Working directory for the command");
   console.log("  --env KEY=VALUE                 Set environment variable (can repeat)");
   console.log();
@@ -957,6 +958,8 @@ type BashArgs = CommonOptions & {
   listenPort?: number;
   /** custom command to run instead of bash */
   cmd?: string;
+  /** arguments for the command */
+  cmdArgs?: string[];
   /** working directory for the command */
   cwd?: string;
   /** environment variables */
@@ -977,6 +980,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     ssh: false,
     listen: false,
     env: [],
+    cmdArgs: [],
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -1155,6 +1159,15 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.cmd = cmd;
         break;
       }
+      case "--arg": {
+        const arg = argv[++i];
+        if (!arg) {
+          console.error("--arg requires an argument");
+          process.exit(1);
+        }
+        args.cmdArgs!.push(arg);
+        break;
+      }
       case "--cwd": {
         const cwd = argv[++i];
         if (!cwd) {
@@ -1182,6 +1195,11 @@ function parseBashArgs(argv: string[]): BashArgs {
         bashUsage();
         process.exit(1);
     }
+  }
+
+  if (args.cmdArgs && args.cmdArgs.length > 0 && !args.cmd) {
+    console.error("--arg can only be used with --cmd");
+    process.exit(1);
   }
 
   return args;
@@ -1223,10 +1241,14 @@ async function runBash(argv: string[]) {
 
     // Start the shell (or custom command) without using ExecProcess.attach() so we can implement
     // a CLI-local escape hatch (Ctrl-]) that always regains control.
+    const command = args.cmd
+      ? [args.cmd, ...(args.cmdArgs || [])]
+      : undefined;
+
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command: args.cmd ? [args.cmd] : undefined,
+      command,
       env: args.env && args.env.length > 0 ? args.env : undefined
     });
 
