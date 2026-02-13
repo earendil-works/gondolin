@@ -22,6 +22,9 @@
 const std = @import("std");
 const cbor = @import("cbor.zig");
 
+/// maximum frame size in `bytes`
+pub const max_frame_len: u32 = 4 * 1024 * 1024;
+
 pub const ProtocolError = error{
     InvalidType,
     MissingField,
@@ -189,8 +192,7 @@ pub const FrameReader = struct {
                     (@as(u32, self.len_buf[2]) << 8) |
                     @as(u32, self.len_buf[3]);
 
-                const max_frame: u32 = 4 * 1024 * 1024;
-                if (len > max_frame) return error.FrameTooLarge;
+                if (len > max_frame_len) return error.FrameTooLarge;
 
                 const frame = try self.allocator.alloc(u8, len);
                 self.frame = frame;
@@ -257,6 +259,8 @@ pub const FrameWriter = struct {
     }
 
     pub fn enqueue(self: *FrameWriter, payload: []const u8) !void {
+        if (payload.len > @as(usize, max_frame_len)) return error.FrameTooLarge;
+
         const len: u32 = @intCast(payload.len);
         var len_buf: [4]u8 = .{
             @intCast((len >> 24) & 0xff),
@@ -659,8 +663,7 @@ pub fn readFrame(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
         (@as(u32, len_buf[2]) << 8) |
         @as(u32, len_buf[3]);
 
-    const max_frame: u32 = 4 * 1024 * 1024;
-    if (len > max_frame) return error.FrameTooLarge;
+    if (len > max_frame_len) return error.FrameTooLarge;
 
     const frame = try allocator.alloc(u8, len);
     errdefer allocator.free(frame);
@@ -669,6 +672,8 @@ pub fn readFrame(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
 }
 
 pub fn writeFrame(fd: std.posix.fd_t, payload: []const u8) !void {
+    if (payload.len > @as(usize, max_frame_len)) return error.FrameTooLarge;
+
     const len: u32 = @intCast(payload.len);
     var len_buf: [4]u8 = .{
         @intCast((len >> 24) & 0xff),

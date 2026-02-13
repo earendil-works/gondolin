@@ -5,6 +5,10 @@ pub const Error = error{
     Malformed,
     Unsupported,
     Overflow,
+    /// nesting exceeds `Decoder.max_depth`
+    RecursionLimit,
+    /// requested container allocation exceeds `Decoder.max_alloc_bytes`
+    AllocationTooLarge,
 };
 
 pub const Value = union(enum) {
@@ -32,6 +36,11 @@ pub const Decoder = struct {
     /// current read offset in `bytes`
     pos: usize = 0,
 
+    /// maximum nesting depth
+    max_depth: usize = 64,
+    /// maximum allocation size for a single array/map backing store in `bytes`
+    max_alloc_bytes: usize = 8 * 1024 * 1024,
+
     pub fn init(allocator: std.mem.Allocator, buf: []const u8) Decoder {
         return .{ .allocator = allocator, .buf = buf, .pos = 0 };
     }
@@ -44,8 +53,9 @@ pub const Decoder = struct {
     }
 
     fn readN(self: *Decoder, n: usize) ![]const u8 {
-        if (self.pos + n > self.buf.len) return Error.EndOfBuffer;
-        const slice = self.buf[self.pos .. self.pos + n];
+        // Avoid integer overflow when computing `pos + n`.
+        if (n > self.buf.len - self.pos) return Error.EndOfBuffer;
+        const slice = self.buf[self.pos..][0..n];
         self.pos += n;
         return slice;
     }
@@ -72,6 +82,12 @@ pub const Decoder = struct {
     }
 
     pub fn decodeValue(self: *Decoder) !Value {
+        return self.decodeValueDepth(self.max_depth);
+    }
+
+    fn decodeValueDepth(self: *Decoder, depth: usize) !Value {
+        if (depth == 0) return Error.RecursionLimit;
+
         const head = try self.readByte();
         const major: u8 = head >> 5;
         const add: u8 = head & 0x1f;
@@ -104,10 +120,26 @@ pub const Decoder = struct {
                 const len = try self.readUInt(add);
                 if (len > std.math.maxInt(usize)) return Error.Overflow;
                 const count = @as(usize, @intCast(len));
+
+                // Even in the best case each item consumes at least one byte.
+                if (count > self.buf.len - self.pos) return Error.EndOfBuffer;
+
+                const max_count = self.max_alloc_bytes / @sizeOf(Value);
+                if (count > max_count) return Error.AllocationTooLarge;
+
+                // Guard against allocator/internal sizing overflow.
+                _ = std.math.mul(usize, count, @sizeOf(Value)) catch return Error.Overflow;
+
                 const items = try self.allocator.alloc(Value, count);
+                var filled: usize = 0;
+                errdefer {
+                    for (items[0..filled]) |item| freeValue(self.allocator, item);
+                    self.allocator.free(items);
+                }
+
                 for (items, 0..) |*item, idx| {
-                    _ = idx;
-                    item.* = try self.decodeValue();
+                    item.* = try self.decodeValueDepth(depth - 1);
+                    filled = idx + 1;
                 }
                 break :blk Value{ .Array = items };
             },
@@ -115,13 +147,32 @@ pub const Decoder = struct {
                 const len = try self.readUInt(add);
                 if (len > std.math.maxInt(usize)) return Error.Overflow;
                 const count = @as(usize, @intCast(len));
+
+                const remaining = self.buf.len - self.pos;
+                // Each entry contains a key and value (>= 1 byte each).
+                if (count > remaining / 2) return Error.EndOfBuffer;
+
+                const max_count = self.max_alloc_bytes / @sizeOf(Entry);
+                if (count > max_count) return Error.AllocationTooLarge;
+
+                _ = std.math.mul(usize, count, @sizeOf(Entry)) catch return Error.Overflow;
+
                 const entries = try self.allocator.alloc(Entry, count);
+                var filled: usize = 0;
+                errdefer {
+                    for (entries[0..filled]) |entry| {
+                        freeValue(self.allocator, entry.key);
+                        freeValue(self.allocator, entry.value);
+                    }
+                    self.allocator.free(entries);
+                }
+
                 for (entries, 0..) |*entry, idx| {
-                    _ = idx;
                     entry.* = .{
-                        .key = try self.decodeValue(),
-                        .value = try self.decodeValue(),
+                        .key = try self.decodeValueDepth(depth - 1),
+                        .value = try self.decodeValueDepth(depth - 1),
                     };
+                    filled = idx + 1;
                 }
                 break :blk Value{ .Map = entries };
             },
@@ -275,4 +326,36 @@ test "encode/decode simple map" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "decode rejects absurd array length" {
+    // 0x9b = array with 8-byte length
+    const buf: []const u8 = &.{
+        0x9b,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    var dec = Decoder.init(testing.allocator, buf);
+    try testing.expectError(Error.EndOfBuffer, dec.decodeValue());
+}
+
+test "decode rejects array allocation too large" {
+    // Array(100) followed by 100 integers(0)
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    try buf.appendSlice(testing.allocator, &.{ 0x98, 0x64 });
+    try buf.appendNTimes(testing.allocator, 0x00, 100);
+
+    var dec = Decoder.init(testing.allocator, buf.items);
+    dec.max_alloc_bytes = 1024;
+
+    try testing.expectError(Error.AllocationTooLarge, dec.decodeValue());
 }
