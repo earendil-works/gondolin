@@ -9,7 +9,8 @@ const c = @cImport({
 
 const log = std.log.scoped(.sandboxd);
 
-const max_queued_stdin_bytes: usize = 4 * 1024 * 1024;
+/// max buffered stdin per exec session in `bytes`
+const max_queued_stdin_bytes: usize = 32 * 1024 * 1024;
 
 const Termination = struct {
     exit_code: i32,
