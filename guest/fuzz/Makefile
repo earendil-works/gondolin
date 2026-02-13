@@ -1,7 +1,8 @@
-.PHONY: help fuzz cbor protocol run-cbor run-protocol clean
+.PHONY: help fuzz cbor protocol repro-protocol run-cbor run-protocol print-protocol-last run-repro-protocol clean
 
 ZIG ?= zig
 FUZZ_OPTIMIZE ?= ReleaseSafe
+REPRO_OPTIMIZE ?= Debug
 
 TSX ?= ../../host/node_modules/.bin/tsx
 GONDOLIN ?= $(TSX) ../../host/bin/gondolin.ts
@@ -49,13 +50,18 @@ help:
 	@echo "  make run-protocol"
 	@echo "  (these clear cache/v/ on the host to avoid stale coverage mismatches)"
 	@echo
+	@echo "Repro / debugging helpers:"
+	@echo "  make print-protocol-last                   # prints newest corpus file path"
+	@echo "  make repro-protocol                        # builds repro runner binary"
+	@echo "  make run-repro-protocol [FILE=path]        # runs repro in VM (defaults to newest)"
+	@echo
 	@echo "Outputs (under cache dir):"
 	@echo "  corpus:   $(CACHE_DIR)/f/<fuzzer-name>/"
 	@echo "  coverage: $(CACHE_DIR)/v/<coverage-id>"
 	@echo "  log:      $(CACHE_DIR)/tmp/libfuzzer.log"
 	@echo
 	@echo "Binaries:"
-	@echo "  $(OUT_DIR)/{cbor-fuzz,protocol-fuzz}"
+	@echo "  $(OUT_DIR)/{cbor-fuzz,protocol-fuzz,protocol-repro}"
 
 fuzz: cbor protocol
 
@@ -66,6 +72,8 @@ cbor: $(OUT_DIR)/cbor-fuzz
 
 protocol: $(OUT_DIR)/protocol-fuzz
 
+repro-protocol: $(OUT_DIR)/protocol-repro
+
 $(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
@@ -73,6 +81,11 @@ $(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 
 $(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
+		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		-femit-bin=$@
+
+$(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
+	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
 		-femit-bin=$@
 
@@ -87,6 +100,32 @@ run-protocol: $(OUT_DIR)/protocol-fuzz
 	$(GONDOLIN) exec \
 		--mount-hostfs $(REPO_ROOT):/workspace \
 		-- /bin/sh -lc "mkdir -p /workspace/guest/fuzz/cache && exec /workspace/guest/fuzz/out/$(TARGET)/protocol-fuzz --cache-dir=/workspace/guest/fuzz/cache"
+
+print-protocol-last:
+	@set -e; \
+		corpus_dir="$(CACHE_DIR)/f/protocol_decode"; \
+		if [ ! -d "$$corpus_dir" ]; then \
+			echo "missing corpus dir: $$corpus_dir" >&2; \
+			exit 1; \
+		fi; \
+		f=$$(ls "$$corpus_dir" | LC_ALL=C sort -n | tail -n 1); \
+		if [ -z "$$f" ]; then \
+			echo "corpus dir is empty: $$corpus_dir" >&2; \
+			exit 1; \
+		fi; \
+		echo "guest/fuzz/cache/f/protocol_decode/$$f"
+
+run-repro-protocol: $(OUT_DIR)/protocol-repro
+	@set -e; \
+		file="$(FILE)"; \
+		if [ -z "$$file" ]; then \
+			file=$$($(MAKE) --no-print-directory print-protocol-last); \
+		fi; \
+		vm_file="$$file"; \
+		case "$$vm_file" in /*) ;; *) vm_file="/workspace/$$vm_file" ;; esac; \
+		$(GONDOLIN) exec \
+			--mount-hostfs $(REPO_ROOT):/workspace \
+			-- /bin/sh -lc "exec /workspace/guest/fuzz/out/$(TARGET)/protocol-repro $$vm_file"
 
 clean:
 	@rm -rf ./out ./cache
