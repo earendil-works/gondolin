@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-cbor fuzz-protocol fuzz-protocol-last fuzz-protocol-repro fuzz-clean
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-cbor-repro fuzz-protocol-repro fuzz-clean
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -12,10 +12,13 @@ help:
 	@echo "  make format      - Format code"
 	@echo "  make fix         - Alias for format"
 	@echo "  make clean       - Clean build artifacts"
-	@echo "  make fuzz        - Build guest fuzzers (protocol + cbor)"
+	@echo "  make fuzz        - Build guest fuzzers (protocol + cbor + sandbox)"
 	@echo "  make fuzz-cbor   - Run CBOR fuzzer in a VM"
 	@echo "  make fuzz-protocol - Run protocol fuzzer in a VM"
+	@echo "  make fuzz-sandbox - Run sandbox behavior fuzzer in a VM"
+	@echo "  make fuzz-cbor-last - Print newest CBOR fuzzer corpus file"
 	@echo "  make fuzz-protocol-last - Print newest protocol fuzzer corpus file"
+	@echo "  make fuzz-cbor-repro [FILE=path] - Run CBOR repro in VM (defaults to newest)"
 	@echo "  make fuzz-protocol-repro [FILE=path] - Run protocol repro in VM (defaults to newest)"
 	@echo "  make fuzz-clean  - Remove fuzz binaries + cache"
 	@echo "  make docs        - Build documentation site (Zensical)"
@@ -83,8 +86,17 @@ fuzz-cbor:
 fuzz-protocol:
 	@$(MAKE) -C guest fuzz-protocol
 
+fuzz-sandbox:
+	@$(MAKE) -C guest fuzz-sandbox
+
+fuzz-cbor-last:
+	@$(MAKE) -C guest fuzz-cbor-last
+
 fuzz-protocol-last:
 	@$(MAKE) -C guest fuzz-protocol-last
+
+fuzz-cbor-repro:
+	@$(MAKE) -C guest fuzz-cbor-repro FILE="$(FILE)"
 
 fuzz-protocol-repro:
 	@$(MAKE) -C guest fuzz-protocol-repro FILE="$(FILE)"
