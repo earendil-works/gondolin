@@ -1010,7 +1010,12 @@ export type SshExecRequest = {
   command: string;
 
   /** source guest flow attribution */
-  src: { ip: string; port: number };
+  src: {
+    /** guest source ip address */
+    ip: string;
+    /** guest source port */
+    port: number;
+  };
 };
 
 export type SshExecDecision =

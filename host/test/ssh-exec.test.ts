@@ -38,3 +38,39 @@ test("getInfoFromSshExecRequest returns null for non-git commands", () => {
 
   assert.equal(info, null);
 });
+
+test("getInfoFromSshExecRequest returns null for multiple shell commands", () => {
+  const info = getInfoFromSshExecRequest({
+    hostname: "github.com",
+    port: 22,
+    guestUsername: "git",
+    command: "git-upload-pack 'my-org/my-repo.git' && echo pwned",
+    src: { ip: "192.168.127.3", port: 50000 },
+  });
+
+  assert.equal(info, null);
+});
+
+test("getInfoFromSshExecRequest returns null for suspicious repo paths", () => {
+  const info = getInfoFromSshExecRequest({
+    hostname: "github.com",
+    port: 22,
+    guestUsername: "git",
+    command: 'git-upload-pack "$(echo my-org/my-repo.git)"',
+    src: { ip: "192.168.127.3", port: 50000 },
+  });
+
+  assert.equal(info, null);
+});
+
+test("getInfoFromSshExecRequest returns null for suspicious service paths", () => {
+  const info = getInfoFromSshExecRequest({
+    hostname: "github.com",
+    port: 22,
+    guestUsername: "git",
+    command: "/usr/lib/git-core/$(id)/git-upload-pack 'my-org/my-repo.git'",
+    src: { ip: "192.168.127.3", port: 50000 },
+  });
+
+  assert.equal(info, null);
+});
