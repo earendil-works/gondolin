@@ -955,10 +955,8 @@ type BashArgs = CommonOptions & {
   listenHost?: string;
   /** host port to bind ingress gateway (0 = ephemeral) */
   listenPort?: number;
-  /** custom command to run instead of bash */
-  cmd?: string;
-  /** arguments for the command */
-  cmdArgs?: string[];
+  /** custom command with arguments to run instead of bash */
+  command?: string[];
   /** working directory for the command */
   cwd?: string;
   /** environment variables */
@@ -979,7 +977,6 @@ function parseBashArgs(argv: string[]): BashArgs {
     ssh: false,
     listen: false,
     env: [],
-    cmdArgs: [],
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -988,8 +985,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     // Handle -- delimiter for command + args
     if (arg === "--") {
       if (i + 1 < argv.length) {
-        args.cmd = argv[i + 1];
-        args.cmdArgs = argv.slice(i + 2);
+        args.command = argv.slice(i + 1);
       }
       break; // Stop processing arguments
     }
@@ -1227,14 +1223,10 @@ async function runBash(argv: string[]) {
 
     // Start the shell (or custom command) without using ExecProcess.attach() so we can implement
     // a CLI-local escape hatch (Ctrl-]) that always regains control.
-    const command = args.cmd
-      ? [args.cmd, ...(args.cmdArgs || [])]
-      : undefined;
-
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command,
+      command: args.command,
       env: args.env && args.env.length > 0 ? args.env : undefined
     });
 
