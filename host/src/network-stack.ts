@@ -114,7 +114,7 @@ export type TcpResumeMessage = {
   key: string;
 };
 
-export type TcpFlowProtocol = "http" | "tls";
+export type TcpFlowProtocol = "http" | "tls" | "ssh";
 
 export type TcpFlowInfo = {
   /** nat/session key */
@@ -176,6 +176,8 @@ export type NetworkStackOptions = {
   callbacks: NetworkCallbacks;
   /** policy callback for allowing a sniffed tcp flow */
   allowTcpFlow?: (info: TcpFlowInfo) => boolean;
+  /** tcp ports that should be classified as SSH when the banner matches */
+  sshPorts?: number[];
   /** qemu tx buffer hard cap in `bytes` (includes the 4-byte length prefix) */
   txQueueMaxBytes?: number;
 };
@@ -208,6 +210,7 @@ export class NetworkStack extends EventEmitter {
 
   private readonly callbacks: NetworkCallbacks;
   private readonly allowTcpFlow: (info: TcpFlowInfo) => boolean;
+  private readonly sshPorts: ReadonlySet<number>;
   private readonly natTable = new Map<string, TcpSession>();
 
   private readonly MAX_FLOW_SNIFF = 8 * 1024;
@@ -238,6 +241,7 @@ export class NetworkStack extends EventEmitter {
     this.dnsServers = normalizeDnsServers(options.dnsServers);
     this.callbacks = options.callbacks;
     this.allowTcpFlow = options.allowTcpFlow ?? (() => true);
+    this.sshPorts = new Set((options.sshPorts && options.sshPorts.length > 0 ? options.sshPorts : [22]).filter((p) => Number.isInteger(p) && p > 0 && p <= 65535));
     this.TX_QUEUE_MAX_BYTES = options.txQueueMaxBytes ?? 8 * 1024 * 1024;
   }
 
@@ -615,7 +619,7 @@ export class NetworkStack extends EventEmitter {
     return { method, target, version };
   }
 
-  private classifyTcpFlow(data: Buffer) {
+  private classifyTcpFlow(data: Buffer, dstPort: number) {
     if (data.length === 0) {
       return { status: "need-more" } as const;
     }
@@ -639,6 +643,16 @@ export class NetworkStack extends EventEmitter {
 
     if (prefix.status === "partial") {
       return { status: "need-more" } as const;
+    }
+
+    if (this.sshPorts.has(dstPort)) {
+      const snippet = data.toString("ascii", 0, Math.min(data.length, 4));
+      if (snippet === "SSH-") {
+        return { status: "ssh" } as const;
+      }
+      if ("SSH-".startsWith(snippet)) {
+        return { status: "need-more" } as const;
+      }
     }
 
     if (data.length < 4) {
@@ -733,12 +747,37 @@ export class NetworkStack extends EventEmitter {
     }
 
     if (payload.length > 0) {
+      // Basic TCP reassembly / retransmit handling:
+      // - only accept in-order bytes starting at `session.myAck`
+      // - ignore pure retransmits (seq+len <= myAck)
+      // - ignore out-of-order segments (seq > myAck)
+      //
+      // This matters for SSH in particular: duplicating bytes can desync the
+      // protocol and trigger errors like "Bad packet length".
+      const expectedSeq = session.myAck;
+
+      if (seq > expectedSeq) {
+        // Out-of-order: re-ACK what we've already seen.
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      const skip = Math.max(0, expectedSeq - seq);
+      if (skip >= payload.length) {
+        // Pure retransmit (or segment contains only already-acked bytes)
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        if (!FIN) {
+          return;
+        }
+      }
+
+      const newPayload = payload.subarray(skip);
       let sendBuffer: Buffer | null = null;
-      const nextAck = session.myAck + payload.length;
+      const nextAck = expectedSeq + newPayload.length;
 
       if (!session.flowProtocol) {
-        session.pendingData = Buffer.concat([session.pendingData, payload]);
-        const classification = this.classifyTcpFlow(session.pendingData);
+        session.pendingData = Buffer.concat([session.pendingData, newPayload]);
+        const classification = this.classifyTcpFlow(session.pendingData, session.dstPort);
 
         if (classification.status === "need-more") {
           if (session.pendingData.length >= this.MAX_FLOW_SNIFF) {
@@ -757,6 +796,8 @@ export class NetworkStack extends EventEmitter {
           session.httpMethod = classification.method;
         } else if (classification.status === "tls") {
           session.flowProtocol = "tls";
+        } else if (classification.status === "ssh") {
+          session.flowProtocol = "ssh";
         }
 
         if (session.flowProtocol) {
@@ -777,22 +818,42 @@ export class NetworkStack extends EventEmitter {
           session.pendingData = Buffer.alloc(0);
         }
       } else {
-        sendBuffer = payload;
+        sendBuffer = newPayload;
       }
 
-      session.vmSeq += payload.length;
+      session.vmSeq = nextAck;
       session.myAck = nextAck;
 
       if (sendBuffer && sendBuffer.length > 0) {
         this.callbacks.onTcpSend({ key, data: Buffer.from(sendBuffer) });
       }
 
-      this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+      // ACK payload immediately unless FIN is also set (FIN handling below will ACK).
+      if (!FIN) {
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+      }
     }
 
     if (FIN) {
+      // FIN consumes one sequence number, so only accept it once the sequence
+      // space up to the FIN is fully received.
+      const finSeq = seq + payload.length;
+      if (finSeq > session.myAck) {
+        // Out-of-order FIN: keep ACKing the last in-order byte.
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      if (finSeq < session.myAck) {
+        // Duplicate FIN (already acked)
+        this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
+        return;
+      }
+
+      // finSeq === session.myAck
       this.callbacks.onTcpClose({ key, destroy: false });
       session.myAck++;
+
       this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
       if (session.state === "CLOSED_BY_REMOTE" || session.state === "FIN_WAIT") {
         this.clearPauseState(key);

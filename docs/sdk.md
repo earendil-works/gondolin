@@ -424,6 +424,49 @@ const { httpHooks, env } = createHttpHooks({
 });
 ```
 
+### SSH egress (optional)
+
+You can optionally allow outbound SSH (default port `22`, with non-standard ports enabled by allowlisting `HOST:PORT`) from the guest to an allowlist.
+This is useful for git-over-SSH (e.g. cloning private repos) without granting the
+guest arbitrary TCP access.
+
+```ts
+import os from "node:os";
+import path from "node:path";
+
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  ssh: {
+    allowedHosts: ["github.com"],
+
+    // Non-standard ports can be allowlisted as "HOST:PORT" (e.g. "ssh.github.com:443")
+
+    // Authenticate upstream using host ssh-agent OR a configured private key
+    agent: process.env.SSH_AUTH_SOCK,
+    // credentials: { "github.com": { username: "git", privateKey: "..." } },
+
+    // Verify upstream host keys (recommended)
+    knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
+
+    // Optional safety knobs:
+    // maxUpstreamConnectionsPerTcpSession: 4,
+    // maxUpstreamConnectionsTotal: 64,
+    // upstreamReadyTimeoutMs: 15_000,
+  },
+});
+```
+
+Notes:
+
+- SSH egress is proxied by the host and intentionally limited to non-interactive
+  `exec` usage (no shells, no subsystems like `sftp`).
+- See: [SSH](./ssh.md) and [Network stack](./network.md).
+
 Notable consequences:
 
 - Secret placeholders are substituted in request headers by default (including Basic auth token decoding/re-encoding).

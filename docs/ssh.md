@@ -99,3 +99,87 @@ command without the recommended options.
 - Port forwarding is intentionally disabled. If you need host <-> guest
   connectivity for a specific service, prefer purpose-built host APIs instead of
   SSH tunnels.
+
+## Outbound SSH (Guest -> Upstream)
+
+Separate from `vm.enableSsh()` (host -> guest SSH access), Gondolin can also
+allow **outbound** SSH from the guest to specific allowlisted upstream hosts.
+This is primarily intended for workflows like **git over SSH**.
+
+How it works:
+
+- The guest connects to `HOST:PORT` as usual (default `22`; non-standard ports are enabled by allowlisting `HOST:PORT`)
+- The host intercepts that TCP flow (SSH is only allowed when explicitly
+  configured) and terminates it in an in-process SSH server.
+- For each guest `exec` request, the host opens an upstream SSH connection to
+  the real destination using either:
+    - a host ssh-agent, or
+    - a configured private key
+- Upstream host keys are verified on the host via OpenSSH `known_hosts` (or a
+  custom verifier).
+
+Limitations:
+
+- Only non-interactive `exec` channels are supported
+    - interactive shells are denied
+    - subsystems (such as `sftp`) are denied
+- Upstream connections are resource-capped and time-bounded to avoid
+  guest-triggerable host DoS
+
+### Guest SSH client options (git)
+
+The guest’s OpenSSH client is connecting to Gondolin’s **host-side SSH proxy**.
+That proxy uses an ephemeral host key and does not currently support
+post-quantum key exchange, so OpenSSH may show:
+
+- `Permanently added ...` / host key prompts
+- `** WARNING: connection is not using a post-quantum key exchange algorithm.`
+
+For non-interactive tools like `git`, you can suppress prompts and these warnings:
+
+```sh
+export GIT_SSH_COMMAND='ssh \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR'
+```
+
+This only affects the guest->proxy SSH client UX. Upstream host key verification
+still happens on the host (via `known_hosts` / `--ssh-known-hosts`).
+
+### CLI
+
+See the SSH egress flags in the CLI reference: [CLI](./cli.md).
+
+### SDK
+
+```ts
+import os from "node:os";
+import path from "node:path";
+
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  ssh: {
+    allowedHosts: ["github.com"],
+    // Non-standard ports can be allowlisted as "HOST:PORT" (e.g. "ssh.github.com:443")
+    agent: process.env.SSH_AUTH_SOCK,
+    knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
+
+    // Optional safety/perf knobs:
+    // maxUpstreamConnectionsPerTcpSession: 4,
+    // maxUpstreamConnectionsTotal: 64,
+    // upstreamReadyTimeoutMs: 15_000,
+    // upstreamKeepaliveIntervalMs: 10_000,
+    // upstreamKeepaliveCountMax: 3,
+  },
+});
+
+// Now commands like `git clone git@github.com:org/repo.git` can work inside the guest
+```

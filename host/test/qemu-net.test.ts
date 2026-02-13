@@ -22,11 +22,100 @@ function makeBackend(options?: Partial<ConstructorParameters<typeof QemuNetworkB
   });
 }
 
+test("qemu-net: ssh host key generation is lazy", () => {
+  const backend = makeBackend();
+  assert.equal((backend as any).sshHostKey, null);
+
+  const backendWithSsh = makeBackend({
+    ssh: {
+      allowedHosts: ["example.com"],
+      credentials: {
+        "example.com": { privateKey: "FAKE" },
+      },
+      hostVerifier: () => true,
+    },
+  });
+  assert.equal((backendWithSsh as any).sshHostKey, null);
+});
+
 test("qemu-net: trusted dns mode requires ipv4 resolvers (no silent fallback)", () => {
   assert.throws(
     () => makeBackend({ dns: { mode: "trusted", trustedServers: ["::1"] } as any }),
     /requires at least one IPv4 resolver/i
   );
+});
+
+function buildDnsQueryA(name: string, id = 0x1234): Buffer {
+  const labels = name.split(".").filter(Boolean);
+  const qnameParts: Buffer[] = [];
+  for (const label of labels) {
+    const b = Buffer.from(label, "ascii");
+    qnameParts.push(Buffer.from([b.length]));
+    qnameParts.push(b);
+  }
+  qnameParts.push(Buffer.from([0]));
+  const qname = Buffer.concat(qnameParts);
+
+  const tail = Buffer.alloc(4);
+  tail.writeUInt16BE(1, 0); // A
+  tail.writeUInt16BE(1, 2); // IN
+
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(id, 0);
+  header.writeUInt16BE(0x0100, 2); // RD
+  header.writeUInt16BE(1, 4); // QDCOUNT
+  header.writeUInt16BE(0, 6);
+  header.writeUInt16BE(0, 8);
+  header.writeUInt16BE(0, 10);
+
+  return Buffer.concat([header, qname, tail]);
+}
+
+function runSyntheticDns(backend: QemuNetworkBackend, payload: Buffer): Buffer {
+  let response: Buffer | null = null;
+  (backend as any).stack = {
+    handleUdpResponse: (message: { data: Buffer }) => {
+      response = Buffer.from(message.data);
+    },
+  };
+
+  (backend as any).handleUdpSend({
+    key: "dns",
+    srcIP: "192.168.127.2",
+    srcPort: 55555,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload,
+  });
+
+  assert.ok(response, "expected synthetic dns response");
+  return response;
+}
+
+test("qemu-net: synthetic per-host dns mapping does not throw on root query", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const response = runSyntheticDns(backend, buildDnsQueryA("."));
+  assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
+  assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
+});
+
+test("qemu-net: synthetic per-host dns mapping does not throw on mapping exhaustion", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const hostMap = (backend as any).syntheticDnsHostMap;
+  assert.ok(hostMap);
+  // Force the allocator into an exhausted state without allocating ~65k entries.
+  hostMap.nextHostId = 65024 + 1;
+
+  const response = runSyntheticDns(backend, buildDnsQueryA("example.com", 0x9999));
+  assert.equal(response.readUInt16BE(0), 0x9999);
+  assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
+  assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
 });
 
 test("qemu-net: parseHttpRequest parses content-length and preserves remaining", () => {
@@ -1585,6 +1674,480 @@ test("qemu-net: dns synthetic mode replies without opening udp socket", () => {
   assert.equal(response.readUInt16BE(0), 0x2222);
   assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
   assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
+});
+
+test("qemu-net: dns synthetic per-host mapping assigns stable unique IPv4 addresses", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+  };
+
+  const sendQuery = (name: string, id: number) => {
+    (backend as any).handleUdpSend({
+      key: `udp-${id}`,
+      srcIP: "192.168.127.3",
+      srcPort: 40000 + id,
+      dstIP: "192.168.127.1",
+      dstPort: 53,
+      payload: buildQueryA(name, id),
+    });
+    const response = responses[responses.length - 1]?.data as Buffer;
+    const parts = [...response.subarray(response.length - 4)];
+    return `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+  };
+
+  const exampleIp = sendQuery("example.com", 0x3001);
+  const githubIp = sendQuery("github.com", 0x3002);
+  const exampleIpAgain = sendQuery("example.com", 0x3003);
+
+  assert.equal(exampleIpAgain, exampleIp);
+  assert.notEqual(exampleIp, githubIp);
+  assert.ok(exampleIp.startsWith("198.19."));
+  assert.ok(githubIp.startsWith("198.19."));
+  assert.equal((backend as any).syntheticDnsHostMap.lookupHostByIp(exampleIp), "example.com");
+  assert.equal((backend as any).syntheticDnsHostMap.lookupHostByIp(githubIp), "github.com");
+});
+
+test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  const resolveSynthetic = (name: string, id: number) => {
+    (backend as any).handleUdpSend({
+      key: `udp-${id}`,
+      srcIP: "192.168.127.3",
+      srcPort: 41000 + id,
+      dstIP: "192.168.127.1",
+      dstPort: 53,
+      payload: buildQueryA(name, id),
+    });
+    const response = responses[responses.length - 1]?.data as Buffer;
+    const parts = [...response.subarray(response.length - 4)];
+    return `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+  };
+
+  const githubIp = resolveSynthetic("github.com", 0x4001);
+  const gitlabIp = resolveSynthetic("gitlab.com", 0x4002);
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-github",
+    srcIP: "192.168.127.3",
+    srcPort: 50001,
+    dstIP: githubIp,
+    dstPort: 22,
+  });
+  assert.equal((backend as any).isSshFlowAllowed("tcp-github", githubIp, 22), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-github").connectIP, "github.com");
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-gitlab",
+    srcIP: "192.168.127.3",
+    srcPort: 50002,
+    dstIP: gitlabIp,
+    dstPort: 22,
+  });
+  assert.equal((backend as any).isSshFlowAllowed("tcp-gitlab", gitlabIp, 22), false);
+});
+
+test("qemu-net: ssh flows can be enabled on non-standard ports via host:port allowlist", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com:443"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-ssh-port",
+    srcIP: "192.168.127.3",
+    srcPort: 41123,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("ssh.github.com", 0x4010),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const sshGithubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-ssh-443",
+    srcIP: "192.168.127.3",
+    srcPort: 50011,
+    dstIP: sshGithubIp,
+    dstPort: 443,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-ssh-443", sshGithubIp, 443), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-ssh-443").connectIP, "ssh.github.com");
+});
+
+test("qemu-net: ssh flows on non-allowed ports are blocked", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-ssh-port2",
+    srcIP: "192.168.127.3",
+    srcPort: 41124,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("ssh.github.com", 0x4011),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const sshGithubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-ssh-443-blocked",
+    srcIP: "192.168.127.3",
+    srcPort: 50012,
+    dstIP: sshGithubIp,
+    dstPort: 443,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-ssh-443-blocked", sshGithubIp, 443), false);
+});
+
+test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+  assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
+});
+
+test("qemu-net: ssh egress requires synthetic dns mode", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "trusted", trustedServers: ["1.1.1.1"] },
+        ssh: { allowedHosts: ["github.com"] },
+      }),
+    /ssh egress requires dns mode 'synthetic'/i
+  );
+});
+
+test("qemu-net: ssh egress rejects single synthetic host mapping", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "single" },
+        ssh: { allowedHosts: ["github.com"] },
+      }),
+    /ssh egress requires dns syntheticHostMapping='per-host'/i
+  );
+});
+
+test("qemu-net: ssh egress requires upstream host key verification", () => {
+  const missingKnownHosts = path.join(os.tmpdir(), `gondolin-missing-known-hosts-${crypto.randomUUID()}`);
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        ssh: {
+          allowedHosts: ["github.com"],
+          agent: "/tmp/fake-ssh-agent.sock",
+          knownHostsFile: missingKnownHosts,
+        },
+      }),
+    /ssh\.hostVerifier to validate upstream host keys/i
+  );
+});
+
+test("qemu-net: ssh auth defaults to known_hosts verification", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+
+  fs.writeFileSync(knownHostsPath, `github.com ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backendAgent = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  const backendCred = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      credentials: { "github.com": { privateKey: "FAKE" } },
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  for (const backend of [backendAgent, backendCred]) {
+    const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port: number) => boolean) | null;
+    assert.equal(typeof verifier, "function");
+    assert.equal(verifier!("github.com", keyBlob, 22), true);
+    assert.equal(verifier!("github.com", Buffer.from("nope"), 22), false);
+    assert.equal(verifier!("gitlab.com", keyBlob, 22), false);
+  }
+});
+
+test("qemu-net: known_hosts port entries are respected", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-port-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+
+  fs.writeFileSync(knownHostsPath, `[ssh.github.com]:443 ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["ssh.github.com:443"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port: number) => boolean) | null;
+  assert.equal(typeof verifier, "function");
+  assert.equal(verifier!("ssh.github.com", keyBlob, 443), true);
+  // Default port (22) lookup should not match a port-specific entry
+  assert.equal(verifier!("ssh.github.com", keyBlob, 22), false);
+});
+
+test("qemu-net: known_hosts hashed host patterns are supported", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gondolin-known-hosts-hash-${process.pid}-`));
+  const knownHostsPath = path.join(dir, "known_hosts");
+
+  const keyBlob = Buffer.from("test-host-key-blob", "utf8");
+  const host = "github.com";
+  const salt = Buffer.from("0123456789abcdef0123", "utf8");
+  const hmac = crypto.createHmac("sha1", salt).update(host, "utf8").digest();
+  const hashedHost = `|1|${salt.toString("base64")}|${hmac.toString("base64")}`;
+
+  fs.writeFileSync(knownHostsPath, `${hashedHost} ssh-ed25519 ${keyBlob.toString("base64")}\n`);
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: [host],
+      credentials: { [host]: { privateKey: "FAKE" } },
+      knownHostsFile: knownHostsPath,
+    },
+  });
+
+  const verifier = (backend as any).sshHostVerifier as ((hostname: string, key: Buffer, port: number) => boolean) | null;
+  assert.equal(typeof verifier, "function");
+  assert.equal(verifier!(host, keyBlob, 22), true);
+});
+
+test("qemu-net: ssh egress requires credential or ssh agent", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        ssh: {
+          allowedHosts: ["github.com"],
+          hostVerifier: () => true,
+        },
+      }),
+    /requires at least one credential|requires at least one credential or ssh agent/i
+  );
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      credentials: {
+        "github.com": {
+          username: "git",
+          privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
+        },
+      },
+      hostVerifier: () => true,
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-cred",
+    srcIP: "192.168.127.3",
+    srcPort: 42000,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("github.com", 0x4444),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const githubIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  (backend as any).handleTcpConnect({
+    key: "tcp-cred",
+    srcIP: "192.168.127.3",
+    srcPort: 50003,
+    dstIP: githubIp,
+    dstPort: 22,
+  });
+
+  assert.equal((backend as any).isSshFlowAllowed("tcp-cred", githubIp, 22), true);
+  assert.equal((backend as any).tcpSessions.get("tcp-cred").sshCredential.pattern, "github.com");
+});
+
+test("qemu-net: ssh egress allows ssh agent", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  assert.ok(backend);
+});
+
+test("qemu-net: ssh flows with credentials use proxy path", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      credentials: {
+        "github.com": {
+          username: "git",
+          privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----",
+        },
+      },
+      hostVerifier: () => true,
+    },
+  });
+
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 50004,
+    dstIP: "198.19.0.10",
+    dstPort: 22,
+    connectIP: "github.com",
+    syntheticHostname: "github.com",
+    sshCredential: {
+      pattern: "github.com",
+      username: "git",
+      privateKey: "k",
+    },
+    sshProxyAuth: "credential",
+    flowControlPaused: false,
+    protocol: "ssh",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  (backend as any).tcpSessions.set("tcp-proxy", session);
+
+  let usedProxy = 0;
+  let usedSocket = 0;
+  (backend as any).handleSshProxyData = () => {
+    usedProxy += 1;
+  };
+  (backend as any).ensureTcpSocket = () => {
+    usedSocket += 1;
+  };
+
+  (backend as any).handleTcpSend({ key: "tcp-proxy", data: Buffer.from("SSH-2.0-test\r\n", "ascii") });
+
+  assert.equal(usedProxy, 1);
+  assert.equal(usedSocket, 0);
+});
+
+test("qemu-net: ssh flows with agent use proxy path", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+    },
+  });
+
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 50005,
+    dstIP: "198.19.0.11",
+    dstPort: 22,
+    connectIP: "github.com",
+    syntheticHostname: "github.com",
+    sshCredential: null,
+    sshProxyAuth: "agent",
+    flowControlPaused: false,
+    protocol: "ssh",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  (backend as any).tcpSessions.set("tcp-proxy-agent", session);
+
+  let usedProxy = 0;
+  let usedSocket = 0;
+  (backend as any).handleSshProxyData = () => {
+    usedProxy += 1;
+  };
+  (backend as any).ensureTcpSocket = () => {
+    usedSocket += 1;
+  };
+
+  (backend as any).handleTcpSend({
+    key: "tcp-proxy-agent",
+    data: Buffer.from("SSH-2.0-test\r\n", "ascii"),
+  });
+
+  assert.equal(usedProxy, 1);
+  assert.equal(usedSocket, 0);
 });
 
 test("qemu-net: shared checked dispatcher is reused per origin", () => {

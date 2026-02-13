@@ -91,6 +91,58 @@ risk and should only be used when required.
 > certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
 > failures (e.g. `curl: (60)`).
 
+## Outbound SSH host allowlist
+
+SSH egress can be enabled with an explicit host allowlist:
+
+```ts
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  ssh: {
+    allowedHosts: ["github.com"],
+
+    // Upstream host key verification
+    //
+    // If `hostVerifier` is not provided, gondolin verifies upstream host keys using
+    // OpenSSH known_hosts (by default: ~/.ssh/known_hosts and /etc/ssh/ssh_known_hosts).
+    // You can override this with `knownHostsFile`.
+    // knownHostsFile: "/path/to/known_hosts",
+
+    // Option A: use an ssh-agent (recommended for encrypted keys)
+    agent: process.env.SSH_AUTH_SOCK,
+
+    // Option B: provide a raw private key
+    credentials: {
+      "github.com": {
+        username: "git",
+        privateKey: process.env.GITHUB_DEPLOY_KEY!,
+      },
+    },
+  },
+});
+```
+
+`syntheticHostMapping: "per-host"` is required so the host can map outbound
+TCP connections on port `22` back to the intended hostname.
+
+When credentials or an SSH agent are configured, the host terminates the guest SSH
+session and proxies `exec` requests (including Git smart-protocol commands) to the
+real upstream host using host-side authentication. The private key is never
+visible in the guest.
+
+If no matching credential is configured for a host and no `ssh.agent` is set, the
+SSH flow is blocked (direct passthrough is not supported).
+
+Because this is SSH termination, the guest sees a host-provided SSH host key;
+configure guest `known_hosts` (or disable strict checking explicitly) as needed.
+
+Upstream SSH host keys are verified against OpenSSH `known_hosts` by default.
+If the upstream host is missing (or the key changes), the proxied SSH request
+will fail.
+
 ## License and Links
 
 - [Documentation](https://earendil-works.github.io/gondolin/)

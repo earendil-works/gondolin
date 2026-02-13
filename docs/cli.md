@@ -57,9 +57,10 @@ gondolin exec --mount-hostfs /data:/data:ro --mount-memfs /tmp -- ls -la /data
 
 ### Network Options (HTTP Allowlist + Secret Injection)
 
-Gondolin's network bridge only forwards HTTP/HTTPS traffic.  Requests are
-intercepted on the host side, which allows enforcing host allowlists and
-injecting secrets without exposing them inside the VM.
+Gondolin's network bridge forwards HTTP/HTTPS traffic and can optionally proxy
+allowlisted outbound SSH. Requests are intercepted on the host side, which
+allows enforcing host allowlists and injecting secrets without exposing them
+inside the VM.
 
 - `--allow-host HOST_PATTERN`
   - Allow outbound HTTP/HTTPS requests to this host
@@ -101,6 +102,81 @@ gondolin exec \
 
 # Allow multiple hosts / wildcards
 gondolin bash --allow-host "*.github.com" --allow-host api.openai.com
+```
+
+### Network Options (SSH Egress Proxy)
+
+Gondolin can optionally allow outbound SSH from the guest to specific
+allowlisted hosts. SSH egress is **proxied by the host**: the guest connects to
+an in-process SSH server, and the host opens the real upstream SSH connection
+(using either an ssh-agent or a configured private key).
+
+Restrictions and properties:
+
+- Non-standard ports are supported by suffixing `:PORT` in `--ssh-allow-host` (default: `22`)
+- Only non-interactive `exec` channels are supported
+  - interactive shells are denied
+  - SSH subsystems (such as `sftp`) are denied
+- Upstream host keys are verified on the host (via OpenSSH `known_hosts`)
+- Interactive passphrase prompting is not supported; prefer `passphrase-env`
+- Note: in shells, `~/.ssh/known_hosts` is only expanded when unquoted (otherwise use `$HOME/.ssh/known_hosts`)
+
+CLI flags:
+
+- `--ssh-allow-host HOST_PATTERN[:PORT]`
+  - Allow outbound SSH to the given host+port (repeatable, default port: 22)
+- `--ssh-agent [SOCK]`
+  - Use a host ssh-agent socket (defaults to `$SSH_AUTH_SOCK`)
+- `--ssh-known-hosts PATH`
+  - OpenSSH `known_hosts` file for upstream verification (repeatable)
+- `--ssh-credential SPEC`
+  - Host-side SSH private key for upstream authentication
+  - Format:
+    - `HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+    - `USER@HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+
+Example (git over ssh using your host ssh-agent):
+
+```bash
+gondolin bash \
+  --ssh-allow-host github.com \
+  --ssh-agent \
+  --ssh-known-hosts ~/.ssh/known_hosts
+```
+
+Example (git over ssh on a non-standard port):
+
+```bash
+gondolin bash \
+  --ssh-allow-host ssh.github.com:443 \
+  --ssh-agent \
+  --ssh-known-hosts ~/.ssh/known_hosts
+```
+
+Example (git over ssh using a dedicated key + passphrase from env):
+
+```bash
+export GIT_KEY_PASSPHRASE='...'
+
+gondolin bash \
+  --ssh-credential git@github.com=~/.ssh/id_ed25519,passphrase-env=GIT_KEY_PASSPHRASE \
+  --ssh-known-hosts ~/.ssh/known_hosts
+```
+
+Inside the guest, OpenSSH is talking to the **host-side SSH proxy**, so you may see:
+
+- a host key prompt / `Permanently added ...` message (the proxy host key is ephemeral)
+- the OpenSSH post-quantum key exchange warning
+
+For non-interactive tools like `git`, you can suppress prompts and these warnings:
+
+```sh
+export GIT_SSH_COMMAND='ssh \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR'
 ```
 
 ## Commands
