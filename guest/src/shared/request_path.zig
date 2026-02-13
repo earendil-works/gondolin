@@ -3,6 +3,10 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 
+fn validateNoNul(path: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return protocol.ProtocolError.InvalidValue;
+}
+
 fn isPathWithinRoot(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, root, "/")) return true;
     if (std.mem.eql(u8, path, root)) return true;
@@ -19,11 +23,13 @@ pub fn resolveRequestPath(
     cwd: ?[]const u8,
 ) ![]u8 {
     if (request_path.len == 0) return protocol.ProtocolError.InvalidValue;
+    try validateNoNul(request_path);
     if (std.fs.path.isAbsolute(request_path)) {
         return allocator.dupe(u8, request_path);
     }
 
     const base = cwd orelse return protocol.ProtocolError.InvalidValue;
+    try validateNoNul(base);
     if (!std.fs.path.isAbsolute(base)) return protocol.ProtocolError.InvalidValue;
 
     return std.fs.path.resolve(allocator, &[_][]const u8{ base, request_path });
@@ -38,6 +44,8 @@ pub fn resolveRequestPathInRoot(
     request_path: []const u8,
     cwd: ?[]const u8,
 ) ![]u8 {
+    try validateNoNul(root_dir);
+
     if (std.mem.eql(u8, root_dir, "/")) {
         return resolveRequestPath(allocator, request_path, cwd);
     }
@@ -45,6 +53,7 @@ pub fn resolveRequestPathInRoot(
     // If the request uses an absolute path, interpret it as absolute within the root.
     // This keeps fuzz harnesses from touching the real guest filesystem.
     if (request_path.len == 0) return protocol.ProtocolError.InvalidValue;
+    try validateNoNul(request_path);
     if (std.fs.path.isAbsolute(request_path)) {
         const rel = std.mem.trimLeft(u8, request_path, "/");
         const resolved = try std.fs.path.resolve(allocator, &[_][]const u8{ root_dir, rel });
