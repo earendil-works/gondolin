@@ -1,8 +1,8 @@
 .PHONY: help fuzz cbor protocol sandbox \
-	repro-cbor repro-protocol \
+	repro repro-cbor repro-protocol repro-sandbox \
 	run-cbor run-protocol run-sandbox \
 	print-cbor-last print-protocol-last print-sandbox-last \
-	run-repro-cbor run-repro-protocol clean
+	run-repro-cbor run-repro-protocol run-repro-sandbox clean
 
 ZIG ?= zig
 FUZZ_OPTIMIZE ?= ReleaseSafe
@@ -65,10 +65,13 @@ help:
 	@echo "  make print-cbor-last                       # prints newest corpus file path"
 	@echo "  make print-protocol-last                   # prints newest corpus file path"
 	@echo "  make print-sandbox-last                    # prints newest corpus file path"
+	@echo "  make repro                                 # builds all repro runner binaries"
 	@echo "  make repro-cbor                            # builds repro runner binary"
 	@echo "  make repro-protocol                        # builds repro runner binary"
+	@echo "  make repro-sandbox                         # builds repro runner binary"
 	@echo "  make run-repro-cbor [FILE=path]            # runs repro in VM (defaults to newest)"
 	@echo "  make run-repro-protocol [FILE=path]        # runs repro in VM (defaults to newest)"
+	@echo "  make run-repro-sandbox [FILE=path]         # runs repro in VM (defaults to newest)"
 	@echo
 	@echo "Outputs (under cache dir):"
 	@echo "  corpus:   $(CACHE_DIR)/f/<fuzzer-name>/"
@@ -76,9 +79,11 @@ help:
 	@echo "  log:      $(CACHE_DIR)/tmp/libfuzzer.log"
 	@echo
 	@echo "Binaries:"
-	@echo "  $(OUT_DIR)/{cbor-fuzz,cbor-repro,protocol-fuzz,protocol-repro,sandbox-fuzz}"
+	@echo "  $(OUT_DIR)/{cbor-fuzz,cbor-repro,protocol-fuzz,protocol-repro,sandbox-fuzz,sandbox-repro}"
 
 fuzz: cbor protocol sandbox
+
+repro: repro-cbor repro-protocol repro-sandbox
 
 $(OUT_DIR):
 	@mkdir -p $(OUT_DIR)
@@ -92,6 +97,8 @@ sandbox: $(OUT_DIR)/sandbox-fuzz
 repro-cbor: $(OUT_DIR)/cbor-repro
 
 repro-protocol: $(OUT_DIR)/protocol-repro
+
+repro-sandbox: $(OUT_DIR)/sandbox-repro
 
 $(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
@@ -118,6 +125,13 @@ $(OUT_DIR)/cbor-repro: cbor_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
 $(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		-femit-bin=$@
+
+$(OUT_DIR)/sandbox-repro: sandbox_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
+	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
+		--dep sandboxd --dep file_requests -Mmain=$< \
+		-Msandboxd=../src/root.zig \
+		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
 		-femit-bin=$@
 
 run-cbor: $(OUT_DIR)/cbor-fuzz
@@ -203,6 +217,18 @@ run-repro-protocol: $(OUT_DIR)/protocol-repro
 		$(GONDOLIN) exec \
 			$(VM_MOUNTS) \
 			-- /bin/sh -lc "exec /workspace/guest/fuzz/out/$(TARGET)/protocol-repro $$vm_file"
+
+run-repro-sandbox: $(OUT_DIR)/sandbox-repro
+	@set -e; \
+		file="$(FILE)"; \
+		if [ -z "$$file" ]; then \
+			file=$$($(MAKE) --no-print-directory print-sandbox-last); \
+		fi; \
+		vm_file="$$file"; \
+		case "$$vm_file" in /*) ;; *) vm_file="/workspace/$$vm_file" ;; esac; \
+		$(GONDOLIN) exec \
+			$(VM_MOUNTS) \
+			-- /bin/sh -lc "exec /workspace/guest/fuzz/out/$(TARGET)/sandbox-repro $$vm_file"
 
 clean:
 	@rm -rf ./out ./cache
