@@ -68,13 +68,13 @@ function usage() {
 }
 
 function bashUsage() {
-  console.log("Usage: gondolin bash [options]");
+  console.log("Usage: gondolin bash [options] [-- COMMAND [ARGS...]]");
   console.log();
   console.log("Start an interactive bash session in the sandbox.");
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("Command Options:");
-  console.log("  --cmd CMD                       Run custom command interactively");
+  console.log("  --                              Everything after -- is treated as command + args");
   console.log("  --cwd PATH                      Working directory for the command");
   console.log("  --env KEY=VALUE                 Set environment variable (can repeat)");
   console.log();
@@ -955,8 +955,8 @@ type BashArgs = CommonOptions & {
   listenHost?: string;
   /** host port to bind ingress gateway (0 = ephemeral) */
   listenPort?: number;
-  /** custom command to run instead of bash */
-  cmd?: string;
+  /** custom command with arguments to run instead of bash */
+  command?: string[];
   /** working directory for the command */
   cwd?: string;
   /** environment variables */
@@ -981,6 +981,15 @@ function parseBashArgs(argv: string[]): BashArgs {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+
+    // Handle -- delimiter for command + args
+    if (arg === "--") {
+      if (i + 1 < argv.length) {
+        args.command = argv.slice(i + 1);
+      }
+      break; // Stop processing arguments
+    }
+
     switch (arg) {
       case "--mount-hostfs": {
         const spec = argv[++i];
@@ -1146,15 +1155,6 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.sshListen = host;
         break;
       }
-      case "--cmd": {
-        const cmd = argv[++i];
-        if (!cmd) {
-          console.error("--cmd requires an argument");
-          process.exit(1);
-        }
-        args.cmd = cmd;
-        break;
-      }
       case "--cwd": {
         const cwd = argv[++i];
         if (!cwd) {
@@ -1226,7 +1226,7 @@ async function runBash(argv: string[]) {
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command: args.cmd ? [args.cmd] : undefined,
+      command: args.command,
       env: args.env && args.env.length > 0 ? args.env : undefined
     });
 
