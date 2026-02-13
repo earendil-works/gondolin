@@ -9,6 +9,7 @@ guest/.zig-cache/
 guest/image/out/
 guest/image/.cache/
 guest/fuzz/out/
+guest/fuzz/out-native/
 guest/fuzz/cache/
 node_modules/
 host/node_modules/
