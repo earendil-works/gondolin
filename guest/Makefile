@@ -1,4 +1,4 @@
-.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format
+.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format fuzz fuzz-cbor fuzz-protocol fuzz-clean
 
 RUN_PARALLEL ?= ../scripts/run-parallel
 
@@ -9,7 +9,7 @@ GONDOLIN ?= $(TSX) ../host/bin/gondolin.ts
 GONDOLIN_BUILD_CONFIG ?=
 GONDOLIN_BUILD_EXTRA_ARGS ?=
 
-ZIG_SOURCES := $(shell find src -name '*.zig') build.zig
+ZIG_SOURCES := $(shell find src fuzz -name '*.zig') build.zig
 ZIG_BUILD_DEPS := $(ZIG_SOURCES) build.zig.zon
 # NOTE: guest image builds are driven by the host TypeScript builder (host/src/build-alpine.ts).
 HOST_BUILD_DEPS := $(shell find ../host/src ../host/bin -name '*.ts') ../host/package.json ../host/tsconfig.json
@@ -85,3 +85,17 @@ test-inner: assets
 
 clean:
 	@rm -rf zig-cache zig-out $(IMAGE_OUT)
+
+# Build fuzzers (Zig -ffuzz / libFuzzer-style runner)
+fuzz:
+	$(MAKE) -C fuzz fuzz
+
+# Run fuzzers in a VM (mounts repo at /workspace)
+fuzz-cbor:
+	$(MAKE) -C fuzz run-cbor
+
+fuzz-protocol:
+	$(MAKE) -C fuzz run-protocol
+
+fuzz-clean:
+	$(MAKE) -C fuzz clean

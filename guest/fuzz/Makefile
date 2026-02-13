@@ -1,0 +1,92 @@
+.PHONY: help fuzz cbor protocol run-cbor run-protocol clean
+
+ZIG ?= zig
+FUZZ_OPTIMIZE ?= ReleaseSafe
+
+TSX ?= ../../host/node_modules/.bin/tsx
+GONDOLIN ?= $(TSX) ../../host/bin/gondolin.ts
+
+# Keep this in sync with guest/Makefile
+HOST_ARCH := $(shell uname -m)
+HOST_OS := $(shell uname -s)
+ifeq ($(HOST_OS),Darwin)
+  ifeq ($(HOST_ARCH),x86_64)
+    ifeq ($(shell sysctl -n hw.optional.arm64 2>/dev/null),1)
+      HOST_ARCH := arm64
+    endif
+  endif
+endif
+
+ifeq ($(HOST_ARCH),arm64)
+DEFAULT_ARCH := aarch64
+else ifeq ($(HOST_ARCH),aarch64)
+DEFAULT_ARCH := aarch64
+else
+DEFAULT_ARCH := x86_64
+endif
+
+FUZZ_ARCH ?= $(DEFAULT_ARCH)
+ifeq ($(FUZZ_ARCH),arm64)
+FUZZ_ARCH := aarch64
+endif
+
+TARGET ?= $(FUZZ_ARCH)-linux-musl
+
+REPO_ROOT := $(abspath ../..)
+OUT_DIR ?= $(abspath ./out/$(TARGET))
+CACHE_DIR ?= $(abspath ./cache)
+
+FUZZ_DEPS := $(shell find ../src -name '*.zig')
+
+help:
+	@echo "Guest fuzzing (Zig -ffuzz / libFuzzer-style runner)"
+	@echo
+	@echo "Build fuzzers:"
+	@echo "  make fuzz"
+	@echo
+	@echo "Run in VM (stores corpus in guest/fuzz/cache):"
+	@echo "  make run-cbor"
+	@echo "  make run-protocol"
+	@echo "  (these clear cache/v/ on the host to avoid stale coverage mismatches)"
+	@echo
+	@echo "Outputs (under cache dir):"
+	@echo "  corpus:   $(CACHE_DIR)/f/<fuzzer-name>/"
+	@echo "  coverage: $(CACHE_DIR)/v/<coverage-id>"
+	@echo "  log:      $(CACHE_DIR)/tmp/libfuzzer.log"
+	@echo
+	@echo "Binaries:"
+	@echo "  $(OUT_DIR)/{cbor-fuzz,protocol-fuzz}"
+
+fuzz: cbor protocol
+
+$(OUT_DIR):
+	@mkdir -p $(OUT_DIR)
+
+cbor: $(OUT_DIR)/cbor-fuzz
+
+protocol: $(OUT_DIR)/protocol-fuzz
+
+$(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
+	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
+		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		-femit-bin=$@
+
+$(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
+	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
+		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		-femit-bin=$@
+
+run-cbor: $(OUT_DIR)/cbor-fuzz
+	@rm -rf $(CACHE_DIR)/v
+	$(GONDOLIN) exec \
+		--mount-hostfs $(REPO_ROOT):/workspace \
+		-- /bin/sh -lc "mkdir -p /workspace/guest/fuzz/cache && exec /workspace/guest/fuzz/out/$(TARGET)/cbor-fuzz --cache-dir=/workspace/guest/fuzz/cache"
+
+run-protocol: $(OUT_DIR)/protocol-fuzz
+	@rm -rf $(CACHE_DIR)/v
+	$(GONDOLIN) exec \
+		--mount-hostfs $(REPO_ROOT):/workspace \
+		-- /bin/sh -lc "mkdir -p /workspace/guest/fuzz/cache && exec /workspace/guest/fuzz/out/$(TARGET)/protocol-fuzz --cache-dir=/workspace/guest/fuzz/cache"
+
+clean:
+	@rm -rf ./out ./cache
