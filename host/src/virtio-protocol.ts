@@ -226,10 +226,25 @@ export type FileDeleteDone = {
   p: Record<string, never>;
 };
 
+export type StdinWindow = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "stdin_window";
+  /** request id */
+  id: number;
+  /** payload */
+  p: {
+    /** additional stdin credits in `bytes` */
+    stdin: number;
+  };
+};
+
 export type IncomingMessage =
   | ExecOutput
   | ExecResponse
   | ErrorResponse
+  | StdinWindow
   | FsRequest
   | FsResponse
   | VfsReady

@@ -1027,6 +1027,8 @@ export class SandboxServer extends EventEmitter {
   private queuedStdinBytes = new Map<number, number>();
   /** total bytes buffered in queuedStdin across all queued exec ids in `bytes` */
   private queuedStdinBytesTotal = 0;
+  /** stdin credits available to send to sandboxd, tracked in `bytes` */
+  private stdinCredits = new Map<number, number>();
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
@@ -1340,10 +1342,12 @@ export class SandboxServer extends EventEmitter {
           if (!sendBinary(client, encodeOutputFrame(message.id, message.p.stream, data))) {
             this.inflight.delete(message.id);
             this.stdinAllowed.delete(message.id);
+            this.stdinCredits.delete(message.id);
           }
         } catch {
           this.inflight.delete(message.id);
           this.stdinAllowed.delete(message.id);
+          this.stdinCredits.delete(message.id);
         }
       } else if (message.t === "exec_response") {
         if (this.hasDebug("exec")) {
@@ -1364,9 +1368,24 @@ export class SandboxServer extends EventEmitter {
         this.inflight.delete(message.id);
         this.startedExecs.delete(message.id);
         this.stdinAllowed.delete(message.id);
+        this.stdinCredits.delete(message.id);
         this.pendingExecWindows.delete(message.id);
         this.clearQueuedStdin(message.id);
         this.queuedPtyResize.delete(message.id);
+      } else if (message.t === "stdin_window") {
+        const stdin = (message as any).p?.stdin;
+        const credits = Number(stdin);
+        if (!Number.isFinite(credits) || credits <= 0) return;
+        // Ignore credits for unknown exec ids.
+        if (!this.inflight.has(message.id)) return;
+
+        const prev = this.stdinCredits.get(message.id) ?? 0;
+        const next = Math.min(0xffffffff, prev + Math.trunc(credits));
+        this.stdinCredits.set(message.id, next);
+
+        if (!this.flushQueuedStdinFor(message.id)) {
+          this.scheduleExecIoFlush();
+        }
       } else if (message.t === "file_read_data") {
         const op = this.fileOps.get(message.id);
         if (!op || op.kind !== "read") return;
@@ -1411,6 +1430,7 @@ export class SandboxServer extends EventEmitter {
           this.inflight.delete(message.id);
           this.startedExecs.delete(message.id);
           this.stdinAllowed.delete(message.id);
+          this.stdinCredits.delete(message.id);
           this.pendingExecWindows.delete(message.id);
           this.clearQueuedStdin(message.id);
           this.queuedPtyResize.delete(message.id);
@@ -1421,6 +1441,7 @@ export class SandboxServer extends EventEmitter {
           // tracking when sandboxd reports terminal failure.
           this.startedExecs.delete(message.id);
           this.stdinAllowed.delete(message.id);
+          this.stdinCredits.delete(message.id);
           this.pendingExecWindows.delete(message.id);
           this.clearQueuedStdin(message.id);
           this.queuedPtyResize.delete(message.id);
@@ -2298,6 +2319,7 @@ export class SandboxServer extends EventEmitter {
       if (entry === client) {
         this.inflight.delete(id);
         this.stdinAllowed.delete(id);
+        this.stdinCredits.delete(id);
         this.pendingExecWindows.delete(id);
         this.clearQueuedStdin(id);
         this.queuedPtyResize.delete(id);
@@ -2418,6 +2440,7 @@ export class SandboxServer extends EventEmitter {
       this.inflight.delete(id);
       this.startedExecs.delete(id);
       this.stdinAllowed.delete(id);
+      this.stdinCredits.delete(id);
       this.pendingExecWindows.delete(id);
       this.clearQueuedStdin(id);
       this.queuedPtyResize.delete(id);
@@ -2452,6 +2475,7 @@ export class SandboxServer extends EventEmitter {
       if (!this.inflight.has(id)) {
         this.startedExecs.delete(id);
         this.stdinAllowed.delete(id);
+        this.stdinCredits.delete(id);
         this.pendingExecWindows.delete(id);
         this.clearQueuedStdin(id);
         this.queuedPtyResize.delete(id);
@@ -2518,7 +2542,10 @@ export class SandboxServer extends EventEmitter {
     }
 
     this.inflight.set(message.id, client);
-    if (message.stdin) this.stdinAllowed.add(message.id);
+    if (message.stdin) {
+      this.stdinAllowed.add(message.id);
+      this.stdinCredits.set(message.id, 0);
+    }
 
     const payload = {
       cmd: message.cmd,
@@ -2625,6 +2652,7 @@ export class SandboxServer extends EventEmitter {
           this.inflight.delete(message.id);
           this.startedExecs.delete(message.id);
           this.stdinAllowed.delete(message.id);
+          this.stdinCredits.delete(message.id);
           this.pendingExecWindows.delete(message.id);
           this.clearQueuedStdin(message.id);
           this.queuedPtyResize.delete(message.id);
@@ -2647,19 +2675,17 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    // If we already have buffered stdin for this exec (e.g. transient virtio
-    // backpressure), append to preserve ordering and retry once writable.
-    if ((this.queuedStdin.get(message.id)?.length ?? 0) > 0) {
-      if (queueStdinChunk(false)) this.scheduleExecIoFlush();
+    if (data.length === 0 && !message.eof) {
       return;
     }
 
-    if (this.bridge.send(buildStdinData(message.id, data, message.eof))) {
+    // Always enqueue then flush. This lets us apply both virtio backpressure
+    // and guest-advertised stdin credits consistently.
+    if (!queueStdinChunk(false)) {
       return;
     }
 
-    // Virtio bridge backpressure: buffer and retry when writable.
-    if (queueStdinChunk(false)) {
+    if (!this.flushQueuedStdinFor(message.id)) {
       this.scheduleExecIoFlush();
     }
   }
@@ -2777,30 +2803,71 @@ export class SandboxServer extends EventEmitter {
     }
 
     let remainingBytes = this.queuedStdinBytes.get(id) ?? 0;
+    let credit = this.stdinCredits.get(id) ?? 0;
 
-    let sent = 0;
-    for (; sent < list.length; sent++) {
-      const chunk = list[sent];
-      if (!this.bridge.send(buildStdinData(id, chunk.data, chunk.eof))) {
+    let progressed = false;
+    let removed = 0;
+
+    // Send as much as we can, constrained by:
+    // - virtio bridge queue capacity
+    // - guest-advertised stdin credits (stdin_window)
+    while (removed < list.length) {
+      const chunk = list[removed]!;
+
+      // Allow EOF with an empty payload even when out of credit.
+      if (chunk.data.length === 0) {
+        if (chunk.eof) {
+          if (!this.bridge.send(buildStdinData(id, chunk.data, true))) {
+            break;
+          }
+          progressed = true;
+        }
+        removed += 1;
+        continue;
+      }
+
+      if (credit <= 0) {
+        break;
+      }
+
+      const toSend = Math.min(chunk.data.length, credit);
+      const part = chunk.data.subarray(0, toSend);
+      const eof = chunk.eof && toSend === chunk.data.length ? true : undefined;
+
+      if (!this.bridge.send(buildStdinData(id, part, eof))) {
         // Queue still full; wait for bridge.onWritable to retry.
         break;
       }
 
-      remainingBytes = Math.max(0, remainingBytes - chunk.data.length);
-      if (chunk.data.length > 0) {
-        this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - chunk.data.length);
+      progressed = true;
+      credit -= toSend;
+      this.stdinCredits.set(id, credit);
+
+      remainingBytes = Math.max(0, remainingBytes - toSend);
+      this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - toSend);
+
+      if (toSend < chunk.data.length) {
+        // Partial send: keep the remaining tail queued.
+        chunk.data = chunk.data.subarray(toSend);
+        break;
       }
+
+      // Entire chunk sent, pop it.
+      removed += 1;
     }
 
-    if (sent === 0) return false;
+    if (!progressed) return false;
 
-    if (sent >= list.length) {
+    if (removed >= list.length) {
       this.queuedStdin.delete(id);
       this.queuedStdinBytes.delete(id);
       return true;
     }
 
-    this.queuedStdin.set(id, list.slice(sent));
+    if (removed > 0) {
+      this.queuedStdin.set(id, list.slice(removed));
+    }
+
     this.queuedStdinBytes.set(id, remainingBytes);
     return false;
   }

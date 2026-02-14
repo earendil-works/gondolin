@@ -154,6 +154,10 @@ test("started exec stdin replay keeps data buffered on queue pressure and retrie
   const a = makeClient();
 
   (server as any).handleExec(a.client, execMessage(1));
+
+  // sandboxd advertises stdin credits via a stdin_window message.
+  bridge.onMessage({ v: 1, t: "stdin_window", id: 1, p: { stdin: 1024 } });
+
   (server as any).handleStdin(a.client, stdinMessage(1, Buffer.from("hello")));
 
   assert.ok((server as any).queuedStdin.has(1), "stdin should stay buffered after send failure");
@@ -172,6 +176,37 @@ test("started exec stdin replay keeps data buffered on queue pressure and retrie
     "expected one failed send and one retry"
   );
   assert.ok(!((server as any).queuedStdin.has(1)), "stdin buffer should clear after retry");
+});
+
+test("stdin sending is gated by guest-advertised stdin credits", () => {
+  const server = new SandboxServer(makeResolvedOptions());
+
+  const sent: any[] = [];
+  const bridge = (server as any).bridge;
+  bridge.send = (msg: any) => {
+    sent.push(msg);
+    return true;
+  };
+
+  const a = makeClient();
+  (server as any).handleExec(a.client, execMessage(10));
+
+  // No initial stdin credits yet, so stdin chunks must be buffered.
+  (server as any).handleStdin(a.client, stdinMessage(10, Buffer.from("hello")));
+  assert.equal(sent.filter((m) => m.t === "stdin_data" && m.id === 10).length, 0);
+  assert.ok((server as any).queuedStdin.has(10));
+
+  // Grant 2 bytes: should send a partial chunk.
+  bridge.onMessage({ v: 1, t: "stdin_window", id: 10, p: { stdin: 2 } });
+  const first = sent.find((m) => m.t === "stdin_data" && m.id === 10);
+  assert.ok(first, "expected first stdin_data frame");
+  assert.equal(first.p.data.toString("utf8"), "he");
+
+  // Grant remaining 3 bytes: should flush the rest.
+  bridge.onMessage({ v: 1, t: "stdin_window", id: 10, p: { stdin: 3 } });
+  const frames = sent.filter((m) => m.t === "stdin_data" && m.id === 10);
+  assert.equal(frames.length, 2);
+  assert.equal(frames[1].p.data.toString("utf8"), "llo");
 });
 
 test("stdin backpressure errors stay non-terminal and are not forwarded as client errors", () => {

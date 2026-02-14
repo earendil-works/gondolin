@@ -10,7 +10,7 @@ const c = @cImport({
 const log = std.log.scoped(.sandboxd);
 
 /// max buffered stdin per exec session in `bytes`
-const max_queued_stdin_bytes: usize = 32 * 1024 * 1024;
+const max_queued_stdin_bytes: usize = 4 * 1024 * 1024;
 
 const Termination = struct {
     exit_code: i32,
@@ -65,6 +65,12 @@ const VirtioTx = struct {
         try protocol.sendError(allocator, self.fd, id, code, message);
     }
 
+    fn sendStdinWindow(self: *VirtioTx, allocator: std.mem.Allocator, id: u32, stdin: u32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try protocol.sendStdinWindow(allocator, self.fd, id, stdin);
+    }
+
     fn sendVfsReady(self: *VirtioTx, allocator: std.mem.Allocator) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -85,7 +91,10 @@ const ExecSession = struct {
     mutex: std.Thread.Mutex = .{},
     control_cv: std.Thread.Condition = .{},
     controls: std.ArrayList(ExecControlMessage) = .empty,
+    /// stdin bytes buffered in the control queue in `bytes`
     stdin_queued_bytes: usize = 0,
+    /// stdin credits granted to the host but not yet received in `bytes`
+    stdin_credit_inflight: usize = 0,
     done: bool = false,
     thread: ?std.Thread = null,
     wake_read_fd: ?std.posix.fd_t = null,
@@ -411,6 +420,13 @@ fn enqueueExecInput(session: *ExecSession, input: protocol.InputMessage) !void {
             if (session.stdin_queued_bytes + chunk.data.len > max_queued_stdin_bytes) {
                 return error.StdinBackpressure;
             }
+
+            // Flow control: the host must not send more stdin bytes than the guest
+            // has advertised via stdin_window.
+            if (chunk.data.len > session.stdin_credit_inflight) {
+                return error.StdinBackpressure;
+            }
+            session.stdin_credit_inflight -= chunk.data.len;
 
             const copied = try session.allocator.alloc(u8, chunk.data.len);
             errdefer session.allocator.free(copied);
@@ -738,6 +754,14 @@ fn runExecSession(session: *ExecSession) !void {
 
     var status: ?u32 = null;
 
+    if (wants_stdin) {
+        const grant_bytes: usize = @min(max_queued_stdin_bytes, @as(usize, std.math.maxInt(u32)));
+        session.mutex.lock();
+        session.stdin_credit_inflight = grant_bytes;
+        session.mutex.unlock();
+        _ = session.tx.sendStdinWindow(session.allocator, req.id, @intCast(grant_bytes)) catch {};
+    }
+
     // PTY mode: after the main PID exits, we stop waiting for EOF (other
     // processes may still hold the slave open) but do a short best-effort drain
     // of already-buffered output before forcing the PTY closed.
@@ -802,14 +826,30 @@ fn runExecSession(session: *ExecSession) !void {
                     }
 
                     session.allocator.free(data.data);
+
+                    var grant: usize = 0;
                     session.mutex.lock();
                     if (session.stdin_queued_bytes >= data_len) {
                         session.stdin_queued_bytes -= data_len;
                     } else {
                         session.stdin_queued_bytes = 0;
                     }
+
+                    // Credit-based stdin flow control.
+                    // Maintain: stdin_queued_bytes + stdin_credit_inflight <= max_queued_stdin_bytes
+                    const used = session.stdin_queued_bytes + session.stdin_credit_inflight;
+                    if (data_len > 0 and used < max_queued_stdin_bytes) {
+                        const free = max_queued_stdin_bytes - used;
+                        grant = @min(data_len, free);
+                        session.stdin_credit_inflight += grant;
+                    }
+
                     session.control_cv.signal();
                     session.mutex.unlock();
+
+                    if (grant > 0) {
+                        _ = session.tx.sendStdinWindow(session.allocator, req.id, @intCast(grant)) catch {};
+                    }
                 },
                 .resize => |size| {
                     if (pty_master) |fd| {
