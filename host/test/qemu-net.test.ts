@@ -10,7 +10,7 @@ import dns from "node:dns";
 
 import forge from "node-forge";
 
-import { HttpRequestBlockedError, QemuNetworkBackend, __test } from "../src/qemu-net";
+import { HttpRequestBlockedError, QemuNetworkBackend } from "../src/qemu-net";
 import * as qemuHttp from "../src/qemu-http";
 import { EventEmitter } from "node:events";
 
@@ -549,7 +549,7 @@ test("qemu-net: handleHttpDataWithWriter enforces MAX_HTTP_PIPELINE_BYTES for ch
   const session: any = { http: undefined };
   let finished = false;
 
-  const pipelineJunk = Buffer.alloc(__test.MAX_HTTP_PIPELINE_BYTES + 1, 0x61); // 'a'
+  const pipelineJunk = Buffer.alloc(qemuHttp.MAX_HTTP_PIPELINE_BYTES + 1, 0x61); // 'a'
 
   await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
@@ -1505,7 +1505,7 @@ test("qemu-net: createLookupGuard filters DNS results via isIpAllowed", async ()
   };
 
   const isIpAllowed = async (info: any) => info.ip !== "127.0.0.1";
-  const guarded = __test.createLookupGuard(
+  const guarded = qemuHttp.createLookupGuard(
     { hostname: "example.com", port: 443, protocol: "https" },
     isIpAllowed,
     lookupMock as any
@@ -2461,7 +2461,7 @@ test("qemu-net: createLookupGuard invokes ip policy callback", async () => {
     cb: (err: any, address: any, family?: number) => void
   ) => cb(null, "93.184.216.34", 4);
 
-  const guarded = __test.createLookupGuard(
+  const guarded = qemuHttp.createLookupGuard(
     {
       hostname: "example.com",
       port: 443,

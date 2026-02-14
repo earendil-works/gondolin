@@ -44,9 +44,16 @@ import {
 } from "./ssh-utils";
 import { caCertVerifiesLeaf, privateKeyMatchesLeafCert } from "./http-utils";
 
-import * as httpImpl from "./qemu-http";
-import { HttpRequestBlockedError } from "./qemu-http";
-import type { HttpSession, WebSocketState } from "./qemu-http";
+import {
+  HttpReceiveBuffer,
+  HttpRequestBlockedError,
+  closeSharedDispatchers,
+  handlePlainHttpData,
+  handleTlsHttpData,
+  updateQemuRxPauseState,
+  type HttpSession,
+  type WebSocketState,
+} from "./qemu-http";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -788,7 +795,7 @@ export class QemuNetworkBackend extends EventEmitter {
           session.protocol = info.protocol;
           if (info.protocol === "http" || info.protocol === "tls") {
             session.http = session.http ?? {
-              buffer: new httpImpl.HttpReceiveBuffer(),
+              buffer: new HttpReceiveBuffer(),
               processing: false,
               closed: false,
               sentContinue: false,
@@ -1378,7 +1385,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
 
   private updateQemuRxPauseState() {
-    return httpImpl.updateQemuRxPauseState.call(this);
+    return updateQemuRxPauseState.call(this);
   }
 
   private closeSshProxySession(proxy?: SshProxySession) {
@@ -1878,11 +1885,11 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private async handlePlainHttpData(key: string, session: TcpSession, data: Buffer) {
-    return httpImpl.handlePlainHttpData.call(this, key, session, data);
+    return handlePlainHttpData.call(this, key, session, data);
   }
 
   private async handleTlsHttpData(key: string, session: TcpSession, data: Buffer) {
-    return httpImpl.handleTlsHttpData.call(this, key, session, data);
+    return handleTlsHttpData.call(this, key, session, data);
   }
 
   private handleTlsData(key: string, session: TcpSession, data: Buffer) {
@@ -1892,7 +1899,7 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private closeSharedDispatchers() {
-    return httpImpl.closeSharedDispatchers.call(this);
+    return closeSharedDispatchers.call(this);
   }
 
 
@@ -2077,14 +2084,3 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
-/** @internal */
-// Expose internal helpers for unit tests. Not part of the public API.
-export const __test = {
-  createLookupGuard: httpImpl.createLookupGuard,
-  normalizeLookupEntries: httpImpl.normalizeLookupEntries,
-  normalizeLookupOptions: httpImpl.normalizeLookupOptions,
-  normalizeLookupFailure: httpImpl.normalizeLookupFailure,
-  getRedirectUrl: httpImpl.getRedirectUrl,
-  applyRedirectRequest: httpImpl.applyRedirectRequest,
-  MAX_HTTP_PIPELINE_BYTES: httpImpl.MAX_HTTP_PIPELINE_BYTES,
-};
