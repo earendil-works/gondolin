@@ -34,7 +34,7 @@ import {
 
 import * as httpImpl from "./qemu-http";
 import { HttpRequestBlockedError } from "./qemu-http";
-import type { HttpRequestData, HttpSession, WebSocketState } from "./qemu-http";
+import type { HttpSession, WebSocketState } from "./qemu-http";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -1756,9 +1756,6 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private getMaxHttpStreamingPendingBytes(): number {
-    return httpImpl.getMaxHttpStreamingPendingBytes.call(this);
-  }
 
   private updateQemuRxPauseState() {
     return httpImpl.updateQemuRxPauseState.call(this);
@@ -2268,241 +2265,16 @@ export class QemuNetworkBackend extends EventEmitter {
     return httpImpl.handleTlsHttpData.call(this, key, session, data);
   }
 
-  private abortWebSocketSession(key: string, session: TcpSession, reason: string) {
-    return httpImpl.abortWebSocketSession.call(this, key, session, reason);
-  }
-
-  private handleWebSocketClientData(key: string, session: TcpSession, data: Buffer) {
-    return httpImpl.handleWebSocketClientData.call(this, key, session, data);
-  }
-
-  private maybeSend100ContinueFromHead(
-    httpSession: HttpSession,
-    head: { version: string; headers: Record<string, string>; bodyOffset: number },
-    bufferedBodyBytes: number,
-    write: (chunk: Buffer) => void
-  ) {
-    return httpImpl.maybeSend100ContinueFromHead.call(
-      this,
-      httpSession,
-      head,
-      bufferedBodyBytes,
-      write
-    );
-  }
-
-  private async handleHttpDataWithWriter(
-    key: string,
-    session: TcpSession,
-    data: Buffer,
-    options: {
-      scheme: "http" | "https";
-      write: (chunk: Buffer) => void;
-      finish: () => void;
-      waitForWritable?: () => Promise<void>;
-    }
-  ) {
-    return httpImpl.handleHttpDataWithWriter.call(this, key, session, data, options);
-  }
-
   private handleTlsData(key: string, session: TcpSession, data: Buffer) {
     const tlsSession = this.ensureTlsSession(key, session);
     if (!tlsSession) return;
     tlsSession.stream.pushEncrypted(data);
   }
 
-  private parseHttpHead(buffer: Buffer): {
-    method: string;
-    target: string;
-    version: string;
-    headers: Record<string, string>;
-    bodyOffset: number;
-  } | null {
-    return httpImpl.parseHttpHead.call(this, buffer);
-  }
-
-  private validateExpectHeader(version: string, headers: Record<string, string>) {
-    return httpImpl.validateExpectHeader.call(this, version, headers);
-  }
-
-  private decodeChunkedBodyFromReceiveBuffer(
-    receiveBuffer: httpImpl.HttpReceiveBuffer,
-    bodyOffset: number,
-    maxBodyBytes: number
-  ): { complete: boolean; body: Buffer; bytesConsumed: number } {
-    return httpImpl.decodeChunkedBodyFromReceiveBuffer.call(this, receiveBuffer, bodyOffset, maxBodyBytes);
-  }
-
-  private async fetchHookRequestAndRespond(options: {
-    request: HttpHookRequest;
-    httpVersion: "HTTP/1.0" | "HTTP/1.1";
-    write: (chunk: Buffer) => void;
-    waitForWritable?: () => Promise<void>;
-
-    /** whether onRequestHead/onRequest have already been applied to the initial request */
-    hooksAppliedFirstHop?: boolean;
-
-    /** whether request policy + IP policy have already been evaluated for the first hop */
-    policyCheckedFirstHop?: boolean;
-
-    /** whether to run httpHooks.onRequest (buffered body rewrite hook) */
-    enableBodyHook: boolean;
-
-    /** optional streaming request body for the initial hop */
-    initialBodyStream?: WebReadableStream<Uint8Array> | null;
-
-    /** whether the initial body stream carries a request body */
-    initialBodyStreamHasBody?: boolean;
-  }) {
-    return httpImpl.fetchHookRequestAndRespond.call(this, options);
-  }
-
-  private isWebSocketUpgradeRequest(request: HttpRequestData): boolean {
-    return httpImpl.isWebSocketUpgradeRequest.call(this, request);
-  }
-
-  private stripHopByHopHeadersForWebSocket(headers: Record<string, string>): Record<string, string> {
-    return httpImpl.stripHopByHopHeadersForWebSocket.call(this, headers);
-  }
-
-  private async handleWebSocketUpgrade(
-    key: string,
-    request: HttpRequestData,
-    session: TcpSession,
-    options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void },
-    httpVersion: "HTTP/1.0" | "HTTP/1.1",
-    hookContext: {
-      /** head after `onRequestHead` (and secret substitution) */
-      headHookRequest: HttpHookRequest;
-      /** placeholder-only head to feed into `onRequest` */
-      headHookRequestForBodyHook: HttpHookRequest | null;
-    }
-  ): Promise<boolean> {
-    return httpImpl.handleWebSocketUpgrade.call(this, key, request, session, options, httpVersion, hookContext);
-  }
-
-  private async connectWebSocketUpstream(info: {
-    protocol: "http" | "https";
-    hostname: string;
-    address: string;
-    port: number;
-  }): Promise<net.Socket> {
-    return httpImpl.connectWebSocketUpstream.call(this, info);
-  }
-
-  private async readUpstreamHttpResponseHead(socket: net.Socket): Promise<{
-    statusCode: number;
-    statusMessage: string;
-    headers: Record<string, string | string[]>;
-    rest: Buffer;
-  }> {
-    return httpImpl.readUpstreamHttpResponseHead.call(this, socket);
-  }
-
-  private sendHttpResponseHead(
-    write: (chunk: Buffer) => void,
-    response: { status: number; statusText: string; headers: HttpResponseHeaders },
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    return httpImpl.sendHttpResponseHead.call(this, write, response, httpVersion);
-  }
-
-  private sendHttpResponse(
-    write: (chunk: Buffer) => void,
-    response: HttpHookResponse,
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    return httpImpl.sendHttpResponse.call(this, write, response, httpVersion);
-  }
-
-  private async sendChunkedBody(
-    body: WebReadableStream<Uint8Array>,
-    write: (chunk: Buffer) => void,
-    waitForWritable?: () => Promise<void>
-  ): Promise<number> {
-    return httpImpl.sendChunkedBody.call(this, body, write, waitForWritable);
-  }
-
-  private async sendStreamBody(
-    body: WebReadableStream<Uint8Array>,
-    write: (chunk: Buffer) => void,
-    waitForWritable?: () => Promise<void>
-  ): Promise<number> {
-    return httpImpl.sendStreamBody.call(this, body, write, waitForWritable);
-  }
-
-  private async bufferResponseBodyWithLimit(
-    body: WebReadableStream<Uint8Array>,
-    maxBytes: number
-  ): Promise<Buffer> {
-    return httpImpl.bufferResponseBodyWithLimit.call(this, body, maxBytes);
-  }
-
-  private respondWithError(
-    write: (chunk: Buffer) => void,
-    status: number,
-    statusText: string,
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    return httpImpl.respondWithError.call(this, write, status, statusText, httpVersion);
-  }
-
-  private buildFetchUrl(request: HttpRequestData, defaultScheme: "http" | "https") {
-    return httpImpl.buildFetchUrl.call(this, request, defaultScheme);
-  }
-
-  private async resolveHostname(
-    hostname: string,
-    policy?: { protocol: "http" | "https"; port: number }
-  ): Promise<{ address: string; family: 4 | 6 }> {
-    return httpImpl.resolveHostname.call(this, hostname, policy);
-  }
-
-  private async ensureRequestAllowed(request: HttpHookRequest) {
-    return httpImpl.ensureRequestAllowed.call(this, request);
-  }
-
-  private async ensureIpAllowed(parsedUrl: URL, protocol: "http" | "https", port: number) {
-    return httpImpl.ensureIpAllowed.call(this, parsedUrl, protocol, port);
-  }
-
-  private isSamePolicyRelevantRequestHead(a: HttpHookRequest, b: HttpHookRequest): boolean {
-    return httpImpl.isSamePolicyRelevantRequestHead.call(this, a, b);
-  }
-
-  private async applyRequestHeadHooks(request: HttpHookRequest): Promise<{
-    request: HttpHookRequest;
-    /** optional placeholder request head to feed into `httpHooks.onRequest` */
-    requestForBodyHook: HttpHookRequest | null;
-    bufferRequestBody: boolean;
-    maxBufferedRequestBodyBytes: number | null;
-  }> {
-    return httpImpl.applyRequestHeadHooks.call(this, request);
-  }
-
-  private async applyRequestBodyHooks(request: HttpHookRequest): Promise<HttpHookRequest> {
-    return httpImpl.applyRequestBodyHooks.call(this, request);
-  }
-
   private closeSharedDispatchers() {
     return httpImpl.closeSharedDispatchers.call(this);
   }
 
-  private pruneSharedDispatchers(now = Date.now()) {
-    return httpImpl.pruneSharedDispatchers.call(this, now);
-  }
-
-  private evictSharedDispatchersIfNeeded() {
-    return httpImpl.evictSharedDispatchersIfNeeded.call(this);
-  }
-
-  private getCheckedDispatcher(info: {
-    hostname: string;
-    port: number;
-    protocol: "http" | "https";
-  }): Agent | null {
-    return httpImpl.getCheckedDispatcher.call(this, info);
-  }
 
   private getMitmDir() {
     return this.mitmDir;
@@ -2678,15 +2450,6 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private stripHopByHopHeaders(headers: Record<string, string>): Record<string, string>;
-  private stripHopByHopHeaders(headers: HttpResponseHeaders): HttpResponseHeaders;
-  private stripHopByHopHeaders(headers: Record<string, HeaderValue>): any {
-    return httpImpl.stripHopByHopHeaders.call(this, headers as any);
-  }
-
-  private headersToRecord(headers: Headers): HttpResponseHeaders {
-    return httpImpl.headersToRecord.call(this, headers);
-  }
 }
 
 function caCertVerifiesLeaf(caCert: forge.pki.Certificate, leafCert: forge.pki.Certificate): boolean {

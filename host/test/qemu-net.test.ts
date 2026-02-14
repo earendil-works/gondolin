@@ -6,10 +6,12 @@ import test from "node:test";
 import crypto from "node:crypto";
 import tls from "node:tls";
 import net from "node:net";
+import dns from "node:dns";
 
 import forge from "node-forge";
 
 import { HttpRequestBlockedError, QemuNetworkBackend, __test } from "../src/qemu-net";
+import * as qemuHttp from "../src/qemu-http";
 import { EventEmitter } from "node:events";
 
 function makeBackend(options?: Partial<ConstructorParameters<typeof QemuNetworkBackend>[0]>) {
@@ -20,6 +22,16 @@ function makeBackend(options?: Partial<ConstructorParameters<typeof QemuNetworkB
     ),
     ...options,
   });
+}
+
+function dnsLookupStub(addresses: Array<{ address: string; family: 4 | 6 }>) {
+  return (
+    _hostname: string,
+    _options: any,
+    cb: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+  ) => {
+    cb(null, addresses as any);
+  };
 }
 
 function toHookRequest(
@@ -57,7 +69,7 @@ async function fetchHookAndRespond(
   const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
     request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
-  await (backend as any).fetchHookRequestAndRespond({
+  await qemuHttp.fetchHookRequestAndRespond.call(backend, {
     request: toHookRequest(request, scheme),
     httpVersion,
     write,
@@ -163,11 +175,21 @@ test("qemu-net: synthetic per-host dns mapping does not throw on mapping exhaust
 });
 
 test("qemu-net: parseHttpRequest parses content-length and preserves remaining", async () => {
+  let captured: any = null;
+
   const backend = makeBackend({
     maxHttpBodyBytes: 1024,
+    fetch: async () =>
+      new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      }),
     // Enable buffering path so we can assert on the fully-parsed request and remaining bytes
     httpHooks: {
-      onRequest: async (req) => req,
+      onRequest: async (req) => {
+        captured = req;
+        return req;
+      },
     },
   });
 
@@ -182,15 +204,11 @@ test("qemu-net: parseHttpRequest parses content-length and preserves remaining",
       "EXTRA"
   );
 
-  let captured: any = null;
-  (backend as any).fetchHookRequestAndRespond = async (options: any) => {
-    captured = options.request;
-  };
 
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, buf, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, buf, {
     scheme: "http",
     write: () => {},
     finish: () => {
@@ -215,18 +233,24 @@ test("qemu-net: parseHttpRequest parses content-length and preserves remaining",
 });
 
 test("qemu-net: parseHttpRequest decodes chunked body (and waits for completeness)", async () => {
+  let captured: any = null;
+
   const backend = makeBackend({
     maxHttpBodyBytes: 1024,
+    fetch: async () =>
+      new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      }),
     httpHooks: {
-      onRequest: async (req) => req,
+      onRequest: async (req) => {
+        captured = req;
+        return req;
+      },
     },
   });
 
   const session: any = { http: undefined };
-  let captured: any = null;
-  (backend as any).fetchHookRequestAndRespond = async (options: any) => {
-    captured = options.request;
-  };
 
   const incomplete = Buffer.from(
     "POST / HTTP/1.1\r\n" +
@@ -237,7 +261,7 @@ test("qemu-net: parseHttpRequest decodes chunked body (and waits for completenes
   );
 
   let finished = false;
-  await (backend as any).handleHttpDataWithWriter("key", session, incomplete, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, incomplete, {
     scheme: "http",
     write: () => {},
     finish: () => {
@@ -251,7 +275,7 @@ test("qemu-net: parseHttpRequest decodes chunked body (and waits for completenes
   // Send the remainder of the chunked framing/body (no head)
   const rest = Buffer.from("llo\r\n0\r\n\r\n");
 
-  await (backend as any).handleHttpDataWithWriter("key", session, rest, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, rest, {
     scheme: "http",
     write: () => {},
     finish: () => {
@@ -268,18 +292,24 @@ test("qemu-net: parseHttpRequest decodes chunked body (and waits for completenes
 });
 
 test("qemu-net: parseHttpRequest consumes chunked trailers", async () => {
+  let captured: any = null;
+
   const backend = makeBackend({
     maxHttpBodyBytes: 1024,
+    fetch: async () =>
+      new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      }),
     httpHooks: {
-      onRequest: async (req) => req,
+      onRequest: async (req) => {
+        captured = req;
+        return req;
+      },
     },
   });
 
   const session: any = { http: undefined };
-  let captured: any = null;
-  (backend as any).fetchHookRequestAndRespond = async (options: any) => {
-    captured = options.request;
-  };
 
   const complete = Buffer.from(
     "POST / HTTP/1.1\r\n" +
@@ -293,7 +323,7 @@ test("qemu-net: parseHttpRequest consumes chunked trailers", async () => {
   );
 
   let finished = false;
-  await (backend as any).handleHttpDataWithWriter("key", session, complete, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, complete, {
     scheme: "http",
     write: () => {},
     finish: () => {
@@ -325,7 +355,7 @@ test("qemu-net: parseHttpRequest rejects unsupported transfer-encodings", async 
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, buf, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, buf, {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -355,7 +385,7 @@ test("qemu-net: parseHttpRequest errors on invalid content-length (does not hang
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, buf, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, buf, {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -377,7 +407,7 @@ test("qemu-net: parseHttpRequest rejects oversized headers without terminator (f
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, Buffer.from(huge, "latin1"), {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, Buffer.from(huge, "latin1"), {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -392,7 +422,7 @@ test("qemu-net: parseHttpRequest rejects oversized headers without terminator (f
 
 test("qemu-net: stripHopByHopHeaders removes headers nominated by Connection", () => {
   const backend = makeBackend();
-  const stripped = (backend as any).stripHopByHopHeaders({
+  const stripped = qemuHttp.stripHopByHopHeaders.call(backend, {
     host: "example.com",
     connection: "x-foo, keep-alive",
     "keep-alive": "timeout=5",
@@ -409,7 +439,7 @@ test("qemu-net: stripHopByHopHeaders removes headers nominated by Connection", (
 test("qemu-net: stripHopByHopHeadersForWebSocket strips connection-nominated headers", () => {
   const backend = makeBackend();
 
-  const stripped = (backend as any).stripHopByHopHeadersForWebSocket({
+  const stripped = qemuHttp.stripHopByHopHeadersForWebSocket.call(backend, {
     host: "example.com",
     connection: "Upgrade, x-foo, sec-websocket-key",
     upgrade: "websocket",
@@ -445,7 +475,7 @@ test("qemu-net: resolveHostname picks first allowed DNS answer", async () => {
     },
   });
 
-  const resolved = await (backend as any).resolveHostname("example.com", {
+  const resolved = await qemuHttp.resolveHostname.call(backend, "example.com", {
     protocol: "http",
     port: 80,
   });
@@ -460,7 +490,7 @@ test("qemu-net: handleHttpDataWithWriter sends 100-continue when body is pending
   const writes: Buffer[] = [];
   const session: any = { http: undefined };
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.from(
@@ -488,7 +518,7 @@ test("qemu-net: handleHttpDataWithWriter sends 100-continue for supported chunke
   const writes: Buffer[] = [];
   const session: any = { http: undefined };
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.from(
@@ -521,7 +551,7 @@ test("qemu-net: handleHttpDataWithWriter enforces MAX_HTTP_PIPELINE_BYTES for ch
 
   const pipelineJunk = Buffer.alloc(__test.MAX_HTTP_PIPELINE_BYTES + 1, 0x61); // 'a'
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.concat([
@@ -556,7 +586,7 @@ test("qemu-net: handleHttpDataWithWriter does not send 100-continue for unsuppor
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.from(
@@ -596,7 +626,7 @@ test("qemu-net: parseHttpRequest returns 417 for unsupported Expect tokens", asy
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, buf, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, buf, {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -624,7 +654,7 @@ test("qemu-net: parseHttpRequest enforces maxHttpBodyBytes", async () => {
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter("key", session, buf, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, "key", session, buf, {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -650,13 +680,12 @@ test("qemu-net: fetchAndRespond enforces request policy hook", async () => {
 
   const backend = makeBackend({
     fetch: fetchMock as any,
+    dnsLookup: dnsLookupStub([{ address: "203.0.113.1", family: 4 }]),
     httpHooks: {
       isRequestAllowed: (request) => request.method !== "DELETE",
       isIpAllowed: () => true,
     },
   });
-
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.1", family: 4 });
 
   const request = {
     method: "DELETE",
@@ -711,7 +740,7 @@ test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async
   });
 
   // Avoid real DNS in ensureRequestAllowed()
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.1", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.1", family: 4 }]);
 
   const request = {
     method: "POST",
@@ -767,7 +796,7 @@ test("qemu-net: fetchAndRespond drops auth headers on cross-origin redirects", a
   });
 
   // Avoid real DNS in ensureRequestAllowed()
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.1", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.1", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -793,7 +822,7 @@ test("qemu-net: fetchAndRespond rejects OPTIONS * (asterisk-form)", async () => 
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.from("OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"),
@@ -820,7 +849,7 @@ test("qemu-net: fetchAndRespond rejects websocket upgrade requests", async () =>
   const session: any = { http: undefined };
   let finished = false;
 
-  await (backend as any).handleHttpDataWithWriter(
+  await qemuHttp.handleHttpDataWithWriter.call(backend, 
     "key",
     session,
     Buffer.from(
@@ -903,7 +932,7 @@ test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
   });
 
   // Pin example.com to localhost for the test.
-  (backend as any).resolveHostname = async () => ({ address: "127.0.0.1", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "127.0.0.1", family: 4 }]);
 
   const key = "TCP:1.1.1.1:1234:2.2.2.2:80";
   const session: any = {
@@ -936,7 +965,7 @@ test("qemu-net: websocket upgrades are tunneled when enabled", async () => {
   );
 
   // Call the internal HTTP handler directly with a custom writer.
-  await (backend as any).handleHttpDataWithWriter(key, session, req, {
+  await qemuHttp.handleHttpDataWithWriter.call(backend, key, session, req, {
     scheme: "http",
     write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
     finish: () => {
@@ -992,7 +1021,7 @@ test("qemu-net: websocket upstream connect timeout covers stalled tls handshake"
 
     await assert.rejects(
       () =>
-        (backend as any).connectWebSocketUpstream({
+        qemuHttp.connectWebSocketUpstream.call(backend, {
           protocol: "https",
           hostname: "example.com",
           address: "127.0.0.1",
@@ -1038,7 +1067,7 @@ test("qemu-net: websocket upstream header read times out", async () => {
     });
 
     await assert.rejects(
-      () => (backend as any).readUpstreamHttpResponseHead(socket as net.Socket),
+      () => qemuHttp.readUpstreamHttpResponseHead.call(backend, socket as net.Socket),
       /websocket upstream header timeout/i
     );
   } finally {
@@ -1077,7 +1106,7 @@ test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () =>
       isIpAllowed: () => true,
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.3", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.3", family: 4 }]);
 
   const request = {
     method: "HEAD",
@@ -1114,7 +1143,7 @@ test("qemu-net: fetchAndRespond suppresses body for 204 (forces content-length: 
       isIpAllowed: () => true,
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.4", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.4", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1151,7 +1180,7 @@ test("qemu-net: fetchAndRespond suppresses body for 304 (forces content-length: 
       isIpAllowed: () => true,
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.5", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.5", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1201,7 +1230,7 @@ test("qemu-net: fetchAndRespond streams chunked body when length unknown/encoded
       isIpAllowed: () => true,
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.2", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.2", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1259,7 +1288,7 @@ test("qemu-net: fetchAndRespond preserves multiple Set-Cookie headers", async ()
       },
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.21", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.21", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1313,7 +1342,7 @@ test("qemu-net: fetchAndRespond handles HTTP/1.0 clients correctly (no chunked)"
       isIpAllowed: () => true,
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.20", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.20", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1372,7 +1401,7 @@ test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering
       },
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.10", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.10", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -1438,7 +1467,7 @@ test("qemu-net: fetchAndRespond enforces maxHttpResponseBodyBytes when buffering
       },
     },
   });
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.11", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.11", family: 4 }]);
 
   const request = {
     method: "GET",
@@ -2395,12 +2424,12 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
     },
   });
 
-  const one = (backend as any).getCheckedDispatcher({
+  const one = qemuHttp.getCheckedDispatcher.call(backend, {
     hostname: "example.com",
     port: 443,
     protocol: "https",
   });
-  const two = (backend as any).getCheckedDispatcher({
+  const two = qemuHttp.getCheckedDispatcher.call(backend, {
     hostname: "example.com",
     port: 443,
     protocol: "https",
@@ -2409,7 +2438,7 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
   assert.ok(one);
   assert.equal(one, two);
 
-  const three = (backend as any).getCheckedDispatcher({
+  const three = qemuHttp.getCheckedDispatcher.call(backend, {
     hostname: "example.org",
     port: 443,
     protocol: "https",
@@ -2482,7 +2511,7 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
     },
   });
 
-  (backend as any).resolveHostname = async () => ({ address: "203.0.113.100", family: 4 });
+  (backend as any).options.dnsLookup = dnsLookupStub([{ address: "203.0.113.100", family: 4 }]);
 
   const request = Buffer.from("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
 
@@ -2490,7 +2519,7 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
   for (let i = 0; i < 180; i += 1) {
     const session: any = { http: undefined };
     runs.push(
-      (backend as any).handleHttpDataWithWriter(`k-${i}`, session, request, {
+      qemuHttp.handleHttpDataWithWriter.call(backend, `k-${i}`, session, request, {
         scheme: "http",
         write: () => {},
         finish: () => {},
