@@ -410,7 +410,7 @@ export type WebSocketState = {
   pendingBytes: number;
 };
 
-export function getMaxHttpStreamingPendingBytes(this: any): number {
+function getMaxHttpStreamingPendingBytes(this: any): number {
   let maxPending = 0;
   for (const session of this.tcpSessions.values()) {
     const pending = session.http?.streamingBody?.pendingBytes ?? 0;
@@ -488,7 +488,7 @@ export async function handleTlsHttpData(this: any, key: string, session: any, da
   });
 }
 
-export function abortWebSocketSession(this: any, key: string, session: any, reason: string) {
+function abortWebSocketSession(this: any, key: string, session: any, reason: string) {
   if (this.options.debug) {
     this.emitDebug(
       `websocket session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
@@ -511,7 +511,7 @@ export function abortWebSocketSession(this: any, key: string, session: any, reas
   this.abortTcpSession(key, session, reason);
 }
 
-export function handleWebSocketClientData(this: any, key: string, session: any, data: Buffer) {
+function handleWebSocketClientData(this: any, key: string, session: any, data: Buffer) {
   const ws = session.ws;
   if (!ws) return;
   if (data.length === 0) return;
@@ -548,7 +548,7 @@ export function handleWebSocketClientData(this: any, key: string, session: any, 
   ws.pendingBytes = nextBytes;
 }
 
-export function maybeSend100ContinueFromHead(
+function maybeSend100ContinueFromHead(
   this: any,
   httpSession: HttpSession,
   head: { version: string; headers: Record<string, string>; bodyOffset: number },
@@ -1315,7 +1315,7 @@ export async function handleHttpDataWithWriter(
   }
 }
 
-export function parseHttpHead(
+function parseHttpHead(
   this: any,
   buffer: Buffer
 ): {
@@ -1389,7 +1389,7 @@ export function parseHttpHead(
   };
 }
 
-export function validateExpectHeader(this: any, version: string, headers: Record<string, string>) {
+function validateExpectHeader(this: any, version: string, headers: Record<string, string>) {
   // RFC 9110: unknown expectations MUST be rejected with 417.
   if (version !== "HTTP/1.1") return;
 
@@ -1411,7 +1411,7 @@ export function validateExpectHeader(this: any, version: string, headers: Record
   }
 }
 
-export function decodeChunkedBodyFromReceiveBuffer(
+function decodeChunkedBodyFromReceiveBuffer(
   this: any,
   receiveBuffer: HttpReceiveBuffer,
   bodyOffset: number,
@@ -1819,7 +1819,7 @@ export async function fetchHookRequestAndRespond(
   }
 }
 
-export function isWebSocketUpgradeRequest(this: any, request: HttpRequestData): boolean {
+function isWebSocketUpgradeRequest(this: any, request: HttpRequestData): boolean {
   const upgrade = request.headers["upgrade"]?.toLowerCase() ?? "";
   if (upgrade === "websocket") return true;
 
@@ -1871,7 +1871,7 @@ export function stripHopByHopHeadersForWebSocket(this: any, headers: Record<stri
   return out;
 }
 
-export async function handleWebSocketUpgrade(
+async function handleWebSocketUpgrade(
   this: any,
   key: string,
   request: HttpRequestData,
@@ -2366,7 +2366,7 @@ export async function readUpstreamHttpResponseHead(
   });
 }
 
-export function sendHttpResponseHead(
+function sendHttpResponseHead(
   this: any,
   write: (chunk: Buffer) => void,
   response: { status: number; statusText: string; headers: HttpResponseHeaders },
@@ -2394,7 +2394,7 @@ export function sendHttpResponseHead(
   write(Buffer.from(headerBlock));
 }
 
-export function sendHttpResponse(
+function sendHttpResponse(
   this: any,
   write: (chunk: Buffer) => void,
   response: HttpHookResponse,
@@ -2406,7 +2406,7 @@ export function sendHttpResponse(
   }
 }
 
-export async function sendChunkedBody(
+async function sendChunkedBody(
   this: any,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
@@ -2436,7 +2436,7 @@ export async function sendChunkedBody(
   return total;
 }
 
-export async function sendStreamBody(
+async function sendStreamBody(
   this: any,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
@@ -2461,7 +2461,7 @@ export async function sendStreamBody(
   return total;
 }
 
-export async function bufferResponseBodyWithLimit(
+async function bufferResponseBodyWithLimit(
   this: any,
   body: WebReadableStream<Uint8Array>,
   maxBytes: number
@@ -2495,7 +2495,7 @@ export async function bufferResponseBodyWithLimit(
   return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks, total);
 }
 
-export function respondWithError(
+function respondWithError(
   this: any,
   write: (chunk: Buffer) => void,
   status: number,
@@ -2519,7 +2519,7 @@ export function respondWithError(
   );
 }
 
-export function buildFetchUrl(this: any, request: HttpRequestData, defaultScheme: "http" | "https") {
+function buildFetchUrl(this: any, request: HttpRequestData, defaultScheme: "http" | "https") {
   if (
     request.target.startsWith("http://") ||
     request.target.startsWith("https://") ||
@@ -2606,7 +2606,7 @@ export async function resolveHostname(
   throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
 }
 
-export async function ensureRequestAllowed(this: any, request: HttpHookRequest) {
+async function ensureRequestAllowed(this: any, request: HttpHookRequest) {
   if (!this.options.httpHooks?.isRequestAllowed) return;
 
   // Request policy is head-only: never expose request body to this callback.
@@ -2623,7 +2623,7 @@ export async function ensureRequestAllowed(this: any, request: HttpHookRequest) 
   }
 }
 
-export async function ensureIpAllowed(this: any, parsedUrl: URL, protocol: "http" | "https", port: number) {
+async function ensureIpAllowed(this: any, parsedUrl: URL, protocol: "http" | "https", port: number) {
   if (!this.options.httpHooks?.isIpAllowed) return;
 
   // Resolve all A/AAAA records and ensure at least one address is permitted.
@@ -2632,7 +2632,7 @@ export async function ensureIpAllowed(this: any, parsedUrl: URL, protocol: "http
   await resolveHostname.call(this, parsedUrl.hostname, { protocol, port });
 }
 
-export function isSamePolicyRelevantRequestHead(this: any, a: HttpHookRequest, b: HttpHookRequest): boolean {
+function isSamePolicyRelevantRequestHead(this: any, a: HttpHookRequest, b: HttpHookRequest): boolean {
   if (a.method !== b.method) return false;
   if (a.url !== b.url) return false;
 
@@ -2662,7 +2662,7 @@ export function isSamePolicyRelevantRequestHead(this: any, a: HttpHookRequest, b
   return true;
 }
 
-export async function applyRequestHeadHooks(
+async function applyRequestHeadHooks(
   this: any,
   request: HttpHookRequest
 ): Promise<{
@@ -2715,7 +2715,7 @@ export async function applyRequestHeadHooks(
   };
 }
 
-export async function applyRequestBodyHooks(this: any, request: HttpHookRequest): Promise<HttpHookRequest> {
+async function applyRequestBodyHooks(this: any, request: HttpHookRequest): Promise<HttpHookRequest> {
   if (!this.options.httpHooks?.onRequest) {
     return request;
   }
@@ -2742,7 +2742,7 @@ export function closeSharedDispatchers(this: any) {
   this.sharedDispatchers.clear();
 }
 
-export function pruneSharedDispatchers(this: any, now = Date.now()) {
+function pruneSharedDispatchers(this: any, now = Date.now()) {
   if (this.sharedDispatchers.size === 0) return;
 
   for (const [key, entry] of this.sharedDispatchers) {
@@ -2756,7 +2756,7 @@ export function pruneSharedDispatchers(this: any, now = Date.now()) {
   }
 }
 
-export function evictSharedDispatchersIfNeeded(this: any) {
+function evictSharedDispatchersIfNeeded(this: any) {
   while (this.sharedDispatchers.size > DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS) {
     const oldestKey = this.sharedDispatchers.keys().next().value as string | undefined;
     if (!oldestKey) break;
@@ -2845,7 +2845,7 @@ export function stripHopByHopHeaders<T extends HeaderValue>(
   return output;
 }
 
-export function headersToRecord(this: any, headers: Headers): HttpResponseHeaders {
+function headersToRecord(this: any, headers: Headers): HttpResponseHeaders {
   const record: HttpResponseHeaders = {};
 
   headers.forEach((value, key) => {
