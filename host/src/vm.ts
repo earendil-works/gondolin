@@ -8,6 +8,7 @@ import { Duplex, Readable } from "stream";
 import {
   createTempQcow2Overlay,
   ensureQemuImgAvailable,
+  inferDiskFormatFromPath,
   moveFile,
 } from "./qemu-img";
 import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
@@ -31,10 +32,15 @@ import {
 import type { SandboxState } from "./sandbox-controller";
 import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
 import type { SshOptions } from "./qemu-ssh";
-import { MemoryProvider } from "./vfs/node";
-import { SandboxVfsProvider, type VfsHooks } from "./vfs/provider";
-import type { VirtualProvider } from "./vfs/node";
-import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
+import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs";
+import {
+  buildShellEnv,
+  envInputToEntries,
+  mapToEnvArray,
+  mergeEnvInputs,
+  parseEnvEntry,
+  resolveEnvNumber,
+} from "./env-utils";
 import {
   defaultDebugLog,
   resolveDebugFlags,
@@ -49,8 +55,19 @@ import {
   createGondolinEtcHooks,
   createGondolinEtcMount,
 } from "./ingress";
+import { MemoryProvider, type VirtualProvider } from "./vfs/node";
+import { normalizeVfsPath } from "./vfs/utils";
+import {
+  SandboxVfsProvider,
+  type VfsHooks,
+  composeVfsHooks,
+  wrapProvider,
+} from "./vfs/provider";
 import {
   MountRouterProvider,
+  getRelativePath,
+  isNoEntryError,
+  isUnderMountPoint,
   listMountPaths,
   normalizeMountMap,
   normalizeMountPath,
@@ -65,6 +82,8 @@ import {
   rejectExecSession,
   resolveOutputMode,
   applyOutputChunk,
+  normalizeCommand,
+  toAsyncIterable,
 } from "./exec";
 
 const MAX_REQUEST_ID = 0xffffffff;
@@ -83,14 +102,6 @@ const VFS_READY_ATTEMPTS = Math.max(
   1,
   Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000)),
 );
-
-function resolveEnvNumber(name: string, fallback: number) {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
-}
 
 type ExecInput = string | string[];
 
@@ -259,12 +270,6 @@ type RootDiskState = {
   /** delete the disk file on vm.close() */
   deleteOnClose: boolean;
 };
-
-function inferDiskFormatFromPath(diskPath: string): "raw" | "qcow2" {
-  const lower = diskPath.toLowerCase();
-  if (lower.endsWith(".qcow2") || lower.endsWith(".qcow")) return "qcow2";
-  return "raw";
-}
 
 export class VM {
   /**
@@ -847,13 +852,13 @@ export class VM {
     if (!absolutePath) return null;
 
     for (const mountPath of this.shortcutBindMounts) {
-      if (isPathWithinMount(absolutePath, mountPath)) {
+      if (isUnderMountPoint(absolutePath, mountPath)) {
         return absolutePath;
       }
     }
 
-    if (isPathWithinMount(absolutePath, this.fuseMount)) {
-      return mapFuseGuestPathToVfsPath(absolutePath, this.fuseMount);
+    if (isUnderMountPoint(absolutePath, this.fuseMount)) {
+      return getRelativePath(absolutePath, this.fuseMount);
     }
 
     return null;
@@ -2169,47 +2174,17 @@ fi
   }
 }
 
-function normalizeGuestPath(inputPath: string): string {
-  let normalized = path.posix.normalize(inputPath);
-  if (!normalized.startsWith("/")) {
-    normalized = `/${normalized}`;
-  }
-  if (normalized.length > 1 && normalized.endsWith("/")) {
-    normalized = normalized.slice(0, -1);
-  }
-  return normalized;
-}
-
 function resolveAbsoluteGuestPath(
   filePath: string,
   cwd?: string,
 ): string | null {
   if (filePath.startsWith("/")) {
-    return normalizeGuestPath(filePath);
+    return normalizeVfsPath(filePath);
   }
   if (!cwd || !cwd.startsWith("/")) {
     return null;
   }
-  return normalizeGuestPath(path.posix.join(cwd, filePath));
-}
-
-function isPathWithinMount(filePath: string, mountPath: string): boolean {
-  if (filePath === mountPath) return true;
-  if (mountPath === "/") return filePath.startsWith("/");
-  return filePath.startsWith(`${mountPath}/`);
-}
-
-function mapFuseGuestPathToVfsPath(
-  filePath: string,
-  fuseMount: string,
-): string {
-  if (fuseMount === "/") {
-    return filePath;
-  }
-  if (filePath === fuseMount) {
-    return "/";
-  }
-  return filePath.slice(fuseMount.length);
+  return normalizeVfsPath(path.posix.join(cwd, filePath));
 }
 
 function normalizePositiveInt(
@@ -2229,17 +2204,6 @@ function assertNotAborted(
   if (signal?.aborted) {
     throw new Error(message);
   }
-}
-
-function isNoEntryError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const error = err as NodeJS.ErrnoException;
-  return (
-    error.code === "ENOENT" ||
-    error.code === "ERRNO_2" ||
-    error.errno === 2 ||
-    error.errno === -2
-  );
 }
 
 async function* toFileBufferIterable(
@@ -2291,36 +2255,6 @@ async function* toFileBufferIterable(
   throw new Error("unsupported write input type");
 }
 
-function normalizeCommand(
-  command: ExecInput,
-  options: ExecOptions,
-): {
-  cmd: string;
-  argv: string[];
-} {
-  // Array form: execute an executable directly
-  // NOTE: the guest does not search `$PATH` for this.
-  if (Array.isArray(command)) {
-    if (command.length === 0) {
-      throw new Error("command array must include the executable");
-    }
-    return { cmd: command[0], argv: command.slice(1) };
-  }
-
-  // String form: run through a login shell
-  // Equivalent to: vm.exec(["/bin/sh", "-lc", command])
-  const extraArgv = options.argv ?? [];
-  const argv = ["-lc", command];
-
-  // If the caller provides extra argv entries, pass them as positional params
-  // to the shell script (requires an explicit $0 parameter).
-  if (extraArgv.length) {
-    argv.push("sh", ...extraArgv);
-  }
-
-  return { cmd: "/bin/sh", argv };
-}
-
 type ResolvedVfs = {
   provider: SandboxVfsProvider | null;
   mounts: Record<string, VirtualProvider>;
@@ -2362,37 +2296,6 @@ function resolveVmVfs(
   return { provider: wrapProvider(provider, hooks), mounts };
 }
 
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return typeof (value as any)?.then === "function";
-}
-
-function composeVfsHooks(a?: VfsHooks, b?: VfsHooks): VfsHooks {
-  if (!a || (!a.before && !a.after)) return b ?? {};
-  if (!b || (!b.before && !b.after)) return a;
-
-  return {
-    before: (ctx) => {
-      const ra = a.before?.(ctx);
-      if (isPromiseLike(ra)) {
-        return Promise.resolve(ra).then(() => b.before?.(ctx));
-      }
-      return b.before?.(ctx);
-    },
-    after: (ctx) => {
-      const ra = a.after?.(ctx);
-      if (isPromiseLike(ra)) {
-        return Promise.resolve(ra).then(() => b.after?.(ctx));
-      }
-      return b.after?.(ctx);
-    },
-  };
-}
-
-function wrapProvider(provider: VirtualProvider, hooks: VfsHooks) {
-  if (provider instanceof SandboxVfsProvider) return provider;
-  return new SandboxVfsProvider(provider, hooks);
-}
-
 function resolveFuseConfig(
   options?: VmVfsOptions | null,
   mounts?: Record<string, VirtualProvider>,
@@ -2401,139 +2304,6 @@ function resolveFuseConfig(
   const mountPaths = listMountPaths(mounts ?? options?.mounts);
   const fuseBinds = mountPaths.filter((mountPath) => mountPath !== "/");
   return { fuseMount, fuseBinds };
-}
-
-function resolveMitmMounts(
-  options?: VmVfsOptions | null,
-  mitmCertDir?: string,
-  netEnabled = true,
-): Record<string, VirtualProvider> {
-  if (options === null || !netEnabled) return {};
-
-  const mountPaths = listMountPaths(options?.mounts);
-  if (mountPaths.includes("/etc/ssl/certs")) {
-    return {};
-  }
-
-  return {
-    "/etc/ssl/certs": createMitmCaProvider(mitmCertDir),
-  };
-}
-
-function createMitmCaProvider(mitmCertDir?: string): VirtualProvider {
-  const resolvedDir = resolveMitmCertDir(mitmCertDir);
-  const ca = loadOrCreateMitmCaSync(resolvedDir);
-  const provider = new MemoryProvider();
-  const certPem = ca.certPem.endsWith("\n") ? ca.certPem : `${ca.certPem}\n`;
-  const handle = provider.openSync("/ca-certificates.crt", "w");
-  try {
-    handle.writeFileSync(certPem);
-  } finally {
-    handle.closeSync();
-  }
-  provider.setReadOnly();
-  return provider;
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<Buffer> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Symbol.asyncIterator in value &&
-    typeof (value as AsyncIterable<Buffer>)[Symbol.asyncIterator] === "function"
-  );
-}
-
-async function* toAsyncIterable(value: ExecStdin): AsyncIterable<Buffer> {
-  if (
-    typeof value === "string" ||
-    Buffer.isBuffer(value) ||
-    typeof value === "boolean"
-  ) {
-    return;
-  }
-
-  if (isAsyncIterable(value)) {
-    for await (const chunk of value) {
-      yield Buffer.from(chunk);
-    }
-    return;
-  }
-
-  if (value instanceof Readable) {
-    for await (const chunk of value) {
-      yield Buffer.from(chunk as Buffer);
-    }
-    return;
-  }
-
-  throw new Error("unsupported stdin type");
-}
-
-function buildShellEnv(
-  baseEnv?: EnvInput,
-  extraEnv?: EnvInput,
-): string[] | undefined {
-  const envMap = mergeEnvMap(baseEnv, extraEnv);
-  if (envMap.size === 0) {
-    const term = resolveTermValue();
-    return term ? [`TERM=${term}`] : undefined;
-  }
-
-  if (!envMap.has("TERM")) {
-    const term = resolveTermValue();
-    if (term) envMap.set("TERM", term);
-  }
-
-  return mapToEnvArray(envMap);
-}
-
-function resolveTermValue(): string | null {
-  const term = process.env.TERM;
-  if (!term || term === "xterm-ghostty") {
-    return "xterm-256color";
-  }
-  return term;
-}
-
-function mergeEnvInputs(
-  baseEnv?: EnvInput,
-  extraEnv?: EnvInput,
-): string[] | undefined {
-  const envMap = mergeEnvMap(baseEnv, extraEnv);
-  return envMap.size > 0 ? mapToEnvArray(envMap) : undefined;
-}
-
-function mergeEnvMap(
-  baseEnv?: EnvInput,
-  extraEnv?: EnvInput,
-): Map<string, string> {
-  const envMap = new Map<string, string>();
-  for (const [key, value] of envInputToEntries(baseEnv)) {
-    envMap.set(key, value);
-  }
-  for (const [key, value] of envInputToEntries(extraEnv)) {
-    envMap.set(key, value);
-  }
-  return envMap;
-}
-
-function envInputToEntries(env?: EnvInput): Array<[string, string]> {
-  if (!env) return [];
-  if (Array.isArray(env)) {
-    return env.map(parseEnvEntry);
-  }
-  return Object.entries(env);
-}
-
-function parseEnvEntry(entry: string): [string, string] {
-  const idx = entry.indexOf("=");
-  if (idx === -1) return [entry, ""];
-  return [entry.slice(0, idx), entry.slice(idx + 1)];
-}
-
-function mapToEnvArray(envMap: Map<string, string>): string[] {
-  return Array.from(envMap.entries(), ([key, value]) => `${key}=${value}`);
 }
 
 /** @internal */

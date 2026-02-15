@@ -544,3 +544,39 @@ export class SandboxVfsProvider extends VirtualProviderClass implements VirtualP
     }
   }
 }
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as any)?.then === "function";
+}
+
+/** @internal */
+export function composeVfsHooks(a?: VfsHooks, b?: VfsHooks): VfsHooks {
+  if (!a || (!a.before && !a.after)) return b ?? {};
+  if (!b || (!b.before && !b.after)) return a;
+
+  return {
+    before: (ctx) => {
+      const ra = a.before?.(ctx);
+      if (isPromiseLike(ra)) {
+        return Promise.resolve(ra).then(() => b.before?.(ctx));
+      }
+      return b.before?.(ctx);
+    },
+    after: (ctx) => {
+      const ra = a.after?.(ctx);
+      if (isPromiseLike(ra)) {
+        return Promise.resolve(ra).then(() => b.after?.(ctx));
+      }
+      return b.after?.(ctx);
+    },
+  };
+}
+
+/** @internal */
+export function wrapProvider(
+  provider: VirtualProvider,
+  hooks: VfsHooks,
+): SandboxVfsProvider {
+  if (provider instanceof SandboxVfsProvider) return provider;
+  return new SandboxVfsProvider(provider, hooks);
+}
