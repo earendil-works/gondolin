@@ -205,7 +205,7 @@ type SshProxySession = {
   upstreams: Set<SshClient>;
 };
 
-type TcpSession = {
+export type TcpSession = {
   socket: net.Socket | null;
   srcIP: string;
   srcPort: number;

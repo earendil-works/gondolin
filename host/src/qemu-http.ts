@@ -10,6 +10,7 @@ import type {
   HttpIpAllowInfo,
   HttpResponseHeaders,
   QemuNetworkBackend,
+  TcpSession,
 } from "./qemu-net";
 
 import {
@@ -461,7 +462,7 @@ export function updateQemuRxPauseState(backend: QemuNetworkBackend) {
 export async function handlePlainHttpData(
   backend: QemuNetworkBackend,
   key: string,
-  session: any,
+  session: TcpSession,
   data: Buffer,
 ) {
   if (session.ws) {
@@ -485,7 +486,7 @@ export async function handlePlainHttpData(
 export async function handleTlsHttpData(
   backend: QemuNetworkBackend,
   key: string,
-  session: any,
+  session: TcpSession,
   data: Buffer,
 ) {
   const tlsSession = session.tls;
@@ -514,7 +515,7 @@ export async function handleTlsHttpData(
 function abortWebSocketSession(
   backend: QemuNetworkBackend,
   key: string,
-  session: any,
+  session: TcpSession,
   reason: string,
 ) {
   if (backend.options.debug) {
@@ -542,7 +543,7 @@ function abortWebSocketSession(
 function handleWebSocketClientData(
   backend: QemuNetworkBackend,
   key: string,
-  session: any,
+  session: TcpSession,
   data: Buffer,
 ) {
   const ws = session.ws;
@@ -638,7 +639,7 @@ function maybeSend100ContinueFromHead(
 export async function handleHttpDataWithWriter(
   backend: QemuNetworkBackend,
   key: string,
-  session: any,
+  session: TcpSession,
   data: Buffer,
   options: {
     scheme: "http" | "https";
@@ -2158,7 +2159,7 @@ async function handleWebSocketUpgrade(
   backend: QemuNetworkBackend,
   key: string,
   request: HttpRequestData,
-  session: any,
+  session: TcpSession,
   options: {
     scheme: "http" | "https";
     write: (chunk: Buffer) => void;
