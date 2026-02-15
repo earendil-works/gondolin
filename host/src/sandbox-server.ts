@@ -43,7 +43,8 @@ import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
 } from "./qemu-net";
-import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
+import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
+import type { SshOptions } from "./qemu-ssh";
 import { FsRpcService } from "./vfs/rpc-service";
 import { SandboxVfsProvider } from "./vfs/provider";
 import type { VirtualProvider } from "./vfs/node";

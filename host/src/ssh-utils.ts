@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import type { SshCredential } from "./qemu-net";
+import type { SshCredential } from "./qemu-ssh";
 
 export type SshAllowedTarget = {
   /** normalized host pattern */

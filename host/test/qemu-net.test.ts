@@ -11,6 +11,7 @@ import dns from "node:dns";
 import forge from "node-forge";
 
 import { QemuNetworkBackend } from "../src/qemu-net";
+import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu-ssh";
 import {
   HttpRequestBlockedError,
   closeSharedDispatchers,
@@ -93,7 +94,7 @@ async function fetchHookAndRespond(
 
 test("qemu-net: ssh host key generation is lazy", () => {
   const backend = makeBackend();
-  assert.equal((backend as any).sshHostKey, null);
+  assert.equal(backend.ssh.hostKey, null);
 
   const backendWithSsh = makeBackend({
     ssh: {
@@ -104,7 +105,7 @@ test("qemu-net: ssh host key generation is lazy", () => {
       hostVerifier: () => true,
     },
   });
-  assert.equal((backendWithSsh as any).sshHostKey, null);
+  assert.equal(backendWithSsh.ssh.hostKey, null);
 });
 
 test("qemu-net: trusted dns mode requires ipv4 resolvers (no silent fallback)", () => {
@@ -2036,10 +2037,7 @@ test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
     dstIP: githubIp,
     dstPort: 22,
   });
-  assert.equal(
-    (backend as any).isSshFlowAllowed("tcp-github", githubIp, 22),
-    true,
-  );
+  assert.equal(isSshFlowAllowed(backend, "tcp-github", githubIp, 22), true);
   assert.equal(
     (backend as any).tcpSessions.get("tcp-github").connectIP,
     "github.com",
@@ -2052,10 +2050,7 @@ test("qemu-net: ssh flows require allowlisted synthetic hostname", () => {
     dstIP: gitlabIp,
     dstPort: 22,
   });
-  assert.equal(
-    (backend as any).isSshFlowAllowed("tcp-gitlab", gitlabIp, 22),
-    false,
-  );
+  assert.equal(isSshFlowAllowed(backend, "tcp-gitlab", gitlabIp, 22), false);
 });
 
 test("qemu-net: ssh flows can be enabled on non-standard ports via host:port allowlist", () => {
@@ -2095,10 +2090,7 @@ test("qemu-net: ssh flows can be enabled on non-standard ports via host:port all
     dstPort: 443,
   });
 
-  assert.equal(
-    (backend as any).isSshFlowAllowed("tcp-ssh-443", sshGithubIp, 443),
-    true,
-  );
+  assert.equal(isSshFlowAllowed(backend, "tcp-ssh-443", sshGithubIp, 443), true);
   assert.equal(
     (backend as any).tcpSessions.get("tcp-ssh-443").connectIP,
     "ssh.github.com",
@@ -2143,7 +2135,7 @@ test("qemu-net: ssh flows on non-allowed ports are blocked", () => {
   });
 
   assert.equal(
-    (backend as any).isSshFlowAllowed("tcp-ssh-443-blocked", sshGithubIp, 443),
+    isSshFlowAllowed(backend, "tcp-ssh-443-blocked", sshGithubIp, 443),
     false,
   );
 });
@@ -2232,9 +2224,7 @@ test("qemu-net: ssh auth defaults to known_hosts verification", () => {
   });
 
   for (const backend of [backendAgent, backendCred]) {
-    const verifier = (backend as any).sshHostVerifier as
-      | ((hostname: string, key: Buffer, port: number) => boolean)
-      | null;
+    const verifier = backend.ssh.hostVerifier;
     assert.equal(typeof verifier, "function");
     assert.equal(verifier!("github.com", keyBlob, 22), true);
     assert.equal(verifier!("github.com", Buffer.from("nope"), 22), false);
@@ -2263,9 +2253,7 @@ test("qemu-net: known_hosts port entries are respected", () => {
     },
   });
 
-  const verifier = (backend as any).sshHostVerifier as
-    | ((hostname: string, key: Buffer, port: number) => boolean)
-    | null;
+  const verifier = backend.ssh.hostVerifier;
   assert.equal(typeof verifier, "function");
   assert.equal(verifier!("ssh.github.com", keyBlob, 443), true);
   // Default port (22) lookup should not match a port-specific entry
@@ -2298,9 +2286,7 @@ test("qemu-net: known_hosts hashed host patterns are supported", () => {
     },
   });
 
-  const verifier = (backend as any).sshHostVerifier as
-    | ((hostname: string, key: Buffer, port: number) => boolean)
-    | null;
+  const verifier = backend.ssh.hostVerifier;
   assert.equal(typeof verifier, "function");
   assert.equal(verifier!(host, keyBlob, 22), true);
 });
@@ -2360,14 +2346,10 @@ test("qemu-net: ssh egress requires credential or ssh agent", () => {
     dstPort: 22,
   });
 
-  assert.equal(
-    (backend as any).isSshFlowAllowed("tcp-cred", githubIp, 22),
-    true,
-  );
-  assert.equal(
-    (backend as any).tcpSessions.get("tcp-cred").sshCredential.pattern,
-    "github.com",
-  );
+  assert.equal(isSshFlowAllowed(backend, "tcp-cred", githubIp, 22), true);
+  const tcpCred = (backend as any).tcpSessions.get("tcp-cred");
+  assert.ok(tcpCred.ssh?.credential);
+  assert.equal(tcpCred.ssh.credential.pattern, "github.com");
 });
 
 test("qemu-net: ssh egress allows ssh agent", () => {
@@ -2543,7 +2525,8 @@ test("qemu-net: ssh execPolicy can deny exec", async () => {
 
   const ch: any = new FakeChannel();
 
-  await (backend as any).bridgeSshExecChannel({
+  await bridgeSshExecChannel({
+    backend,
     key: "tcp-exec-policy",
     session,
     proxy,

@@ -92,17 +92,19 @@ export type {
   DnsMode,
   DnsOptions,
   SyntheticDnsHostMappingMode,
-  SshOptions,
-  SshCredential,
-  SshExecRequest,
-  SshExecDecision,
-  SshExecPolicy,
   HttpIpAllowInfo,
   HttpHooks,
   HttpHookRequest,
   HttpHookRequestHeadResult,
   HttpFetch,
 } from "./qemu-net";
+export type {
+  SshOptions,
+  SshCredential,
+  SshExecRequest,
+  SshExecDecision,
+  SshExecPolicy,
+} from "./qemu-ssh";
 export { HttpRequestBlockedError } from "./http-utils";
 
 // SSH helpers

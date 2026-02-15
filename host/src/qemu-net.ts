@@ -25,28 +25,19 @@ import {
   parseDnsQuery,
 } from "./dns";
 import { Agent, fetch as undiciFetch } from "undici";
-import {
-  Client as SshClient,
-  Server as SshServer,
-  type AuthContext as SshAuthContext,
-  type ClientChannel as SshClientChannel,
-  type Connection as SshServerConnection,
-  type ServerChannel as SshServerChannel,
-  type Session as SshServerSession,
-} from "ssh2";
 
 import { AsyncSemaphore } from "./async-utils";
 import { SyntheticDnsHostMap, normalizeIpv4Servers } from "./dns-utils";
 import {
-  createOpenSshKnownHostsHostVerifier,
-  generateSshHostKey,
-  matchHostname,
-  normalizeSshAllowedTargets,
-  normalizeSshCredentials,
-  normalizeSshKnownHostsFiles,
-  type ResolvedSshCredential,
-  type SshAllowedTarget,
-} from "./ssh-utils";
+  assertSshDnsConfig,
+  cleanupSshTcpSession,
+  createQemuSshInternals,
+  handleSshProxyData as handleSshProxyDataImpl,
+  isSshFlowAllowed,
+  type QemuSshInternals,
+  type SshOptions,
+  type SshTcpSessionState,
+} from "./qemu-ssh";
 import {
   caCertVerifiesLeaf,
   closeSharedDispatchers,
@@ -84,11 +75,6 @@ const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode =
 
 const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
 
-const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION = 4;
-const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
-const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
-const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
-const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
 
 import {
   NetworkStack,
@@ -155,56 +141,10 @@ class GuestTlsStream extends Duplex {
   }
 }
 
-class GuestSshStream extends Duplex {
-  constructor(
-    private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>,
-    private readonly onServerEnd: () => void | Promise<void>,
-  ) {
-    super();
-  }
-
-  pushFromGuest(data: Buffer) {
-    this.push(data);
-  }
-
-  _read() {
-    // data is pushed via pushFromGuest
-  }
-
-  _write(
-    chunk: Buffer,
-    _encoding: BufferEncoding,
-    callback: (error?: Error | null) => void,
-  ) {
-    Promise.resolve(this.onServerWrite(Buffer.from(chunk))).then(
-      () => callback(),
-      (err) => callback(err as Error),
-    );
-  }
-
-  _final(callback: (error?: Error | null) => void) {
-    Promise.resolve(this.onServerEnd()).then(
-      () => callback(),
-      (err) => callback(err as Error),
-    );
-  }
-}
-
 type TlsSession = {
   stream: GuestTlsStream;
   socket: tls.TLSSocket;
   servername: string | null;
-};
-
-type SshProxySession = {
-  /** guest-side injected transport stream */
-  stream: GuestSshStream;
-  /** per-flow ssh server */
-  server: SshServer;
-  /** guest-side ssh server connection */
-  connection: SshServerConnection | null;
-  /** active upstream ssh clients created for concurrent exec channels */
-  upstreams: Set<SshClient>;
 };
 
 export type TcpSession = {
@@ -217,10 +157,9 @@ export type TcpSession = {
   connectIP: string;
   /** synthetic hostname derived from destination synthetic dns ip */
   syntheticHostname: string | null;
-  /** resolved upstream credential for ssh proxying */
-  sshCredential: ResolvedSshCredential | null;
-  /** active ssh proxy state when host-side credentials are used */
-  sshProxy?: SshProxySession;
+
+  /** @internal */
+  ssh?: SshTcpSessionState;
   flowControlPaused: boolean;
   protocol: TcpFlowProtocol | null;
   connected: boolean;
@@ -316,80 +255,6 @@ export type DnsOptions = {
 
   /** synthetic hostname mapping strategy (mode="synthetic") */
   syntheticHostMapping?: SyntheticDnsHostMappingMode;
-};
-
-export type SshCredential = {
-  /** upstream ssh username */
-  username?: string;
-  /** private key in OpenSSH/PEM format */
-  privateKey: string | Buffer;
-  /** private key passphrase */
-  passphrase?: string | Buffer;
-};
-
-export type SshExecRequest = {
-  /** target hostname derived from synthetic dns mapping */
-  hostname: string;
-  /** target port */
-  port: number;
-
-  /** ssh username the guest authenticated as */
-  guestUsername: string;
-
-  /** raw ssh exec command */
-  command: string;
-
-  /** source guest flow attribution */
-  src: {
-    /** guest source ip address */
-    ip: string;
-    /** guest source port */
-    port: number;
-  };
-};
-
-export type SshExecDecision =
-  | { allow: true }
-  | {
-      allow: false;
-      /** process exit code (default: 1) */
-      exitCode?: number;
-      /** message written to the guest channel stderr (trailing newline implied) */
-      message?: string;
-    };
-
-export type SshExecPolicy = (
-  request: SshExecRequest,
-) => SshExecDecision | Promise<SshExecDecision>;
-
-export type SshOptions = {
-  /** allowed ssh host patterns (optionally with ":PORT" suffix to allow non-standard ports) */
-  allowedHosts: string[];
-  /** host pattern -> upstream private-key credential */
-  credentials?: Record<string, SshCredential>;
-  /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
-  agent?: string;
-  /** OpenSSH known_hosts file path(s) used for default host key verification when `hostVerifier` is not set */
-  knownHostsFile?: string | string[];
-
-  /** allow/deny callback for guest ssh exec requests */
-  execPolicy?: SshExecPolicy;
-
-  /** max concurrent upstream ssh connections per guest tcp flow */
-  maxUpstreamConnectionsPerTcpSession?: number;
-  /** max concurrent upstream ssh connections across all guest flows */
-  maxUpstreamConnectionsTotal?: number;
-  /** upstream ssh connect+handshake timeout in `ms` */
-  upstreamReadyTimeoutMs?: number;
-  /** upstream ssh keepalive interval in `ms` */
-  upstreamKeepaliveIntervalMs?: number;
-  /** upstream ssh keepalive probes before disconnect */
-  upstreamKeepaliveCountMax?: number;
-
-  /** guest-facing ssh host key */
-  hostKey?: string | Buffer;
-  /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `knownHostsFile`/default known_hosts is used) */
-  hostVerifier?: (hostname: string, key: Buffer, port: number) => boolean;
 };
 
 export type HttpHookRequestHeadResult = HttpHookRequest & {
@@ -545,6 +410,9 @@ export class QemuNetworkBackend extends EventEmitter {
   /** @internal */
   readonly http: QemuHttpInternals;
 
+  /** @internal */
+  readonly ssh: QemuSshInternals;
+
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
   private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
@@ -562,22 +430,6 @@ export class QemuNetworkBackend extends EventEmitter {
   };
   private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
-  private readonly sshAllowedTargets: SshAllowedTarget[];
-  private readonly sshSniffPorts: number[];
-  private readonly sshSniffPortsSet: ReadonlySet<number>;
-  private readonly sshCredentials: ResolvedSshCredential[];
-  private readonly sshAgent: string | null;
-  private sshHostKey: string | null;
-  private readonly sshHostVerifier:
-    | ((hostname: string, key: Buffer, port: number) => boolean)
-    | null;
-  private readonly sshExecPolicy: SshExecPolicy | null;
-  private readonly sshMaxUpstreamConnectionsPerTcpSession: number;
-  private readonly sshMaxUpstreamConnectionsTotal: number;
-  private readonly sshUpstreamReadyTimeoutMs: number;
-  private readonly sshUpstreamKeepaliveIntervalMs: number;
-  private readonly sshUpstreamKeepaliveCountMax: number;
-  private readonly sshUpstreams = new Set<SshClient>();
 
   constructor(options: QemuNetworkOptions) {
     super();
@@ -631,134 +483,21 @@ export class QemuNetworkBackend extends EventEmitter {
         options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
     };
 
-    this.sshAllowedTargets = normalizeSshAllowedTargets(
-      options.ssh?.allowedHosts,
-    );
-    this.sshSniffPorts = Array.from(
-      new Set(this.sshAllowedTargets.map((t) => t.port)),
-    );
-    this.sshSniffPortsSet = new Set(this.sshSniffPorts);
-    this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
-    this.sshAgent = options.ssh?.agent ?? null;
-    this.sshExecPolicy = options.ssh?.execPolicy ?? null;
-    this.sshHostKey =
-      typeof options.ssh?.hostKey === "string"
-        ? options.ssh.hostKey
-        : options.ssh?.hostKey
-          ? options.ssh.hostKey.toString("utf8")
-          : null;
-    let sshHostVerifier = options.ssh?.hostVerifier ?? null;
-
-    // Default to OpenSSH host key verification via known_hosts unless an explicit verifier
-    // is provided. This protects against DNS poisoning / MITM for both agent and raw key auth.
-    if (
-      this.sshAllowedTargets.length > 0 &&
-      !sshHostVerifier &&
-      (this.sshAgent || this.sshCredentials.length > 0)
-    ) {
-      const knownHostsFiles = normalizeSshKnownHostsFiles(
-        options.ssh?.knownHostsFile,
-      );
-      try {
-        sshHostVerifier = createOpenSshKnownHostsHostVerifier(knownHostsFiles);
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : typeof err === "string"
-              ? err
-              : JSON.stringify(err);
-        throw new Error(
-          `ssh egress requires ssh.hostVerifier to validate upstream host keys (failed to load known_hosts: ${message})`,
-        );
-      }
-    }
-
-    this.sshHostVerifier = sshHostVerifier;
-
-    const sshMaxPerSession =
-      options.ssh?.maxUpstreamConnectionsPerTcpSession ??
-      DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION;
-    if (!Number.isInteger(sshMaxPerSession) || sshMaxPerSession <= 0) {
-      throw new Error(
-        "ssh.maxUpstreamConnectionsPerTcpSession must be an integer > 0",
-      );
-    }
-
-    const sshMaxTotal =
-      options.ssh?.maxUpstreamConnectionsTotal ??
-      DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL;
-    if (!Number.isInteger(sshMaxTotal) || sshMaxTotal <= 0) {
-      throw new Error("ssh.maxUpstreamConnectionsTotal must be an integer > 0");
-    }
-
-    const sshReadyTimeoutMs =
-      options.ssh?.upstreamReadyTimeoutMs ??
-      DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS;
-    if (!Number.isInteger(sshReadyTimeoutMs) || sshReadyTimeoutMs <= 0) {
-      throw new Error("ssh.upstreamReadyTimeoutMs must be an integer > 0");
-    }
-
-    const sshKeepaliveIntervalMs =
-      options.ssh?.upstreamKeepaliveIntervalMs ??
-      DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS;
-    if (
-      !Number.isInteger(sshKeepaliveIntervalMs) ||
-      sshKeepaliveIntervalMs < 0
-    ) {
-      throw new Error(
-        "ssh.upstreamKeepaliveIntervalMs must be an integer >= 0",
-      );
-    }
-
-    const sshKeepaliveCountMax =
-      options.ssh?.upstreamKeepaliveCountMax ??
-      DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX;
-    if (!Number.isInteger(sshKeepaliveCountMax) || sshKeepaliveCountMax < 0) {
-      throw new Error("ssh.upstreamKeepaliveCountMax must be an integer >= 0");
-    }
-
-    this.sshMaxUpstreamConnectionsPerTcpSession = sshMaxPerSession;
-    this.sshMaxUpstreamConnectionsTotal = sshMaxTotal;
-    this.sshUpstreamReadyTimeoutMs = sshReadyTimeoutMs;
-    this.sshUpstreamKeepaliveIntervalMs = sshKeepaliveIntervalMs;
-    this.sshUpstreamKeepaliveCountMax = sshKeepaliveCountMax;
+    this.ssh = createQemuSshInternals(options.ssh);
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
-      (this.sshAllowedTargets.length > 0
-        ? "per-host"
-        : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+      (this.ssh.enabled ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
     this.syntheticDnsHostMap =
       this.syntheticDnsHostMapping === "per-host"
         ? new SyntheticDnsHostMap()
         : null;
 
-    if (this.sshAllowedTargets.length > 0 && this.dnsMode !== "synthetic") {
-      throw new Error("ssh egress requires dns mode 'synthetic'");
-    }
-    if (
-      this.sshAllowedTargets.length > 0 &&
-      this.syntheticDnsHostMapping !== "per-host"
-    ) {
-      throw new Error(
-        "ssh egress requires dns syntheticHostMapping='per-host'",
-      );
-    }
-    if (
-      this.sshAllowedTargets.length > 0 &&
-      this.sshCredentials.length === 0 &&
-      !this.sshAgent
-    ) {
-      throw new Error(
-        "ssh egress requires at least one credential or ssh agent (direct ssh is not supported)",
-      );
-    }
-    if (this.sshAllowedTargets.length > 0 && !this.sshHostVerifier) {
-      throw new Error(
-        "ssh egress requires ssh.hostVerifier to validate upstream host keys",
-      );
-    }
+    assertSshDnsConfig({
+      ssh: this.ssh,
+      dnsMode: this.dnsMode,
+      syntheticHostMapping: this.syntheticDnsHostMapping,
+    });
   }
 
   start() {
@@ -855,7 +594,7 @@ export class QemuNetworkBackend extends EventEmitter {
       gatewayMac: this.options.gatewayMac,
       vmMac: this.options.vmMac,
       dnsServers,
-      sshPorts: this.sshSniffPorts,
+      sshPorts: this.ssh.sniffPorts,
       callbacks: {
         onUdpSend: (message) => this.handleUdpSend(message),
         onTcpConnect: (message) => this.handleTcpConnect(message),
@@ -866,7 +605,8 @@ export class QemuNetworkBackend extends EventEmitter {
       },
       allowTcpFlow: (info) => {
         if (info.protocol === "ssh") {
-          const allowed = this.isSshFlowAllowed(
+          const allowed = isSshFlowAllowed(
+            this,
             info.key,
             info.dstIP,
             info.dstPort,
@@ -1125,7 +865,7 @@ export class QemuNetworkBackend extends EventEmitter {
       } catch {
         // ignore
       }
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
     }
     this.tcpSessions.clear();
   }
@@ -1279,59 +1019,6 @@ export class QemuNetworkBackend extends EventEmitter {
     );
   }
 
-  private resolveSshCredential(
-    hostname: string,
-    port: number,
-  ): ResolvedSshCredential | null {
-    const normalized = hostname.toLowerCase();
-    for (const credential of this.sshCredentials) {
-      if (credential.port !== port) continue;
-      if (matchHostname(normalized, credential.pattern)) {
-        return credential;
-      }
-    }
-    return null;
-  }
-
-  private isSshFlowAllowed(
-    key: string,
-    dstIP: string,
-    dstPort: number,
-  ): boolean {
-    if (this.sshAllowedTargets.length === 0) return false;
-
-    const session = this.tcpSessions.get(key);
-    const hostname =
-      session?.syntheticHostname ??
-      this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ??
-      null;
-    if (!hostname) return false;
-
-    const normalized = hostname.toLowerCase();
-    const allowed = this.sshAllowedTargets.some(
-      (target) =>
-        target.port === dstPort && matchHostname(normalized, target.pattern),
-    );
-    if (!allowed) return false;
-
-    const credential = this.resolveSshCredential(hostname, dstPort);
-    const canUseAgent = Boolean(this.sshAgent);
-
-    // SSH egress is always proxied via the host; without a credential or agent we can't
-    // authenticate upstream and must deny the flow.
-    if (!credential && !canUseAgent) {
-      return false;
-    }
-
-    if (session) {
-      session.connectIP = hostname;
-      session.syntheticHostname = hostname;
-      session.sshCredential = credential;
-    }
-
-    return true;
-  }
-
   private handleTcpConnect(message: TcpConnectMessage) {
     const syntheticHostname =
       this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
@@ -1340,7 +1027,7 @@ export class QemuNetworkBackend extends EventEmitter {
         ? "127.0.0.1"
         : message.dstIP;
 
-    if (syntheticHostname && this.sshSniffPortsSet.has(message.dstPort)) {
+    if (syntheticHostname && this.ssh.sniffPortsSet.has(message.dstPort)) {
       connectIP = syntheticHostname;
     }
 
@@ -1352,7 +1039,6 @@ export class QemuNetworkBackend extends EventEmitter {
       dstPort: message.dstPort,
       connectIP,
       syntheticHostname,
-      sshCredential: null,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -1378,8 +1064,7 @@ export class QemuNetworkBackend extends EventEmitter {
     } catch {
       // ignore
     }
-    this.closeSshProxySession(session.sshProxy);
-    session.sshProxy = undefined;
+    cleanupSshTcpSession(this, session);
 
     session.pendingWrites = [];
     session.pendingWriteBytes = 0;
@@ -1451,6 +1136,10 @@ export class QemuNetworkBackend extends EventEmitter {
     this.queueTcpPendingWrite(message.key, session, message.data);
   }
 
+  private handleSshProxyData(key: string, session: TcpSession, data: Buffer) {
+    handleSshProxyDataImpl(this, key, session, data);
+  }
+
   private handleTcpClose(message: TcpCloseMessage) {
     const session = this.tcpSessions.get(message.key);
     if (session) {
@@ -1480,8 +1169,7 @@ export class QemuNetworkBackend extends EventEmitter {
         }
         session.tls = undefined;
       }
-      this.closeSshProxySession(session.sshProxy);
-      session.sshProxy = undefined;
+      cleanupSshTcpSession(this, session);
 
       if (session.socket) {
         if (message.destroy) {
@@ -1537,445 +1225,6 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private closeSshProxySession(proxy?: SshProxySession) {
-    if (!proxy) return;
-    try {
-      proxy.connection?.end();
-    } catch {
-      // ignore
-    }
-
-    // A guest SSH connection can spawn multiple exec channels concurrently.
-    // Each exec uses its own upstream SshClient, so make sure we close all of them.
-    for (const upstream of proxy.upstreams) {
-      this.sshUpstreams.delete(upstream);
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    }
-    proxy.upstreams.clear();
-
-    try {
-      proxy.server.close();
-    } catch {
-      // ignore
-    }
-    try {
-      proxy.stream.destroy();
-    } catch {
-      // ignore
-    }
-  }
-
-  private getOrCreateSshHostKey(): string {
-    if (this.sshHostKey !== null) {
-      return this.sshHostKey;
-    }
-    this.sshHostKey = generateSshHostKey();
-    return this.sshHostKey;
-  }
-
-  private ensureSshProxySession(
-    key: string,
-    session: TcpSession,
-  ): SshProxySession {
-    const existing = session.sshProxy;
-    if (existing) return existing;
-
-    if (!session.syntheticHostname) {
-      throw new Error("ssh proxy requires synthetic hostname");
-    }
-    if (!session.sshCredential && !this.sshAgent) {
-      throw new Error("ssh proxy requires credential or ssh agent");
-    }
-
-    const stream = new GuestSshStream(
-      async (chunk) => {
-        this.stack?.handleTcpData({ key, data: chunk });
-        this.flush();
-        await this.waitForFlowResume(key);
-      },
-      async () => {
-        this.stack?.handleTcpEnd({ key });
-        this.flush();
-      },
-    );
-
-    const server = new SshServer({
-      hostKeys: [this.getOrCreateSshHostKey()],
-      ident: "SSH-2.0-gondolin-ssh-proxy",
-    });
-
-    const proxy: SshProxySession = {
-      stream,
-      server,
-      connection: null,
-      upstreams: new Set(),
-    };
-
-    const onProxyError = (err: unknown) => {
-      this.abortTcpSession(
-        key,
-        session,
-        `ssh-proxy-error (${formatError(err)})`,
-      );
-    };
-
-    server.on("error", onProxyError);
-    stream.on("error", onProxyError);
-
-    server.on("connection", (connection) => {
-      proxy.connection = connection;
-      let guestUsername = "";
-
-      connection.on("authentication", (context: SshAuthContext) => {
-        guestUsername = context.username || guestUsername;
-        context.accept();
-      });
-
-      connection.on("error", onProxyError);
-
-      connection.on("ready", () => {
-        connection.on("session", (acceptSession) => {
-          const sshSession = acceptSession();
-          this.attachSshSessionHandlers({
-            key,
-            session,
-            proxy,
-            sshSession,
-            guestUsername,
-          });
-        });
-      });
-    });
-
-    server.injectSocket(stream as any);
-    session.sshProxy = proxy;
-
-    if (this.options.debug) {
-      this.emitDebug(
-        `ssh proxy start ${session.srcIP}:${session.srcPort} -> ${session.syntheticHostname}:${session.dstPort}`,
-      );
-    }
-
-    return proxy;
-  }
-
-  private attachSshSessionHandlers(options: {
-    key: string;
-    session: TcpSession;
-    proxy: SshProxySession;
-    sshSession: SshServerSession;
-    guestUsername: string;
-  }) {
-    const { key, session, proxy, sshSession, guestUsername } = options;
-
-    sshSession.on("pty", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-    sshSession.on("window-change", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-    sshSession.on("env", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-
-    sshSession.on("shell", (accept) => {
-      if (typeof accept !== "function") return;
-      const ch = accept();
-      ch.stderr.write(
-        "gondolin ssh proxy: interactive shells are not supported\n",
-      );
-      ch.exit(1);
-      ch.close();
-    });
-
-    sshSession.on("exec", (accept, _reject, info) => {
-      if (typeof accept !== "function") return;
-      const guestChannel = accept();
-      this.bridgeSshExecChannel({
-        key,
-        session,
-        proxy,
-        guestChannel,
-        command: info.command,
-        guestUsername,
-      }).catch((err) => {
-        try {
-          guestChannel.stderr.write(
-            Buffer.from(
-              `gondolin ssh proxy error: ${formatError(err)}\n`,
-              "utf8",
-            ),
-          );
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.exit(255);
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.close();
-        } catch {
-          // ignore
-        }
-      });
-    });
-
-    sshSession.on("subsystem", (_accept, reject) => {
-      reject();
-    });
-  }
-
-  private async bridgeSshExecChannel(options: {
-    key: string;
-    session: TcpSession;
-    proxy: SshProxySession;
-    guestChannel: SshServerChannel;
-    command: string;
-    guestUsername: string;
-  }) {
-    const { key, session, proxy, guestChannel, command, guestUsername } =
-      options;
-    const hostname = session.syntheticHostname;
-    const credential = session.sshCredential;
-    if (!hostname) {
-      throw new Error("missing ssh proxy hostname");
-    }
-    if (!credential && !this.sshAgent) {
-      throw new Error("missing ssh proxy credential/agent");
-    }
-
-    if (this.sshExecPolicy) {
-      const decision = await this.sshExecPolicy({
-        hostname,
-        port: session.dstPort,
-        guestUsername,
-        command,
-        src: { ip: session.srcIP, port: session.srcPort },
-      });
-
-      if (!decision.allow) {
-        const exitCode = decision.exitCode ?? 1;
-        if (decision.message) {
-          try {
-            guestChannel.stderr.write(`${decision.message}\n`);
-          } catch {
-            // ignore
-          }
-        }
-        try {
-          guestChannel.exit(exitCode);
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.close();
-        } catch {
-          // ignore
-        }
-        if (this.options.debug) {
-          this.emitDebug(
-            `ssh proxy exec denied ${hostname}:${session.dstPort} ${JSON.stringify(command)}`,
-          );
-        }
-        return;
-      }
-    }
-
-    if (proxy.upstreams.size >= this.sshMaxUpstreamConnectionsPerTcpSession) {
-      throw new Error(
-        `too many concurrent upstream ssh connections for this guest flow (limit ${this.sshMaxUpstreamConnectionsPerTcpSession})`,
-      );
-    }
-    if (this.sshUpstreams.size >= this.sshMaxUpstreamConnectionsTotal) {
-      throw new Error(
-        `too many concurrent upstream ssh connections on host (limit ${this.sshMaxUpstreamConnectionsTotal})`,
-      );
-    }
-
-    const upstream = new SshClient();
-    proxy.upstreams.add(upstream);
-    this.sshUpstreams.add(upstream);
-
-    const removeUpstream = () => {
-      proxy.upstreams.delete(upstream);
-      this.sshUpstreams.delete(upstream);
-    };
-
-    // Ensure we don't retain references if the client closes unexpectedly.
-    upstream.once("close", removeUpstream);
-
-    const connectConfig: import("ssh2").ConnectConfig = {
-      host: hostname,
-      port: session.dstPort,
-      username: credential
-        ? (credential.username ?? "git")
-        : guestUsername || "git",
-      readyTimeout: this.sshUpstreamReadyTimeoutMs,
-      keepaliveInterval: this.sshUpstreamKeepaliveIntervalMs,
-      keepaliveCountMax: this.sshUpstreamKeepaliveCountMax,
-    };
-
-    if (credential) {
-      connectConfig.privateKey = credential.privateKey;
-      connectConfig.passphrase = credential.passphrase;
-    } else if (this.sshAgent) {
-      connectConfig.agent = this.sshAgent;
-    }
-
-    if (this.sshHostVerifier) {
-      connectConfig.hostVerifier = (key: Buffer) =>
-        this.sshHostVerifier!(hostname, key, session.dstPort);
-    }
-
-    let upstreamChannel: SshClientChannel | null = null;
-
-    // If the guest closes the channel early, tear down the upstream connection.
-    guestChannel.once("close", () => {
-      try {
-        upstreamChannel?.close();
-      } catch {
-        // ignore
-      }
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    });
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const settleResolve = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        const settleReject = (err: unknown) => {
-          if (settled) return;
-          settled = true;
-          reject(err);
-        };
-
-        upstream.once("ready", settleResolve);
-        upstream.once("error", settleReject);
-        upstream.once("close", () =>
-          settleReject(new Error("upstream ssh closed before ready")),
-        );
-        upstream.connect(connectConfig);
-      });
-
-      upstreamChannel = await new Promise<SshClientChannel>(
-        (resolve, reject) => {
-          upstream.exec(command, (err, channel) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-            resolve(channel);
-          });
-        },
-      );
-    } catch (err) {
-      removeUpstream();
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-      throw err;
-    }
-
-    if (this.options.debug) {
-      this.emitDebug(`ssh proxy exec ${hostname} ${JSON.stringify(command)}`);
-    }
-
-    upstreamChannel.on("data", (data: Buffer) => {
-      guestChannel.write(data);
-    });
-
-    upstreamChannel.stderr.on("data", (data: Buffer) => {
-      guestChannel.stderr.write(data);
-    });
-
-    upstreamChannel.on("exit", (code: number | null, signal?: string) => {
-      if (typeof code === "number") {
-        guestChannel.exit(code);
-      } else if (signal) {
-        guestChannel.exit(signal);
-      }
-    });
-
-    upstreamChannel.on("close", () => {
-      try {
-        guestChannel.close();
-      } catch {
-        // ignore
-      }
-      removeUpstream();
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    });
-
-    guestChannel.on("data", (data: Buffer) => {
-      upstreamChannel!.write(data);
-    });
-
-    guestChannel.on("eof", () => {
-      upstreamChannel!.end();
-    });
-
-    guestChannel.on("close", () => {
-      upstreamChannel!.close();
-    });
-
-    guestChannel.on("signal", (signalName: string) => {
-      try {
-        upstreamChannel!.signal(signalName);
-      } catch {
-        // ignore
-      }
-    });
-
-    upstreamChannel.on("error", (err: Error) => {
-      this.abortTcpSession(
-        key,
-        session,
-        `ssh-upstream-channel-error (${formatError(err)})`,
-      );
-    });
-
-    upstream.on("error", (err: Error) => {
-      this.abortTcpSession(
-        key,
-        session,
-        `ssh-upstream-error (${formatError(err)})`,
-      );
-    });
-  }
-
-  private handleSshProxyData(key: string, session: TcpSession, data: Buffer) {
-    try {
-      const proxy = this.ensureSshProxySession(key, session);
-      proxy.stream.pushFromGuest(data);
-    } catch (err) {
-      this.abortTcpSession(
-        key,
-        session,
-        `ssh-proxy-init-error (${formatError(err)})`,
-      );
-    }
-  }
-
   private ensureTcpSocket(key: string, session: TcpSession) {
     if (session.socket) return;
 
@@ -2004,14 +1253,14 @@ export class QemuNetworkBackend extends EventEmitter {
     socket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
       this.resolveFlowResume(key);
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
 
     socket.on("error", () => {
       this.stack?.handleTcpError({ key });
       this.resolveFlowResume(key);
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
   }

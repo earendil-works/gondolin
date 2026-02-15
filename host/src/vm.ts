@@ -29,7 +29,8 @@ import {
   type SandboxConnection,
 } from "./sandbox-server";
 import type { SandboxState } from "./sandbox-controller";
-import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
+import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
+import type { SshOptions } from "./qemu-ssh";
 import { MemoryProvider } from "./vfs/node";
 import { SandboxVfsProvider, type VfsHooks } from "./vfs/provider";
 import type { VirtualProvider } from "./vfs/node";
