@@ -545,23 +545,29 @@ function getEntryName(entry: string | fs.Dirent) {
   return typeof entry === "string" ? entry : entry.name;
 }
 
-function isNoEntryError(err: unknown) {
+/** @internal */
+export function isNoEntryError(err: unknown) {
   if (!err || typeof err !== "object") return false;
   const error = err as NodeJS.ErrnoException;
   return (
     error.code === "ENOENT" ||
     error.code === "ERRNO_2" ||
-    error.errno === ERRNO.ENOENT
+    error.errno === ERRNO.ENOENT ||
+    error.errno === -ERRNO.ENOENT ||
+    error.errno === 2 ||
+    error.errno === -2
   );
 }
 
-function isUnderMountPoint(normalizedPath: string, mountPoint: string) {
+/** @internal */
+export function isUnderMountPoint(normalizedPath: string, mountPoint: string) {
   if (normalizedPath === mountPoint) return true;
   if (mountPoint === "/") return normalizedPath.startsWith("/");
   return normalizedPath.startsWith(mountPoint + "/");
 }
 
-function getRelativePath(normalizedPath: string, mountPoint: string) {
+/** @internal */
+export function getRelativePath(normalizedPath: string, mountPoint: string) {
   if (normalizedPath === mountPoint) return "/";
   if (mountPoint === "/") return normalizedPath;
   return normalizedPath.slice(mountPoint.length);

@@ -129,6 +129,75 @@ export type ExecOptions = {
   buffer?: boolean;
 };
 
+/** @internal */
+export function normalizeCommand(
+  command: string | string[],
+  options: Pick<ExecOptions, "argv">
+): {
+  cmd: string;
+  argv: string[];
+} {
+  // Array form: execute an executable directly
+  // NOTE: the guest does not search `$PATH` for this.
+  if (Array.isArray(command)) {
+    if (command.length === 0) {
+      throw new Error("command array must include the executable");
+    }
+    return { cmd: command[0], argv: command.slice(1) };
+  }
+
+  // String form: run through a login shell
+  // Equivalent to: vm.exec(["/bin/sh", "-lc", command])
+  const extraArgv = options.argv ?? [];
+  const argv = ["-lc", command];
+
+  // If the caller provides extra argv entries, pass them as positional params
+  // to the shell script (requires an explicit $0 parameter).
+  if (extraArgv.length) {
+    argv.push("sh", ...extraArgv);
+  }
+
+  return { cmd: "/bin/sh", argv };
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<Buffer> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Symbol.asyncIterator in value &&
+    typeof (value as AsyncIterable<Buffer>)[Symbol.asyncIterator] === "function"
+  );
+}
+
+/** @internal */
+export async function* toAsyncIterable(
+  value: boolean | string | Buffer | Readable | AsyncIterable<Buffer>
+): AsyncIterable<Buffer> {
+  if (
+    typeof value === "string" ||
+    Buffer.isBuffer(value) ||
+    typeof value === "boolean"
+  ) {
+    return;
+  }
+
+  if (isAsyncIterable(value)) {
+    for await (const chunk of value) {
+      yield Buffer.from(chunk);
+    }
+    return;
+  }
+
+  if (value instanceof Readable) {
+    for await (const chunk of value) {
+      yield Buffer.from(chunk as Buffer);
+    }
+    return;
+  }
+
+  throw new Error("unsupported stdin type");
+}
+
 export type ResolvedExecOutputMode =
   | { mode: "buffer" }
   | { mode: "ignore" }

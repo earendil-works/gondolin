@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemoryProvider, ShadowProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
+import { ShadowProvider } from "../src/vfs/shadow";
 
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
-  return error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2;
+  return (
+    error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2
+  );
 };
 
 const isEACCES = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
-  return error.code === "EACCES" || error.code === "ERRNO_13" || error.errno === 13;
+  return (
+    error.code === "EACCES" || error.code === "ERRNO_13" || error.errno === 13
+  );
 };
 
 test("ShadowProvider (deny mode) hides entries and blocks writes", async () => {

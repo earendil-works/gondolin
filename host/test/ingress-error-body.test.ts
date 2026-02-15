@@ -4,7 +4,7 @@ import { Readable, Writable } from "node:stream";
 import test from "node:test";
 
 import { GondolinListeners, IngressGateway } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 
 class CaptureResponse extends Writable {
   statusCode = 0;
@@ -16,7 +16,11 @@ class CaptureResponse extends Writable {
     this.headers[name.toLowerCase()] = value;
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, cb: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    cb: (error?: Error | null) => void,
+  ) {
     this.bodyChunks.push(Buffer.from(chunk));
     cb();
   }

@@ -21,11 +21,7 @@ export {
   type VmDeleteFileOptions,
 } from "./vm";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
-export {
-  type ExecOptions,
-  type ExecResult,
-  type ExecProcess,
-} from "./exec";
+export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec";
 
 // Server for running the sandbox
 export {
@@ -48,15 +44,27 @@ export {
   VirtualProvider,
   MemoryProvider,
   RealFSProvider,
+  type VirtualFileHandle,
+  type VfsStatfs,
+  type VirtualFileSystemOptions,
+} from "./vfs/node";
+
+export {
   SandboxVfsProvider,
-  ReadonlyProvider,
-  ReadonlyVirtualProvider,
+  type VfsHooks,
+  type VfsHookContext,
+} from "./vfs/provider";
+export { ReadonlyProvider } from "./vfs/readonly";
+export { ReadonlyVirtualProvider } from "./vfs/readonly-virtual";
+export {
   ShadowProvider,
   createShadowPathPredicate,
   type ShadowProviderOptions,
   type ShadowWriteMode,
   type ShadowPredicate,
   type ShadowContext,
+} from "./vfs/shadow";
+export {
   VirtualProviderClass,
   ERRNO,
   isWriteFlag,
@@ -64,15 +72,12 @@ export {
   VirtualDirent,
   createVirtualDirStats,
   formatVirtualEntries,
+} from "./vfs/utils";
+export {
   FsRpcService,
-  type VirtualFileHandle,
-  type VfsStatfs,
-  type VirtualFileSystemOptions,
-  type VfsHooks,
-  type VfsHookContext,
   type FsRpcMetrics,
   MAX_RPC_DATA,
-} from "./vfs";
+} from "./vfs/rpc-service";
 
 // HTTP hooks for network policy
 export {
@@ -87,18 +92,20 @@ export type {
   DnsMode,
   DnsOptions,
   SyntheticDnsHostMappingMode,
-  SshOptions,
-  SshCredential,
-  SshExecRequest,
-  SshExecDecision,
-  SshExecPolicy,
   HttpIpAllowInfo,
   HttpHooks,
   HttpHookRequest,
   HttpHookRequestHeadResult,
   HttpFetch,
 } from "./qemu-net";
-export { HttpRequestBlockedError } from "./qemu-net";
+export type {
+  SshOptions,
+  SshCredential,
+  SshExecRequest,
+  SshExecDecision,
+  SshExecPolicy,
+} from "./qemu-ssh";
+export { HttpRequestBlockedError } from "./http-utils";
 
 // SSH helpers
 export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh-exec";

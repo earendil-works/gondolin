@@ -3,7 +3,7 @@ import { once } from "node:events";
 import test from "node:test";
 
 import { GondolinListeners } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 
 test("GondolinListeners: invalid listeners file does not crash and keeps old routes", async () => {
   const etcProvider = new MemoryProvider();
@@ -31,7 +31,9 @@ test("GondolinListeners: invalid listeners file does not crash and keeps old rou
   assert.match((err as Error).message, /invalid listeners file line 1/);
 
   // old routes remain
-  assert.deepEqual(listeners.getRoutes(), [{ prefix: "/", port: 8080, stripPrefix: true }]);
+  assert.deepEqual(listeners.getRoutes(), [
+    { prefix: "/", port: 8080, stripPrefix: true },
+  ]);
   assert.ok(listeners.getLastReloadError());
 });
 
@@ -55,6 +57,8 @@ test("GondolinListeners: read errors preserve last-known-good routes", async () 
   assert.match((err as Error).message, /simulated provider failure/);
 
   // old routes remain
-  assert.deepEqual(listeners.getRoutes(), [{ prefix: "/", port: 8080, stripPrefix: true }]);
+  assert.deepEqual(listeners.getRoutes(), [
+    { prefix: "/", port: 8080, stripPrefix: true },
+  ]);
   assert.ok(listeners.getLastReloadError());
 });

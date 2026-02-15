@@ -4,7 +4,7 @@ import { Duplex, Readable, Writable } from "node:stream";
 import test from "node:test";
 
 import { GondolinListeners, IngressGateway } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 
 class CaptureDuplex extends Duplex {
   readonly written: Buffer[] = [];
@@ -13,7 +13,11 @@ class CaptureDuplex extends Duplex {
     // driven by push() from the test
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, cb: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    cb: (error?: Error | null) => void,
+  ) {
     this.written.push(Buffer.from(chunk));
     cb();
   }
@@ -45,7 +49,11 @@ class EmittingResponse extends Writable {
     this.headersSent = true;
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, cb: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    cb: (error?: Error | null) => void,
+  ) {
     const b = Buffer.from(chunk);
     this.bodyChunks.push(b);
     this.emit("chunk", b);
@@ -70,7 +78,7 @@ test("IngressGateway: streams chunked response without buffering whole chunk", a
             "Transfer-Encoding: chunked\r\n" +
             "\r\n" +
             "10\r\n" +
-            "0123456789"
+            "0123456789",
         );
 
         // Send the remaining 6 bytes on the next turn of the event loop.
@@ -104,5 +112,8 @@ test("IngressGateway: streams chunked response without buffering whole chunk", a
   await once(res, "finish");
 
   assert.equal(res.statusCode, 200);
-  assert.equal(Buffer.concat(res.bodyChunks).toString("ascii"), "0123456789ABCDEF");
+  assert.equal(
+    Buffer.concat(res.bodyChunks).toString("ascii"),
+    "0123456789ABCDEF",
+  );
 });

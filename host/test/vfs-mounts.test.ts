@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 import type { VfsStatfs } from "../src/vfs/node";
 import {
   MountRouterProvider,
@@ -15,12 +15,16 @@ const { errno: ERRNO } = os.constants;
 
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
-  return error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2;
+  return (
+    error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2
+  );
 };
 
 const isEXDEV = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
-  return error.code === "EXDEV" || error.code === "ERRNO_18" || error.errno === 18;
+  return (
+    error.code === "EXDEV" || error.code === "ERRNO_18" || error.errno === 18
+  );
 };
 
 const isENOSYS = (err: unknown) => {
@@ -40,7 +44,7 @@ test("normalizeMountMap rejects invalid providers and duplicates", () => {
   assert.throws(() => normalizeMountMap({ "/data": {} as any }), /invalid/);
   assert.throws(
     () => normalizeMountMap({ "/data": provider, "/data/": provider }),
-    /duplicate mount path/
+    /duplicate mount path/,
   );
 });
 
@@ -61,7 +65,10 @@ test("MountRouterProvider merges virtual children", async () => {
   await appHandle.writeFile("info");
   await appHandle.close();
 
-  const router = new MountRouterProvider({ "/": rootProvider, "/app": appProvider });
+  const router = new MountRouterProvider({
+    "/": rootProvider,
+    "/app": appProvider,
+  });
 
   const rootEntries = await router.readdir("/");
   assert.ok(rootEntries.includes("root.txt"));
@@ -75,7 +82,7 @@ test("MountRouterProvider merges virtual children", async () => {
 
   await assert.rejects(
     () => router.rename("/root.txt", "/app/other.txt"),
-    isEXDEV
+    isEXDEV,
   );
 });
 
@@ -93,14 +100,25 @@ test("MountRouterProvider exposes virtual root without base mount", async () => 
 });
 
 test("MountRouterProvider link rejects cross-mount paths", async () => {
-  const router = new MountRouterProvider({ "/": new MemoryProvider(), "/app": new MemoryProvider() });
+  const router = new MountRouterProvider({
+    "/": new MemoryProvider(),
+    "/app": new MemoryProvider(),
+  });
 
-  await assert.rejects(() => router.link("/origin.txt", "/app/linked.txt"), isEXDEV);
+  await assert.rejects(
+    () => router.link("/origin.txt", "/app/linked.txt"),
+    isEXDEV,
+  );
 });
 
 test("MountRouterProvider link delegates or reports ENOSYS", async () => {
-  const unsupportedRouter = new MountRouterProvider({ "/data": new MemoryProvider() });
-  await assert.rejects(() => unsupportedRouter.link("/data/a", "/data/b"), isENOSYS);
+  const unsupportedRouter = new MountRouterProvider({
+    "/data": new MemoryProvider(),
+  });
+  await assert.rejects(
+    () => unsupportedRouter.link("/data/a", "/data/b"),
+    isENOSYS,
+  );
 
   let seen: { existingPath: string; newPath: string } | null = null;
   const supportedProvider = Object.assign(new MemoryProvider(), {
@@ -108,14 +126,20 @@ test("MountRouterProvider link delegates or reports ENOSYS", async () => {
       seen = { existingPath, newPath };
     },
   });
-  const supportedRouter = new MountRouterProvider({ "/data": supportedProvider });
+  const supportedRouter = new MountRouterProvider({
+    "/data": supportedProvider,
+  });
 
   await supportedRouter.link("/data/a", "/data/b");
   assert.deepEqual(seen, { existingPath: "/a", newPath: "/b" });
 });
 
 test("MountRouterProvider resolves deep nested mounts and normalizes .. traversal", async () => {
-  const write = async (provider: MemoryProvider, p: string, contents: string) => {
+  const write = async (
+    provider: MemoryProvider,
+    p: string,
+    contents: string,
+  ) => {
     const fh = await provider.open(p, "w+");
     await fh.writeFile(contents);
     await fh.close();
@@ -188,9 +212,14 @@ test("MountRouterProvider virtual child mount masks conflicting base entry", asy
   await appFileHandle.writeFile("info");
   await appFileHandle.close();
 
-  const router = new MountRouterProvider({ "/": rootProvider, "/app": appProvider });
+  const router = new MountRouterProvider({
+    "/": rootProvider,
+    "/app": appProvider,
+  });
 
-  const entries = (await router.readdir("/", { withFileTypes: true })) as Array<{ name: string; isDirectory(): boolean }>;
+  const entries = (await router.readdir("/", {
+    withFileTypes: true,
+  })) as Array<{ name: string; isDirectory(): boolean }>;
   const app = entries.find((e) => e.name === "app");
   assert.ok(app);
   assert.equal(app!.isDirectory(), true);
@@ -209,9 +238,14 @@ test("MountRouterProvider statfs returns synthetic defaults for virtual dirs", a
 
 test("MountRouterProvider statfs delegates to mounted provider", async () => {
   const customStatfs: VfsStatfs = {
-    blocks: 1000, bfree: 500, bavail: 400,
-    files: 2000, ffree: 1500,
-    bsize: 4096, frsize: 4096, namelen: 255,
+    blocks: 1000,
+    bfree: 500,
+    bavail: 400,
+    files: 2000,
+    ffree: 1500,
+    bsize: 4096,
+    frsize: 4096,
+    namelen: 255,
   };
 
   const dataProvider = Object.assign(new MemoryProvider(), {
@@ -241,7 +275,10 @@ test("MountRouterProvider statfs on virtual root prefers mounted provider stats"
     statfs: async (_path: string) => customStatfs,
   });
 
-  const router = new MountRouterProvider({ "/workspace": workspaceProvider, "/tmp": new MemoryProvider() });
+  const router = new MountRouterProvider({
+    "/workspace": workspaceProvider,
+    "/tmp": new MemoryProvider(),
+  });
   const statfs = await router.statfs("/");
   assert.equal(statfs.blocks, 2222);
   assert.equal(statfs.bfree, 1111);
@@ -257,7 +294,10 @@ test("MountRouterProvider statfs probe rethrows non-fallback errors", async () =
   });
 
   const router = new MountRouterProvider({ "/workspace": badProvider });
-  await assert.rejects(() => router.statfs("/"), (error) => error === expected);
+  await assert.rejects(
+    () => router.statfs("/"),
+    (error) => error === expected,
+  );
 });
 
 function createErrorWithErrno(code: string, errno: number) {

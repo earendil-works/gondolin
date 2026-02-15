@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
 import { stripTrailingNewline } from "./debug";
 import net from "net";
-import os from "os";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -10,7 +9,6 @@ import tls from "tls";
 import crypto from "crypto";
 import dns from "dns";
 import { Duplex } from "stream";
-import type { ReadableStream as WebReadableStream } from "stream/web";
 import { monitorEventLoopDelay, performance } from "perf_hooks";
 import forge from "node-forge";
 
@@ -20,31 +18,40 @@ import {
   loadOrCreateMitmCa,
   resolveMitmCertDir,
 } from "./mitm";
-import { buildSyntheticDnsResponse, isLocalhostDnsName, isProbablyDnsPacket, parseDnsQuery } from "./dns";
-import { Agent, fetch as undiciFetch } from "undici";
 import {
-  Client as SshClient,
-  Server as SshServer,
-  type AuthContext as SshAuthContext,
-  type ClientChannel as SshClientChannel,
-  type Connection as SshServerConnection,
-  type ServerChannel as SshServerChannel,
-  type Session as SshServerSession,
-} from "ssh2";
+  buildSyntheticDnsResponse,
+  isLocalhostDnsName,
+  isProbablyDnsPacket,
+  parseDnsQuery,
+} from "./dns";
+import { Agent, fetch as undiciFetch } from "undici";
 
-const MAX_HTTP_REDIRECTS = 10;
-const MAX_HTTP_HEADER_BYTES = 64 * 1024;
-const MAX_HTTP_PIPELINE_BYTES = 64 * 1024;
+import { AsyncSemaphore } from "./async-utils";
+import { SyntheticDnsHostMap, normalizeIpv4Servers } from "./dns-utils";
+import {
+  assertSshDnsConfig,
+  cleanupSshTcpSession,
+  createQemuSshInternals,
+  handleSshProxyData as handleSshProxyDataImpl,
+  isSshFlowAllowed,
+  type QemuSshInternals,
+  type SshOptions,
+  type SshTcpSessionState,
+} from "./qemu-ssh";
+import {
+  caCertVerifiesLeaf,
+  closeSharedDispatchers,
+  privateKeyMatchesLeafCert,
+  HttpReceiveBuffer,
+} from "./http-utils";
 
-// When streaming request bodies (Content-Length, no buffering), keep the internal
-// ReadableStream queue bounded and apply coarse-grained backpressure to QEMU.
-const HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES = 64 * 1024;
-const HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES = 512 * 1024;
-const HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES = 256 * 1024;
-
-// Chunked framing (chunk-size lines + trailers) can add overhead on top of the decoded body.
-// Keep this bounded separately from maxHttpBodyBytes.
-const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
+import {
+  handlePlainHttpData,
+  handleTlsHttpData,
+  updateQemuRxPauseState,
+  type HttpSession,
+} from "./qemu-http";
+import type { WebSocketState } from "./qemu-ws";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -63,399 +70,11 @@ const DEFAULT_DNS_MODE: DnsMode = "synthetic";
 const DEFAULT_SYNTHETIC_DNS_IPV4 = "192.0.2.1";
 const DEFAULT_SYNTHETIC_DNS_IPV6 = "2001:db8::1";
 const DEFAULT_SYNTHETIC_DNS_TTL_SECONDS = 60;
-const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode = "single";
-const SYNTHETIC_DNS_HOSTMAP_PREFIX_A = 198;
-const SYNTHETIC_DNS_HOSTMAP_PREFIX_B = 19;
+const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode =
+  "single";
 
 const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
-const DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN = 16;
-const DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS = 512;
-const DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS = 30 * 1000;
 
-const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION = 4;
-const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
-const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
-const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
-const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
-
-class AsyncSemaphore {
-  private active = 0;
-  private readonly waiters: Array<() => void> = [];
-
-  constructor(private readonly limit: number) {
-    if (!Number.isFinite(limit) || limit <= 0) {
-      throw new Error(`max concurrent operations must be > 0 (got ${limit})`);
-    }
-  }
-
-  async acquire(): Promise<() => void> {
-    if (this.active >= this.limit) {
-      await new Promise<void>((resolve) => {
-        this.waiters.push(resolve);
-      });
-    }
-
-    this.active += 1;
-
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.active = Math.max(0, this.active - 1);
-      const next = this.waiters.shift();
-      if (next) next();
-    };
-  }
-}
-
-function normalizeIpv4Servers(servers?: string[]): string[] {
-  const candidates = (servers && servers.length > 0 ? servers : dns.getServers())
-    .map((server) => server.split("%")[0])
-    .filter((server) => net.isIP(server) === 4);
-
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  for (const server of candidates) {
-    if (seen.has(server)) continue;
-    seen.add(server);
-    unique.push(server);
-  }
-
-  return unique;
-}
-
-function generateSshHostKey(): string {
-  // ssh2 Server hostKeys expects PEM PKCS#1 RSA keys (ed25519 pkcs8 is not supported)
-  const { privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 3072,
-    privateKeyEncoding: { format: "pem", type: "pkcs1" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
-  return privateKey;
-}
-
-type SshAllowedTarget = {
-  /** normalized host pattern */
-  pattern: string;
-  /** destination port */
-  port: number;
-};
-
-function parseSshTargetPattern(raw: string): SshAllowedTarget | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-
-  let hostPattern = trimmed;
-  let port = 22;
-
-  // Support bracket form: [host]:port
-  if (hostPattern.startsWith("[")) {
-    const end = hostPattern.indexOf("]");
-    if (end === -1) return null;
-    const host = hostPattern.slice(1, end);
-    const rest = hostPattern.slice(end + 1);
-    if (!host) return null;
-    hostPattern = host;
-
-    if (rest) {
-      if (!rest.startsWith(":")) return null;
-      const portStr = rest.slice(1);
-      if (!/^[0-9]+$/.test(portStr)) return null;
-      port = Number.parseInt(portStr, 10);
-    }
-  } else {
-    const idx = hostPattern.lastIndexOf(":");
-    if (idx !== -1) {
-      const maybePort = hostPattern.slice(idx + 1);
-      if (/^[0-9]+$/.test(maybePort)) {
-        port = Number.parseInt(maybePort, 10);
-        hostPattern = hostPattern.slice(0, idx);
-      }
-    }
-  }
-
-  const normalizedPattern = normalizeHostnamePattern(hostPattern);
-  if (!normalizedPattern) return null;
-
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    return null;
-  }
-
-  return { pattern: normalizedPattern, port };
-}
-
-function normalizeSshAllowedTargets(targets?: string[]): SshAllowedTarget[] {
-  const out: SshAllowedTarget[] = [];
-  const seen = new Set<string>();
-
-  for (const raw of targets ?? []) {
-    const parsed = parseSshTargetPattern(raw);
-    if (!parsed) continue;
-    const key = `${parsed.pattern}:${parsed.port}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(parsed);
-  }
-
-  return out;
-}
-
-function normalizeSshCredentials(credentials?: Record<string, SshCredential>): ResolvedSshCredential[] {
-  const entries: ResolvedSshCredential[] = [];
-  for (const [rawPattern, credential] of Object.entries(credentials ?? {})) {
-    const target = parseSshTargetPattern(rawPattern);
-    if (!target) continue;
-    entries.push({
-      pattern: target.pattern,
-      port: target.port,
-      username: credential.username,
-      privateKey: credential.privateKey,
-      passphrase: credential.passphrase,
-    });
-  }
-  return entries;
-}
-
-type OpenSshKnownHostsEntry = {
-  /** known_hosts marker like "@revoked" */
-  marker: string | null;
-  /** raw host patterns from the first column */
-  hostPatterns: string[];
-  /** key type string (e.g. "ssh-ed25519") */
-  keyType: string;
-  /** decoded public key blob */
-  key: Buffer;
-};
-
-function normalizeSshKnownHostsFiles(knownHostsFile?: string | string[]): string[] {
-  const candidates: string[] = [];
-  if (typeof knownHostsFile === "string") {
-    candidates.push(knownHostsFile);
-  } else if (Array.isArray(knownHostsFile)) {
-    for (const file of knownHostsFile) {
-      if (typeof file === "string" && file.trim()) {
-        candidates.push(file);
-      }
-    }
-  }
-
-  if (candidates.length === 0) {
-    candidates.push(path.join(os.homedir(), ".ssh", "known_hosts"));
-    candidates.push("/etc/ssh/ssh_known_hosts");
-  }
-
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  for (const file of candidates) {
-    const normalized = file.trim();
-    if (!normalized) continue;
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    unique.push(normalized);
-  }
-  return unique;
-}
-
-function parseOpenSshKnownHosts(content: string): OpenSshKnownHostsEntry[] {
-  const entries: OpenSshKnownHostsEntry[] = [];
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-
-    let marker: string | null = null;
-    let rest = line;
-    if (rest.startsWith("@")) {
-      const space = rest.indexOf(" ");
-      if (space === -1) continue;
-      marker = rest.slice(0, space);
-      rest = rest.slice(space + 1).trim();
-    }
-
-    const parts = rest.split(/\s+/);
-    if (parts.length < 3) continue;
-    const [hostsField, keyType, keyB64] = parts;
-
-    let key: Buffer;
-    try {
-      key = Buffer.from(keyB64, "base64");
-    } catch {
-      continue;
-    }
-
-    if (!hostsField || !keyType || key.length === 0) continue;
-    entries.push({
-      marker,
-      hostPatterns: hostsField.split(",").filter(Boolean),
-      keyType,
-      key,
-    });
-  }
-  return entries;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function matchOpenSshHostPattern(hostname: string, pattern: string): boolean {
-  const hn = hostname.toLowerCase();
-  const pat = pattern.startsWith("|1|") ? pattern : pattern.toLowerCase();
-
-  // Hashed hostnames: "|1|<salt-b64>|<hmac-b64>"
-  if (pat.startsWith("|1|")) {
-    const parts = pat.split("|");
-    // ['', '1', salt, hmac]
-    if (parts.length !== 4) return false;
-    const saltB64 = parts[2];
-    const hmacB64 = parts[3];
-    let salt: Buffer;
-    let expected: Buffer;
-    try {
-      salt = Buffer.from(saltB64, "base64");
-      expected = Buffer.from(hmacB64, "base64");
-    } catch {
-      return false;
-    }
-    const actual = crypto.createHmac("sha1", salt).update(hn, "utf8").digest();
-    return actual.length === expected.length && actual.equals(expected);
-  }
-
-  // Wildcards: "*" and "?" like OpenSSH
-  if (pat.includes("*") || pat.includes("?")) {
-    const re = new RegExp(
-      "^" + escapeRegExp(pat).replace(/\\\*/g, ".*").replace(/\\\?/g, ".") + "$",
-      "i"
-    );
-    return re.test(hn);
-  }
-
-  return hn === pat;
-}
-
-function hostMatchesOpenSshKnownHostsList(hostname: string, patterns: string[], port: number): boolean {
-  const candidates = port === 22 ? [hostname, `[${hostname}]:22`] : [`[${hostname}]:${port}`];
-
-  for (const candidate of candidates) {
-    let positive = false;
-    for (const rawPattern of patterns) {
-      if (!rawPattern) continue;
-      const negated = rawPattern.startsWith("!");
-      const pattern = negated ? rawPattern.slice(1) : rawPattern;
-      if (!pattern) continue;
-
-      if (matchOpenSshHostPattern(candidate, pattern)) {
-        if (negated) {
-          return false;
-        }
-        positive = true;
-      }
-    }
-    if (positive) return true;
-  }
-
-  return false;
-}
-
-function createOpenSshKnownHostsHostVerifier(
-  files: string[]
-): (hostname: string, key: Buffer, port: number) => boolean {
-  const entries: OpenSshKnownHostsEntry[] = [];
-  const loadedFiles: string[] = [];
-
-  for (const file of files) {
-    try {
-      if (!fs.existsSync(file)) continue;
-      const content = fs.readFileSync(file, "utf8");
-      loadedFiles.push(file);
-      entries.push(...parseOpenSshKnownHosts(content));
-    } catch {
-      // Ignore unreadable files here; we'll fail if nothing could be loaded.
-    }
-  }
-
-  if (loadedFiles.length === 0) {
-    throw new Error(`no OpenSSH known_hosts files found (tried ${files.join(", ")})`);
-  }
-
-  return (hostname: string, key: Buffer, port: number) => {
-    const host = hostname.trim().toLowerCase();
-    if (!host) return false;
-    const sshPort = Number.isInteger(port) && port > 0 ? port : 22;
-
-    for (const entry of entries) {
-      if (!hostMatchesOpenSshKnownHostsList(host, entry.hostPatterns, sshPort)) {
-        continue;
-      }
-
-      // Respect revoked keys
-      if (entry.marker === "@revoked") {
-        if (entry.key.equals(key)) {
-          return false;
-        }
-        continue;
-      }
-
-      if (entry.key.equals(key)) {
-        return true;
-      }
-    }
-
-    // If we saw matching host patterns but no matching key, reject.
-    // If we saw no matching host patterns, also reject (unknown host).
-    return false;
-  };
-}
-
-class SyntheticDnsHostMap {
-  private readonly hostToIp = new Map<string, string>();
-  private readonly ipToHost = new Map<string, string>();
-  private nextHostId = 1;
-
-  /**
-   * Allocate (or retrieve) a stable synthetic IPv4 for a hostname.
-   *
-   * Returns null for invalid/unsupported hostnames or if the mapping space is exhausted.
-   * This method must be safe to call on untrusted guest input.
-   */
-  allocate(hostname: string): string | null {
-    const normalized = hostname.trim().toLowerCase();
-    if (!normalized) {
-      return null;
-    }
-
-    // DNS names are limited to 253 chars in presentation format (without trailing dot).
-    // Treat anything larger as invalid to avoid unbounded memory usage.
-    if (normalized.length > 253) {
-      return null;
-    }
-
-    const existing = this.hostToIp.get(normalized);
-    if (existing) return existing;
-
-    const hostsPerBucket = 254;
-    const maxHosts = 0x100 * hostsPerBucket;
-    if (this.nextHostId > maxHosts) {
-      return null;
-    }
-
-    const index = this.nextHostId - 1;
-    const hi = Math.floor(index / hostsPerBucket) & 0xff;
-    const lo = (index % hostsPerBucket) + 1;
-    this.nextHostId += 1;
-
-    const ip = `${SYNTHETIC_DNS_HOSTMAP_PREFIX_A}.${SYNTHETIC_DNS_HOSTMAP_PREFIX_B}.${hi}.${lo}`;
-
-    this.hostToIp.set(normalized, ip);
-    this.ipToHost.set(ip, normalized);
-    return ip;
-  }
-
-  lookupHostByIp(ip: string): string | null {
-    return this.ipToHost.get(ip) ?? null;
-  }
-}
-
-type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
 import {
   NetworkStack,
@@ -467,15 +86,6 @@ import {
   TcpFlowProtocol,
   UdpSendMessage,
 } from "./network-stack";
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-connection",
-  "transfer-encoding",
-  "te",
-  "trailer",
-  "upgrade",
-]);
 
 type IcmpTiming = {
   srcIP: string;
@@ -504,351 +114,10 @@ type UdpSession = {
   upstreamPort: number;
 };
 
-type HttpRequestData = {
-  method: string;
-  target: string;
-  version: string;
-  headers: Record<string, string>;
-  body: Buffer;
-};
-
-class HttpReceiveBuffer {
-  private readonly chunks: Buffer[] = [];
-  private totalBytes = 0;
-
-  get length() {
-    return this.totalBytes;
-  }
-
-  append(chunk: Buffer) {
-    if (chunk.length === 0) return;
-    this.chunks.push(chunk);
-    this.totalBytes += chunk.length;
-  }
-
-  resetTo(buffer: Buffer) {
-    this.chunks.length = 0;
-    this.totalBytes = 0;
-    this.append(buffer);
-  }
-
-  /**
-   * Find the start offset of the first "\r\n\r\n" sequence or -1 if missing
-   */
-  findHeaderEnd(maxSearchBytes: number): number {
-    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
-    let matched = 0;
-    let index = 0;
-
-    for (const chunk of this.chunks) {
-      for (let i = 0; i < chunk.length; i += 1) {
-        if (index >= maxSearchBytes) return -1;
-        const b = chunk[i]!;
-
-        if (b === pattern[matched]) {
-          matched += 1;
-          if (matched === pattern.length) {
-            return index - (pattern.length - 1);
-          }
-        } else {
-          // Only possible overlap is a new '\r'.
-          matched = b === pattern[0] ? 1 : 0;
-        }
-
-        index += 1;
-      }
-    }
-
-    return -1;
-  }
-
-  /**
-   * Copies the first `n` bytes into a contiguous Buffer
-   */
-  prefix(n: number): Buffer {
-    if (n <= 0) return Buffer.alloc(0);
-    if (n >= this.totalBytes) return this.toBuffer();
-
-    const out = Buffer.allocUnsafe(n);
-    let written = 0;
-
-    for (const chunk of this.chunks) {
-      if (written >= n) break;
-      const remaining = n - written;
-      const take = Math.min(remaining, chunk.length);
-      chunk.copy(out, written, 0, take);
-      written += take;
-    }
-
-    return out;
-  }
-
-  /**
-   * Copies the bytes from `start` (inclusive) to the end into a contiguous Buffer
-   */
-  suffix(start: number): Buffer {
-    if (start <= 0) return this.toBuffer();
-    if (start >= this.totalBytes) return Buffer.alloc(0);
-
-    const outLen = this.totalBytes - start;
-    const out = Buffer.allocUnsafe(outLen);
-    let written = 0;
-    let skipped = 0;
-
-    for (const chunk of this.chunks) {
-      if (skipped + chunk.length <= start) {
-        skipped += chunk.length;
-        continue;
-      }
-
-      const chunkStart = Math.max(0, start - skipped);
-      const take = chunk.length - chunkStart;
-      chunk.copy(out, written, chunkStart, chunkStart + take);
-      written += take;
-      skipped += chunk.length;
-    }
-
-    return out;
-  }
-
-  cursor(start = 0): HttpReceiveCursor {
-    return new HttpReceiveCursor(this.chunks, this.totalBytes, start);
-  }
-
-  toBuffer(): Buffer {
-    if (this.chunks.length === 0) return Buffer.alloc(0);
-    if (this.chunks.length === 1) return this.chunks[0]!;
-    return Buffer.concat(this.chunks, this.totalBytes);
-  }
-}
-
-class HttpReceiveCursor {
-  private chunkIndex = 0;
-  private chunkOffset = 0;
-  offset: number;
-
-  constructor(
-    private readonly chunks: Buffer[],
-    private readonly totalBytes: number,
-    startOffset: number
-  ) {
-    this.offset = startOffset;
-
-    let remaining = startOffset;
-    while (this.chunkIndex < this.chunks.length) {
-      const chunk = this.chunks[this.chunkIndex]!;
-      if (remaining < chunk.length) {
-        this.chunkOffset = remaining;
-        break;
-      }
-      remaining -= chunk.length;
-      this.chunkIndex += 1;
-    }
-
-    if (this.chunkIndex >= this.chunks.length && remaining !== 0) {
-      // Clamp: cursor can start at end, but never beyond.
-      this.offset = this.totalBytes;
-      this.chunkIndex = this.chunks.length;
-      this.chunkOffset = 0;
-    }
-  }
-
-  private cloneState() {
-    return {
-      chunkIndex: this.chunkIndex,
-      chunkOffset: this.chunkOffset,
-      offset: this.offset,
-    };
-  }
-
-  private commitState(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
-    this.chunkIndex = state.chunkIndex;
-    this.chunkOffset = state.chunkOffset;
-    this.offset = state.offset;
-  }
-
-  private readByteFrom(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
-    if (state.offset >= this.totalBytes) return null;
-
-    while (state.chunkIndex < this.chunks.length) {
-      const chunk = this.chunks[state.chunkIndex]!;
-      if (state.chunkOffset < chunk.length) {
-        const b = chunk[state.chunkOffset]!;
-        state.chunkOffset += 1;
-        state.offset += 1;
-        return b;
-      }
-      state.chunkIndex += 1;
-      state.chunkOffset = 0;
-    }
-
-    return null;
-  }
-
-  remaining() {
-    return Math.max(0, this.totalBytes - this.offset);
-  }
-
-  tryConsumeSequenceIfPresent(sequence: number[]): boolean | null {
-    const state = this.cloneState();
-
-    for (const expected of sequence) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-      if (b !== expected) return false;
-    }
-
-    this.commitState(state);
-    return true;
-  }
-
-  tryConsumeExactSequence(sequence: number[]): boolean | null {
-    const consumed = this.tryConsumeSequenceIfPresent(sequence);
-    if (consumed === null) return null;
-    if (!consumed) {
-      throw new Error("invalid chunk terminator");
-    }
-    return true;
-  }
-
-  tryReadLineAscii(maxBytes: number): string | null {
-    const state = this.cloneState();
-    const bytes: number[] = [];
-
-    while (true) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-
-      if (b === 0x0d) {
-        const b2 = this.readByteFrom(state);
-        if (b2 === null) return null;
-        if (b2 !== 0x0a) {
-          throw new Error("invalid line terminator");
-        }
-
-        this.commitState(state);
-        return Buffer.from(bytes).toString("ascii");
-      }
-
-      bytes.push(b);
-      if (bytes.length > maxBytes) {
-        throw new Error("chunk size line too large");
-      }
-    }
-  }
-
-  tryReadBytes(n: number): Buffer | null {
-    if (n === 0) return Buffer.alloc(0);
-    if (this.remaining() < n) return null;
-
-    const state = this.cloneState();
-    const firstChunk = this.chunks[state.chunkIndex];
-    if (firstChunk && state.chunkOffset + n <= firstChunk.length) {
-      const slice = firstChunk.subarray(state.chunkOffset, state.chunkOffset + n);
-      state.chunkOffset += n;
-      state.offset += n;
-      this.commitState(state);
-      return slice;
-    }
-
-    const out = Buffer.allocUnsafe(n);
-    let written = 0;
-
-    while (written < n) {
-      const chunk = this.chunks[state.chunkIndex];
-      if (!chunk) return null;
-
-      if (state.chunkOffset >= chunk.length) {
-        state.chunkIndex += 1;
-        state.chunkOffset = 0;
-        continue;
-      }
-
-      const available = chunk.length - state.chunkOffset;
-      const take = Math.min(available, n - written);
-      chunk.copy(out, written, state.chunkOffset, state.chunkOffset + take);
-      state.chunkOffset += take;
-      state.offset += take;
-      written += take;
-    }
-
-    this.commitState(state);
-    return out;
-  }
-
-  tryConsumeUntilDoubleCrlf(): boolean | null {
-    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
-    const state = this.cloneState();
-    let matched = 0;
-
-    while (true) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-
-      if (b === pattern[matched]) {
-        matched += 1;
-        if (matched === pattern.length) {
-          this.commitState(state);
-          return true;
-        }
-      } else {
-        matched = b === pattern[0] ? 1 : 0;
-      }
-    }
-  }
-}
-
-type HttpSession = {
-  buffer: HttpReceiveBuffer;
-  processing: boolean;
-  closed: boolean;
-
-  /** cached request head state (we only process one HTTP request per TCP session) */
-  head?: {
-    method: string;
-    target: string;
-    version: string;
-    headers: Record<string, string>;
-    bodyOffset: number;
-
-    hookRequest: HttpHookRequest;
-    /** request head used as the base for `httpHooks.onRequest` */
-    hookRequestForBodyHook?: HttpHookRequest | null;
-    bufferRequestBody: boolean;
-    maxBodyBytes: number;
-
-    bodyMode: "none" | "content-length" | "chunked";
-    contentLength: number;
-  };
-
-  /** active streaming request body state (Content-Length only) */
-  streamingBody?: {
-    /** bytes remaining in the declared Content-Length body in `bytes` */
-    remaining: number;
-    /** upstream body stream controller */
-    controller: ReadableStreamDefaultController<Uint8Array> | null;
-    /** whether the body stream is complete or canceled */
-    done: boolean;
-    /** bytes observed after body completion in `bytes` (HTTP pipelining/coalescing) */
-    pipelineBytes: number;
-
-    /** pending body chunks not yet enqueued into the ReadableStream */
-    pending: Buffer[];
-    /** pending body bytes not yet enqueued into the ReadableStream in `bytes` */
-    pendingBytes: number;
-    /** close the stream after pending bytes are drained */
-    closeAfterPending: boolean;
-
-    /** drains pending chunks into the ReadableStream while respecting backpressure */
-    drain: () => void;
-  };
-
-  /** whether we already sent an interim 100-continue response */
-  sentContinue?: boolean;
-};
-
 class GuestTlsStream extends Duplex {
-  constructor(private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>) {
+  constructor(
+    private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>,
+  ) {
     super();
   }
 
@@ -860,41 +129,14 @@ class GuestTlsStream extends Duplex {
     // data is pushed via pushEncrypted
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ) {
     Promise.resolve(this.onEncryptedWrite(Buffer.from(chunk))).then(
       () => callback(),
-      (err) => callback(err as Error)
-    );
-  }
-}
-
-class GuestSshStream extends Duplex {
-  constructor(
-    private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>,
-    private readonly onServerEnd: () => void | Promise<void>
-  ) {
-    super();
-  }
-
-  pushFromGuest(data: Buffer) {
-    this.push(data);
-  }
-
-  _read() {
-    // data is pushed via pushFromGuest
-  }
-
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
-    Promise.resolve(this.onServerWrite(Buffer.from(chunk))).then(
-      () => callback(),
-      (err) => callback(err as Error)
-    );
-  }
-
-  _final(callback: (error?: Error | null) => void) {
-    Promise.resolve(this.onServerEnd()).then(
-      () => callback(),
-      (err) => callback(err as Error)
+      (err) => callback(err as Error),
     );
   }
 }
@@ -905,42 +147,7 @@ type TlsSession = {
   servername: string | null;
 };
 
-type WebSocketState = {
-  /** current websocket state */
-  phase: "handshake" | "open";
-  /** connected upstream socket (null until connected) */
-  upstream: net.Socket | null;
-  /** buffered guest->upstream bytes while the upstream socket is not yet connected */
-  pending: Buffer[];
-  /** bytes currently queued in `pending` in `bytes` */
-  pendingBytes: number;
-};
-
-type ResolvedSshCredential = {
-  /** matched host pattern */
-  pattern: string;
-  /** destination port */
-  port: number;
-  /** upstream ssh username */
-  username?: string;
-  /** private key in OpenSSH/PEM format */
-  privateKey: string | Buffer;
-  /** private key passphrase */
-  passphrase?: string | Buffer;
-};
-
-type SshProxySession = {
-  /** guest-side injected transport stream */
-  stream: GuestSshStream;
-  /** per-flow ssh server */
-  server: SshServer;
-  /** guest-side ssh server connection */
-  connection: SshServerConnection | null;
-  /** active upstream ssh clients created for concurrent exec channels */
-  upstreams: Set<SshClient>;
-};
-
-type TcpSession = {
+export type TcpSession = {
   socket: net.Socket | null;
   srcIP: string;
   srcPort: number;
@@ -950,10 +157,9 @@ type TcpSession = {
   connectIP: string;
   /** synthetic hostname derived from destination synthetic dns ip */
   syntheticHostname: string | null;
-  /** resolved upstream credential for ssh proxying */
-  sshCredential: ResolvedSshCredential | null;
-  /** active ssh proxy state when host-side credentials are used */
-  sshProxy?: SshProxySession;
+
+  /** @internal */
+  ssh?: SshTcpSessionState;
   flowControlPaused: boolean;
   protocol: TcpFlowProtocol | null;
   connected: boolean;
@@ -967,9 +173,24 @@ type TcpSession = {
   ws?: WebSocketState;
 };
 
-type SharedDispatcherEntry = {
-  dispatcher: Agent;
-  lastUsedAt: number;
+/** @internal */
+export type QemuHttpInternals = {
+  /** max intercepted http request body size in `bytes` */
+  maxHttpBodyBytes: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes: number;
+  /** whether to allow WebSocket upgrades */
+  allowWebSockets: boolean;
+  /** websocket upstream connect + tls handshake timeout in `ms` */
+  webSocketUpstreamConnectTimeoutMs: number;
+  /** websocket upstream response header timeout in `ms` */
+  webSocketUpstreamHeaderTimeoutMs: number;
+  /** semaphore limiting concurrent upstream fetches */
+  httpConcurrency: AsyncSemaphore;
+  /** shared undici dispatchers keyed by origin */
+  sharedDispatchers: Map<string, { dispatcher: Agent; lastUsedAt: number }>;
+  /** whether qemu rx is paused due to streaming request backpressure */
+  qemuRxPausedForHttpStreaming: boolean;
 };
 
 export type HttpFetch = typeof undiciFetch;
@@ -1036,92 +257,6 @@ export type DnsOptions = {
   syntheticHostMapping?: SyntheticDnsHostMappingMode;
 };
 
-export type SshCredential = {
-  /** upstream ssh username */
-  username?: string;
-  /** private key in OpenSSH/PEM format */
-  privateKey: string | Buffer;
-  /** private key passphrase */
-  passphrase?: string | Buffer;
-};
-
-export type SshExecRequest = {
-  /** target hostname derived from synthetic dns mapping */
-  hostname: string;
-  /** target port */
-  port: number;
-
-  /** ssh username the guest authenticated as */
-  guestUsername: string;
-
-  /** raw ssh exec command */
-  command: string;
-
-  /** source guest flow attribution */
-  src: {
-    /** guest source ip address */
-    ip: string;
-    /** guest source port */
-    port: number;
-  };
-};
-
-export type SshExecDecision =
-  | { allow: true }
-  | {
-      allow: false;
-      /** process exit code (default: 1) */
-      exitCode?: number;
-      /** message written to the guest channel stderr (trailing newline implied) */
-      message?: string;
-    };
-
-export type SshExecPolicy = (request: SshExecRequest) =>
-  | SshExecDecision
-  | Promise<SshExecDecision>;
-
-export type SshOptions = {
-  /** allowed ssh host patterns (optionally with ":PORT" suffix to allow non-standard ports) */
-  allowedHosts: string[];
-  /** host pattern -> upstream private-key credential */
-  credentials?: Record<string, SshCredential>;
-  /** ssh-agent socket path (e.g. $SSH_AUTH_SOCK) */
-  agent?: string;
-  /** OpenSSH known_hosts file path(s) used for default host key verification when `hostVerifier` is not set */
-  knownHostsFile?: string | string[];
-
-  /** allow/deny callback for guest ssh exec requests */
-  execPolicy?: SshExecPolicy;
-
-  /** max concurrent upstream ssh connections per guest tcp flow */
-  maxUpstreamConnectionsPerTcpSession?: number;
-  /** max concurrent upstream ssh connections across all guest flows */
-  maxUpstreamConnectionsTotal?: number;
-  /** upstream ssh connect+handshake timeout in `ms` */
-  upstreamReadyTimeoutMs?: number;
-  /** upstream ssh keepalive interval in `ms` */
-  upstreamKeepaliveIntervalMs?: number;
-  /** upstream ssh keepalive probes before disconnect */
-  upstreamKeepaliveCountMax?: number;
-
-  /** guest-facing ssh host key */
-  hostKey?: string | Buffer;
-  /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `knownHostsFile`/default known_hosts is used) */
-  hostVerifier?: (hostname: string, key: Buffer, port: number) => boolean;
-};
-
-export class HttpRequestBlockedError extends Error {
-  status: number;
-  statusText: string;
-
-  constructor(message = "request blocked", status = 403, statusText = "Forbidden") {
-    super(message);
-    this.name = "HttpRequestBlockedError";
-    this.status = status;
-    this.statusText = statusText;
-  }
-}
-
 export type HttpHookRequestHeadResult = HttpHookRequest & {
   /** whether the request body must be buffered before calling `httpHooks.onRequest` */
   bufferRequestBody?: boolean;
@@ -1140,16 +275,21 @@ export type HttpHooks = {
 
   /** request rewrite hook for the request head (method/url/headers only; body is always `null`) */
   onRequestHead?: (
-    request: HttpHookRequest
-  ) => Promise<HttpHookRequestHeadResult | void> | HttpHookRequestHeadResult | void;
+    request: HttpHookRequest,
+  ) =>
+    | Promise<HttpHookRequestHeadResult | void>
+    | HttpHookRequestHeadResult
+    | void;
 
   /** request rewrite hook for buffered requests (request body is provided as a Buffer) */
-  onRequest?: (request: HttpHookRequest) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
+  onRequest?: (
+    request: HttpHookRequest,
+  ) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
 
   /** response rewrite hook */
   onResponse?: (
     response: HttpHookResponse,
-    request: HttpHookRequest
+    request: HttpHookRequest,
   ) => Promise<HttpHookResponse | void> | HttpHookResponse | void;
 };
 
@@ -1209,7 +349,10 @@ export type QemuNetworkOptions = {
   dnsLookup?: (
     hostname: string,
     options: dns.LookupAllOptions,
-    callback: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+    callback: (
+      err: NodeJS.ErrnoException | null,
+      addresses: dns.LookupAddress[],
+    ) => void,
   ) => void;
 };
 
@@ -1225,19 +368,32 @@ type TlsContextCacheEntry = {
 };
 
 export class QemuNetworkBackend extends EventEmitter {
-  private emitDebug(message: string) {
+  /** @internal */
+  emitDebug(message: string) {
     // Structured event for consumers (VM / SandboxServer)
     this.emit("debug", "net", stripTrailingNewline(message));
     // Legacy string log event
     this.emit("log", `[net] ${stripTrailingNewline(message)}`);
   }
+
+  /** @internal */
+  readonly options: QemuNetworkOptions;
+
   private server: net.Server | null = null;
-  private socket: net.Socket | null = null;
+
+  /** @internal */
+  socket: net.Socket | null = null;
+
   private waitingDrain = false;
-  private qemuRxPausedForHttpStreaming = false;
-  private stack: NetworkStack | null = null;
+
+  /** @internal */
+  stack: NetworkStack | null = null;
+
   private readonly udpSessions = new Map<string, UdpSession>();
-  private readonly tcpSessions = new Map<string, TcpSession>();
+
+  /** @internal */
+  readonly tcpSessions = new Map<string, TcpSession>();
+
   private readonly mitmDir: string;
   private caPromise: Promise<CaCert> | null = null;
   private tlsContexts = new Map<string, TlsContextCacheEntry>();
@@ -1245,17 +401,20 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly icmpTimings = new Map<string, IcmpTiming>();
   private icmpDebugBuffer = Buffer.alloc(0);
   private icmpRxBuffer = Buffer.alloc(0);
-  private eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | null = null;
-  private readonly maxHttpBodyBytes: number;
-  private readonly maxHttpResponseBodyBytes: number;
-  private readonly maxTcpPendingWriteBytes: number;
-  private readonly allowWebSockets: boolean;
-  private readonly webSocketUpstreamConnectTimeoutMs: number;
-  private readonly webSocketUpstreamHeaderTimeoutMs: number;
+  private eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | null =
+    null;
+
+  /** @internal */
+  readonly maxTcpPendingWriteBytes: number;
+
+  /** @internal */
+  readonly http: QemuHttpInternals;
+
+  /** @internal */
+  readonly ssh: QemuSshInternals;
+
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
-  private readonly httpConcurrency: AsyncSemaphore;
-  private readonly sharedDispatchers = new Map<string, SharedDispatcherEntry>();
   private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
 
   private readonly dnsMode: DnsMode;
@@ -1271,152 +430,74 @@ export class QemuNetworkBackend extends EventEmitter {
   };
   private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
-  private readonly sshAllowedTargets: SshAllowedTarget[];
-  private readonly sshSniffPorts: number[];
-  private readonly sshSniffPortsSet: ReadonlySet<number>;
-  private readonly sshCredentials: ResolvedSshCredential[];
-  private readonly sshAgent: string | null;
-  private sshHostKey: string | null;
-  private readonly sshHostVerifier: ((hostname: string, key: Buffer, port: number) => boolean) | null;
-  private readonly sshExecPolicy: SshExecPolicy | null;
-  private readonly sshMaxUpstreamConnectionsPerTcpSession: number;
-  private readonly sshMaxUpstreamConnectionsTotal: number;
-  private readonly sshUpstreamReadyTimeoutMs: number;
-  private readonly sshUpstreamKeepaliveIntervalMs: number;
-  private readonly sshUpstreamKeepaliveCountMax: number;
-  private readonly sshUpstreams = new Set<SshClient>();
 
-  constructor(private readonly options: QemuNetworkOptions) {
+  constructor(options: QemuNetworkOptions) {
     super();
+    this.options = options;
+
     if (options.debug) {
       this.eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
       this.eventLoopDelay.enable();
     }
     this.mitmDir = resolveMitmCertDir(options.mitmCertDir);
-    this.maxHttpBodyBytes = options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES;
-    this.maxHttpResponseBodyBytes =
-      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES;
 
     this.maxTcpPendingWriteBytes =
       options.maxTcpPendingWriteBytes ?? DEFAULT_MAX_TCP_PENDING_WRITE_BYTES;
 
-    this.allowWebSockets = options.allowWebSockets ?? true;
-    this.webSocketUpstreamConnectTimeoutMs =
-      options.webSocketUpstreamConnectTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS;
-    this.webSocketUpstreamHeaderTimeoutMs =
-      options.webSocketUpstreamHeaderTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS;
-
-    this.httpConcurrency = new AsyncSemaphore(DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS);
+    this.http = {
+      maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
+      maxHttpResponseBodyBytes:
+        options.maxHttpResponseBodyBytes ??
+        DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+      allowWebSockets: options.allowWebSockets ?? true,
+      webSocketUpstreamConnectTimeoutMs:
+        options.webSocketUpstreamConnectTimeoutMs ??
+        DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS,
+      webSocketUpstreamHeaderTimeoutMs:
+        options.webSocketUpstreamHeaderTimeoutMs ??
+        DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS,
+      httpConcurrency: new AsyncSemaphore(DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS),
+      sharedDispatchers: new Map(),
+      qemuRxPausedForHttpStreaming: false,
+    };
 
     this.tlsContextCacheMaxEntries =
-      options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
-    this.tlsContextCacheTtlMs = options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
+      options.tlsContextCacheMaxEntries ??
+      DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
+    this.tlsContextCacheTtlMs =
+      options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
 
     this.dnsMode = options.dns?.mode ?? DEFAULT_DNS_MODE;
     this.trustedDnsServers = normalizeIpv4Servers(options.dns?.trustedServers);
 
     if (this.dnsMode === "trusted" && this.trustedDnsServers.length === 0) {
       throw new Error(
-        "dns mode 'trusted' requires at least one IPv4 resolver (none found). Provide an IPv4 resolver via --dns-trusted-server or configure an IPv4 DNS server on the host"
+        "dns mode 'trusted' requires at least one IPv4 resolver (none found). Provide an IPv4 resolver via --dns-trusted-server or configure an IPv4 DNS server on the host",
       );
     }
 
     this.syntheticDnsOptions = {
       ipv4: options.dns?.syntheticIPv4 ?? DEFAULT_SYNTHETIC_DNS_IPV4,
       ipv6: options.dns?.syntheticIPv6 ?? DEFAULT_SYNTHETIC_DNS_IPV6,
-      ttlSeconds: options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
+      ttlSeconds:
+        options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
     };
 
-    this.sshAllowedTargets = normalizeSshAllowedTargets(options.ssh?.allowedHosts);
-    this.sshSniffPorts = Array.from(new Set(this.sshAllowedTargets.map((t) => t.port)));
-    this.sshSniffPortsSet = new Set(this.sshSniffPorts);
-    this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
-    this.sshAgent = options.ssh?.agent ?? null;
-    this.sshExecPolicy = options.ssh?.execPolicy ?? null;
-    this.sshHostKey =
-      typeof options.ssh?.hostKey === "string"
-        ? options.ssh.hostKey
-        : options.ssh?.hostKey
-          ? options.ssh.hostKey.toString("utf8")
-          : null;
-    let sshHostVerifier = options.ssh?.hostVerifier ?? null;
-
-    // Default to OpenSSH host key verification via known_hosts unless an explicit verifier
-    // is provided. This protects against DNS poisoning / MITM for both agent and raw key auth.
-    if (
-      this.sshAllowedTargets.length > 0 &&
-      !sshHostVerifier &&
-      (this.sshAgent || this.sshCredentials.length > 0)
-    ) {
-      const knownHostsFiles = normalizeSshKnownHostsFiles(options.ssh?.knownHostsFile);
-      try {
-        sshHostVerifier = createOpenSshKnownHostsHostVerifier(knownHostsFiles);
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
-        throw new Error(
-          `ssh egress requires ssh.hostVerifier to validate upstream host keys (failed to load known_hosts: ${message})`
-        );
-      }
-    }
-
-    this.sshHostVerifier = sshHostVerifier;
-
-    const sshMaxPerSession =
-      options.ssh?.maxUpstreamConnectionsPerTcpSession ??
-      DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION;
-    if (!Number.isInteger(sshMaxPerSession) || sshMaxPerSession <= 0) {
-      throw new Error("ssh.maxUpstreamConnectionsPerTcpSession must be an integer > 0");
-    }
-
-    const sshMaxTotal =
-      options.ssh?.maxUpstreamConnectionsTotal ?? DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL;
-    if (!Number.isInteger(sshMaxTotal) || sshMaxTotal <= 0) {
-      throw new Error("ssh.maxUpstreamConnectionsTotal must be an integer > 0");
-    }
-
-    const sshReadyTimeoutMs =
-      options.ssh?.upstreamReadyTimeoutMs ?? DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS;
-    if (!Number.isInteger(sshReadyTimeoutMs) || sshReadyTimeoutMs <= 0) {
-      throw new Error("ssh.upstreamReadyTimeoutMs must be an integer > 0");
-    }
-
-    const sshKeepaliveIntervalMs =
-      options.ssh?.upstreamKeepaliveIntervalMs ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS;
-    if (!Number.isInteger(sshKeepaliveIntervalMs) || sshKeepaliveIntervalMs < 0) {
-      throw new Error("ssh.upstreamKeepaliveIntervalMs must be an integer >= 0");
-    }
-
-    const sshKeepaliveCountMax =
-      options.ssh?.upstreamKeepaliveCountMax ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX;
-    if (!Number.isInteger(sshKeepaliveCountMax) || sshKeepaliveCountMax < 0) {
-      throw new Error("ssh.upstreamKeepaliveCountMax must be an integer >= 0");
-    }
-
-    this.sshMaxUpstreamConnectionsPerTcpSession = sshMaxPerSession;
-    this.sshMaxUpstreamConnectionsTotal = sshMaxTotal;
-    this.sshUpstreamReadyTimeoutMs = sshReadyTimeoutMs;
-    this.sshUpstreamKeepaliveIntervalMs = sshKeepaliveIntervalMs;
-    this.sshUpstreamKeepaliveCountMax = sshKeepaliveCountMax;
+    this.ssh = createQemuSshInternals(options.ssh);
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
-      (this.sshAllowedTargets.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+      (this.ssh.enabled ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
     this.syntheticDnsHostMap =
-      this.syntheticDnsHostMapping === "per-host" ? new SyntheticDnsHostMap() : null;
+      this.syntheticDnsHostMapping === "per-host"
+        ? new SyntheticDnsHostMap()
+        : null;
 
-    if (this.sshAllowedTargets.length > 0 && this.dnsMode !== "synthetic") {
-      throw new Error("ssh egress requires dns mode 'synthetic'");
-    }
-    if (this.sshAllowedTargets.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
-      throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
-    }
-    if (this.sshAllowedTargets.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
-      throw new Error("ssh egress requires at least one credential or ssh agent (direct ssh is not supported)");
-    }
-    if (this.sshAllowedTargets.length > 0 && !this.sshHostVerifier) {
-      throw new Error("ssh egress requires ssh.hostVerifier to validate upstream host keys");
-    }
+    assertSshDnsConfig({
+      ssh: this.ssh,
+      dnsMode: this.dnsMode,
+      syntheticHostMapping: this.syntheticDnsHostMapping,
+    });
   }
 
   start() {
@@ -1434,7 +515,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
   async close(): Promise<void> {
     this.detachSocket();
-    this.closeSharedDispatchers();
+    closeSharedDispatchers(this);
 
     if (this.eventLoopDelay) {
       try {
@@ -1494,10 +575,10 @@ export class QemuNetworkBackend extends EventEmitter {
       this.socket.destroy();
       this.socket = null;
     }
-    this.qemuRxPausedForHttpStreaming = false;
+    this.http.qemuRxPausedForHttpStreaming = false;
     this.waitingDrain = false;
     this.cleanupSessions();
-    this.closeSharedDispatchers();
+    closeSharedDispatchers(this);
     this.stack?.reset();
   }
 
@@ -1513,7 +594,7 @@ export class QemuNetworkBackend extends EventEmitter {
       gatewayMac: this.options.gatewayMac,
       vmMac: this.options.vmMac,
       dnsServers,
-      sshPorts: this.sshSniffPorts,
+      sshPorts: this.ssh.sniffPorts,
       callbacks: {
         onUdpSend: (message) => this.handleUdpSend(message),
         onTcpConnect: (message) => this.handleTcpConnect(message),
@@ -1524,11 +605,16 @@ export class QemuNetworkBackend extends EventEmitter {
       },
       allowTcpFlow: (info) => {
         if (info.protocol === "ssh") {
-          const allowed = this.isSshFlowAllowed(info.key, info.dstIP, info.dstPort);
+          const allowed = isSshFlowAllowed(
+            this,
+            info.key,
+            info.dstIP,
+            info.dstPort,
+          );
           if (!allowed) {
             if (this.options.debug) {
               this.emitDebug(
-                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
               );
             }
             return false;
@@ -1544,7 +630,7 @@ export class QemuNetworkBackend extends EventEmitter {
         if (info.protocol !== "http" && info.protocol !== "tls") {
           if (this.options.debug) {
             this.emitDebug(
-              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
             );
           }
           return false;
@@ -1568,11 +654,24 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.stack.on("network-activity", () => this.flush());
     this.stack.on("error", (err) => this.emit("error", err));
-    this.stack.on("tx-drop", (info: { priority: string; bytes: number; reason: string; evictedBytes?: number }) => {
-      if (!this.options.debug) return;
-      const evicted = typeof info.evictedBytes === "number" ? ` evicted=${info.evictedBytes}` : "";
-      this.emitDebug(`tx-drop priority=${info.priority} bytes=${info.bytes} reason=${info.reason}${evicted}`);
-    });
+    this.stack.on(
+      "tx-drop",
+      (info: {
+        priority: string;
+        bytes: number;
+        reason: string;
+        evictedBytes?: number;
+      }) => {
+        if (!this.options.debug) return;
+        const evicted =
+          typeof info.evictedBytes === "number"
+            ? ` evicted=${info.evictedBytes}`
+            : "";
+        this.emitDebug(
+          `tx-drop priority=${info.priority} bytes=${info.bytes} reason=${info.reason}${evicted}`,
+        );
+      },
+    );
     if (this.options.debug) {
       this.icmpTimings.clear();
       this.icmpDebugBuffer = Buffer.alloc(0);
@@ -1586,7 +685,8 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private flush() {
+  /** @internal */
+  flush() {
     if (!this.socket || this.waitingDrain || !this.stack) return;
     while (this.stack.hasPendingData()) {
       const chunk = this.stack.readFromNetwork(64 * 1024);
@@ -1745,7 +845,7 @@ export class QemuNetworkBackend extends EventEmitter {
     this.emitDebug(
       `icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
         `${guestToHostLabel}processing=${processingMs.toFixed(3)}ms ` +
-        `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`
+        `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`,
     );
   }
 
@@ -1765,7 +865,7 @@ export class QemuNetworkBackend extends EventEmitter {
       } catch {
         // ignore
       }
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
     }
     this.tcpSessions.clear();
   }
@@ -1774,7 +874,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const servers = this.trustedDnsServers;
     if (servers.length === 0) {
       throw new Error(
-        "dns mode 'trusted' requires at least one IPv4 resolver (none configured/found)"
+        "dns mode 'trusted' requires at least one IPv4 resolver (none configured/found)",
       );
     }
     const index = this.trustedDnsIndex++ % servers.length;
@@ -1794,14 +894,15 @@ export class QemuNetworkBackend extends EventEmitter {
       !isLocalhostDnsName(query.firstQuestion.name)
     ) {
       try {
-        mappedIpv4 = this.syntheticDnsHostMap?.allocate(query.firstQuestion.name) ?? null;
+        mappedIpv4 =
+          this.syntheticDnsHostMap?.allocate(query.firstQuestion.name) ?? null;
       } catch (err) {
         // Treat mapping failures as untrusted input; fall back to the default synthetic IP.
         // This avoids guest-triggerable process-level crashes.
         mappedIpv4 = null;
         if (this.options.debug) {
           this.emitDebug(
-            `dns synthetic hostmap failed name=${JSON.stringify(query.firstQuestion.name)} err=${formatError(err)}`
+            `dns synthetic hostmap failed name=${JSON.stringify(query.firstQuestion.name)} err=${formatError(err)}`,
           );
         }
       }
@@ -1826,7 +927,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (message.dstPort !== 53) {
       if (this.options.debug) {
         this.emitDebug(
-          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`
+          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`,
         );
       }
       return;
@@ -1835,7 +936,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.dnsMode === "synthetic") {
       if (this.options.debug) {
         this.emitDebug(
-          `dns synthetic ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+          `dns synthetic ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`,
         );
       }
       this.handleSyntheticDns(message);
@@ -1845,7 +946,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.dnsMode === "trusted" && !parseDnsQuery(message.payload)) {
       if (this.options.debug) {
         this.emitDebug(
-          `dns blocked (non-dns payload) ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+          `dns blocked (non-dns payload) ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`,
         );
       }
       return;
@@ -1857,7 +958,10 @@ export class QemuNetworkBackend extends EventEmitter {
         ? this.options.udpSocketFactory()
         : dgram.createSocket("udp4");
 
-      const upstreamIP = this.dnsMode === "trusted" ? this.pickTrustedDnsServer() : message.dstIP;
+      const upstreamIP =
+        this.dnsMode === "trusted"
+          ? this.pickTrustedDnsServer()
+          : message.dstIP;
       const upstreamPort = 53;
 
       session = {
@@ -1873,9 +977,12 @@ export class QemuNetworkBackend extends EventEmitter {
 
       socket.on("message", (data, rinfo) => {
         if (this.options.debug) {
-          const via = this.dnsMode === "trusted" ? ` via ${session!.upstreamIP}:${session!.upstreamPort}` : "";
+          const via =
+            this.dnsMode === "trusted"
+              ? ` via ${session!.upstreamIP}:${session!.upstreamPort}`
+              : "";
           this.emitDebug(
-            `dns recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)${via}`
+            `dns recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)${via}`,
           );
         }
 
@@ -1896,64 +1003,31 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     if (this.options.debug) {
-      const via = this.dnsMode === "trusted" ? ` via ${session.upstreamIP}:${session.upstreamPort}` : "";
+      const via =
+        this.dnsMode === "trusted"
+          ? ` via ${session.upstreamIP}:${session.upstreamPort}`
+          : "";
       this.emitDebug(
-        `dns send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)${via}`
+        `dns send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)${via}`,
       );
     }
 
-    session.socket.send(message.payload, session.upstreamPort, session.upstreamIP);
-  }
-
-  private resolveSshCredential(hostname: string, port: number): ResolvedSshCredential | null {
-    const normalized = hostname.toLowerCase();
-    for (const credential of this.sshCredentials) {
-      if (credential.port !== port) continue;
-      if (matchHostname(normalized, credential.pattern)) {
-        return credential;
-      }
-    }
-    return null;
-  }
-
-  private isSshFlowAllowed(key: string, dstIP: string, dstPort: number): boolean {
-    if (this.sshAllowedTargets.length === 0) return false;
-
-    const session = this.tcpSessions.get(key);
-    const hostname =
-      session?.syntheticHostname ?? this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ?? null;
-    if (!hostname) return false;
-
-    const normalized = hostname.toLowerCase();
-    const allowed = this.sshAllowedTargets.some(
-      (target) => target.port === dstPort && matchHostname(normalized, target.pattern)
+    session.socket.send(
+      message.payload,
+      session.upstreamPort,
+      session.upstreamIP,
     );
-    if (!allowed) return false;
-
-    const credential = this.resolveSshCredential(hostname, dstPort);
-    const canUseAgent = Boolean(this.sshAgent);
-
-    // SSH egress is always proxied via the host; without a credential or agent we can't
-    // authenticate upstream and must deny the flow.
-    if (!credential && !canUseAgent) {
-      return false;
-    }
-
-    if (session) {
-      session.connectIP = hostname;
-      session.syntheticHostname = hostname;
-      session.sshCredential = credential;
-    }
-
-    return true;
   }
 
   private handleTcpConnect(message: TcpConnectMessage) {
-    const syntheticHostname = this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
+    const syntheticHostname =
+      this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
     let connectIP =
-      message.dstIP === (this.options.gatewayIP ?? "192.168.127.1") ? "127.0.0.1" : message.dstIP;
+      message.dstIP === (this.options.gatewayIP ?? "192.168.127.1")
+        ? "127.0.0.1"
+        : message.dstIP;
 
-    if (syntheticHostname && this.sshSniffPortsSet.has(message.dstPort)) {
+    if (syntheticHostname && this.ssh.sniffPortsSet.has(message.dstPort)) {
       connectIP = syntheticHostname;
     }
 
@@ -1965,7 +1039,6 @@ export class QemuNetworkBackend extends EventEmitter {
       dstPort: message.dstPort,
       connectIP,
       syntheticHostname,
-      sshCredential: null,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -1978,10 +1051,11 @@ export class QemuNetworkBackend extends EventEmitter {
     this.flush();
   }
 
-  private abortTcpSession(key: string, session: TcpSession, reason: string) {
+  /** @internal */
+  abortTcpSession(key: string, session: TcpSession, reason: string) {
     if (this.options.debug) {
       this.emitDebug(
-        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`,
       );
     }
 
@@ -1990,8 +1064,7 @@ export class QemuNetworkBackend extends EventEmitter {
     } catch {
       // ignore
     }
-    this.closeSshProxySession(session.sshProxy);
-    session.sshProxy = undefined;
+    cleanupSshTcpSession(this, session);
 
     session.pendingWrites = [];
     session.pendingWriteBytes = 0;
@@ -2002,13 +1075,17 @@ export class QemuNetworkBackend extends EventEmitter {
     this.tcpSessions.delete(key);
   }
 
-  private queueTcpPendingWrite(key: string, session: TcpSession, data: Buffer): boolean {
+  private queueTcpPendingWrite(
+    key: string,
+    session: TcpSession,
+    data: Buffer,
+  ): boolean {
     const nextBytes = session.pendingWriteBytes + data.length;
     if (nextBytes > this.maxTcpPendingWriteBytes) {
       this.abortTcpSession(
         key,
         session,
-        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
+        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`,
       );
       return false;
     }
@@ -2023,7 +1100,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (!session) return;
 
     if (session.protocol === "http") {
-      this.handlePlainHttpData(message.key, session, message.data);
+      handlePlainHttpData(this, message.key, session, message.data);
       return;
     }
 
@@ -2047,7 +1124,7 @@ export class QemuNetworkBackend extends EventEmitter {
         this.abortTcpSession(
           message.key,
           session,
-          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
+          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`,
         );
         return;
       }
@@ -2057,6 +1134,10 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     this.queueTcpPendingWrite(message.key, session, message.data);
+  }
+
+  private handleSshProxyData(key: string, session: TcpSession, data: Buffer) {
+    handleSshProxyDataImpl(this, key, session, data);
   }
 
   private handleTcpClose(message: TcpCloseMessage) {
@@ -2071,7 +1152,7 @@ export class QemuNetworkBackend extends EventEmitter {
         }
         session.http.streamingBody.done = true;
         session.http.streamingBody.controller = null;
-        this.updateQemuRxPauseState();
+        updateQemuRxPauseState(this);
       }
 
       session.http = undefined;
@@ -2088,8 +1169,7 @@ export class QemuNetworkBackend extends EventEmitter {
         }
         session.tls = undefined;
       }
-      this.closeSshProxySession(session.sshProxy);
-      session.sshProxy = undefined;
+      cleanupSshTcpSession(this, session);
 
       if (session.socket) {
         if (message.destroy) {
@@ -2122,7 +1202,8 @@ export class QemuNetworkBackend extends EventEmitter {
     this.resolveFlowResume(message.key);
   }
 
-  private waitForFlowResume(key: string): Promise<void> {
+  /** @internal */
+  waitForFlowResume(key: string): Promise<void> {
     const session = this.tcpSessions.get(key);
     if (!session || !session.flowControlPaused) {
       return Promise.resolve();
@@ -2134,448 +1215,13 @@ export class QemuNetworkBackend extends EventEmitter {
     });
   }
 
-  private resolveFlowResume(key: string) {
+  /** @internal */
+  resolveFlowResume(key: string) {
     const waiters = this.flowResumeWaiters.get(key);
     if (!waiters) return;
     this.flowResumeWaiters.delete(key);
     for (const resolve of waiters) {
       resolve();
-    }
-  }
-
-  private getMaxHttpStreamingPendingBytes(): number {
-    let maxPending = 0;
-    for (const session of this.tcpSessions.values()) {
-      const pending = session.http?.streamingBody?.pendingBytes ?? 0;
-      if (pending > maxPending) maxPending = pending;
-    }
-    return maxPending;
-  }
-
-  private updateQemuRxPauseState() {
-    const socket = this.socket;
-    if (!socket) return;
-
-    const maxPending = this.getMaxHttpStreamingPendingBytes();
-
-    if (!this.qemuRxPausedForHttpStreaming && maxPending >= HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES) {
-      this.qemuRxPausedForHttpStreaming = true;
-      try {
-        socket.pause();
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    if (this.qemuRxPausedForHttpStreaming && maxPending <= HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES) {
-      this.qemuRxPausedForHttpStreaming = false;
-      try {
-        socket.resume();
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  private closeSshProxySession(proxy?: SshProxySession) {
-    if (!proxy) return;
-    try {
-      proxy.connection?.end();
-    } catch {
-      // ignore
-    }
-
-    // A guest SSH connection can spawn multiple exec channels concurrently.
-    // Each exec uses its own upstream SshClient, so make sure we close all of them.
-    for (const upstream of proxy.upstreams) {
-      this.sshUpstreams.delete(upstream);
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    }
-    proxy.upstreams.clear();
-
-    try {
-      proxy.server.close();
-    } catch {
-      // ignore
-    }
-    try {
-      proxy.stream.destroy();
-    } catch {
-      // ignore
-    }
-  }
-
-  private getOrCreateSshHostKey(): string {
-    if (this.sshHostKey !== null) {
-      return this.sshHostKey;
-    }
-    this.sshHostKey = generateSshHostKey();
-    return this.sshHostKey;
-  }
-
-  private ensureSshProxySession(key: string, session: TcpSession): SshProxySession {
-    const existing = session.sshProxy;
-    if (existing) return existing;
-
-    if (!session.syntheticHostname) {
-      throw new Error("ssh proxy requires synthetic hostname");
-    }
-    if (!session.sshCredential && !this.sshAgent) {
-      throw new Error("ssh proxy requires credential or ssh agent");
-    }
-
-    const stream = new GuestSshStream(
-      async (chunk) => {
-        this.stack?.handleTcpData({ key, data: chunk });
-        this.flush();
-        await this.waitForFlowResume(key);
-      },
-      async () => {
-        this.stack?.handleTcpEnd({ key });
-        this.flush();
-      }
-    );
-
-    const server = new SshServer({
-      hostKeys: [this.getOrCreateSshHostKey()],
-      ident: "SSH-2.0-gondolin-ssh-proxy",
-    });
-
-    const proxy: SshProxySession = {
-      stream,
-      server,
-      connection: null,
-      upstreams: new Set(),
-    };
-
-    const onProxyError = (err: unknown) => {
-      this.abortTcpSession(key, session, `ssh-proxy-error (${formatError(err)})`);
-    };
-
-    server.on("error", onProxyError);
-    stream.on("error", onProxyError);
-
-    server.on("connection", (connection) => {
-      proxy.connection = connection;
-      let guestUsername = "";
-
-      connection.on("authentication", (context: SshAuthContext) => {
-        guestUsername = context.username || guestUsername;
-        context.accept();
-      });
-
-      connection.on("error", onProxyError);
-
-      connection.on("ready", () => {
-        connection.on("session", (acceptSession) => {
-          const sshSession = acceptSession();
-          this.attachSshSessionHandlers({
-            key,
-            session,
-            proxy,
-            sshSession,
-            guestUsername,
-          });
-        });
-      });
-    });
-
-    server.injectSocket(stream as any);
-    session.sshProxy = proxy;
-
-    if (this.options.debug) {
-      this.emitDebug(`ssh proxy start ${session.srcIP}:${session.srcPort} -> ${session.syntheticHostname}:${session.dstPort}`);
-    }
-
-    return proxy;
-  }
-
-  private attachSshSessionHandlers(options: {
-    key: string;
-    session: TcpSession;
-    proxy: SshProxySession;
-    sshSession: SshServerSession;
-    guestUsername: string;
-  }) {
-    const { key, session, proxy, sshSession, guestUsername } = options;
-
-    sshSession.on("pty", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-    sshSession.on("window-change", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-    sshSession.on("env", (accept) => {
-      if (typeof accept === "function") accept();
-    });
-
-    sshSession.on("shell", (accept) => {
-      if (typeof accept !== "function") return;
-      const ch = accept();
-      ch.stderr.write("gondolin ssh proxy: interactive shells are not supported\n");
-      ch.exit(1);
-      ch.close();
-    });
-
-    sshSession.on("exec", (accept, _reject, info) => {
-      if (typeof accept !== "function") return;
-      const guestChannel = accept();
-      this.bridgeSshExecChannel({
-        key,
-        session,
-        proxy,
-        guestChannel,
-        command: info.command,
-        guestUsername,
-      }).catch((err) => {
-        try {
-          guestChannel.stderr.write(Buffer.from(`gondolin ssh proxy error: ${formatError(err)}\n`, "utf8"));
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.exit(255);
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.close();
-        } catch {
-          // ignore
-        }
-      });
-    });
-
-    sshSession.on("subsystem", (_accept, reject) => {
-      reject();
-    });
-  }
-
-  private async bridgeSshExecChannel(options: {
-    key: string;
-    session: TcpSession;
-    proxy: SshProxySession;
-    guestChannel: SshServerChannel;
-    command: string;
-    guestUsername: string;
-  }) {
-    const { key, session, proxy, guestChannel, command, guestUsername } = options;
-    const hostname = session.syntheticHostname;
-    const credential = session.sshCredential;
-    if (!hostname) {
-      throw new Error("missing ssh proxy hostname");
-    }
-    if (!credential && !this.sshAgent) {
-      throw new Error("missing ssh proxy credential/agent");
-    }
-
-    if (this.sshExecPolicy) {
-      const decision = await this.sshExecPolicy({
-        hostname,
-        port: session.dstPort,
-        guestUsername,
-        command,
-        src: { ip: session.srcIP, port: session.srcPort },
-      });
-
-      if (!decision.allow) {
-        const exitCode = decision.exitCode ?? 1;
-        if (decision.message) {
-          try {
-            guestChannel.stderr.write(`${decision.message}\n`);
-          } catch {
-            // ignore
-          }
-        }
-        try {
-          guestChannel.exit(exitCode);
-        } catch {
-          // ignore
-        }
-        try {
-          guestChannel.close();
-        } catch {
-          // ignore
-        }
-        if (this.options.debug) {
-          this.emitDebug(`ssh proxy exec denied ${hostname}:${session.dstPort} ${JSON.stringify(command)}`);
-        }
-        return;
-      }
-    }
-
-    if (proxy.upstreams.size >= this.sshMaxUpstreamConnectionsPerTcpSession) {
-      throw new Error(
-        `too many concurrent upstream ssh connections for this guest flow (limit ${this.sshMaxUpstreamConnectionsPerTcpSession})`
-      );
-    }
-    if (this.sshUpstreams.size >= this.sshMaxUpstreamConnectionsTotal) {
-      throw new Error(
-        `too many concurrent upstream ssh connections on host (limit ${this.sshMaxUpstreamConnectionsTotal})`
-      );
-    }
-
-    const upstream = new SshClient();
-    proxy.upstreams.add(upstream);
-    this.sshUpstreams.add(upstream);
-
-    const removeUpstream = () => {
-      proxy.upstreams.delete(upstream);
-      this.sshUpstreams.delete(upstream);
-    };
-
-    // Ensure we don't retain references if the client closes unexpectedly.
-    upstream.once("close", removeUpstream);
-
-    const connectConfig: import("ssh2").ConnectConfig = {
-      host: hostname,
-      port: session.dstPort,
-      username: credential ? (credential.username ?? "git") : guestUsername || "git",
-      readyTimeout: this.sshUpstreamReadyTimeoutMs,
-      keepaliveInterval: this.sshUpstreamKeepaliveIntervalMs,
-      keepaliveCountMax: this.sshUpstreamKeepaliveCountMax,
-    };
-
-    if (credential) {
-      connectConfig.privateKey = credential.privateKey;
-      connectConfig.passphrase = credential.passphrase;
-    } else if (this.sshAgent) {
-      connectConfig.agent = this.sshAgent;
-    }
-
-    if (this.sshHostVerifier) {
-      connectConfig.hostVerifier = (key: Buffer) => this.sshHostVerifier!(hostname, key, session.dstPort);
-    }
-
-    let upstreamChannel: SshClientChannel | null = null;
-
-    // If the guest closes the channel early, tear down the upstream connection.
-    guestChannel.once("close", () => {
-      try {
-        upstreamChannel?.close();
-      } catch {
-        // ignore
-      }
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    });
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const settleResolve = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        const settleReject = (err: unknown) => {
-          if (settled) return;
-          settled = true;
-          reject(err);
-        };
-
-        upstream.once("ready", settleResolve);
-        upstream.once("error", settleReject);
-        upstream.once("close", () => settleReject(new Error("upstream ssh closed before ready")));
-        upstream.connect(connectConfig);
-      });
-
-      upstreamChannel = await new Promise<SshClientChannel>((resolve, reject) => {
-        upstream.exec(command, (err, channel) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          resolve(channel);
-        });
-      });
-    } catch (err) {
-      removeUpstream();
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-      throw err;
-    }
-
-    if (this.options.debug) {
-      this.emitDebug(`ssh proxy exec ${hostname} ${JSON.stringify(command)}`);
-    }
-
-    upstreamChannel.on("data", (data: Buffer) => {
-      guestChannel.write(data);
-    });
-
-    upstreamChannel.stderr.on("data", (data: Buffer) => {
-      guestChannel.stderr.write(data);
-    });
-
-    upstreamChannel.on("exit", (code: number | null, signal?: string) => {
-      if (typeof code === "number") {
-        guestChannel.exit(code);
-      } else if (signal) {
-        guestChannel.exit(signal);
-      }
-    });
-
-    upstreamChannel.on("close", () => {
-      try {
-        guestChannel.close();
-      } catch {
-        // ignore
-      }
-      removeUpstream();
-      try {
-        upstream.end();
-      } catch {
-        // ignore
-      }
-    });
-
-    guestChannel.on("data", (data: Buffer) => {
-      upstreamChannel!.write(data);
-    });
-
-    guestChannel.on("eof", () => {
-      upstreamChannel!.end();
-    });
-
-    guestChannel.on("close", () => {
-      upstreamChannel!.close();
-    });
-
-    guestChannel.on("signal", (signalName: string) => {
-      try {
-        upstreamChannel!.signal(signalName);
-      } catch {
-        // ignore
-      }
-    });
-
-    upstreamChannel.on("error", (err: Error) => {
-      this.abortTcpSession(key, session, `ssh-upstream-channel-error (${formatError(err)})`);
-    });
-
-    upstream.on("error", (err: Error) => {
-      this.abortTcpSession(key, session, `ssh-upstream-error (${formatError(err)})`);
-    });
-  }
-
-  private handleSshProxyData(key: string, session: TcpSession, data: Buffer) {
-    try {
-      const proxy = this.ensureSshProxySession(key, session);
-      proxy.stream.pushFromGuest(data);
-    } catch (err) {
-      this.abortTcpSession(key, session, `ssh-proxy-init-error (${formatError(err)})`);
     }
   }
 
@@ -2607,14 +1253,14 @@ export class QemuNetworkBackend extends EventEmitter {
     socket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
       this.resolveFlowResume(key);
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
 
     socket.on("error", () => {
       this.stack?.handleTcpError({ key });
       this.resolveFlowResume(key);
-      this.closeSshProxySession(session.sshProxy);
+      cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
   }
@@ -2647,7 +1293,7 @@ export class QemuNetworkBackend extends EventEmitter {
     });
 
     tlsSocket.on("data", (data) => {
-      this.handleTlsHttpData(key, session, Buffer.from(data));
+      handleTlsHttpData(this, key, session, Buffer.from(data));
     });
 
     tlsSocket.on("error", (err) => {
@@ -2674,2386 +1320,10 @@ export class QemuNetworkBackend extends EventEmitter {
     return session.tls;
   }
 
-  private async handlePlainHttpData(key: string, session: TcpSession, data: Buffer) {
-    if (session.ws) {
-      this.handleWebSocketClientData(key, session, data);
-      return;
-    }
-
-    await this.handleHttpDataWithWriter(key, session, data, {
-      scheme: "http",
-      write: (chunk) => {
-        this.stack?.handleTcpData({ key, data: chunk });
-      },
-      finish: () => {
-        this.stack?.handleTcpEnd({ key });
-        this.flush();
-      },
-      waitForWritable: () => this.waitForFlowResume(key),
-    });
-  }
-
-  private async handleTlsHttpData(key: string, session: TcpSession, data: Buffer) {
-    const tlsSession = session.tls;
-    if (!tlsSession) return;
-
-    if (session.ws) {
-      this.handleWebSocketClientData(key, session, data);
-      return;
-    }
-
-    await this.handleHttpDataWithWriter(key, session, data, {
-      scheme: "https",
-      write: (chunk) => {
-        tlsSession.socket.write(chunk);
-      },
-      finish: () => {
-        tlsSession.socket.end(() => {
-          this.stack?.handleTcpEnd({ key });
-          this.flush();
-        });
-      },
-      waitForWritable: () => this.waitForFlowResume(key),
-    });
-  }
-
-  private abortWebSocketSession(key: string, session: TcpSession, reason: string) {
-    if (this.options.debug) {
-      this.emitDebug(
-        `websocket session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
-      );
-    }
-
-    try {
-      session.ws?.upstream?.destroy();
-    } catch {
-      // ignore
-    }
-
-    try {
-      session.tls?.socket.destroy();
-    } catch {
-      // ignore
-    }
-
-    session.ws = undefined;
-    this.abortTcpSession(key, session, reason);
-  }
-
-  private handleWebSocketClientData(key: string, session: TcpSession, data: Buffer) {
-    const ws = session.ws;
-    if (!ws) return;
-    if (data.length === 0) return;
-
-    const upstream = ws.upstream;
-
-    if (upstream && upstream.writable) {
-      const nextWritable = upstream.writableLength + data.length;
-      if (nextWritable > this.maxTcpPendingWriteBytes) {
-        this.abortWebSocketSession(
-          key,
-          session,
-          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
-        );
-        return;
-      }
-
-      upstream.write(data);
-      return;
-    }
-
-    // Handshake in progress (or upstream not yet connected): buffer until we have an upstream.
-    const nextBytes = ws.pendingBytes + data.length;
-    if (nextBytes > this.maxTcpPendingWriteBytes) {
-      this.abortWebSocketSession(
-        key,
-        session,
-        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
-      );
-      return;
-    }
-
-    ws.pending.push(data);
-    ws.pendingBytes = nextBytes;
-  }
-
-  private maybeSend100ContinueFromHead(
-    httpSession: HttpSession,
-    head: { version: string; headers: Record<string, string>; bodyOffset: number },
-    bufferedBodyBytes: number,
-    write: (chunk: Buffer) => void
-  ) {
-    if (httpSession.sentContinue) return;
-    if (head.version !== "HTTP/1.1") return;
-
-    const expect = head.headers["expect"]?.toLowerCase();
-    if (!expect) return;
-
-    const expectations = expect
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    if (!expectations.includes("100-continue")) return;
-
-    // For Content-Length, only send Continue if the body is not fully buffered yet.
-    const contentLengthRaw = head.headers["content-length"];
-    const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
-    if (Number.isFinite(contentLength) && contentLength > bufferedBodyBytes) {
-      write(Buffer.from("HTTP/1.1 100 Continue\r\n\r\n"));
-      httpSession.sentContinue = true;
-      return;
-    }
-
-    // For chunked bodies, we don't know completeness without parsing. If the client used
-    // Expect: 100-continue, reply as soon as we see a supported chunked request head.
-    const transferEncodingHeader = head.headers["transfer-encoding"];
-    const encodings = transferEncodingHeader
-      ?.split(",")
-      .map((v) => v.trim().toLowerCase())
-      .filter(Boolean);
-
-    const supportedChunked =
-      Boolean(encodings?.length) &&
-      encodings![encodings!.length - 1] === "chunked" &&
-      encodings!.every((encoding) => encoding === "chunked");
-
-    if (supportedChunked) {
-      write(Buffer.from("HTTP/1.1 100 Continue\r\n\r\n"));
-      httpSession.sentContinue = true;
-    }
-  }
-
-  private async handleHttpDataWithWriter(
-    key: string,
-    session: TcpSession,
-    data: Buffer,
-    options: {
-      scheme: "http" | "https";
-      write: (chunk: Buffer) => void;
-      finish: () => void;
-      waitForWritable?: () => Promise<void>;
-    }
-  ) {
-    const httpSession = session.http ?? {
-      buffer: new HttpReceiveBuffer(),
-      processing: false,
-      closed: false,
-      sentContinue: false,
-    };
-    session.http = httpSession;
-
-    if (httpSession.closed) return;
-
-    // If we are currently streaming a request body to the upstream fetch, forward
-    // bytes directly and avoid buffering.
-    if (httpSession.streamingBody) {
-      const streamState = httpSession.streamingBody;
-
-      if (data.length === 0) return;
-
-      // We only support a single HTTP request per TCP flow. If the guest pipelines
-      // additional bytes after the declared Content-Length, discard them (up to a
-      // strict cap) so the in-flight response can still be delivered.
-      if (streamState.done) {
-        streamState.pipelineBytes += data.length;
-        if (streamState.pipelineBytes > MAX_HTTP_PIPELINE_BYTES) {
-          httpSession.closed = true;
-          this.abortTcpSession(
-            key,
-            session,
-            `http-extra-bytes-after-body (${streamState.pipelineBytes} bytes)`
-          );
-        }
-        return;
-      }
-
-      const take = Math.min(streamState.remaining, data.length);
-      const extra = data.length - take;
-
-      if (take > 0) {
-        streamState.pending.push(data.subarray(0, take));
-        streamState.pendingBytes += take;
-        streamState.remaining -= take;
-        streamState.drain();
-      }
-
-      if (streamState.remaining === 0) {
-        streamState.done = true;
-        streamState.closeAfterPending = true;
-        streamState.drain();
-      }
-
-      if (extra > 0) {
-        streamState.pipelineBytes += extra;
-        if (streamState.pipelineBytes > MAX_HTTP_PIPELINE_BYTES) {
-          httpSession.closed = true;
-          this.abortTcpSession(
-            key,
-            session,
-            `http-body-pipeline-exceeds-cap (${streamState.pipelineBytes} bytes)`
-          );
-        }
-      }
-
-      return;
-    }
-
-    httpSession.buffer.append(data);
-    if (httpSession.processing) return;
-
-    try {
-      // Parse + cache request head.
-      if (!httpSession.head) {
-        const headerEnd = httpSession.buffer.findHeaderEnd(MAX_HTTP_HEADER_BYTES + 4);
-        if (headerEnd === -1) {
-          if (httpSession.buffer.length > MAX_HTTP_HEADER_BYTES) {
-            throw new HttpRequestBlockedError(
-              `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
-              431,
-              "Request Header Fields Too Large"
-            );
-          }
-          return;
-        }
-
-        if (headerEnd > MAX_HTTP_HEADER_BYTES) {
-          throw new HttpRequestBlockedError(
-            `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
-            431,
-            "Request Header Fields Too Large"
-          );
-        }
-
-        const headBuf = httpSession.buffer.prefix(headerEnd + 4);
-        const head = this.parseHttpHead(headBuf);
-        if (!head) return;
-
-        const bufferedBodyBytes = Math.max(0, httpSession.buffer.length - head.bodyOffset);
-
-        // Validate Expect early so we don't send 100-continue for requests we must reject.
-        this.validateExpectHeader(head.version, head.headers);
-
-        // Asterisk-form (OPTIONS *) is valid HTTP but does not map to a URL fetch.
-        if (head.method === "OPTIONS" && head.target === "*") {
-          const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-          this.respondWithError(options.write, 501, "Not Implemented", version);
-          httpSession.closed = true;
-          options.finish();
-          this.flush();
-          return;
-        }
-
-        // Determine request body framing.
-        const transferEncodingHeader = head.headers["transfer-encoding"];
-        let bodyMode: "none" | "content-length" | "chunked" = "none";
-        let contentLength = 0;
-
-        if (transferEncodingHeader) {
-          const encodings = transferEncodingHeader
-            .split(",")
-            .map((value) => value.trim().toLowerCase())
-            .filter(Boolean);
-
-          if (
-            encodings.length === 0 ||
-            encodings[encodings.length - 1] !== "chunked" ||
-            !encodings.every((encoding) => encoding === "chunked")
-          ) {
-            throw new HttpRequestBlockedError(
-              `unsupported transfer-encoding: ${transferEncodingHeader}`,
-              501,
-              "Not Implemented"
-            );
-          }
-
-          bodyMode = "chunked";
-        } else {
-          const contentLengthRaw = head.headers["content-length"];
-          if (contentLengthRaw) {
-            if (contentLengthRaw.includes(",")) {
-              throw new Error("multiple content-length headers");
-            }
-            contentLength = Number(contentLengthRaw);
-            if (
-              !Number.isFinite(contentLength) ||
-              !Number.isInteger(contentLength) ||
-              contentLength < 0
-            ) {
-              throw new Error("invalid content-length");
-            }
-          }
-
-          if (contentLength > 0) {
-            bodyMode = "content-length";
-          }
-        }
-
-        const dummyRequest: HttpRequestData = {
-          method: head.method,
-          target: head.target,
-          version: head.version,
-          headers: head.headers,
-          body: Buffer.alloc(0),
-        };
-
-        const hasUpgrade = (() => {
-          const connection = head.headers["connection"]?.toLowerCase() ?? "";
-          return (
-            Boolean(head.headers["upgrade"]) ||
-            connection
-              .split(",")
-              .map((t) => t.trim())
-              .filter(Boolean)
-              .includes("upgrade") ||
-            Boolean(head.headers["sec-websocket-key"]) ||
-            Boolean(head.headers["sec-websocket-version"])
-          );
-        })();
-
-        const upgradeIsWebSocket = this.isWebSocketUpgradeRequest(dummyRequest);
-        if (hasUpgrade && !(this.allowWebSockets && upgradeIsWebSocket)) {
-          const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-          this.respondWithError(options.write, 501, "Not Implemented", version);
-          httpSession.closed = true;
-          options.finish();
-          this.flush();
-          return;
-        }
-
-        const url = this.buildFetchUrl(dummyRequest, options.scheme);
-        if (!url) {
-          const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-          this.respondWithError(options.write, 400, "Bad Request", version);
-          httpSession.closed = true;
-          options.finish();
-          this.flush();
-          return;
-        }
-
-        const headHookBase: HttpHookRequest = {
-          method: head.method,
-          url,
-          headers: upgradeIsWebSocket
-            ? this.stripHopByHopHeadersForWebSocket(head.headers)
-            : this.stripHopByHopHeaders(head.headers),
-          body: null,
-        };
-
-        const headHooked = await this.applyRequestHeadHooks(headHookBase);
-
-        let maxBodyBytes = this.maxHttpBodyBytes;
-        if (headHooked.maxBufferedRequestBodyBytes !== null) {
-          maxBodyBytes = Math.min(maxBodyBytes, headHooked.maxBufferedRequestBodyBytes);
-        }
-
-        if (bodyMode === "content-length" && Number.isFinite(maxBodyBytes) && contentLength > maxBodyBytes) {
-          throw new HttpRequestBlockedError(
-            `request body exceeds ${maxBodyBytes} bytes`,
-            413,
-            "Payload Too Large"
-          );
-        }
-
-        // Validate request policy + IP policy on the (possibly rewritten) head.
-        let parsedUrl: URL;
-        try {
-          parsedUrl = new URL(headHooked.request.url);
-        } catch {
-          throw new HttpRequestBlockedError("invalid url", 400, "Bad Request");
-        }
-
-        const protocol = getUrlProtocol(parsedUrl);
-        if (!protocol) {
-          throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
-        }
-
-        const port = getUrlPort(parsedUrl, protocol);
-        if (!Number.isFinite(port) || port <= 0) {
-          throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
-        }
-
-        await this.ensureRequestAllowed(headHooked.request);
-        await this.ensureIpAllowed(parsedUrl, protocol, port);
-
-        this.maybeSend100ContinueFromHead(httpSession, head, bufferedBodyBytes, options.write);
-
-        httpSession.head = {
-          method: head.method,
-          target: head.target,
-          version: head.version,
-          headers: head.headers,
-          bodyOffset: head.bodyOffset,
-          hookRequest: headHooked.request,
-          hookRequestForBodyHook: headHooked.requestForBodyHook,
-          bufferRequestBody: headHooked.bufferRequestBody,
-          maxBodyBytes,
-          bodyMode,
-          contentLength,
-        };
-      }
-
-      const state = httpSession.head;
-      if (!state) return;
-
-      const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
-        state.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-
-      // WebSocket upgrade handling (no request bodies allowed).
-      if (this.allowWebSockets) {
-        const stub: HttpRequestData = {
-          method: state.method,
-          target: state.target,
-          version: state.version,
-          headers: state.headers,
-          body: Buffer.alloc(0),
-        };
-
-        if (this.isWebSocketUpgradeRequest(stub)) {
-          if (state.bodyMode !== "none") {
-            throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
-          }
-
-          // Prevent further HTTP parsing on this TCP session; upgraded connections become opaque tunnels.
-          httpSession.closed = true;
-          httpSession.processing = true;
-
-          session.ws = session.ws ?? {
-            phase: "handshake",
-            upstream: null,
-            pending: [],
-            pendingBytes: 0,
-          };
-
-          // Anything already buffered after the request head is treated as early websocket data.
-          const early = httpSession.buffer.suffix(state.bodyOffset);
-          httpSession.buffer.resetTo(Buffer.alloc(0));
-          if (early.length > 0) {
-            this.handleWebSocketClientData(key, session, early);
-          }
-
-          let keepOpen = false;
-          try {
-            keepOpen = await this.handleWebSocketUpgrade(key, stub, session, options, httpVersion, {
-              headHookRequest: state.hookRequest,
-              headHookRequestForBodyHook: state.hookRequestForBodyHook ?? null,
-            });
-          } finally {
-            httpSession.processing = false;
-            if (!keepOpen) {
-              options.finish();
-              this.flush();
-            }
-          }
-          return;
-        }
-      }
-
-      // Buffering / streaming decision based on onRequestHead.
-      const bufferedBodyBytes = Math.max(0, httpSession.buffer.length - state.bodyOffset);
-
-      if (state.bodyMode === "chunked") {
-        // Currently chunked request bodies are always buffered.
-        const maxBuffered =
-          state.bodyOffset +
-          state.maxBodyBytes +
-          MAX_HTTP_CHUNKED_OVERHEAD_BYTES +
-          MAX_HTTP_PIPELINE_BYTES;
-        if (httpSession.buffer.length > maxBuffered) {
-          throw new HttpRequestBlockedError(
-            `request body exceeds ${state.maxBodyBytes} bytes`,
-            413,
-            "Payload Too Large"
-          );
-        }
-
-        const chunked = this.decodeChunkedBodyFromReceiveBuffer(
-          httpSession.buffer,
-          state.bodyOffset,
-          state.maxBodyBytes
-        );
-
-        if (!chunked.complete) {
-          this.maybeSend100ContinueFromHead(httpSession, state, bufferedBodyBytes, options.write);
-          return;
-        }
-
-        const remainingStart = state.bodyOffset + chunked.bytesConsumed;
-        if (httpSession.buffer.length - remainingStart > MAX_HTTP_PIPELINE_BYTES) {
-          throw new HttpRequestBlockedError(
-            `request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`,
-            413,
-            "Payload Too Large"
-          );
-        }
-
-        const remaining = httpSession.buffer.suffix(remainingStart);
-        httpSession.buffer.resetTo(remaining);
-
-        const body = chunked.body;
-        const baseHookRequest = state.hookRequestForBodyHook ?? state.hookRequest;
-        let hookRequest: HttpHookRequest = {
-          method: baseHookRequest.method,
-          url: baseHookRequest.url,
-          headers: { ...baseHookRequest.headers, "content-length": body.length.toString() },
-          body: body.length > 0 ? body : null,
-        };
-
-        if (state.bufferRequestBody) {
-          hookRequest = await this.applyRequestBodyHooks(hookRequest);
-        }
-
-        // Normalize framing headers for fetch.
-        hookRequest.headers = { ...hookRequest.headers };
-        delete hookRequest.headers["transfer-encoding"];
-        if (hookRequest.body) {
-          hookRequest.headers["content-length"] = hookRequest.body.length.toString();
-        } else {
-          delete hookRequest.headers["content-length"];
-        }
-
-        // If the buffered onRequest hook rewrote the destination or relevant headers,
-        // re-run request/ip policy checks against the final request.
-        if (
-          state.bufferRequestBody &&
-          !this.isSamePolicyRelevantRequestHead(hookRequest, state.hookRequest)
-        ) {
-          let parsedUrl: URL;
-          try {
-            parsedUrl = new URL(hookRequest.url);
-          } catch {
-            throw new HttpRequestBlockedError("invalid url", 400, "Bad Request");
-          }
-
-          const protocol = getUrlProtocol(parsedUrl);
-          if (!protocol) {
-            throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
-          }
-
-          const port = getUrlPort(parsedUrl, protocol);
-          if (!Number.isFinite(port) || port <= 0) {
-            throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
-          }
-
-          await this.ensureRequestAllowed(hookRequest);
-          await this.ensureIpAllowed(parsedUrl, protocol, port);
-        }
-
-        httpSession.processing = true;
-        let releaseHttpConcurrency: (() => void) | null = null;
-        try {
-          releaseHttpConcurrency = await this.httpConcurrency.acquire();
-          await this.fetchHookRequestAndRespond({
-            request: hookRequest,
-            httpVersion,
-            write: options.write,
-            waitForWritable: options.waitForWritable,
-            hooksAppliedFirstHop: true,
-            policyCheckedFirstHop: true,
-            enableBodyHook: state.bufferRequestBody,
-          });
-        } finally {
-          releaseHttpConcurrency?.();
-          httpSession.processing = false;
-          httpSession.closed = true;
-          options.finish();
-          this.flush();
-        }
-
-        return;
-      }
-
-      // Content-Length or no body.
-      const contentLength = state.contentLength;
-
-      const maxBuffered = state.bodyOffset + contentLength + MAX_HTTP_PIPELINE_BYTES;
-      if (httpSession.buffer.length > maxBuffered) {
-        throw new HttpRequestBlockedError(`request exceeds ${contentLength} bytes`, 413, "Payload Too Large");
-      }
-
-      if (!state.bufferRequestBody && contentLength > 0 && bufferedBodyBytes < contentLength) {
-        // If the client uses Expect: 100-continue, avoid starting the upstream fetch
-        // until we see at least one body byte (the client may be waiting).
-        const expect = state.headers["expect"]?.toLowerCase() ?? "";
-        if (expect.includes("100-continue") && bufferedBodyBytes === 0) {
-          return;
-        }
-
-        // Start streaming the request body to the upstream fetch.
-        const streamState: NonNullable<HttpSession["streamingBody"]> = {
-          remaining: contentLength,
-          controller: null,
-          done: false,
-          pipelineBytes: 0,
-          pending: [],
-          pendingBytes: 0,
-          closeAfterPending: false,
-          drain: () => {
-            const c: any = streamState.controller;
-            if (!c) return;
-
-            try {
-              while (streamState.pending.length > 0) {
-                const desired = typeof c.desiredSize === "number" ? c.desiredSize : 0;
-                if (desired <= 0) break;
-
-                const head = streamState.pending[0]!;
-                if (head.length <= desired) {
-                  c.enqueue(head);
-                  streamState.pending.shift();
-                  streamState.pendingBytes -= head.length;
-                } else {
-                  c.enqueue(head.subarray(0, desired));
-                  streamState.pending[0] = head.subarray(desired);
-                  streamState.pendingBytes -= desired;
-                }
-              }
-
-              if (streamState.closeAfterPending && streamState.pendingBytes === 0) {
-                streamState.closeAfterPending = false;
-                c.close();
-              }
-            } catch {
-              // The upstream fetch may have canceled/closed the request body stream early.
-              streamState.done = true;
-              streamState.controller = null;
-              streamState.pending.length = 0;
-              streamState.pendingBytes = 0;
-              streamState.closeAfterPending = false;
-            } finally {
-              this.updateQemuRxPauseState();
-            }
-          },
-        };
-
-        const bodyStream = new ReadableStream<Uint8Array>(
-          {
-            start: (c) => {
-              streamState.controller = c;
-              streamState.drain();
-            },
-            pull: (c) => {
-              streamState.controller = c;
-              streamState.drain();
-            },
-            cancel: () => {
-              streamState.done = true;
-              streamState.controller = null;
-              streamState.pending.length = 0;
-              streamState.pendingBytes = 0;
-              streamState.closeAfterPending = false;
-              this.updateQemuRxPauseState();
-            },
-          },
-          {
-            highWaterMark: HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES,
-            size: (chunk: Uint8Array) => chunk.byteLength,
-          }
-        );
-
-        httpSession.streamingBody = streamState;
-
-        // Extract any already-buffered body bytes and clear the receive buffer.
-        const initialBody = httpSession.buffer.suffix(state.bodyOffset);
-        httpSession.buffer.resetTo(Buffer.alloc(0));
-
-        // Kick off the upstream fetch.
-        httpSession.processing = true;
-        let releaseHttpConcurrency: (() => void) | null = null;
-
-        // Normalize framing headers for streaming requests.
-        // If onRequestHead rewrote Content-Length / Transfer-Encoding, ensure we still
-        // send a self-consistent request upstream.
-        const streamingRequest: HttpHookRequest = {
-          method: state.hookRequest.method,
-          url: state.hookRequest.url,
-          headers: Object.fromEntries(
-            Object.entries(state.hookRequest.headers).map(([key, value]) => [key.toLowerCase(), value])
-          ),
-          body: null,
-        };
-
-        const expectedLength = contentLength.toString();
-        const hookedLength = streamingRequest.headers["content-length"];
-        if (hookedLength !== undefined && hookedLength !== expectedLength && this.options.debug) {
-          this.emitDebug(
-            `http bridge onRequestHead rewrote content-length (${hookedLength} -> ${expectedLength}); overriding for streaming`
-          );
-        }
-
-        delete streamingRequest.headers["transfer-encoding"];
-        streamingRequest.headers["content-length"] = expectedLength;
-
-        const safeWrite = (chunk: Buffer) => {
-          if (httpSession.closed) return;
-          options.write(chunk);
-        };
-
-        (async () => {
-          try {
-            releaseHttpConcurrency = await this.httpConcurrency.acquire();
-            await this.fetchHookRequestAndRespond({
-              request: streamingRequest,
-              httpVersion,
-              write: safeWrite,
-              waitForWritable: options.waitForWritable,
-              hooksAppliedFirstHop: true,
-              policyCheckedFirstHop: true,
-              enableBodyHook: false,
-              initialBodyStream: bodyStream as any,
-              initialBodyStreamHasBody: true,
-            });
-          } catch (err) {
-            const error = err instanceof Error ? err : new Error(String(err));
-            if (error instanceof HttpRequestBlockedError) {
-              if (this.options.debug) {
-                this.emitDebug(`http blocked ${error.message}`);
-              }
-              this.respondWithError(safeWrite, error.status, error.statusText, httpVersion);
-            } else {
-              this.emit("error", error);
-              this.respondWithError(safeWrite, 502, "Bad Gateway", httpVersion);
-            }
-          } finally {
-            releaseHttpConcurrency?.();
-            httpSession.processing = false;
-            if (!httpSession.closed) {
-              httpSession.closed = true;
-              options.finish();
-              this.flush();
-            }
-          }
-        })();
-
-        // Feed initial bytes into the stream.
-        if (initialBody.length > 0) {
-          await this.handleHttpDataWithWriter(key, session, initialBody, options);
-        }
-
-        return;
-      }
-
-      // If we know exactly how much body to expect, avoid attempting fetch until complete.
-      if (bufferedBodyBytes < contentLength) {
-        this.maybeSend100ContinueFromHead(httpSession, state, bufferedBodyBytes, options.write);
-        return;
-      }
-
-      // Body is fully buffered (or empty).
-      const full = httpSession.buffer.toBuffer();
-      const body =
-        contentLength > 0
-          ? full.subarray(state.bodyOffset, state.bodyOffset + contentLength)
-          : Buffer.alloc(0);
-      const remainingStart = state.bodyOffset + contentLength;
-
-      if (full.length - remainingStart > MAX_HTTP_PIPELINE_BYTES) {
-        throw new HttpRequestBlockedError(
-          `request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`,
-          413,
-          "Payload Too Large"
-        );
-      }
-
-      const remaining = full.subarray(remainingStart);
-      httpSession.buffer.resetTo(Buffer.from(remaining));
-
-      const baseHookRequest = state.hookRequestForBodyHook ?? state.hookRequest;
-      let hookRequest: HttpHookRequest = {
-        method: baseHookRequest.method,
-        url: baseHookRequest.url,
-        headers: { ...baseHookRequest.headers },
-        body: body.length > 0 ? Buffer.from(body) : null,
-      };
-
-      if (state.bufferRequestBody) {
-        hookRequest = await this.applyRequestBodyHooks(hookRequest);
-      }
-
-      // Normalize framing headers for fetch.
-      hookRequest.headers = { ...hookRequest.headers };
-      delete hookRequest.headers["transfer-encoding"];
-      if (hookRequest.body) {
-        hookRequest.headers["content-length"] = hookRequest.body.length.toString();
-      } else {
-        delete hookRequest.headers["content-length"];
-      }
-
-      // If the buffered onRequest hook rewrote the destination or relevant headers,
-      // re-run request/ip policy checks against the final request.
-      if (state.bufferRequestBody && !this.isSamePolicyRelevantRequestHead(hookRequest, state.hookRequest)) {
-        let parsedUrl: URL;
-        try {
-          parsedUrl = new URL(hookRequest.url);
-        } catch {
-          throw new HttpRequestBlockedError("invalid url", 400, "Bad Request");
-        }
-
-        const protocol = getUrlProtocol(parsedUrl);
-        if (!protocol) {
-          throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
-        }
-
-        const port = getUrlPort(parsedUrl, protocol);
-        if (!Number.isFinite(port) || port <= 0) {
-          throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
-        }
-
-        await this.ensureRequestAllowed(hookRequest);
-        await this.ensureIpAllowed(parsedUrl, protocol, port);
-      }
-
-      httpSession.processing = true;
-      let releaseHttpConcurrency: (() => void) | null = null;
-
-      try {
-        releaseHttpConcurrency = await this.httpConcurrency.acquire();
-        await this.fetchHookRequestAndRespond({
-          request: hookRequest,
-          httpVersion,
-          write: options.write,
-          waitForWritable: options.waitForWritable,
-          hooksAppliedFirstHop: true,
-          policyCheckedFirstHop: true,
-          enableBodyHook: state.bufferRequestBody,
-        });
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-
-        if (error instanceof HttpRequestBlockedError) {
-          if (this.options.debug) {
-            this.emitDebug(`http blocked ${error.message}`);
-          }
-          this.respondWithError(options.write, error.status, error.statusText, httpVersion);
-        } else {
-          this.emit("error", error);
-          this.respondWithError(options.write, 502, "Bad Gateway", httpVersion);
-        }
-      } finally {
-        releaseHttpConcurrency?.();
-        httpSession.processing = false;
-        if (!httpSession.closed) {
-          httpSession.closed = true;
-          options.finish();
-          this.flush();
-        }
-      }
-
-      return;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      const version: "HTTP/1.0" | "HTTP/1.1" =
-        httpSession.head?.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-
-      if (error instanceof HttpRequestBlockedError) {
-        if (this.options.debug) {
-          this.emitDebug(`http blocked ${error.message}`);
-        }
-        this.respondWithError(options.write, error.status, error.statusText, version);
-      } else {
-        this.emit("error", error);
-        this.respondWithError(options.write, 400, "Bad Request", version);
-      }
-
-      // Abort any active upstream body stream.
-      if (httpSession.streamingBody) {
-        const controller = httpSession.streamingBody.controller;
-        try {
-          controller?.error(error);
-        } catch {
-          // ignore
-        }
-        httpSession.streamingBody.done = true;
-        httpSession.streamingBody.controller = null;
-        this.updateQemuRxPauseState();
-      }
-
-      httpSession.closed = true;
-      options.finish();
-      this.flush();
-    }
-  }
-
   private handleTlsData(key: string, session: TcpSession, data: Buffer) {
     const tlsSession = this.ensureTlsSession(key, session);
     if (!tlsSession) return;
     tlsSession.stream.pushEncrypted(data);
-  }
-
-  private parseHttpHead(buffer: Buffer): {
-    method: string;
-    target: string;
-    version: string;
-    headers: Record<string, string>;
-    bodyOffset: number;
-  } | null {
-    const headerEnd = buffer.indexOf("\r\n\r\n");
-    if (headerEnd === -1) {
-      // Fail fast if we buffered more than the maximum header size without
-      // encountering the header terminator (avoid hanging/slowloris).
-      if (buffer.length > MAX_HTTP_HEADER_BYTES) {
-        throw new HttpRequestBlockedError(
-          `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
-          431,
-          "Request Header Fields Too Large"
-        );
-      }
-      return null;
-    }
-
-    if (headerEnd > MAX_HTTP_HEADER_BYTES) {
-      throw new HttpRequestBlockedError(
-        `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
-        431,
-        "Request Header Fields Too Large"
-      );
-    }
-
-    const headerBlock = buffer.subarray(0, headerEnd).toString("latin1");
-    const lines = headerBlock.split("\r\n");
-    if (lines.length === 0) {
-      throw new Error("invalid request");
-    }
-
-    const [method, target, version] = lines[0].split(" ");
-    if (!method || !target || !version || !version.startsWith("HTTP/")) {
-      throw new Error("invalid request line");
-    }
-
-    const headers: Record<string, string> = {};
-    for (let i = 1; i < lines.length; i += 1) {
-      const line = lines[i];
-      const idx = line.indexOf(":");
-      if (idx === -1) continue;
-      const key = line.slice(0, idx).trim().toLowerCase();
-      const value = line.slice(idx + 1).trim();
-      if (!key) continue;
-
-      if (headers[key]) {
-        if (key === "content-length") {
-          if (headers[key] !== value) {
-            throw new Error("multiple content-length headers");
-          }
-          continue;
-        }
-        headers[key] = `${headers[key]}, ${value}`;
-      } else {
-        headers[key] = value;
-      }
-    }
-
-    return {
-      method,
-      target,
-      version,
-      headers,
-      bodyOffset: headerEnd + 4,
-    };
-  }
-
-  private validateExpectHeader(version: string, headers: Record<string, string>) {
-    // RFC 9110: unknown expectations MUST be rejected with 417.
-    if (version !== "HTTP/1.1") return;
-
-    const expect = headers["expect"]?.toLowerCase();
-    if (!expect) return;
-
-    const tokens = expect
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    const unsupported = tokens.filter((t) => t !== "100-continue");
-    if (unsupported.length > 0) {
-      throw new HttpRequestBlockedError(
-        `unsupported expect token(s): ${unsupported.join(", ")}`,
-        417,
-        "Expectation Failed"
-      );
-    }
-  }
-
-  private decodeChunkedBodyFromReceiveBuffer(
-    receiveBuffer: HttpReceiveBuffer,
-    bodyOffset: number,
-    maxBodyBytes: number
-  ): { complete: boolean; body: Buffer; bytesConsumed: number } {
-    const cursor = receiveBuffer.cursor(bodyOffset);
-    const chunks: Buffer[] = [];
-    const enforceLimit = Number.isFinite(maxBodyBytes) && maxBodyBytes >= 0;
-
-    let totalBytes = 0;
-    const startOffset = cursor.offset;
-
-    while (true) {
-      const sizeLineRaw = cursor.tryReadLineAscii(1024);
-      if (sizeLineRaw === null) {
-        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-      }
-
-      const sizeLine = sizeLineRaw.split(";")[0]!.trim();
-      const size = parseInt(sizeLine, 16);
-      if (!Number.isFinite(size) || size < 0) {
-        throw new Error("invalid chunk size");
-      }
-
-      // last-chunk + trailer-section
-      if (size === 0) {
-        const emptyTrailers = cursor.tryConsumeSequenceIfPresent([0x0d, 0x0a]);
-        if (emptyTrailers === null) {
-          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-        }
-
-        if (emptyTrailers) {
-          return {
-            complete: true,
-            body: Buffer.concat(chunks, totalBytes),
-            bytesConsumed: cursor.offset - startOffset,
-          };
-        }
-
-        const consumedTrailers = cursor.tryConsumeUntilDoubleCrlf();
-        if (consumedTrailers === null) {
-          return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-        }
-
-        return {
-          complete: true,
-          body: Buffer.concat(chunks, totalBytes),
-          bytesConsumed: cursor.offset - startOffset,
-        };
-      }
-
-      if (enforceLimit && totalBytes + size > maxBodyBytes) {
-        throw new HttpRequestBlockedError(
-          `request body exceeds ${maxBodyBytes} bytes`,
-          413,
-          "Payload Too Large"
-        );
-      }
-
-      const chunkData = cursor.tryReadBytes(size);
-      if (chunkData === null) {
-        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-      }
-
-      totalBytes += size;
-      chunks.push(chunkData);
-
-      const terminator = cursor.tryConsumeExactSequence([0x0d, 0x0a]);
-      if (terminator === null) {
-        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-      }
-    }
-  }
-
-  private async fetchHookRequestAndRespond(options: {
-    request: HttpHookRequest;
-    httpVersion: "HTTP/1.0" | "HTTP/1.1";
-    write: (chunk: Buffer) => void;
-    waitForWritable?: () => Promise<void>;
-
-    /** whether onRequestHead/onRequest have already been applied to the initial request */
-    hooksAppliedFirstHop?: boolean;
-
-    /** whether request policy + IP policy have already been evaluated for the first hop */
-    policyCheckedFirstHop?: boolean;
-
-    /** whether to run httpHooks.onRequest (buffered body rewrite hook) */
-    enableBodyHook: boolean;
-
-    /** optional streaming request body for the initial hop */
-    initialBodyStream?: WebReadableStream<Uint8Array> | null;
-
-    /** whether the initial body stream carries a request body */
-    initialBodyStreamHasBody?: boolean;
-  }) {
-    const {
-      request: initialRequest,
-      httpVersion,
-      write,
-      waitForWritable,
-      hooksAppliedFirstHop = false,
-      policyCheckedFirstHop = false,
-      enableBodyHook,
-      initialBodyStream = null,
-      initialBodyStreamHasBody = Boolean(initialBodyStream),
-    } = options;
-
-    const fetcher = this.options.fetch ?? undiciFetch;
-
-    let pendingRequest: HttpHookRequest = initialRequest;
-
-    for (let redirectCount = 0; redirectCount <= MAX_HTTP_REDIRECTS; redirectCount += 1) {
-      const isFirstHop = redirectCount === 0;
-
-      let currentRequest = pendingRequest;
-      if (!(isFirstHop && hooksAppliedFirstHop)) {
-        const headResult = await this.applyRequestHeadHooks({
-          method: currentRequest.method,
-          url: currentRequest.url,
-          headers: currentRequest.headers,
-          body: null,
-        });
-
-        const baseForBodyHook = headResult.requestForBodyHook ?? headResult.request;
-        const headForThisHop = enableBodyHook ? baseForBodyHook : headResult.request;
-
-        currentRequest = {
-          method: headForThisHop.method,
-          url: headForThisHop.url,
-          headers: headForThisHop.headers,
-          body: currentRequest.body,
-        };
-
-        if (enableBodyHook) {
-          currentRequest = await this.applyRequestBodyHooks(currentRequest);
-        }
-      }
-
-      if (this.options.debug) {
-        this.emitDebug(`http bridge ${currentRequest.method} ${currentRequest.url}`);
-      }
-
-      let currentUrl: URL;
-      try {
-        currentUrl = new URL(currentRequest.url);
-      } catch {
-        this.respondWithError(write, 400, "Bad Request", httpVersion);
-        return;
-      }
-
-      const protocol = getUrlProtocol(currentUrl);
-      if (!protocol) {
-        this.respondWithError(write, 400, "Bad Request", httpVersion);
-        return;
-      }
-
-      const port = getUrlPort(currentUrl, protocol);
-      if (!Number.isFinite(port) || port <= 0) {
-        this.respondWithError(write, 400, "Bad Request", httpVersion);
-        return;
-      }
-
-      const requestLabel = `${currentRequest.method} ${currentUrl.toString()}`;
-      const responseStart = Date.now();
-
-      if (!(isFirstHop && policyCheckedFirstHop)) {
-        await this.ensureRequestAllowed(currentRequest);
-        await this.ensureIpAllowed(currentUrl, protocol, port);
-      }
-
-      const useDefaultFetch = this.options.fetch === undefined;
-      const dispatcher = useDefaultFetch
-        ? this.getCheckedDispatcher({
-            hostname: currentUrl.hostname,
-            port,
-            protocol,
-          })
-        : null;
-
-      const streamBodyThisHop =
-        isFirstHop && initialBodyStream && initialBodyStreamHasBody ? initialBodyStream : null;
-
-      const bodyInit = streamBodyThisHop
-        ? streamBodyThisHop
-        : currentRequest.body
-          ? new Uint8Array(currentRequest.body)
-          : undefined;
-
-      let response: FetchResponse;
-      try {
-        response = await fetcher(currentUrl.toString(), {
-          method: currentRequest.method,
-          headers: currentRequest.headers,
-          body: bodyInit as any,
-          redirect: "manual",
-          ...(streamBodyThisHop ? { duplex: "half" } : {}),
-          ...(dispatcher ? { dispatcher } : {}),
-        } as any);
-      } catch (err) {
-        if (this.options.debug) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.emitDebug(
-            `http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`
-          );
-        }
-        throw err;
-      }
-
-      const redirectUrl = getRedirectUrl(response, currentUrl);
-      if (redirectUrl) {
-        if (response.body) {
-          await response.body.cancel();
-        }
-
-        if (redirectCount >= MAX_HTTP_REDIRECTS) {
-          throw new HttpRequestBlockedError("too many redirects", 508, "Loop Detected");
-        }
-
-        if (streamBodyThisHop) {
-          // Streaming request bodies cannot be replayed on redirects.
-          const redirected = applyRedirectRequest(
-            {
-              method: currentRequest.method,
-              url: currentRequest.url,
-              headers: currentRequest.headers,
-              // Sentinel to indicate a non-empty body so redirect rewriting matches buffered semantics.
-              body: Buffer.alloc(1),
-            },
-            response.status,
-            currentUrl,
-            redirectUrl
-          );
-
-          if (redirected.body) {
-            throw new HttpRequestBlockedError(
-              "redirect requires replaying streamed request body",
-              502,
-              "Bad Gateway"
-            );
-          }
-
-          pendingRequest = {
-            method: redirected.method,
-            url: redirected.url,
-            headers: redirected.headers,
-            body: null,
-          };
-          continue;
-        }
-
-        pendingRequest = applyRedirectRequest(currentRequest, response.status, currentUrl, redirectUrl);
-        continue;
-      }
-
-      if (this.options.debug) {
-        this.emitDebug(`http bridge response ${response.status} ${response.statusText}`);
-      }
-
-      let responseHeaders = this.stripHopByHopHeaders(this.headersToRecord(response.headers));
-      const contentEncodingValue = responseHeaders["content-encoding"];
-      const contentEncoding = Array.isArray(contentEncodingValue)
-        ? contentEncodingValue[0]
-        : contentEncodingValue;
-
-      const contentLengthValue = responseHeaders["content-length"];
-      const contentLength = Array.isArray(contentLengthValue)
-        ? contentLengthValue[0]
-        : contentLengthValue;
-
-      const parsedLength = contentLength ? Number(contentLength) : null;
-      const hasValidLength = parsedLength !== null && Number.isFinite(parsedLength) && parsedLength >= 0;
-
-      if (contentEncoding) {
-        delete responseHeaders["content-encoding"];
-        delete responseHeaders["content-length"];
-      }
-      responseHeaders["connection"] = "close";
-
-      const responseBodyStream = response.body as WebReadableStream<Uint8Array> | null;
-
-      const suppressBody =
-        currentRequest.method === "HEAD" || response.status === 204 || response.status === 304;
-
-      if (suppressBody) {
-        if (responseBodyStream) {
-          try {
-            await responseBodyStream.cancel();
-          } catch {
-            // ignore cancellation failures
-          }
-        }
-
-        // No message body is allowed for these responses.
-        delete responseHeaders["transfer-encoding"];
-
-        if (response.status === 204 || response.status === 304) {
-          delete responseHeaders["content-encoding"];
-          responseHeaders["content-length"] = "0";
-        } else {
-          // HEAD: preserve Content-Length if present, otherwise be explicit.
-          if (!responseHeaders["content-length"]) responseHeaders["content-length"] = "0";
-        }
-
-        let hookResponse: HttpHookResponse = {
-          status: response.status,
-          statusText: response.statusText || "OK",
-          headers: responseHeaders,
-          body: Buffer.alloc(0),
-        };
-
-        if (this.options.httpHooks?.onResponse) {
-          const updated = await this.options.httpHooks.onResponse(hookResponse, currentRequest);
-          if (updated) hookResponse = updated;
-        }
-
-        this.sendHttpResponse(write, hookResponse, httpVersion);
-        return;
-      }
-
-      const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
-
-      if (canStream && responseBodyStream) {
-        const allowChunked = httpVersion === "HTTP/1.1";
-        let streamedBytes = 0;
-
-        if (contentEncoding || !hasValidLength) {
-          delete responseHeaders["content-length"];
-
-          if (allowChunked) {
-            responseHeaders["transfer-encoding"] = "chunked";
-            this.sendHttpResponseHead(
-              write,
-              {
-                status: response.status,
-                statusText: response.statusText || "OK",
-                headers: responseHeaders,
-              },
-              httpVersion
-            );
-            streamedBytes = await this.sendChunkedBody(responseBodyStream, write, waitForWritable);
-          } else {
-            delete responseHeaders["transfer-encoding"];
-            this.sendHttpResponseHead(
-              write,
-              {
-                status: response.status,
-                statusText: response.statusText || "OK",
-                headers: responseHeaders,
-              },
-              httpVersion
-            );
-            streamedBytes = await this.sendStreamBody(responseBodyStream, write, waitForWritable);
-          }
-        } else {
-          responseHeaders["content-length"] = parsedLength!.toString();
-          delete responseHeaders["transfer-encoding"];
-          this.sendHttpResponseHead(
-            write,
-            {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            },
-            httpVersion
-          );
-          streamedBytes = await this.sendStreamBody(responseBodyStream, write, waitForWritable);
-        }
-
-        if (this.options.debug) {
-          const elapsed = Date.now() - responseStart;
-          this.emitDebug(`http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`);
-        }
-
-        return;
-      }
-
-      const maxResponseBytes = this.maxHttpResponseBodyBytes;
-
-      if (hasValidLength && !contentEncoding && parsedLength! > maxResponseBytes) {
-        if (responseBodyStream) {
-          try {
-            await responseBodyStream.cancel();
-          } catch {
-            // ignore cancellation failures
-          }
-        }
-        throw new HttpRequestBlockedError(`response body exceeds ${maxResponseBytes} bytes`, 502, "Bad Gateway");
-      }
-
-      const responseBody = responseBodyStream
-        ? await this.bufferResponseBodyWithLimit(responseBodyStream, maxResponseBytes)
-        : Buffer.from(await response.arrayBuffer());
-
-      if (responseBody.length > maxResponseBytes) {
-        throw new HttpRequestBlockedError(`response body exceeds ${maxResponseBytes} bytes`, 502, "Bad Gateway");
-      }
-
-      responseHeaders["content-length"] = responseBody.length.toString();
-
-      let hookResponse: HttpHookResponse = {
-        status: response.status,
-        statusText: response.statusText || "OK",
-        headers: responseHeaders,
-        body: responseBody,
-      };
-
-      if (this.options.httpHooks?.onResponse) {
-        const updated = await this.options.httpHooks.onResponse(hookResponse, currentRequest);
-        if (updated) hookResponse = updated;
-      }
-
-      this.sendHttpResponse(write, hookResponse, httpVersion);
-      if (this.options.debug) {
-        const elapsed = Date.now() - responseStart;
-        this.emitDebug(`http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`);
-      }
-      return;
-    }
-  }
-
-  private isWebSocketUpgradeRequest(request: HttpRequestData): boolean {
-    const upgrade = request.headers["upgrade"]?.toLowerCase() ?? "";
-    if (upgrade === "websocket") return true;
-
-    // Some clients omit Upgrade/Connection but include the WebSocket-specific headers.
-    if (request.headers["sec-websocket-key"] || request.headers["sec-websocket-version"]) return true;
-
-    return false;
-  }
-
-  private stripHopByHopHeadersForWebSocket(headers: Record<string, string>): Record<string, string> {
-    const out: Record<string, string> = { ...headers };
-
-    // Unlike normal HTTP proxying, WebSocket handshakes require forwarding Connection/Upgrade.
-    // Still strip proxy-only and framing hop-by-hop headers.
-    delete out["keep-alive"];
-    delete out["proxy-connection"];
-    delete out["proxy-authenticate"];
-    delete out["proxy-authorization"];
-
-    // No request bodies for WebSocket handshake.
-    delete out["content-length"];
-    delete out["transfer-encoding"];
-    delete out["expect"];
-
-    // Avoid forwarding framed/trailer-related hop-by-hop headers.
-    delete out["te"];
-    delete out["trailer"];
-
-    // Apply Connection: token stripping, but keep Upgrade + WebSocket-specific headers.
-    const connection = out["connection"]?.toLowerCase() ?? "";
-    const tokens = connection
-      .split(",")
-      .map((t) => t.trim().toLowerCase())
-      .filter(Boolean);
-
-    const keepNominated = new Set([
-      "upgrade",
-      "sec-websocket-key",
-      "sec-websocket-version",
-      "sec-websocket-protocol",
-      "sec-websocket-extensions",
-    ]);
-
-    for (const token of tokens) {
-      if (keepNominated.has(token)) continue;
-      delete out[token];
-    }
-
-    return out;
-  }
-
-  private async handleWebSocketUpgrade(
-    key: string,
-    request: HttpRequestData,
-    session: TcpSession,
-    options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void },
-    httpVersion: "HTTP/1.0" | "HTTP/1.1",
-    hookContext: {
-      /** head after `onRequestHead` (and secret substitution) */
-      headHookRequest: HttpHookRequest;
-      /** placeholder-only head to feed into `onRequest` */
-      headHookRequestForBodyHook: HttpHookRequest | null;
-    }
-  ): Promise<boolean> { 
-    if (request.version !== "HTTP/1.1") {
-      throw new HttpRequestBlockedError("websocket upgrade requires HTTP/1.1", 501, "Not Implemented");
-    }
-
-    // WebSocket upgrades are always GET without a body.
-    if (request.method.toUpperCase() !== "GET") {
-      throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
-    }
-    if (request.body.length > 0) {
-      throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
-    }
-
-    const { headHookRequest, headHookRequestForBodyHook } = hookContext;
-
-    // `handleHttpDataWithWriter` already ran `onRequestHead` (and the associated
-    // policy checks) for this request. Avoid running it again here (duplicate
-    // side effects + policy mismatches).
-    let hookRequest: HttpHookRequest = {
-      method: headHookRequest.method,
-      url: headHookRequest.url,
-      headers: { ...headHookRequest.headers },
-      body: null,
-    };
-
-    // Preserve placeholder-only values for `onRequest` (per secrets docs). The
-    // `createHttpHooks` wrapper will inject secrets after the user hook runs.
-    hookRequest = await this.applyRequestBodyHooks(headHookRequestForBodyHook ?? hookRequest);
-
-    // If `onRequest` rewrote the destination or relevant headers, re-run request
-    // policy checks against the final (post-rewrite) request.
-    if (!this.isSamePolicyRelevantRequestHead(hookRequest, headHookRequest)) {
-      await this.ensureRequestAllowed(hookRequest);
-    }
-
-    const method = (hookRequest.method ?? "GET").toUpperCase();
-    if (method !== "GET") {
-      throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
-    }
-
-    if (hookRequest.body && hookRequest.body.length > 0) {
-      throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
-    }
-
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(hookRequest.url);
-    } catch {
-      throw new HttpRequestBlockedError("invalid url", 400, "Bad Request");
-    }
-
-    const protocol = getUrlProtocol(parsedUrl);
-    if (!protocol) {
-      throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
-    }
-
-    const port = getUrlPort(parsedUrl, protocol);
-    if (!Number.isFinite(port) || port <= 0) {
-      throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
-    }
-
-    // Resolve all A/AAAA records and pick the first IP allowed by policy.
-    // This pins the websocket tunnel to an allowed address and avoids rejecting
-    // a hostname just because the first DNS answer is blocked.
-    const { address } = await this.resolveHostname(parsedUrl.hostname, { protocol, port });
-
-    const ws = session.ws;
-    if (!ws) {
-      throw new Error("internal error: websocket state missing");
-    }
-
-    const upstream = await this.connectWebSocketUpstream({
-      protocol,
-      hostname: parsedUrl.hostname,
-      address,
-      port,
-    });
-
-    ws.upstream = upstream;
-
-    // Also store upstream in `session.socket` so pause/resume + close propagate.
-    session.socket = upstream;
-    session.connected = true;
-
-    if (session.flowControlPaused) {
-      try {
-        upstream.pause();
-      } catch {
-        // ignore
-      }
-    }
-
-    const guestWrite = (chunk: Buffer) => {
-      options.write(chunk);
-      this.flush();
-    };
-
-    let finished = false;
-    const finishOnce = () => {
-      if (finished) return;
-      finished = true;
-      options.finish();
-    };
-
-    // Ensure Host header exists.
-    const reqHeaders: Record<string, string> = { ...hookRequest.headers };
-    if (!reqHeaders["host"]) {
-      reqHeaders["host"] = parsedUrl.host;
-    }
-
-    // Remove body framing headers; websocket handshakes do not send a body.
-    delete reqHeaders["content-length"];
-    delete reqHeaders["transfer-encoding"];
-    delete reqHeaders["expect"];
-
-    const target = (parsedUrl.pathname || "/") + parsedUrl.search;
-
-    const headerLines: string[] = [];
-    headerLines.push(`${method} ${target} HTTP/1.1`);
-    for (const [rawName, rawValue] of Object.entries(reqHeaders)) {
-      const name = rawName.replace(/[\r\n:]+/g, "");
-      if (!name) continue;
-      const value = String(rawValue).replace(/[\r\n]+/g, " ");
-      headerLines.push(`${name}: ${value}`);
-    }
-    const headerBlob = headerLines.join("\r\n") + "\r\n\r\n";
-
-    upstream.write(Buffer.from(headerBlob, "latin1"));
-
-    // Flush any guest data buffered while we were connecting.
-    if (ws.pending.length > 0) {
-      const pending = ws.pending;
-      ws.pending = [];
-      ws.pendingBytes = 0;
-      for (const chunk of pending) {
-        if (chunk.length === 0) continue;
-        upstream.write(chunk);
-      }
-    }
-
-    // Read handshake response head.
-    const resp = await this.readUpstreamHttpResponseHead(upstream);
-
-    let responseHeaders: HttpResponseHeaders = resp.headers;
-
-    let hookResponse: HttpHookResponse = {
-      status: resp.statusCode,
-      statusText: resp.statusMessage || "OK",
-      headers: responseHeaders,
-      body: Buffer.alloc(0),
-    };
-
-    if (this.options.httpHooks?.onResponse) {
-      const updated = await this.options.httpHooks.onResponse(hookResponse, hookRequest);
-      if (updated) hookResponse = updated;
-    }
-
-    // If the hook injected a body, send it as a normal HTTP response and do not upgrade.
-    if (hookResponse.body.length > 0) {
-      const headers = { ...hookResponse.headers };
-      delete headers["transfer-encoding"];
-      headers["content-length"] = String(hookResponse.body.length);
-      this.sendHttpResponse(guestWrite, { ...hookResponse, headers }, httpVersion);
-      finishOnce();
-      upstream.destroy();
-      session.ws = undefined;
-      return false;
-    }
-
-    this.sendHttpResponseHead(guestWrite, hookResponse, httpVersion);
-
-    if (resp.rest.length > 0) {
-      guestWrite(resp.rest);
-    }
-
-    const upgraded = resp.statusCode === 101 && hookResponse.status === 101;
-    if (!upgraded) {
-      finishOnce();
-      upstream.destroy();
-      session.ws = undefined;
-      return false;
-    }
-
-    ws.phase = "open";
-
-    upstream.on("data", (chunk) => {
-      guestWrite(Buffer.from(chunk));
-    });
-
-    upstream.on("end", () => {
-      finishOnce();
-    });
-
-    upstream.on("error", (err) => {
-      this.emit("error", err);
-      this.abortWebSocketSession(key, session, "upstream-error");
-    });
-
-    upstream.on("close", () => {
-      session.ws = undefined;
-
-      // Some upstreams emit "close" without a prior "end".
-      finishOnce();
-
-      // For plain HTTP flows, closing the upstream socket should also close the guest TCP session.
-      // For TLS flows, closing the guest TLS socket triggers stack.handleTcpClosed.
-      if (options.scheme === "http") {
-        // If the session was already aborted/removed, do not emit a second close.
-        if (!this.tcpSessions.has(key)) return;
-        this.stack?.handleTcpClosed({ key });
-        this.resolveFlowResume(key);
-        this.tcpSessions.delete(key);
-      }
-    });
-
-    // Resume after the header read paused the socket.
-    try {
-      upstream.resume();
-    } catch {
-      // ignore
-    }
-
-    return true;
-  }
-
-  private async connectWebSocketUpstream(info: {
-    protocol: "http" | "https";
-    hostname: string;
-    address: string;
-    port: number;
-  }): Promise<net.Socket> {
-    const timeoutMs = this.webSocketUpstreamConnectTimeoutMs;
-
-    if (info.protocol === "https") {
-      const socket = tls.connect({
-        host: info.address,
-        port: info.port,
-        servername: info.hostname,
-        ALPNProtocols: ["http/1.1"],
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let timer: NodeJS.Timeout | null = null;
-
-        const cleanup = () => {
-          if (timer) {
-            clearTimeout(timer);
-            timer = null;
-          }
-          socket.off("error", onError);
-          socket.off("secureConnect", onConnect);
-        };
-
-        const settleResolve = () => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve();
-        };
-
-        const settleReject = (err: Error) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(err);
-        };
-
-        const onError = (err: Error) => {
-          settleReject(err);
-        };
-
-        const onConnect = () => {
-          settleResolve();
-        };
-
-        if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-          timer = setTimeout(() => {
-            const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
-            settleReject(err);
-            try {
-              socket.destroy();
-            } catch {
-              // ignore
-            }
-          }, timeoutMs);
-        }
-
-        socket.once("error", onError);
-        socket.once("secureConnect", onConnect);
-      });
-
-      return socket;
-    }
-
-    const socket = new net.Socket();
-    socket.connect(info.port, info.address);
-
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let timer: NodeJS.Timeout | null = null;
-
-      const cleanup = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        socket.off("error", onError);
-        socket.off("connect", onConnect);
-      };
-
-      const settleResolve = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve();
-      };
-
-      const settleReject = (err: Error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      };
-
-      const onError = (err: Error) => {
-        settleReject(err);
-      };
-
-      const onConnect = () => {
-        settleResolve();
-      };
-
-      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        timer = setTimeout(() => {
-          const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
-          settleReject(err);
-          try {
-            socket.destroy();
-          } catch {
-            // ignore
-          }
-        }, timeoutMs);
-      }
-
-      socket.once("error", onError);
-      socket.once("connect", onConnect);
-    });
-
-    return socket;
-  }
-
-  private async readUpstreamHttpResponseHead(socket: net.Socket): Promise<{
-    statusCode: number;
-    statusMessage: string;
-    headers: Record<string, string | string[]>;
-    rest: Buffer;
-  }> {
-    let buf = Buffer.alloc(0);
-
-    return await new Promise((resolve, reject) => {
-      const timeoutMs = this.webSocketUpstreamHeaderTimeoutMs;
-      let timer: NodeJS.Timeout | null = null;
-      let settled = false;
-
-      const cleanup = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        socket.off("data", onData);
-        socket.off("error", onError);
-        socket.off("close", onClose);
-        socket.off("end", onEnd);
-      };
-
-      const settleReject = (err: Error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      };
-
-      const settleResolve = (value: {
-        statusCode: number;
-        statusMessage: string;
-        headers: Record<string, string | string[]>;
-        rest: Buffer;
-      }) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      };
-
-      const onError = (err: Error) => {
-        settleReject(err);
-      };
-
-      const onClose = () => {
-        settleReject(new Error("upstream closed before sending headers"));
-      };
-
-      const onEnd = () => {
-        settleReject(new Error("upstream ended before sending headers"));
-      };
-
-      const onData = (chunk: Buffer) => {
-        buf = buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
-
-        if (buf.length > MAX_HTTP_HEADER_BYTES + 4) {
-          settleReject(new Error("upstream headers too large"));
-          return;
-        }
-
-        const idx = buf.indexOf("\r\n\r\n");
-        if (idx === -1) return;
-
-        const head = buf.subarray(0, idx).toString("latin1");
-        const rest = buf.subarray(idx + 4);
-
-        try {
-          socket.pause();
-        } catch {
-          // ignore
-        }
-
-        const [statusLine, ...headerLines] = head.split("\r\n");
-        if (!statusLine) {
-          settleReject(new Error("missing status line"));
-          return;
-        }
-
-        const m = /^HTTP\/\d+\.\d+\s+(\d{3})\s*(.*)$/.exec(statusLine);
-        if (!m) {
-          settleReject(new Error(`invalid http status line: ${JSON.stringify(statusLine)}`));
-          return;
-        }
-
-        const statusCode = Number.parseInt(m[1]!, 10);
-        const statusMessage = m[2] ?? "";
-
-        const headers: Record<string, string | string[]> = {};
-        for (const line of headerLines) {
-          if (!line) continue;
-          const i = line.indexOf(":");
-          if (i === -1) continue;
-          const k = line.slice(0, i).trim().toLowerCase();
-          const v = line.slice(i + 1).trim();
-          const prev = headers[k];
-          if (prev === undefined) headers[k] = v;
-          else if (Array.isArray(prev)) prev.push(v);
-          else headers[k] = [prev, v];
-        }
-
-        settleResolve({ statusCode, statusMessage, headers, rest });
-      };
-
-      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        timer = setTimeout(() => {
-          settleReject(new Error(`websocket upstream header timeout after ${timeoutMs}ms`));
-          try {
-            socket.destroy();
-          } catch {
-            // ignore
-          }
-        }, timeoutMs);
-      }
-
-      socket.on("data", onData);
-      socket.once("error", onError);
-      socket.once("close", onClose);
-      socket.once("end", onEnd);
-    });
-  }
-
-  private sendHttpResponseHead(
-    write: (chunk: Buffer) => void,
-    response: { status: number; statusText: string; headers: HttpResponseHeaders },
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    const statusLine = `${httpVersion} ${response.status} ${response.statusText}\r\n`;
-
-    const headerLines: string[] = [];
-    for (const [rawName, rawValue] of Object.entries(response.headers)) {
-      const name = rawName.replace(/[\r\n:]+/g, "");
-      if (!name) continue;
-
-      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
-      for (const v of values) {
-        const value = String(v).replace(/[\r\n]+/g, " ");
-        headerLines.push(`${name}: ${value}`);
-      }
-    }
-
-    let headerBlock = statusLine;
-    if (headerLines.length > 0) {
-      headerBlock += headerLines.join("\r\n") + "\r\n";
-    }
-    headerBlock += "\r\n";
-    write(Buffer.from(headerBlock));
-  }
-
-  private sendHttpResponse(
-    write: (chunk: Buffer) => void,
-    response: HttpHookResponse,
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    this.sendHttpResponseHead(write, response, httpVersion);
-    if (response.body.length > 0) {
-      write(response.body);
-    }
-  }
-
-  private async sendChunkedBody(
-    body: WebReadableStream<Uint8Array>,
-    write: (chunk: Buffer) => void,
-    waitForWritable?: () => Promise<void>
-  ): Promise<number> {
-    const reader = body.getReader();
-    let total = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value || value.length === 0) continue;
-        total += value.length;
-        const sizeLine = Buffer.from(`${value.length.toString(16)}\r\n`);
-        write(sizeLine);
-        write(Buffer.from(value));
-        write(Buffer.from("\r\n"));
-        if (waitForWritable) {
-          await waitForWritable();
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    write(Buffer.from("0\r\n\r\n"));
-    return total;
-  }
-
-  private async sendStreamBody(
-    body: WebReadableStream<Uint8Array>,
-    write: (chunk: Buffer) => void,
-    waitForWritable?: () => Promise<void>
-  ): Promise<number> {
-    const reader = body.getReader();
-    let total = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value || value.length === 0) continue;
-        total += value.length;
-        write(Buffer.from(value));
-        if (waitForWritable) {
-          await waitForWritable();
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    return total;
-  }
-
-  private async bufferResponseBodyWithLimit(
-    body: WebReadableStream<Uint8Array>,
-    maxBytes: number
-  ): Promise<Buffer> {
-    const reader = body.getReader();
-    const chunks: Buffer[] = [];
-    let total = 0;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value || value.length === 0) continue;
-
-        if (total + value.length > maxBytes) {
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore cancellation failures
-          }
-          throw new HttpRequestBlockedError(
-            `response body exceeds ${maxBytes} bytes`,
-            502,
-            "Bad Gateway"
-          );
-        }
-
-        total += value.length;
-        chunks.push(Buffer.from(value));
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks, total);
-  }
-
-  private respondWithError(
-    write: (chunk: Buffer) => void,
-    status: number,
-    statusText: string,
-    httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
-  ) {
-    const body = Buffer.from(`${status} ${statusText}\n`);
-    this.sendHttpResponse(
-      write,
-      {
-        status,
-        statusText,
-        headers: {
-          "content-length": body.length.toString(),
-          "content-type": "text/plain",
-          connection: "close",
-        },
-        body,
-      },
-      httpVersion
-    );
-  }
-
-  private buildFetchUrl(request: HttpRequestData, defaultScheme: "http" | "https") {
-    if (
-      request.target.startsWith("http://") ||
-      request.target.startsWith("https://") ||
-      request.target.startsWith("ws://") ||
-      request.target.startsWith("wss://")
-    ) {
-      // Map WebSocket schemes to HTTP schemes for policy checks / hooks.
-      if (request.target.startsWith("ws://")) {
-        return `http://${request.target.slice("ws://".length)}`;
-      }
-      if (request.target.startsWith("wss://")) {
-        return `https://${request.target.slice("wss://".length)}`;
-      }
-      return request.target;
-    }
-    const host = request.headers["host"];
-    if (!host) return null;
-    return `${defaultScheme}://${host}${request.target}`;
-  }
-
-  private async resolveHostname(
-    hostname: string,
-    policy?: { protocol: "http" | "https"; port: number }
-  ): Promise<{ address: string; family: 4 | 6 }> {
-    const ipFamily = net.isIP(hostname);
-
-    const entries: LookupEntry[] =
-      ipFamily === 4 || ipFamily === 6
-        ? [{ address: hostname, family: ipFamily }]
-        : normalizeLookupEntries(
-            // Use all addresses so policy checks can pick the first allowed entry.
-            await new Promise<dns.LookupAddress[]>((resolve, reject) => {
-              const lookup = this.options.dnsLookup ?? dns.lookup.bind(dns);
-              lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
-                if (err) reject(err);
-                else resolve(addresses as dns.LookupAddress[]);
-              });
-            })
-          );
-
-    if (entries.length === 0) {
-      throw new Error("DNS lookup returned no addresses");
-    }
-
-    const isIpAllowed = this.options.httpHooks?.isIpAllowed;
-    if (!policy || !isIpAllowed) {
-      const first = entries[0]!;
-      return { address: first.address, family: first.family };
-    }
-
-    for (const entry of entries) {
-      const allowed = await isIpAllowed({
-        hostname,
-        ip: entry.address,
-        family: entry.family,
-        port: policy.port,
-        protocol: policy.protocol,
-      });
-      if (allowed) {
-        return { address: entry.address, family: entry.family };
-      }
-    }
-
-    throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
-  }
-
-  private async ensureRequestAllowed(request: HttpHookRequest) {
-    if (!this.options.httpHooks?.isRequestAllowed) return;
-
-    // Request policy is head-only: never expose request body to this callback.
-    const headOnly: HttpHookRequest = {
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-      body: null,
-    };
-
-    const allowed = await this.options.httpHooks.isRequestAllowed(headOnly);
-    if (!allowed) {
-      throw new HttpRequestBlockedError("blocked by request policy");
-    }
-  }
-
-  private async ensureIpAllowed(parsedUrl: URL, protocol: "http" | "https", port: number) {
-    if (!this.options.httpHooks?.isIpAllowed) return;
-
-    // Resolve all A/AAAA records and ensure at least one address is permitted.
-    // When using the default fetch, the guarded undici lookup will additionally
-    // pin the actual connect to an allowed IP.
-    await this.resolveHostname(parsedUrl.hostname, { protocol, port });
-  }
-
-  private isSamePolicyRelevantRequestHead(a: HttpHookRequest, b: HttpHookRequest): boolean {
-    if (a.method !== b.method) return false;
-    if (a.url !== b.url) return false;
-
-    const normalize = (headers: Record<string, string>) => {
-      const out: Record<string, string> = {};
-      for (const [key, value] of Object.entries(headers)) {
-        const lower = key.toLowerCase();
-        // These are framing headers that the bridge may normalize between the
-        // head parsing step and the eventual fetch.
-        if (lower === "content-length" || lower === "transfer-encoding") continue;
-        out[lower] = value;
-      }
-      return out;
-    };
-
-    const ah = normalize(a.headers);
-    const bh = normalize(b.headers);
-    const aKeys = Object.keys(ah);
-    const bKeys = Object.keys(bh);
-    if (aKeys.length !== bKeys.length) return false;
-
-    for (const key of aKeys) {
-      if (!(key in bh)) return false;
-      if (ah[key] !== bh[key]) return false;
-    }
-
-    return true;
-  }
-
-  private async applyRequestHeadHooks(request: HttpHookRequest): Promise<{
-    request: HttpHookRequest;
-    /** optional placeholder request head to feed into `httpHooks.onRequest` */
-    requestForBodyHook: HttpHookRequest | null;
-    bufferRequestBody: boolean;
-    maxBufferedRequestBodyBytes: number | null;
-  }> {
-    const hasBodyHook = Boolean(this.options.httpHooks?.onRequest);
-
-    if (!this.options.httpHooks?.onRequestHead) {
-      return {
-        request,
-        requestForBodyHook: null,
-        bufferRequestBody: hasBodyHook,
-        maxBufferedRequestBodyBytes: null,
-      };
-    }
-
-    const cloned: HttpHookRequest = {
-      method: request.method,
-      url: request.url,
-      headers: { ...request.headers },
-      body: null,
-    };
-
-    const updated = await this.options.httpHooks.onRequestHead(cloned);
-    const next = (updated ?? cloned) as HttpHookRequest & {
-      bufferRequestBody?: boolean;
-      maxBufferedRequestBodyBytes?: number;
-      requestForBodyHook?: HttpHookRequest;
-    };
-
-    return {
-      request: {
-        method: next.method,
-        url: next.url,
-        headers: next.headers,
-        body: null,
-      },
-      requestForBodyHook: next.requestForBodyHook ?? null,
-      bufferRequestBody:
-        typeof next.bufferRequestBody === "boolean" ? next.bufferRequestBody : hasBodyHook,
-      maxBufferedRequestBodyBytes:
-        typeof next.maxBufferedRequestBodyBytes === "number" &&
-        Number.isFinite(next.maxBufferedRequestBodyBytes) &&
-        next.maxBufferedRequestBodyBytes >= 0
-          ? next.maxBufferedRequestBodyBytes
-          : null,
-    };
-  }
-
-  private async applyRequestBodyHooks(request: HttpHookRequest): Promise<HttpHookRequest> {
-    if (!this.options.httpHooks?.onRequest) {
-      return request;
-    }
-
-    const cloned: HttpHookRequest = {
-      method: request.method,
-      url: request.url,
-      headers: { ...request.headers },
-      body: request.body,
-    };
-
-    const updated = await this.options.httpHooks.onRequest(cloned);
-    return updated ?? cloned;
-  }
-
-  private closeSharedDispatchers() {
-    for (const entry of this.sharedDispatchers.values()) {
-      try {
-        entry.dispatcher.close();
-      } catch {
-        // ignore
-      }
-    }
-    this.sharedDispatchers.clear();
-  }
-
-  private pruneSharedDispatchers(now = Date.now()) {
-    if (this.sharedDispatchers.size === 0) return;
-
-    for (const [key, entry] of this.sharedDispatchers) {
-      if (now - entry.lastUsedAt <= DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS) continue;
-      this.sharedDispatchers.delete(key);
-      try {
-        entry.dispatcher.close();
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  private evictSharedDispatchersIfNeeded() {
-    while (this.sharedDispatchers.size > DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS) {
-      const oldestKey = this.sharedDispatchers.keys().next().value as string | undefined;
-      if (!oldestKey) break;
-      const oldest = this.sharedDispatchers.get(oldestKey);
-      this.sharedDispatchers.delete(oldestKey);
-      try {
-        oldest?.dispatcher.close();
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  private getCheckedDispatcher(info: {
-    hostname: string;
-    port: number;
-    protocol: "http" | "https";
-  }): Agent | null {
-    const isIpAllowed = this.options.httpHooks?.isIpAllowed;
-    if (!isIpAllowed) return null;
-
-    this.pruneSharedDispatchers();
-
-    const key = `${info.protocol}://${info.hostname}:${info.port}`;
-    const cached = this.sharedDispatchers.get(key);
-    if (cached) {
-      cached.lastUsedAt = Date.now();
-      // LRU: move to map tail.
-      this.sharedDispatchers.delete(key);
-      this.sharedDispatchers.set(key, cached);
-      return cached.dispatcher;
-    }
-
-    const lookupFn = createLookupGuard(
-      {
-        hostname: info.hostname,
-        port: info.port,
-        protocol: info.protocol,
-      },
-      isIpAllowed
-    );
-
-    const dispatcher = new Agent({
-      connect: { lookup: lookupFn },
-      connections: DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN,
-    });
-
-    this.sharedDispatchers.set(key, {
-      dispatcher,
-      lastUsedAt: Date.now(),
-    });
-    this.evictSharedDispatchersIfNeeded();
-
-    return dispatcher;
   }
 
   private getMitmDir() {
@@ -5103,13 +1373,17 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     while (this.tlsContexts.size > maxEntries) {
-      const oldestKey = this.tlsContexts.keys().next().value as string | undefined;
+      const oldestKey = this.tlsContexts.keys().next().value as
+        | string
+        | undefined;
       if (!oldestKey) break;
       this.tlsContexts.delete(oldestKey);
     }
   }
 
-  private async getTlsContextAsync(servername: string): Promise<tls.SecureContext> {
+  private async getTlsContextAsync(
+    servername: string,
+  ): Promise<tls.SecureContext> {
     const normalized = servername.trim() || "unknown";
     const now = Date.now();
 
@@ -5143,9 +1417,14 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private async createTlsContext(servername: string): Promise<tls.SecureContext> {
+  private async createTlsContext(
+    servername: string,
+  ): Promise<tls.SecureContext> {
     const ca = await this.ensureCaAsync();
-    const { keyPem, certPem } = await this.ensureLeafCertificateAsync(servername, ca);
+    const { keyPem, certPem } = await this.ensureLeafCertificateAsync(
+      servername,
+      ca,
+    );
 
     return tls.createSecureContext({
       key: keyPem,
@@ -5155,12 +1434,16 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private async ensureLeafCertificateAsync(
     servername: string,
-    ca: CaCert
+    ca: CaCert,
   ): Promise<{ keyPem: string; certPem: string }> {
     const hostsDir = path.join(this.getMitmDir(), "hosts");
     await fsp.mkdir(hostsDir, { recursive: true });
 
-    const hash = crypto.createHash("sha256").update(servername).digest("hex").slice(0, 12);
+    const hash = crypto
+      .createHash("sha256")
+      .update(servername)
+      .digest("hex")
+      .slice(0, 12);
     const slug = servername.replace(/[^a-zA-Z0-9.-]/g, "_");
     const baseName = `${slug || "host"}-${hash}`;
 
@@ -5229,304 +1512,9 @@ export class QemuNetworkBackend extends EventEmitter {
       return { keyPem, certPem };
     }
   }
-
-  private stripHopByHopHeaders(headers: Record<string, string>): Record<string, string>;
-  private stripHopByHopHeaders(headers: HttpResponseHeaders): HttpResponseHeaders;
-  private stripHopByHopHeaders(headers: Record<string, HeaderValue>): any {
-    const connectionValue = headers["connection"];
-    const connection = Array.isArray(connectionValue)
-      ? connectionValue.join(",")
-      : connectionValue ?? "";
-
-    const connectionTokens = new Set<string>();
-    if (connection) {
-      for (const token of connection.split(",")) {
-        const normalized = token.trim().toLowerCase();
-        if (normalized) connectionTokens.add(normalized);
-      }
-    }
-
-    const output: Record<string, HeaderValue> = {};
-    for (const [name, value] of Object.entries(headers)) {
-      const normalizedName = name.toLowerCase();
-      if (HOP_BY_HOP_HEADERS.has(normalizedName)) continue;
-      if (connectionTokens.has(normalizedName)) continue;
-      output[normalizedName] = value;
-    }
-    return output;
-  }
-
-  private headersToRecord(headers: Headers): HttpResponseHeaders {
-    const record: HttpResponseHeaders = {};
-
-    headers.forEach((value, key) => {
-      record[key.toLowerCase()] = value;
-    });
-
-    // undici/Node fetch supports multiple Set-Cookie values via getSetCookie().
-    const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
-    if (typeof anyHeaders.getSetCookie === "function") {
-      const cookies = anyHeaders.getSetCookie();
-      if (cookies.length === 1) {
-        record["set-cookie"] = cookies[0]!;
-      } else if (cookies.length > 1) {
-        record["set-cookie"] = cookies;
-      }
-    }
-
-    return record;
-  }
-}
-
-type LookupEntry = {
-  address: string;
-  family: 4 | 6;
-};
-
-type LookupResult = string | dns.LookupAddress[];
-
-type LookupCallback = (
-  err: NodeJS.ErrnoException | null,
-  address: LookupResult,
-  family?: number
-) => void;
-
-type LookupFn = (
-  hostname: string,
-  options: dns.LookupOneOptions | dns.LookupAllOptions,
-  callback: (err: NodeJS.ErrnoException | null, address: LookupResult, family?: number) => void
-) => void;
-
-function createLookupGuard(
-  info: {
-    hostname: string;
-    port: number;
-    protocol: "http" | "https";
-  },
-  isIpAllowed: NonNullable<HttpHooks["isIpAllowed"]>,
-  lookupFn: LookupFn = (dns.lookup as unknown as LookupFn).bind(dns)
-) {
-  return (
-    hostname: string,
-    options: dns.LookupOneOptions | dns.LookupAllOptions | number,
-    callback: LookupCallback
-  ) => {
-    const normalizedOptions = normalizeLookupOptions(options);
-    lookupFn(hostname, normalizedOptions, (err, address, family) => {
-      if (err) {
-        callback(err, normalizeLookupFailure(normalizedOptions));
-        return;
-      }
-
-      void (async () => {
-        const entries = normalizeLookupEntries(address, family);
-        if (entries.length === 0) {
-          callback(new Error("DNS lookup returned no addresses"), normalizeLookupFailure(normalizedOptions));
-          return;
-        }
-
-        const allowedEntries: LookupEntry[] = [];
-
-        for (const entry of entries) {
-          const allowed = await isIpAllowed({
-            hostname: info.hostname,
-            ip: entry.address,
-            family: entry.family,
-            port: info.port,
-            protocol: info.protocol,
-          });
-          if (allowed) {
-            if (!normalizedOptions.all) {
-              callback(null, entry.address, entry.family);
-              return;
-            }
-            allowedEntries.push(entry);
-          }
-        }
-
-        if (normalizedOptions.all && allowedEntries.length > 0) {
-          callback(null, allowedEntries.map((entry) => ({
-            address: entry.address,
-            family: entry.family,
-          })));
-          return;
-        }
-
-        callback(
-          new HttpRequestBlockedError(`blocked by policy: ${info.hostname}`),
-          normalizeLookupFailure(normalizedOptions)
-        );
-      })().catch((error) => {
-        callback(error as Error, normalizeLookupFailure(normalizedOptions));
-      });
-    });
-  };
-}
-
-function normalizeLookupEntries(address: LookupResult | undefined, family?: number): LookupEntry[] {
-  if (!address) return [];
-
-  if (Array.isArray(address)) {
-    return address
-      .map((entry) => {
-        const family = entry.family === 6 ? 6 : 4;
-        return {
-          address: entry.address,
-          family: family as 4 | 6,
-        };
-      })
-      .filter((entry) => Boolean(entry.address));
-  }
-
-  const resolvedFamily = family === 6 || family === 4 ? family : net.isIP(address);
-  if (resolvedFamily !== 4 && resolvedFamily !== 6) return [];
-  return [{ address, family: resolvedFamily }];
-}
-
-function normalizeLookupOptions(
-  options: dns.LookupOneOptions | dns.LookupAllOptions | number
-): dns.LookupOneOptions | dns.LookupAllOptions {
-  if (typeof options === "number") {
-    return { family: options };
-  }
-  return options;
-}
-
-function normalizeLookupFailure(options: dns.LookupOneOptions | dns.LookupAllOptions): LookupResult {
-  return options.all ? [] : "";
-}
-
-function caCertVerifiesLeaf(caCert: forge.pki.Certificate, leafCert: forge.pki.Certificate): boolean {
-  try {
-    return caCert.verify(leafCert);
-  } catch {
-    return false;
-  }
-}
-
-function privateKeyMatchesLeafCert(keyPem: string, leafCert: forge.pki.Certificate): boolean {
-  try {
-    const privateKey = forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey;
-    const publicKey = leafCert.publicKey as forge.pki.rsa.PublicKey;
-    return (
-      privateKey.n.toString(16) === publicKey.n.toString(16) &&
-      privateKey.e.toString(16) === publicKey.e.toString(16)
-    );
-  } catch {
-    return false;
-  }
-}
-
-function getUrlProtocol(url: URL): "http" | "https" | null {
-  if (url.protocol === "https:") return "https";
-  if (url.protocol === "http:") return "http";
-  return null;
-}
-
-function getUrlPort(url: URL, protocol: "http" | "https"): number {
-  if (url.port) return Number(url.port);
-  return protocol === "https" ? 443 : 80;
-}
-
-function getRedirectUrl(response: FetchResponse, currentUrl: URL): URL | null {
-  if (![301, 302, 303, 307, 308].includes(response.status)) return null;
-  const location = response.headers.get("location");
-  if (!location) return null;
-  try {
-    return new URL(location, currentUrl);
-  } catch {
-    return null;
-  }
-}
-
-function applyRedirectRequest(
-  request: HttpHookRequest,
-  status: number,
-  sourceUrl: URL,
-  redirectUrl: URL
-): HttpHookRequest {
-  let method = request.method;
-  let body = request.body;
-
-  if (status === 303 && method !== "GET" && method !== "HEAD") {
-    method = "GET";
-    body = null;
-  } else if ((status === 301 || status === 302) && method === "POST") {
-    method = "GET";
-    body = null;
-  }
-
-  const headers = { ...request.headers };
-  if (headers.host) {
-    headers.host = redirectUrl.host;
-  }
-
-  if (!isSameOrigin(sourceUrl, redirectUrl)) {
-    // Do not forward credentials across origins.
-    // This matches browser/fetch redirect behavior and avoids leaking registry
-    // Bearer tokens into object-storage signed URLs.
-    delete headers.authorization;
-    delete headers.cookie;
-  }
-
-  if (!body || method === "GET" || method === "HEAD") {
-    delete headers["content-length"];
-    delete headers["content-type"];
-    delete headers["transfer-encoding"];
-  }
-
-  return {
-    method,
-    url: redirectUrl.toString(),
-    headers,
-    body,
-  };
 }
 
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
-
-function normalizeHostnamePattern(pattern: string): string {
-  return pattern.trim().toLowerCase();
-}
-
-function matchHostname(hostname: string, pattern: string): boolean {
-  if (!pattern) return false;
-  if (pattern === "*") return true;
-
-  const escaped = pattern
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  const regex = new RegExp(`^${escaped}$`, "i");
-  return regex.test(hostname);
-}
-
-function normalizeOriginPort(url: URL): string {
-  if (url.port) return url.port;
-  if (url.protocol === "https:") return "443";
-  if (url.protocol === "http:") return "80";
-  return "";
-}
-
-function isSameOrigin(a: URL, b: URL): boolean {
-  return (
-    a.protocol === b.protocol &&
-    a.hostname.toLowerCase() === b.hostname.toLowerCase() &&
-    normalizeOriginPort(a) === normalizeOriginPort(b)
-  );
-}
-
-/** @internal */
-// Expose internal helpers for unit tests. Not part of the public API.
-export const __test = {
-  createLookupGuard,
-  normalizeLookupEntries,
-  normalizeLookupOptions,
-  normalizeLookupFailure,
-  getRedirectUrl,
-  applyRedirectRequest,
-  MAX_HTTP_PIPELINE_BYTES,
-};

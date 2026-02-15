@@ -4,11 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { RealFSProvider } from "../src/vfs";
+import { RealFSProvider } from "../src/vfs/node";
 
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
-  return error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2;
+  return (
+    error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2
+  );
 };
 
 function makeTempDir(t: TestContext, prefix = "gondolin-vfs-") {
@@ -91,7 +93,10 @@ test("RealFSProvider blocks path traversal outside root", (t) => {
   assert.throws(() => provider.readdirSync("/../"), isENOENT);
 
   // A more complex traversal should be blocked as well.
-  assert.throws(() => provider.openSync("/a/b/../../../../outside.txt", "r"), isENOENT);
+  assert.throws(
+    () => provider.openSync("/a/b/../../../../outside.txt", "r"),
+    isENOENT,
+  );
 });
 
 test("RealFSProvider symlink, readlink, lstat, realpath", (t) => {

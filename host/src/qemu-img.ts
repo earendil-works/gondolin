@@ -24,6 +24,12 @@ export function ensureQemuImgAvailable(): void {
   execFileSync("qemu-img", ["--version"], { stdio: "ignore" });
 }
 
+export function inferDiskFormatFromPath(diskPath: string): "raw" | "qcow2" {
+  const lower = diskPath.toLowerCase();
+  if (lower.endsWith(".qcow2") || lower.endsWith(".qcow")) return "qcow2";
+  return "raw";
+}
+
 function createQcow2Overlay(opts: Qcow2CreateOptions): void {
   const dir = path.dirname(opts.path);
   fs.mkdirSync(dir, { recursive: true });
