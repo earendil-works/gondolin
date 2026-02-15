@@ -425,7 +425,7 @@ export async function handleHttpDataWithWriter(
       }
 
       const headBuf = httpSession.buffer.prefix(headerEnd + 4);
-      const head = parseHttpHead(backend, headBuf);
+      const head = parseHttpHead(headBuf);
       if (!head) return;
 
       const bufferedBodyBytes = Math.max(
@@ -434,14 +434,13 @@ export async function handleHttpDataWithWriter(
       );
 
       // Validate Expect early so we don't send 100-continue for requests we must reject.
-      validateExpectHeader(backend, head.version, head.headers);
+      validateExpectHeader(head.version, head.headers);
 
       // Asterisk-form (OPTIONS *) is valid HTTP but does not map to a URL fetch.
       if (head.method === "OPTIONS" && head.target === "*") {
         const version: "HTTP/1.0" | "HTTP/1.1" =
           head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
         respondWithError(
-          backend,
           options.write,
           501,
           "Not Implemented",
@@ -521,14 +520,12 @@ export async function handleHttpDataWithWriter(
       })();
 
       const upgradeIsWebSocket = isWebSocketUpgradeRequest(
-        backend,
         dummyRequest,
       );
       if (hasUpgrade && !(backend.http.allowWebSockets && upgradeIsWebSocket)) {
         const version: "HTTP/1.0" | "HTTP/1.1" =
           head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
         respondWithError(
-          backend,
           options.write,
           501,
           "Not Implemented",
@@ -540,11 +537,11 @@ export async function handleHttpDataWithWriter(
         return;
       }
 
-      const url = buildFetchUrl(backend, dummyRequest, options.scheme);
+      const url = buildFetchUrl(dummyRequest, options.scheme);
       if (!url) {
         const version: "HTTP/1.0" | "HTTP/1.1" =
           head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-        respondWithError(backend, options.write, 400, "Bad Request", version);
+        respondWithError(options.write, 400, "Bad Request", version);
         httpSession.closed = true;
         options.finish();
         backend.flush();
@@ -645,7 +642,7 @@ export async function handleHttpDataWithWriter(
         body: Buffer.alloc(0),
       };
 
-      if (isWebSocketUpgradeRequest(backend, stub)) {
+      if (isWebSocketUpgradeRequest(stub)) {
         if (state.bodyMode !== "none") {
           throw new HttpRequestBlockedError(
             "websocket upgrade requests must not have a body",
@@ -719,7 +716,6 @@ export async function handleHttpDataWithWriter(
       }
 
       const chunked = decodeChunkedBodyFromReceiveBuffer(
-        backend,
         httpSession.buffer,
         state.bodyOffset,
         state.maxBodyBytes,
@@ -781,7 +777,6 @@ export async function handleHttpDataWithWriter(
       if (
         state.bufferRequestBody &&
         !isSamePolicyRelevantRequestHead(
-          backend,
           hookRequest,
           state.hookRequest,
         )
@@ -1004,7 +999,6 @@ export async function handleHttpDataWithWriter(
               backend.emitDebug(`http blocked ${error.message}`);
             }
             respondWithError(
-              backend,
               safeWrite,
               error.status,
               error.statusText,
@@ -1013,7 +1007,6 @@ export async function handleHttpDataWithWriter(
           } else {
             backend.emit("error", error);
             respondWithError(
-              backend,
               safeWrite,
               502,
               "Bad Gateway",
@@ -1101,7 +1094,7 @@ export async function handleHttpDataWithWriter(
     // re-run request/ip policy checks against the final request.
     if (
       state.bufferRequestBody &&
-      !isSamePolicyRelevantRequestHead(backend, hookRequest, state.hookRequest)
+      !isSamePolicyRelevantRequestHead(hookRequest, state.hookRequest)
     ) {
       let parsedUrl: URL;
       try {
@@ -1150,7 +1143,6 @@ export async function handleHttpDataWithWriter(
           backend.emitDebug(`http blocked ${error.message}`);
         }
         respondWithError(
-          backend,
           options.write,
           error.status,
           error.statusText,
@@ -1159,7 +1151,6 @@ export async function handleHttpDataWithWriter(
       } else {
         backend.emit("error", error);
         respondWithError(
-          backend,
           options.write,
           502,
           "Bad Gateway",
@@ -1187,7 +1178,6 @@ export async function handleHttpDataWithWriter(
         backend.emitDebug(`http blocked ${error.message}`);
       }
       respondWithError(
-        backend,
         options.write,
         error.status,
         error.statusText,
@@ -1195,7 +1185,7 @@ export async function handleHttpDataWithWriter(
       );
     } else {
       backend.emit("error", error);
-      respondWithError(backend, options.write, 400, "Bad Request", version);
+      respondWithError(options.write, 400, "Bad Request", version);
     }
 
     // Abort any active upstream body stream.
@@ -1218,7 +1208,6 @@ export async function handleHttpDataWithWriter(
 }
 
 function parseHttpHead(
-  backend: QemuNetworkBackend,
   buffer: Buffer,
 ): {
   method: string;
@@ -1292,7 +1281,6 @@ function parseHttpHead(
 }
 
 function validateExpectHeader(
-  backend: QemuNetworkBackend,
   version: string,
   headers: Record<string, string>,
 ) {
@@ -1318,7 +1306,6 @@ function validateExpectHeader(
 }
 
 function decodeChunkedBodyFromReceiveBuffer(
-  backend: QemuNetworkBackend,
   receiveBuffer: HttpReceiveBuffer,
   bodyOffset: number,
   maxBodyBytes: number,
@@ -1476,19 +1463,19 @@ export async function fetchHookRequestAndRespond(
     try {
       currentUrl = new URL(currentRequest.url);
     } catch {
-      respondWithError(backend, write, 400, "Bad Request", httpVersion);
+      respondWithError(write, 400, "Bad Request", httpVersion);
       return;
     }
 
     const protocol = getUrlProtocol(currentUrl);
     if (!protocol) {
-      respondWithError(backend, write, 400, "Bad Request", httpVersion);
+      respondWithError(write, 400, "Bad Request", httpVersion);
       return;
     }
 
     const port = getUrlPort(currentUrl, protocol);
     if (!Number.isFinite(port) || port <= 0) {
-      respondWithError(backend, write, 400, "Bad Request", httpVersion);
+      respondWithError(write, 400, "Bad Request", httpVersion);
       return;
     }
 
@@ -1602,7 +1589,7 @@ export async function fetchHookRequestAndRespond(
     }
 
     let responseHeaders = stripHopByHopHeaders(
-      headersToRecord(backend, response.headers),
+      headersToRecord(response.headers),
     );
     const contentEncodingValue = responseHeaders["content-encoding"];
     const contentEncoding = Array.isArray(contentEncodingValue)
@@ -1670,7 +1657,7 @@ export async function fetchHookRequestAndRespond(
         if (updated) hookResponse = updated;
       }
 
-      sendHttpResponse(backend, write, hookResponse, httpVersion);
+      sendHttpResponse(write, hookResponse, httpVersion);
       return;
     }
 
@@ -1687,7 +1674,6 @@ export async function fetchHookRequestAndRespond(
         if (allowChunked) {
           responseHeaders["transfer-encoding"] = "chunked";
           sendHttpResponseHead(
-            backend,
             write,
             {
               status: response.status,
@@ -1697,7 +1683,6 @@ export async function fetchHookRequestAndRespond(
             httpVersion,
           );
           streamedBytes = await sendChunkedBody(
-            backend,
             responseBodyStream,
             write,
             waitForWritable,
@@ -1705,7 +1690,6 @@ export async function fetchHookRequestAndRespond(
         } else {
           delete responseHeaders["transfer-encoding"];
           sendHttpResponseHead(
-            backend,
             write,
             {
               status: response.status,
@@ -1715,7 +1699,6 @@ export async function fetchHookRequestAndRespond(
             httpVersion,
           );
           streamedBytes = await sendStreamBody(
-            backend,
             responseBodyStream,
             write,
             waitForWritable,
@@ -1725,7 +1708,6 @@ export async function fetchHookRequestAndRespond(
         responseHeaders["content-length"] = parsedLength!.toString();
         delete responseHeaders["transfer-encoding"];
         sendHttpResponseHead(
-          backend,
           write,
           {
             status: response.status,
@@ -1735,7 +1717,6 @@ export async function fetchHookRequestAndRespond(
           httpVersion,
         );
         streamedBytes = await sendStreamBody(
-          backend,
           responseBodyStream,
           write,
           waitForWritable,
@@ -1775,7 +1756,6 @@ export async function fetchHookRequestAndRespond(
 
     const responseBody = responseBodyStream
       ? await bufferResponseBodyWithLimit(
-          backend,
           responseBodyStream,
           maxResponseBytes,
         )
@@ -1806,7 +1786,7 @@ export async function fetchHookRequestAndRespond(
       if (updated) hookResponse = updated;
     }
 
-    sendHttpResponse(backend, write, hookResponse, httpVersion);
+    sendHttpResponse(write, hookResponse, httpVersion);
     if (backend.options.debug) {
       const elapsed = Date.now() - responseStart;
       backend.emitDebug(
@@ -1818,7 +1798,6 @@ export async function fetchHookRequestAndRespond(
 }
 
 function isWebSocketUpgradeRequest(
-  backend: QemuNetworkBackend,
   request: HttpRequestData,
 ): boolean {
   const upgrade = request.headers["upgrade"]?.toLowerCase() ?? "";
@@ -1897,7 +1876,7 @@ async function handleWebSocketUpgrade(
 
   // If `onRequest` rewrote the destination or relevant headers, re-run request
   // policy checks against the final (post-rewrite) request.
-  if (!isSamePolicyRelevantRequestHead(backend, hookRequest, headHookRequest)) {
+  if (!isSamePolicyRelevantRequestHead(hookRequest, headHookRequest)) {
     await ensureRequestAllowed(backend, hookRequest);
   }
 
@@ -2047,7 +2026,6 @@ async function handleWebSocketUpgrade(
     delete headers["transfer-encoding"];
     headers["content-length"] = String(hookResponse.body.length);
     sendHttpResponse(
-      backend,
       guestWrite,
       { ...hookResponse, headers },
       httpVersion,
@@ -2058,7 +2036,7 @@ async function handleWebSocketUpgrade(
     return false;
   }
 
-  sendHttpResponseHead(backend, guestWrite, hookResponse, httpVersion);
+  sendHttpResponseHead(guestWrite, hookResponse, httpVersion);
 
   if (resp.rest.length > 0) {
     guestWrite(resp.rest);
@@ -2380,7 +2358,6 @@ export async function readUpstreamHttpResponseHead(
 }
 
 function sendHttpResponseHead(
-  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
   response: {
     status: number;
@@ -2412,19 +2389,17 @@ function sendHttpResponseHead(
 }
 
 function sendHttpResponse(
-  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
   response: HttpHookResponse,
   httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1",
 ) {
-  sendHttpResponseHead(backend, write, response, httpVersion);
+  sendHttpResponseHead(write, response, httpVersion);
   if (response.body.length > 0) {
     write(response.body);
   }
 }
 
 async function sendChunkedBody(
-  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
   waitForWritable?: () => Promise<void>,
@@ -2454,7 +2429,6 @@ async function sendChunkedBody(
 }
 
 async function sendStreamBody(
-  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
   waitForWritable?: () => Promise<void>,
@@ -2479,7 +2453,6 @@ async function sendStreamBody(
 }
 
 async function bufferResponseBodyWithLimit(
-  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
   maxBytes: number,
 ): Promise<Buffer> {
@@ -2517,7 +2490,6 @@ async function bufferResponseBodyWithLimit(
 }
 
 function respondWithError(
-  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
   status: number,
   statusText: string,
@@ -2525,7 +2497,6 @@ function respondWithError(
 ) {
   const body = Buffer.from(`${status} ${statusText}\n`);
   sendHttpResponse(
-    backend,
     write,
     {
       status,
@@ -2542,7 +2513,6 @@ function respondWithError(
 }
 
 function buildFetchUrl(
-  backend: QemuNetworkBackend,
   request: HttpRequestData,
   defaultScheme: "http" | "https",
 ) {
@@ -2678,7 +2648,6 @@ async function ensureIpAllowed(
 }
 
 function isSamePolicyRelevantRequestHead(
-  backend: QemuNetworkBackend,
   a: HttpHookRequest,
   b: HttpHookRequest,
 ): boolean {
@@ -2787,7 +2756,6 @@ async function applyRequestBodyHooks(
 }
 
 function headersToRecord(
-  backend: QemuNetworkBackend,
   headers: Headers,
 ): HttpResponseHeaders {
   const record: HttpResponseHeaders = {};
