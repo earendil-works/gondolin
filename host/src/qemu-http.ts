@@ -9,6 +9,7 @@ import type {
   HttpHookResponse,
   HttpIpAllowInfo,
   HttpResponseHeaders,
+  QemuNetworkBackend,
 } from "./qemu-net";
 
 import {
@@ -177,7 +178,7 @@ class HttpReceiveCursor {
   constructor(
     private readonly chunks: Buffer[],
     private readonly totalBytes: number,
-    startOffset: number
+    startOffset: number,
   ) {
     this.offset = startOffset;
 
@@ -208,13 +209,21 @@ class HttpReceiveCursor {
     };
   }
 
-  private commitState(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
+  private commitState(state: {
+    chunkIndex: number;
+    chunkOffset: number;
+    offset: number;
+  }) {
     this.chunkIndex = state.chunkIndex;
     this.chunkOffset = state.chunkOffset;
     this.offset = state.offset;
   }
 
-  private readByteFrom(state: { chunkIndex: number; chunkOffset: number; offset: number }) {
+  private readByteFrom(state: {
+    chunkIndex: number;
+    chunkOffset: number;
+    offset: number;
+  }) {
     if (state.offset >= this.totalBytes) return null;
 
     while (state.chunkIndex < this.chunks.length) {
@@ -291,7 +300,10 @@ class HttpReceiveCursor {
     const state = this.cloneState();
     const firstChunk = this.chunks[state.chunkIndex];
     if (firstChunk && state.chunkOffset + n <= firstChunk.length) {
-      const slice = firstChunk.subarray(state.chunkOffset, state.chunkOffset + n);
+      const slice = firstChunk.subarray(
+        state.chunkOffset,
+        state.chunkOffset + n,
+      );
       state.chunkOffset += n;
       state.offset += n;
       this.commitState(state);
@@ -405,23 +417,26 @@ export type WebSocketState = {
   pendingBytes: number;
 };
 
-function getMaxHttpStreamingPendingBytes(this: any): number {
+function getMaxHttpStreamingPendingBytes(backend: QemuNetworkBackend): number {
   let maxPending = 0;
-  for (const session of this.tcpSessions.values()) {
+  for (const session of backend.tcpSessions.values()) {
     const pending = session.http?.streamingBody?.pendingBytes ?? 0;
     if (pending > maxPending) maxPending = pending;
   }
   return maxPending;
 }
 
-export function updateQemuRxPauseState(this: any) {
-  const socket = this.socket;
+export function updateQemuRxPauseState(backend: QemuNetworkBackend) {
+  const socket = backend.socket;
   if (!socket) return;
 
-  const maxPending = getMaxHttpStreamingPendingBytes.call(this);
+  const maxPending = getMaxHttpStreamingPendingBytes(backend);
 
-  if (!this.qemuRxPausedForHttpStreaming && maxPending >= HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES) {
-    this.qemuRxPausedForHttpStreaming = true;
+  if (
+    !backend.http.qemuRxPausedForHttpStreaming &&
+    maxPending >= HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES
+  ) {
+    backend.http.qemuRxPausedForHttpStreaming = true;
     try {
       socket.pause();
     } catch {
@@ -430,8 +445,11 @@ export function updateQemuRxPauseState(this: any) {
     return;
   }
 
-  if (this.qemuRxPausedForHttpStreaming && maxPending <= HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES) {
-    this.qemuRxPausedForHttpStreaming = false;
+  if (
+    backend.http.qemuRxPausedForHttpStreaming &&
+    maxPending <= HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES
+  ) {
+    backend.http.qemuRxPausedForHttpStreaming = false;
     try {
       socket.resume();
     } catch {
@@ -440,53 +458,68 @@ export function updateQemuRxPauseState(this: any) {
   }
 }
 
-export async function handlePlainHttpData(this: any, key: string, session: any, data: Buffer) {
+export async function handlePlainHttpData(
+  backend: QemuNetworkBackend,
+  key: string,
+  session: any,
+  data: Buffer,
+) {
   if (session.ws) {
-    handleWebSocketClientData.call(this, key, session, data);
+    handleWebSocketClientData(backend, key, session, data);
     return;
   }
 
-  await handleHttpDataWithWriter.call(this, key, session, data, {
+  await handleHttpDataWithWriter(backend, key, session, data, {
     scheme: "http",
     write: (chunk: Buffer) => {
-      this.stack?.handleTcpData({ key, data: chunk });
+      backend.stack?.handleTcpData({ key, data: chunk });
     },
     finish: () => {
-      this.stack?.handleTcpEnd({ key });
-      this.flush();
+      backend.stack?.handleTcpEnd({ key });
+      backend.flush();
     },
-    waitForWritable: () => this.waitForFlowResume(key),
+    waitForWritable: () => backend.waitForFlowResume(key),
   });
 }
 
-export async function handleTlsHttpData(this: any, key: string, session: any, data: Buffer) {
+export async function handleTlsHttpData(
+  backend: QemuNetworkBackend,
+  key: string,
+  session: any,
+  data: Buffer,
+) {
   const tlsSession = session.tls;
   if (!tlsSession) return;
 
   if (session.ws) {
-    handleWebSocketClientData.call(this, key, session, data);
+    handleWebSocketClientData(backend, key, session, data);
     return;
   }
 
-  await handleHttpDataWithWriter.call(this, key, session, data, {
+  await handleHttpDataWithWriter(backend, key, session, data, {
     scheme: "https",
     write: (chunk: Buffer) => {
       tlsSession.socket.write(chunk);
     },
     finish: () => {
       tlsSession.socket.end(() => {
-        this.stack?.handleTcpEnd({ key });
-        this.flush();
+        backend.stack?.handleTcpEnd({ key });
+        backend.flush();
       });
     },
-    waitForWritable: () => this.waitForFlowResume(key),
+    waitForWritable: () => backend.waitForFlowResume(key),
   });
 }
 
-function abortWebSocketSession(this: any, key: string, session: any, reason: string) {
-  if (this.options.debug) {
-    this.emitDebug(
-      `websocket session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+function abortWebSocketSession(
+  backend: QemuNetworkBackend,
+  key: string,
+  session: any,
+  reason: string,
+) {
+  if (backend.options.debug) {
+    backend.emitDebug(
+      `websocket session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`,
     );
   }
 
@@ -503,10 +536,15 @@ function abortWebSocketSession(this: any, key: string, session: any, reason: str
   }
 
   session.ws = undefined;
-  this.abortTcpSession(key, session, reason);
+  backend.abortTcpSession(key, session, reason);
 }
 
-function handleWebSocketClientData(this: any, key: string, session: any, data: Buffer) {
+function handleWebSocketClientData(
+  backend: QemuNetworkBackend,
+  key: string,
+  session: any,
+  data: Buffer,
+) {
   const ws = session.ws;
   if (!ws) return;
   if (data.length === 0) return;
@@ -515,11 +553,12 @@ function handleWebSocketClientData(this: any, key: string, session: any, data: B
 
   if (upstream && upstream.writable) {
     const nextWritable = upstream.writableLength + data.length;
-    if (nextWritable > this.maxTcpPendingWriteBytes) {
-      abortWebSocketSession.call(this, 
+    if (nextWritable > backend.maxTcpPendingWriteBytes) {
+      abortWebSocketSession(
+        backend,
         key,
         session,
-        `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
+        `socket-write-buffer-exceeded (${nextWritable} > ${backend.maxTcpPendingWriteBytes})`,
       );
       return;
     }
@@ -530,11 +569,12 @@ function handleWebSocketClientData(this: any, key: string, session: any, data: B
 
   // Handshake in progress (or upstream not yet connected): buffer until we have an upstream.
   const nextBytes = ws.pendingBytes + data.length;
-  if (nextBytes > this.maxTcpPendingWriteBytes) {
-    abortWebSocketSession.call(this, 
+  if (nextBytes > backend.maxTcpPendingWriteBytes) {
+    abortWebSocketSession(
+      backend,
       key,
       session,
-      `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
+      `pending-write-buffer-exceeded (${nextBytes} > ${backend.maxTcpPendingWriteBytes})`,
     );
     return;
   }
@@ -544,11 +584,15 @@ function handleWebSocketClientData(this: any, key: string, session: any, data: B
 }
 
 function maybeSend100ContinueFromHead(
-  this: any,
+  backend: QemuNetworkBackend,
   httpSession: HttpSession,
-  head: { version: string; headers: Record<string, string>; bodyOffset: number },
+  head: {
+    version: string;
+    headers: Record<string, string>;
+    bodyOffset: number;
+  },
   bufferedBodyBytes: number,
-  write: (chunk: Buffer) => void
+  write: (chunk: Buffer) => void,
 ) {
   if (httpSession.sentContinue) return;
   if (head.version !== "HTTP/1.1") return;
@@ -592,7 +636,7 @@ function maybeSend100ContinueFromHead(
 }
 
 export async function handleHttpDataWithWriter(
-  this: any,
+  backend: QemuNetworkBackend,
   key: string,
   session: any,
   data: Buffer,
@@ -601,7 +645,7 @@ export async function handleHttpDataWithWriter(
     write: (chunk: Buffer) => void;
     finish: () => void;
     waitForWritable?: () => Promise<void>;
-  }
+  },
 ) {
   const httpSession: HttpSession =
     session.http ??
@@ -629,7 +673,11 @@ export async function handleHttpDataWithWriter(
       streamState.pipelineBytes += data.length;
       if (streamState.pipelineBytes > MAX_HTTP_PIPELINE_BYTES) {
         httpSession.closed = true;
-        this.abortTcpSession(key, session, `http-extra-bytes-after-body (${streamState.pipelineBytes} bytes)`);
+        backend.abortTcpSession(
+          key,
+          session,
+          `http-extra-bytes-after-body (${streamState.pipelineBytes} bytes)`,
+        );
       }
       return;
     }
@@ -654,7 +702,11 @@ export async function handleHttpDataWithWriter(
       streamState.pipelineBytes += extra;
       if (streamState.pipelineBytes > MAX_HTTP_PIPELINE_BYTES) {
         httpSession.closed = true;
-        this.abortTcpSession(key, session, `http-body-pipeline-exceeds-cap (${streamState.pipelineBytes} bytes)`);
+        backend.abortTcpSession(
+          key,
+          session,
+          `http-body-pipeline-exceeds-cap (${streamState.pipelineBytes} bytes)`,
+        );
       }
     }
 
@@ -667,13 +719,15 @@ export async function handleHttpDataWithWriter(
   try {
     // Parse + cache request head.
     if (!httpSession.head) {
-      const headerEnd = httpSession.buffer.findHeaderEnd(MAX_HTTP_HEADER_BYTES + 4);
+      const headerEnd = httpSession.buffer.findHeaderEnd(
+        MAX_HTTP_HEADER_BYTES + 4,
+      );
       if (headerEnd === -1) {
         if (httpSession.buffer.length > MAX_HTTP_HEADER_BYTES) {
           throw new HttpRequestBlockedError(
             `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
             431,
-            "Request Header Fields Too Large"
+            "Request Header Fields Too Large",
           );
         }
         return;
@@ -683,26 +737,36 @@ export async function handleHttpDataWithWriter(
         throw new HttpRequestBlockedError(
           `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
           431,
-          "Request Header Fields Too Large"
+          "Request Header Fields Too Large",
         );
       }
 
       const headBuf = httpSession.buffer.prefix(headerEnd + 4);
-      const head = parseHttpHead.call(this, headBuf);
+      const head = parseHttpHead(backend, headBuf);
       if (!head) return;
 
-      const bufferedBodyBytes = Math.max(0, httpSession.buffer.length - head.bodyOffset);
+      const bufferedBodyBytes = Math.max(
+        0,
+        httpSession.buffer.length - head.bodyOffset,
+      );
 
       // Validate Expect early so we don't send 100-continue for requests we must reject.
-      validateExpectHeader.call(this, head.version, head.headers);
+      validateExpectHeader(backend, head.version, head.headers);
 
       // Asterisk-form (OPTIONS *) is valid HTTP but does not map to a URL fetch.
       if (head.method === "OPTIONS" && head.target === "*") {
-        const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-        respondWithError.call(this, options.write, 501, "Not Implemented", version);
+        const version: "HTTP/1.0" | "HTTP/1.1" =
+          head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+        respondWithError(
+          backend,
+          options.write,
+          501,
+          "Not Implemented",
+          version,
+        );
         httpSession.closed = true;
         options.finish();
-        this.flush();
+        backend.flush();
         return;
       }
 
@@ -725,7 +789,7 @@ export async function handleHttpDataWithWriter(
           throw new HttpRequestBlockedError(
             `unsupported transfer-encoding: ${transferEncodingHeader}`,
             501,
-            "Not Implemented"
+            "Not Implemented",
           );
         }
 
@@ -737,7 +801,11 @@ export async function handleHttpDataWithWriter(
             throw new Error("multiple content-length headers");
           }
           contentLength = Number(contentLengthRaw);
-          if (!Number.isFinite(contentLength) || !Number.isInteger(contentLength) || contentLength < 0) {
+          if (
+            !Number.isFinite(contentLength) ||
+            !Number.isInteger(contentLength) ||
+            contentLength < 0
+          ) {
             throw new Error("invalid content-length");
           }
         }
@@ -769,23 +837,34 @@ export async function handleHttpDataWithWriter(
         );
       })();
 
-      const upgradeIsWebSocket = isWebSocketUpgradeRequest.call(this, dummyRequest);
-      if (hasUpgrade && !(this.allowWebSockets && upgradeIsWebSocket)) {
-        const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-        respondWithError.call(this, options.write, 501, "Not Implemented", version);
+      const upgradeIsWebSocket = isWebSocketUpgradeRequest(
+        backend,
+        dummyRequest,
+      );
+      if (hasUpgrade && !(backend.http.allowWebSockets && upgradeIsWebSocket)) {
+        const version: "HTTP/1.0" | "HTTP/1.1" =
+          head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+        respondWithError(
+          backend,
+          options.write,
+          501,
+          "Not Implemented",
+          version,
+        );
         httpSession.closed = true;
         options.finish();
-        this.flush();
+        backend.flush();
         return;
       }
 
-      const url = buildFetchUrl.call(this, dummyRequest, options.scheme);
+      const url = buildFetchUrl(backend, dummyRequest, options.scheme);
       if (!url) {
-        const version: "HTTP/1.0" | "HTTP/1.1" = head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
-        respondWithError.call(this, options.write, 400, "Bad Request", version);
+        const version: "HTTP/1.0" | "HTTP/1.1" =
+          head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+        respondWithError(backend, options.write, 400, "Bad Request", version);
         httpSession.closed = true;
         options.finish();
-        this.flush();
+        backend.flush();
         return;
       }
 
@@ -798,15 +877,26 @@ export async function handleHttpDataWithWriter(
         body: null,
       };
 
-      const headHooked = await applyRequestHeadHooks.call(this, headHookBase);
+      const headHooked = await applyRequestHeadHooks(backend, headHookBase);
 
-      let maxBodyBytes = this.maxHttpBodyBytes;
+      let maxBodyBytes = backend.http.maxHttpBodyBytes;
       if (headHooked.maxBufferedRequestBodyBytes !== null) {
-        maxBodyBytes = Math.min(maxBodyBytes, headHooked.maxBufferedRequestBodyBytes);
+        maxBodyBytes = Math.min(
+          maxBodyBytes,
+          headHooked.maxBufferedRequestBodyBytes,
+        );
       }
 
-      if (bodyMode === "content-length" && Number.isFinite(maxBodyBytes) && contentLength > maxBodyBytes) {
-        throw new HttpRequestBlockedError(`request body exceeds ${maxBodyBytes} bytes`, 413, "Payload Too Large");
+      if (
+        bodyMode === "content-length" &&
+        Number.isFinite(maxBodyBytes) &&
+        contentLength > maxBodyBytes
+      ) {
+        throw new HttpRequestBlockedError(
+          `request body exceeds ${maxBodyBytes} bytes`,
+          413,
+          "Payload Too Large",
+        );
       }
 
       // Validate request policy + IP policy on the (possibly rewritten) head.
@@ -819,7 +909,11 @@ export async function handleHttpDataWithWriter(
 
       const protocol = getUrlProtocol(parsedUrl);
       if (!protocol) {
-        throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
+        throw new HttpRequestBlockedError(
+          "unsupported protocol",
+          400,
+          "Bad Request",
+        );
       }
 
       const port = getUrlPort(parsedUrl, protocol);
@@ -827,10 +921,16 @@ export async function handleHttpDataWithWriter(
         throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
       }
 
-      await ensureRequestAllowed.call(this, headHooked.request);
-      await ensureIpAllowed.call(this, parsedUrl, protocol, port);
+      await ensureRequestAllowed(backend, headHooked.request);
+      await ensureIpAllowed(backend, parsedUrl, protocol, port);
 
-      maybeSend100ContinueFromHead.call(this, httpSession, head, bufferedBodyBytes, options.write);
+      maybeSend100ContinueFromHead(
+        backend,
+        httpSession,
+        head,
+        bufferedBodyBytes,
+        options.write,
+      );
 
       httpSession.head = {
         method: head.method,
@@ -850,10 +950,11 @@ export async function handleHttpDataWithWriter(
     const state = httpSession.head;
     if (!state) return;
 
-    const httpVersion: "HTTP/1.0" | "HTTP/1.1" = state.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+    const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
+      state.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
     // WebSocket upgrade handling (no request bodies allowed).
-    if (this.allowWebSockets) {
+    if (backend.http.allowWebSockets) {
       const stub: HttpRequestData = {
         method: state.method,
         target: state.target,
@@ -862,9 +963,13 @@ export async function handleHttpDataWithWriter(
         body: Buffer.alloc(0),
       };
 
-      if (isWebSocketUpgradeRequest.call(this, stub)) {
+      if (isWebSocketUpgradeRequest(backend, stub)) {
         if (state.bodyMode !== "none") {
-          throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
+          throw new HttpRequestBlockedError(
+            "websocket upgrade requests must not have a body",
+            400,
+            "Bad Request",
+          );
         }
 
         // Prevent further HTTP parsing on this TCP session; upgraded connections become opaque tunnels.
@@ -882,20 +987,28 @@ export async function handleHttpDataWithWriter(
         const early = httpSession.buffer.suffix(state.bodyOffset);
         httpSession.buffer.resetTo(Buffer.alloc(0));
         if (early.length > 0) {
-          handleWebSocketClientData.call(this, key, session, early);
+          handleWebSocketClientData(backend, key, session, early);
         }
 
         let keepOpen = false;
         try {
-          keepOpen = await handleWebSocketUpgrade.call(this, key, stub, session, options, httpVersion, {
-            headHookRequest: state.hookRequest,
-            headHookRequestForBodyHook: state.hookRequestForBodyHook ?? null,
-          });
+          keepOpen = await handleWebSocketUpgrade(
+            backend,
+            key,
+            stub,
+            session,
+            options,
+            httpVersion,
+            {
+              headHookRequest: state.hookRequest,
+              headHookRequestForBodyHook: state.hookRequestForBodyHook ?? null,
+            },
+          );
         } finally {
           httpSession.processing = false;
           if (!keepOpen) {
             options.finish();
-            this.flush();
+            backend.flush();
           }
         }
         return;
@@ -903,29 +1016,53 @@ export async function handleHttpDataWithWriter(
     }
 
     // Buffering / streaming decision based on onRequestHead.
-    const bufferedBodyBytes = Math.max(0, httpSession.buffer.length - state.bodyOffset);
+    const bufferedBodyBytes = Math.max(
+      0,
+      httpSession.buffer.length - state.bodyOffset,
+    );
 
     if (state.bodyMode === "chunked") {
       // Currently chunked request bodies are always buffered.
       const maxBuffered =
-        state.bodyOffset + state.maxBodyBytes + MAX_HTTP_CHUNKED_OVERHEAD_BYTES + MAX_HTTP_PIPELINE_BYTES;
+        state.bodyOffset +
+        state.maxBodyBytes +
+        MAX_HTTP_CHUNKED_OVERHEAD_BYTES +
+        MAX_HTTP_PIPELINE_BYTES;
       if (httpSession.buffer.length > maxBuffered) {
-        throw new HttpRequestBlockedError(`request body exceeds ${state.maxBodyBytes} bytes`, 413, "Payload Too Large");
+        throw new HttpRequestBlockedError(
+          `request body exceeds ${state.maxBodyBytes} bytes`,
+          413,
+          "Payload Too Large",
+        );
       }
 
-      const chunked = decodeChunkedBodyFromReceiveBuffer.call(this, httpSession.buffer, state.bodyOffset, state.maxBodyBytes);
+      const chunked = decodeChunkedBodyFromReceiveBuffer(
+        backend,
+        httpSession.buffer,
+        state.bodyOffset,
+        state.maxBodyBytes,
+      );
 
       if (!chunked.complete) {
-        maybeSend100ContinueFromHead.call(this, httpSession, state, bufferedBodyBytes, options.write);
+        maybeSend100ContinueFromHead(
+          backend,
+          httpSession,
+          state,
+          bufferedBodyBytes,
+          options.write,
+        );
         return;
       }
 
       const remainingStart = state.bodyOffset + chunked.bytesConsumed;
-      if (httpSession.buffer.length - remainingStart > MAX_HTTP_PIPELINE_BYTES) {
+      if (
+        httpSession.buffer.length - remainingStart >
+        MAX_HTTP_PIPELINE_BYTES
+      ) {
         throw new HttpRequestBlockedError(
           `request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`,
           413,
-          "Payload Too Large"
+          "Payload Too Large",
         );
       }
 
@@ -937,26 +1074,37 @@ export async function handleHttpDataWithWriter(
       let hookRequest: HttpHookRequest = {
         method: baseHookRequest.method,
         url: baseHookRequest.url,
-        headers: { ...baseHookRequest.headers, "content-length": body.length.toString() },
+        headers: {
+          ...baseHookRequest.headers,
+          "content-length": body.length.toString(),
+        },
         body: body.length > 0 ? body : null,
       };
 
       if (state.bufferRequestBody) {
-        hookRequest = await applyRequestBodyHooks.call(this, hookRequest);
+        hookRequest = await applyRequestBodyHooks(backend, hookRequest);
       }
 
       // Normalize framing headers for fetch.
       hookRequest.headers = { ...hookRequest.headers };
       delete hookRequest.headers["transfer-encoding"];
       if (hookRequest.body) {
-        hookRequest.headers["content-length"] = hookRequest.body.length.toString();
+        hookRequest.headers["content-length"] =
+          hookRequest.body.length.toString();
       } else {
         delete hookRequest.headers["content-length"];
       }
 
       // If the buffered onRequest hook rewrote the destination or relevant headers,
       // re-run request/ip policy checks against the final request.
-      if (state.bufferRequestBody && !isSamePolicyRelevantRequestHead.call(this, hookRequest, state.hookRequest)) {
+      if (
+        state.bufferRequestBody &&
+        !isSamePolicyRelevantRequestHead(
+          backend,
+          hookRequest,
+          state.hookRequest,
+        )
+      ) {
         let parsedUrl: URL;
         try {
           parsedUrl = new URL(hookRequest.url);
@@ -966,7 +1114,11 @@ export async function handleHttpDataWithWriter(
 
         const protocol = getUrlProtocol(parsedUrl);
         if (!protocol) {
-          throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
+          throw new HttpRequestBlockedError(
+            "unsupported protocol",
+            400,
+            "Bad Request",
+          );
         }
 
         const port = getUrlPort(parsedUrl, protocol);
@@ -974,16 +1126,16 @@ export async function handleHttpDataWithWriter(
           throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
         }
 
-        await ensureRequestAllowed.call(this, hookRequest);
-        await ensureIpAllowed.call(this, parsedUrl, protocol, port);
+        await ensureRequestAllowed(backend, hookRequest);
+        await ensureIpAllowed(backend, parsedUrl, protocol, port);
       }
 
       httpSession.processing = true;
       let releaseHttpConcurrency: (() => void) | null = null;
 
       try {
-        releaseHttpConcurrency = await this.httpConcurrency.acquire();
-        await fetchHookRequestAndRespond.call(this, {
+        releaseHttpConcurrency = await backend.http.httpConcurrency.acquire();
+        await fetchHookRequestAndRespond(backend, {
           request: hookRequest,
           httpVersion,
           write: options.write,
@@ -997,7 +1149,7 @@ export async function handleHttpDataWithWriter(
         httpSession.processing = false;
         httpSession.closed = true;
         options.finish();
-        this.flush();
+        backend.flush();
       }
 
       return;
@@ -1006,12 +1158,21 @@ export async function handleHttpDataWithWriter(
     // Content-Length or no body.
     const contentLength = state.contentLength;
 
-    const maxBuffered = state.bodyOffset + contentLength + MAX_HTTP_PIPELINE_BYTES;
+    const maxBuffered =
+      state.bodyOffset + contentLength + MAX_HTTP_PIPELINE_BYTES;
     if (httpSession.buffer.length > maxBuffered) {
-      throw new HttpRequestBlockedError(`request exceeds ${contentLength} bytes`, 413, "Payload Too Large");
+      throw new HttpRequestBlockedError(
+        `request exceeds ${contentLength} bytes`,
+        413,
+        "Payload Too Large",
+      );
     }
 
-    if (!state.bufferRequestBody && contentLength > 0 && bufferedBodyBytes < contentLength) {
+    if (
+      !state.bufferRequestBody &&
+      contentLength > 0 &&
+      bufferedBodyBytes < contentLength
+    ) {
       // If the client uses Expect: 100-continue, avoid starting the upstream fetch
       // until we see at least one body byte (the client may be waiting).
       const expect = state.headers["expect"]?.toLowerCase() ?? "";
@@ -1029,12 +1190,13 @@ export async function handleHttpDataWithWriter(
         pendingBytes: 0,
         closeAfterPending: false,
         drain: () => {
-          const c: any = streamState.controller;
+          const c = streamState.controller;
           if (!c) return;
 
           try {
             while (streamState.pending.length > 0) {
-              const desired = typeof c.desiredSize === "number" ? c.desiredSize : 0;
+              const desired =
+                typeof c.desiredSize === "number" ? c.desiredSize : 0;
               if (desired <= 0) break;
 
               const head = streamState.pending[0]!;
@@ -1049,7 +1211,10 @@ export async function handleHttpDataWithWriter(
               }
             }
 
-            if (streamState.closeAfterPending && streamState.pendingBytes === 0) {
+            if (
+              streamState.closeAfterPending &&
+              streamState.pendingBytes === 0
+            ) {
               streamState.closeAfterPending = false;
               c.close();
             }
@@ -1061,7 +1226,7 @@ export async function handleHttpDataWithWriter(
             streamState.pendingBytes = 0;
             streamState.closeAfterPending = false;
           } finally {
-            updateQemuRxPauseState.call(this);
+            updateQemuRxPauseState(backend);
           }
         },
       };
@@ -1082,13 +1247,13 @@ export async function handleHttpDataWithWriter(
             streamState.pending.length = 0;
             streamState.pendingBytes = 0;
             streamState.closeAfterPending = false;
-            updateQemuRxPauseState.call(this);
+            updateQemuRxPauseState(backend);
           },
         },
         {
           highWaterMark: HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES,
           size: (chunk: Uint8Array) => chunk.byteLength,
-        }
+        },
       );
 
       httpSession.streamingBody = streamState;
@@ -1108,16 +1273,23 @@ export async function handleHttpDataWithWriter(
         method: state.hookRequest.method,
         url: state.hookRequest.url,
         headers: Object.fromEntries(
-          Object.entries(state.hookRequest.headers).map(([key, value]) => [key.toLowerCase(), value])
+          Object.entries(state.hookRequest.headers).map(([key, value]) => [
+            key.toLowerCase(),
+            value,
+          ]),
         ),
         body: null,
       };
 
       const expectedLength = contentLength.toString();
       const hookedLength = streamingRequest.headers["content-length"];
-      if (hookedLength !== undefined && hookedLength !== expectedLength && this.options.debug) {
-        this.emitDebug(
-          `http bridge onRequestHead rewrote content-length (${hookedLength} -> ${expectedLength}); overriding for streaming`
+      if (
+        hookedLength !== undefined &&
+        hookedLength !== expectedLength &&
+        backend.options.debug
+      ) {
+        backend.emitDebug(
+          `http bridge onRequestHead rewrote content-length (${hookedLength} -> ${expectedLength}); overriding for streaming`,
         );
       }
 
@@ -1131,8 +1303,8 @@ export async function handleHttpDataWithWriter(
 
       (async () => {
         try {
-          releaseHttpConcurrency = await this.httpConcurrency.acquire();
-          await fetchHookRequestAndRespond.call(this, {
+          releaseHttpConcurrency = await backend.http.httpConcurrency.acquire();
+          await fetchHookRequestAndRespond(backend, {
             request: streamingRequest,
             httpVersion,
             write: safeWrite,
@@ -1147,13 +1319,25 @@ export async function handleHttpDataWithWriter(
           const error = err instanceof Error ? err : new Error(String(err));
 
           if (error instanceof HttpRequestBlockedError) {
-            if (this.options.debug) {
-              this.emitDebug(`http blocked ${error.message}`);
+            if (backend.options.debug) {
+              backend.emitDebug(`http blocked ${error.message}`);
             }
-            respondWithError.call(this, safeWrite, error.status, error.statusText, httpVersion);
+            respondWithError(
+              backend,
+              safeWrite,
+              error.status,
+              error.statusText,
+              httpVersion,
+            );
           } else {
-            this.emit("error", error);
-            respondWithError.call(this, safeWrite, 502, "Bad Gateway", httpVersion);
+            backend.emit("error", error);
+            respondWithError(
+              backend,
+              safeWrite,
+              502,
+              "Bad Gateway",
+              httpVersion,
+            );
           }
         } finally {
           releaseHttpConcurrency?.();
@@ -1161,14 +1345,20 @@ export async function handleHttpDataWithWriter(
           if (!httpSession.closed) {
             httpSession.closed = true;
             options.finish();
-            this.flush();
+            backend.flush();
           }
         }
       })();
 
       // Feed initial bytes into the stream.
       if (initialBody.length > 0) {
-        await handleHttpDataWithWriter.call(this, key, session, initialBody, options);
+        await handleHttpDataWithWriter(
+          backend,
+          key,
+          session,
+          initialBody,
+          options,
+        );
       }
 
       return;
@@ -1176,7 +1366,13 @@ export async function handleHttpDataWithWriter(
 
     // If we know exactly how much body to expect, avoid attempting fetch until complete.
     if (bufferedBodyBytes < contentLength) {
-      maybeSend100ContinueFromHead.call(this, httpSession, state, bufferedBodyBytes, options.write);
+      maybeSend100ContinueFromHead(
+        backend,
+        httpSession,
+        state,
+        bufferedBodyBytes,
+        options.write,
+      );
       return;
     }
 
@@ -1189,7 +1385,11 @@ export async function handleHttpDataWithWriter(
     const remainingStart = state.bodyOffset + contentLength;
 
     if (full.length - remainingStart > MAX_HTTP_PIPELINE_BYTES) {
-      throw new HttpRequestBlockedError(`request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`, 413, "Payload Too Large");
+      throw new HttpRequestBlockedError(
+        `request pipeline exceeds ${MAX_HTTP_PIPELINE_BYTES} bytes`,
+        413,
+        "Payload Too Large",
+      );
     }
 
     const remaining = full.subarray(remainingStart);
@@ -1204,21 +1404,25 @@ export async function handleHttpDataWithWriter(
     };
 
     if (state.bufferRequestBody) {
-      hookRequest = await applyRequestBodyHooks.call(this, hookRequest);
+      hookRequest = await applyRequestBodyHooks(backend, hookRequest);
     }
 
     // Normalize framing headers for fetch.
     hookRequest.headers = { ...hookRequest.headers };
     delete hookRequest.headers["transfer-encoding"];
     if (hookRequest.body) {
-      hookRequest.headers["content-length"] = hookRequest.body.length.toString();
+      hookRequest.headers["content-length"] =
+        hookRequest.body.length.toString();
     } else {
       delete hookRequest.headers["content-length"];
     }
 
     // If the buffered onRequest hook rewrote the destination or relevant headers,
     // re-run request/ip policy checks against the final request.
-    if (state.bufferRequestBody && !isSamePolicyRelevantRequestHead.call(this, hookRequest, state.hookRequest)) {
+    if (
+      state.bufferRequestBody &&
+      !isSamePolicyRelevantRequestHead(backend, hookRequest, state.hookRequest)
+    ) {
       let parsedUrl: URL;
       try {
         parsedUrl = new URL(hookRequest.url);
@@ -1228,7 +1432,11 @@ export async function handleHttpDataWithWriter(
 
       const protocol = getUrlProtocol(parsedUrl);
       if (!protocol) {
-        throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
+        throw new HttpRequestBlockedError(
+          "unsupported protocol",
+          400,
+          "Bad Request",
+        );
       }
 
       const port = getUrlPort(parsedUrl, protocol);
@@ -1236,16 +1444,16 @@ export async function handleHttpDataWithWriter(
         throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
       }
 
-      await ensureRequestAllowed.call(this, hookRequest);
-      await ensureIpAllowed.call(this, parsedUrl, protocol, port);
+      await ensureRequestAllowed(backend, hookRequest);
+      await ensureIpAllowed(backend, parsedUrl, protocol, port);
     }
 
     httpSession.processing = true;
     let releaseHttpConcurrency: (() => void) | null = null;
 
     try {
-      releaseHttpConcurrency = await this.httpConcurrency.acquire();
-      await fetchHookRequestAndRespond.call(this, {
+      releaseHttpConcurrency = await backend.http.httpConcurrency.acquire();
+      await fetchHookRequestAndRespond(backend, {
         request: hookRequest,
         httpVersion,
         write: options.write,
@@ -1258,13 +1466,25 @@ export async function handleHttpDataWithWriter(
       const error = err instanceof Error ? err : new Error(String(err));
 
       if (error instanceof HttpRequestBlockedError) {
-        if (this.options.debug) {
-          this.emitDebug(`http blocked ${error.message}`);
+        if (backend.options.debug) {
+          backend.emitDebug(`http blocked ${error.message}`);
         }
-        respondWithError.call(this, options.write, error.status, error.statusText, httpVersion);
+        respondWithError(
+          backend,
+          options.write,
+          error.status,
+          error.statusText,
+          httpVersion,
+        );
       } else {
-        this.emit("error", error);
-        respondWithError.call(this, options.write, 502, "Bad Gateway", httpVersion);
+        backend.emit("error", error);
+        respondWithError(
+          backend,
+          options.write,
+          502,
+          "Bad Gateway",
+          httpVersion,
+        );
       }
     } finally {
       releaseHttpConcurrency?.();
@@ -1272,23 +1492,30 @@ export async function handleHttpDataWithWriter(
       if (!httpSession.closed) {
         httpSession.closed = true;
         options.finish();
-        this.flush();
+        backend.flush();
       }
     }
 
     return;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
-    const version: "HTTP/1.0" | "HTTP/1.1" = httpSession.head?.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+    const version: "HTTP/1.0" | "HTTP/1.1" =
+      httpSession.head?.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
     if (error instanceof HttpRequestBlockedError) {
-      if (this.options.debug) {
-        this.emitDebug(`http blocked ${error.message}`);
+      if (backend.options.debug) {
+        backend.emitDebug(`http blocked ${error.message}`);
       }
-      respondWithError.call(this, options.write, error.status, error.statusText, version);
+      respondWithError(
+        backend,
+        options.write,
+        error.status,
+        error.statusText,
+        version,
+      );
     } else {
-      this.emit("error", error);
-      respondWithError.call(this, options.write, 400, "Bad Request", version);
+      backend.emit("error", error);
+      respondWithError(backend, options.write, 400, "Bad Request", version);
     }
 
     // Abort any active upstream body stream.
@@ -1301,18 +1528,18 @@ export async function handleHttpDataWithWriter(
       }
       httpSession.streamingBody.done = true;
       httpSession.streamingBody.controller = null;
-      updateQemuRxPauseState.call(this);
+      updateQemuRxPauseState(backend);
     }
 
     httpSession.closed = true;
     options.finish();
-    this.flush();
+    backend.flush();
   }
 }
 
 function parseHttpHead(
-  this: any,
-  buffer: Buffer
+  backend: QemuNetworkBackend,
+  buffer: Buffer,
 ): {
   method: string;
   target: string;
@@ -1328,7 +1555,7 @@ function parseHttpHead(
       throw new HttpRequestBlockedError(
         `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
         431,
-        "Request Header Fields Too Large"
+        "Request Header Fields Too Large",
       );
     }
     return null;
@@ -1338,7 +1565,7 @@ function parseHttpHead(
     throw new HttpRequestBlockedError(
       `request headers exceed ${MAX_HTTP_HEADER_BYTES} bytes`,
       431,
-      "Request Header Fields Too Large"
+      "Request Header Fields Too Large",
     );
   }
 
@@ -1384,7 +1611,11 @@ function parseHttpHead(
   };
 }
 
-function validateExpectHeader(this: any, version: string, headers: Record<string, string>) {
+function validateExpectHeader(
+  backend: QemuNetworkBackend,
+  version: string,
+  headers: Record<string, string>,
+) {
   // RFC 9110: unknown expectations MUST be rejected with 417.
   if (version !== "HTTP/1.1") return;
 
@@ -1401,16 +1632,16 @@ function validateExpectHeader(this: any, version: string, headers: Record<string
     throw new HttpRequestBlockedError(
       `unsupported expect token(s): ${unsupported.join(", ")}`,
       417,
-      "Expectation Failed"
+      "Expectation Failed",
     );
   }
 }
 
 function decodeChunkedBodyFromReceiveBuffer(
-  this: any,
+  backend: QemuNetworkBackend,
   receiveBuffer: HttpReceiveBuffer,
   bodyOffset: number,
-  maxBodyBytes: number
+  maxBodyBytes: number,
 ): { complete: boolean; body: Buffer; bytesConsumed: number } {
   const cursor = receiveBuffer.cursor(bodyOffset);
   const chunks: Buffer[] = [];
@@ -1459,7 +1690,11 @@ function decodeChunkedBodyFromReceiveBuffer(
     }
 
     if (enforceLimit && totalBytes + size > maxBodyBytes) {
-      throw new HttpRequestBlockedError(`request body exceeds ${maxBodyBytes} bytes`, 413, "Payload Too Large");
+      throw new HttpRequestBlockedError(
+        `request body exceeds ${maxBodyBytes} bytes`,
+        413,
+        "Payload Too Large",
+      );
     }
 
     const chunkData = cursor.tryReadBytes(size);
@@ -1478,7 +1713,7 @@ function decodeChunkedBodyFromReceiveBuffer(
 }
 
 export async function fetchHookRequestAndRespond(
-  this: any,
+  backend: QemuNetworkBackend,
   options: {
     request: HttpHookRequest;
     httpVersion: "HTTP/1.0" | "HTTP/1.1";
@@ -1499,7 +1734,7 @@ export async function fetchHookRequestAndRespond(
 
     /** whether the initial body stream carries a request body */
     initialBodyStreamHasBody?: boolean;
-  }
+  },
 ) {
   const {
     request: initialRequest,
@@ -1513,24 +1748,31 @@ export async function fetchHookRequestAndRespond(
     initialBodyStreamHasBody = Boolean(initialBodyStream),
   } = options;
 
-  const fetcher = this.options.fetch ?? undiciFetch;
+  const fetcher = backend.options.fetch ?? undiciFetch;
 
   let pendingRequest: HttpHookRequest = initialRequest;
 
-  for (let redirectCount = 0; redirectCount <= MAX_HTTP_REDIRECTS; redirectCount += 1) {
+  for (
+    let redirectCount = 0;
+    redirectCount <= MAX_HTTP_REDIRECTS;
+    redirectCount += 1
+  ) {
     const isFirstHop = redirectCount === 0;
 
     let currentRequest = pendingRequest;
     if (!(isFirstHop && hooksAppliedFirstHop)) {
-      const headResult = await applyRequestHeadHooks.call(this, {
+      const headResult = await applyRequestHeadHooks(backend, {
         method: currentRequest.method,
         url: currentRequest.url,
         headers: currentRequest.headers,
         body: null,
       });
 
-      const baseForBodyHook = headResult.requestForBodyHook ?? headResult.request;
-      const headForThisHop = enableBodyHook ? baseForBodyHook : headResult.request;
+      const baseForBodyHook =
+        headResult.requestForBodyHook ?? headResult.request;
+      const headForThisHop = enableBodyHook
+        ? baseForBodyHook
+        : headResult.request;
 
       currentRequest = {
         method: headForThisHop.method,
@@ -1540,31 +1782,33 @@ export async function fetchHookRequestAndRespond(
       };
 
       if (enableBodyHook) {
-        currentRequest = await applyRequestBodyHooks.call(this, currentRequest);
+        currentRequest = await applyRequestBodyHooks(backend, currentRequest);
       }
     }
 
-    if (this.options.debug) {
-      this.emitDebug(`http bridge ${currentRequest.method} ${currentRequest.url}`);
+    if (backend.options.debug) {
+      backend.emitDebug(
+        `http bridge ${currentRequest.method} ${currentRequest.url}`,
+      );
     }
 
     let currentUrl: URL;
     try {
       currentUrl = new URL(currentRequest.url);
     } catch {
-      respondWithError.call(this, write, 400, "Bad Request", httpVersion);
+      respondWithError(backend, write, 400, "Bad Request", httpVersion);
       return;
     }
 
     const protocol = getUrlProtocol(currentUrl);
     if (!protocol) {
-      respondWithError.call(this, write, 400, "Bad Request", httpVersion);
+      respondWithError(backend, write, 400, "Bad Request", httpVersion);
       return;
     }
 
     const port = getUrlPort(currentUrl, protocol);
     if (!Number.isFinite(port) || port <= 0) {
-      respondWithError.call(this, write, 400, "Bad Request", httpVersion);
+      respondWithError(backend, write, 400, "Bad Request", httpVersion);
       return;
     }
 
@@ -1572,20 +1816,23 @@ export async function fetchHookRequestAndRespond(
     const responseStart = Date.now();
 
     if (!(isFirstHop && policyCheckedFirstHop)) {
-      await ensureRequestAllowed.call(this, currentRequest);
-      await ensureIpAllowed.call(this, currentUrl, protocol, port);
+      await ensureRequestAllowed(backend, currentRequest);
+      await ensureIpAllowed(backend, currentUrl, protocol, port);
     }
 
-    const useDefaultFetch = this.options.fetch === undefined;
+    const useDefaultFetch = backend.options.fetch === undefined;
     const dispatcher = useDefaultFetch
-      ? getCheckedDispatcher.call(this, {
+      ? getCheckedDispatcher(backend, {
           hostname: currentUrl.hostname,
           port,
           protocol,
         })
       : null;
 
-    const streamBodyThisHop = isFirstHop && initialBodyStream && initialBodyStreamHasBody ? initialBodyStream : null;
+    const streamBodyThisHop =
+      isFirstHop && initialBodyStream && initialBodyStreamHasBody
+        ? initialBodyStream
+        : null;
 
     const bodyInit = streamBodyThisHop
       ? streamBodyThisHop
@@ -1604,9 +1851,11 @@ export async function fetchHookRequestAndRespond(
         ...(dispatcher ? { dispatcher } : {}),
       } as any);
     } catch (err) {
-      if (this.options.debug) {
+      if (backend.options.debug) {
         const message = err instanceof Error ? err.message : String(err);
-        this.emitDebug(`http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`);
+        backend.emitDebug(
+          `http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`,
+        );
       }
       throw err;
     }
@@ -1618,7 +1867,11 @@ export async function fetchHookRequestAndRespond(
       }
 
       if (redirectCount >= MAX_HTTP_REDIRECTS) {
-        throw new HttpRequestBlockedError("too many redirects", 508, "Loop Detected");
+        throw new HttpRequestBlockedError(
+          "too many redirects",
+          508,
+          "Loop Detected",
+        );
       }
 
       if (streamBodyThisHop) {
@@ -1633,11 +1886,15 @@ export async function fetchHookRequestAndRespond(
           },
           response.status,
           currentUrl,
-          redirectUrl
+          redirectUrl,
         );
 
         if (redirected.body) {
-          throw new HttpRequestBlockedError("redirect requires replaying streamed request body", 502, "Bad Gateway");
+          throw new HttpRequestBlockedError(
+            "redirect requires replaying streamed request body",
+            502,
+            "Bad Gateway",
+          );
         }
 
         pendingRequest = {
@@ -1649,23 +1906,39 @@ export async function fetchHookRequestAndRespond(
         continue;
       }
 
-      pendingRequest = applyRedirectRequest(currentRequest, response.status, currentUrl, redirectUrl);
+      pendingRequest = applyRedirectRequest(
+        currentRequest,
+        response.status,
+        currentUrl,
+        redirectUrl,
+      );
       continue;
     }
 
-    if (this.options.debug) {
-      this.emitDebug(`http bridge response ${response.status} ${response.statusText}`);
+    if (backend.options.debug) {
+      backend.emitDebug(
+        `http bridge response ${response.status} ${response.statusText}`,
+      );
     }
 
-    let responseHeaders = stripHopByHopHeaders(headersToRecord(response.headers));
+    let responseHeaders = stripHopByHopHeaders(
+      headersToRecord(backend, response.headers),
+    );
     const contentEncodingValue = responseHeaders["content-encoding"];
-    const contentEncoding = Array.isArray(contentEncodingValue) ? contentEncodingValue[0] : contentEncodingValue;
+    const contentEncoding = Array.isArray(contentEncodingValue)
+      ? contentEncodingValue[0]
+      : contentEncodingValue;
 
     const contentLengthValue = responseHeaders["content-length"];
-    const contentLength = Array.isArray(contentLengthValue) ? contentLengthValue[0] : contentLengthValue;
+    const contentLength = Array.isArray(contentLengthValue)
+      ? contentLengthValue[0]
+      : contentLengthValue;
 
     const parsedLength = contentLength ? Number(contentLength) : null;
-    const hasValidLength = parsedLength !== null && Number.isFinite(parsedLength) && parsedLength >= 0;
+    const hasValidLength =
+      parsedLength !== null &&
+      Number.isFinite(parsedLength) &&
+      parsedLength >= 0;
 
     if (contentEncoding) {
       delete responseHeaders["content-encoding"];
@@ -1673,9 +1946,13 @@ export async function fetchHookRequestAndRespond(
     }
     responseHeaders["connection"] = "close";
 
-    const responseBodyStream = response.body as WebReadableStream<Uint8Array> | null;
+    const responseBodyStream =
+      response.body as WebReadableStream<Uint8Array> | null;
 
-    const suppressBody = currentRequest.method === "HEAD" || response.status === 204 || response.status === 304;
+    const suppressBody =
+      currentRequest.method === "HEAD" ||
+      response.status === 204 ||
+      response.status === 304;
 
     if (suppressBody) {
       if (responseBodyStream) {
@@ -1694,7 +1971,8 @@ export async function fetchHookRequestAndRespond(
         responseHeaders["content-length"] = "0";
       } else {
         // HEAD: preserve Content-Length if present, otherwise be explicit.
-        if (!responseHeaders["content-length"]) responseHeaders["content-length"] = "0";
+        if (!responseHeaders["content-length"])
+          responseHeaders["content-length"] = "0";
       }
 
       let hookResponse: HttpHookResponse = {
@@ -1704,16 +1982,20 @@ export async function fetchHookRequestAndRespond(
         body: Buffer.alloc(0),
       };
 
-      if (this.options.httpHooks?.onResponse) {
-        const updated = await this.options.httpHooks.onResponse(hookResponse, currentRequest);
+      if (backend.options.httpHooks?.onResponse) {
+        const updated = await backend.options.httpHooks.onResponse(
+          hookResponse,
+          currentRequest,
+        );
         if (updated) hookResponse = updated;
       }
 
-      sendHttpResponse.call(this, write, hookResponse, httpVersion);
+      sendHttpResponse(backend, write, hookResponse, httpVersion);
       return;
     }
 
-    const canStream = Boolean(responseBodyStream) && !this.options.httpHooks?.onResponse;
+    const canStream =
+      Boolean(responseBodyStream) && !backend.options.httpHooks?.onResponse;
 
     if (canStream && responseBodyStream) {
       const allowChunked = httpVersion === "HTTP/1.1";
@@ -1724,55 +2006,79 @@ export async function fetchHookRequestAndRespond(
 
         if (allowChunked) {
           responseHeaders["transfer-encoding"] = "chunked";
-          sendHttpResponseHead.call(this, 
+          sendHttpResponseHead(
+            backend,
             write,
             {
               status: response.status,
               statusText: response.statusText || "OK",
               headers: responseHeaders,
             },
-            httpVersion
+            httpVersion,
           );
-          streamedBytes = await sendChunkedBody.call(this, responseBodyStream, write, waitForWritable);
+          streamedBytes = await sendChunkedBody(
+            backend,
+            responseBodyStream,
+            write,
+            waitForWritable,
+          );
         } else {
           delete responseHeaders["transfer-encoding"];
-          sendHttpResponseHead.call(this, 
+          sendHttpResponseHead(
+            backend,
             write,
             {
               status: response.status,
               statusText: response.statusText || "OK",
               headers: responseHeaders,
             },
-            httpVersion
+            httpVersion,
           );
-          streamedBytes = await sendStreamBody.call(this, responseBodyStream, write, waitForWritable);
+          streamedBytes = await sendStreamBody(
+            backend,
+            responseBodyStream,
+            write,
+            waitForWritable,
+          );
         }
       } else {
         responseHeaders["content-length"] = parsedLength!.toString();
         delete responseHeaders["transfer-encoding"];
-        sendHttpResponseHead.call(this, 
+        sendHttpResponseHead(
+          backend,
           write,
           {
             status: response.status,
             statusText: response.statusText || "OK",
             headers: responseHeaders,
           },
-          httpVersion
+          httpVersion,
         );
-        streamedBytes = await sendStreamBody.call(this, responseBodyStream, write, waitForWritable);
+        streamedBytes = await sendStreamBody(
+          backend,
+          responseBodyStream,
+          write,
+          waitForWritable,
+        );
       }
 
-      if (this.options.debug) {
+      if (backend.options.debug) {
         const elapsed = Date.now() - responseStart;
-        this.emitDebug(`http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`);
+        backend.emitDebug(
+          `http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`,
+        );
       }
 
       return;
     }
 
-    const maxResponseBytes = this.maxHttpResponseBodyBytes;
+    const maxResponseBytes = backend.http.maxHttpResponseBodyBytes;
 
-    if (hasValidLength && !contentEncoding && parsedLength! > maxResponseBytes) {
+    if (
+      hasValidLength &&
+      !contentEncoding &&
+      parsedLength! > maxResponseBytes
+    ) {
       if (responseBodyStream) {
         try {
           await responseBodyStream.cancel();
@@ -1780,15 +2086,27 @@ export async function fetchHookRequestAndRespond(
           // ignore cancellation failures
         }
       }
-      throw new HttpRequestBlockedError(`response body exceeds ${maxResponseBytes} bytes`, 502, "Bad Gateway");
+      throw new HttpRequestBlockedError(
+        `response body exceeds ${maxResponseBytes} bytes`,
+        502,
+        "Bad Gateway",
+      );
     }
 
     const responseBody = responseBodyStream
-      ? await bufferResponseBodyWithLimit.call(this, responseBodyStream, maxResponseBytes)
+      ? await bufferResponseBodyWithLimit(
+          backend,
+          responseBodyStream,
+          maxResponseBytes,
+        )
       : Buffer.from(await response.arrayBuffer());
 
     if (responseBody.length > maxResponseBytes) {
-      throw new HttpRequestBlockedError(`response body exceeds ${maxResponseBytes} bytes`, 502, "Bad Gateway");
+      throw new HttpRequestBlockedError(
+        `response body exceeds ${maxResponseBytes} bytes`,
+        502,
+        "Bad Gateway",
+      );
     }
 
     responseHeaders["content-length"] = responseBody.length.toString();
@@ -1800,54 +2118,82 @@ export async function fetchHookRequestAndRespond(
       body: responseBody,
     };
 
-    if (this.options.httpHooks?.onResponse) {
-      const updated = await this.options.httpHooks.onResponse(hookResponse, currentRequest);
+    if (backend.options.httpHooks?.onResponse) {
+      const updated = await backend.options.httpHooks.onResponse(
+        hookResponse,
+        currentRequest,
+      );
       if (updated) hookResponse = updated;
     }
 
-    sendHttpResponse.call(this, write, hookResponse, httpVersion);
-    if (this.options.debug) {
+    sendHttpResponse(backend, write, hookResponse, httpVersion);
+    if (backend.options.debug) {
       const elapsed = Date.now() - responseStart;
-      this.emitDebug(`http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`);
+      backend.emitDebug(
+        `http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`,
+      );
     }
     return;
   }
 }
 
-function isWebSocketUpgradeRequest(this: any, request: HttpRequestData): boolean {
+function isWebSocketUpgradeRequest(
+  backend: QemuNetworkBackend,
+  request: HttpRequestData,
+): boolean {
   const upgrade = request.headers["upgrade"]?.toLowerCase() ?? "";
   if (upgrade === "websocket") return true;
 
   // Some clients omit Upgrade/Connection but include the WebSocket-specific headers.
-  if (request.headers["sec-websocket-key"] || request.headers["sec-websocket-version"]) return true;
+  if (
+    request.headers["sec-websocket-key"] ||
+    request.headers["sec-websocket-version"]
+  )
+    return true;
 
   return false;
 }
 
 async function handleWebSocketUpgrade(
-  this: any,
+  backend: QemuNetworkBackend,
   key: string,
   request: HttpRequestData,
   session: any,
-  options: { scheme: "http" | "https"; write: (chunk: Buffer) => void; finish: () => void },
+  options: {
+    scheme: "http" | "https";
+    write: (chunk: Buffer) => void;
+    finish: () => void;
+  },
   httpVersion: "HTTP/1.0" | "HTTP/1.1",
   hookContext: {
     /** head after `onRequestHead` (and secret substitution) */
     headHookRequest: HttpHookRequest;
     /** placeholder-only head to feed into `onRequest` */
     headHookRequestForBodyHook: HttpHookRequest | null;
-  }
+  },
 ): Promise<boolean> {
   if (request.version !== "HTTP/1.1") {
-    throw new HttpRequestBlockedError("websocket upgrade requires HTTP/1.1", 501, "Not Implemented");
+    throw new HttpRequestBlockedError(
+      "websocket upgrade requires HTTP/1.1",
+      501,
+      "Not Implemented",
+    );
   }
 
   // WebSocket upgrades are always GET without a body.
   if (request.method.toUpperCase() !== "GET") {
-    throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
+    throw new HttpRequestBlockedError(
+      "websocket upgrade requires GET",
+      400,
+      "Bad Request",
+    );
   }
   if (request.body.length > 0) {
-    throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
+    throw new HttpRequestBlockedError(
+      "websocket upgrade requests must not have a body",
+      400,
+      "Bad Request",
+    );
   }
 
   const { headHookRequest, headHookRequestForBodyHook } = hookContext;
@@ -1864,21 +2210,32 @@ async function handleWebSocketUpgrade(
 
   // Preserve placeholder-only values for `onRequest` (per secrets docs). The
   // `createHttpHooks` wrapper will inject secrets after the user hook runs.
-  hookRequest = await applyRequestBodyHooks.call(this, headHookRequestForBodyHook ?? hookRequest);
+  hookRequest = await applyRequestBodyHooks(
+    backend,
+    headHookRequestForBodyHook ?? hookRequest,
+  );
 
   // If `onRequest` rewrote the destination or relevant headers, re-run request
   // policy checks against the final (post-rewrite) request.
-  if (!isSamePolicyRelevantRequestHead.call(this, hookRequest, headHookRequest)) {
-    await ensureRequestAllowed.call(this, hookRequest);
+  if (!isSamePolicyRelevantRequestHead(backend, hookRequest, headHookRequest)) {
+    await ensureRequestAllowed(backend, hookRequest);
   }
 
   const method = (hookRequest.method ?? "GET").toUpperCase();
   if (method !== "GET") {
-    throw new HttpRequestBlockedError("websocket upgrade requires GET", 400, "Bad Request");
+    throw new HttpRequestBlockedError(
+      "websocket upgrade requires GET",
+      400,
+      "Bad Request",
+    );
   }
 
   if (hookRequest.body && hookRequest.body.length > 0) {
-    throw new HttpRequestBlockedError("websocket upgrade requests must not have a body", 400, "Bad Request");
+    throw new HttpRequestBlockedError(
+      "websocket upgrade requests must not have a body",
+      400,
+      "Bad Request",
+    );
   }
 
   let parsedUrl: URL;
@@ -1890,7 +2247,11 @@ async function handleWebSocketUpgrade(
 
   const protocol = getUrlProtocol(parsedUrl);
   if (!protocol) {
-    throw new HttpRequestBlockedError("unsupported protocol", 400, "Bad Request");
+    throw new HttpRequestBlockedError(
+      "unsupported protocol",
+      400,
+      "Bad Request",
+    );
   }
 
   const port = getUrlPort(parsedUrl, protocol);
@@ -1901,14 +2262,17 @@ async function handleWebSocketUpgrade(
   // Resolve all A/AAAA records and pick the first IP allowed by policy.
   // This pins the websocket tunnel to an allowed address and avoids rejecting
   // a hostname just because the first DNS answer is blocked.
-  const { address } = await resolveHostname.call(this, parsedUrl.hostname, { protocol, port });
+  const { address } = await resolveHostname(backend, parsedUrl.hostname, {
+    protocol,
+    port,
+  });
 
   const ws = session.ws;
   if (!ws) {
     throw new Error("internal error: websocket state missing");
   }
 
-  const upstream = await connectWebSocketUpstream.call(this, {
+  const upstream = await connectWebSocketUpstream(backend, {
     protocol,
     hostname: parsedUrl.hostname,
     address,
@@ -1931,7 +2295,7 @@ async function handleWebSocketUpgrade(
 
   const guestWrite = (chunk: Buffer) => {
     options.write(chunk);
-    this.flush();
+    backend.flush();
   };
 
   let finished = false;
@@ -1978,7 +2342,7 @@ async function handleWebSocketUpgrade(
   }
 
   // Read handshake response head.
-  const resp = await readUpstreamHttpResponseHead.call(this, upstream);
+  const resp = await readUpstreamHttpResponseHead(backend, upstream);
 
   let responseHeaders: HttpResponseHeaders = resp.headers;
 
@@ -1989,8 +2353,11 @@ async function handleWebSocketUpgrade(
     body: Buffer.alloc(0),
   };
 
-  if (this.options.httpHooks?.onResponse) {
-    const updated = await this.options.httpHooks.onResponse(hookResponse, hookRequest);
+  if (backend.options.httpHooks?.onResponse) {
+    const updated = await backend.options.httpHooks.onResponse(
+      hookResponse,
+      hookRequest,
+    );
     if (updated) hookResponse = updated;
   }
 
@@ -1999,14 +2366,19 @@ async function handleWebSocketUpgrade(
     const headers = { ...hookResponse.headers };
     delete headers["transfer-encoding"];
     headers["content-length"] = String(hookResponse.body.length);
-    sendHttpResponse.call(this, guestWrite, { ...hookResponse, headers }, httpVersion);
+    sendHttpResponse(
+      backend,
+      guestWrite,
+      { ...hookResponse, headers },
+      httpVersion,
+    );
     finishOnce();
     upstream.destroy();
     session.ws = undefined;
     return false;
   }
 
-  sendHttpResponseHead.call(this, guestWrite, hookResponse, httpVersion);
+  sendHttpResponseHead(backend, guestWrite, hookResponse, httpVersion);
 
   if (resp.rest.length > 0) {
     guestWrite(resp.rest);
@@ -2031,8 +2403,8 @@ async function handleWebSocketUpgrade(
   });
 
   upstream.on("error", (err: Error) => {
-    this.emit("error", err);
-    abortWebSocketSession.call(this, key, session, "upstream-error");
+    backend.emit("error", err);
+    abortWebSocketSession(backend, key, session, "upstream-error");
   });
 
   upstream.on("close", () => {
@@ -2045,10 +2417,10 @@ async function handleWebSocketUpgrade(
     // For TLS flows, closing the guest TLS socket triggers stack.handleTcpClosed.
     if (options.scheme === "http") {
       // If the session was already aborted/removed, do not emit a second close.
-      if (!this.tcpSessions.has(key)) return;
-      this.stack?.handleTcpClosed({ key });
-      this.resolveFlowResume(key);
-      this.tcpSessions.delete(key);
+      if (!backend.tcpSessions.has(key)) return;
+      backend.stack?.handleTcpClosed({ key });
+      backend.resolveFlowResume(key);
+      backend.tcpSessions.delete(key);
     }
   });
 
@@ -2063,15 +2435,15 @@ async function handleWebSocketUpgrade(
 }
 
 export async function connectWebSocketUpstream(
-  this: any,
+  backend: QemuNetworkBackend,
   info: {
     protocol: "http" | "https";
     hostname: string;
     address: string;
     port: number;
-  }
+  },
 ): Promise<net.Socket> {
-  const timeoutMs = this.webSocketUpstreamConnectTimeoutMs;
+  const timeoutMs = backend.http.webSocketUpstreamConnectTimeoutMs;
 
   if (info.protocol === "https") {
     const socket = tls.connect({
@@ -2118,7 +2490,9 @@ export async function connectWebSocketUpstream(
 
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timer = setTimeout(() => {
-          const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
+          const err = new Error(
+            `websocket upstream connect timeout after ${timeoutMs}ms`,
+          );
           settleReject(err);
           try {
             socket.destroy();
@@ -2175,7 +2549,9 @@ export async function connectWebSocketUpstream(
 
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => {
-        const err = new Error(`websocket upstream connect timeout after ${timeoutMs}ms`);
+        const err = new Error(
+          `websocket upstream connect timeout after ${timeoutMs}ms`,
+        );
         settleReject(err);
         try {
           socket.destroy();
@@ -2193,8 +2569,8 @@ export async function connectWebSocketUpstream(
 }
 
 export async function readUpstreamHttpResponseHead(
-  this: any,
-  socket: net.Socket
+  backend: QemuNetworkBackend,
+  socket: net.Socket,
 ): Promise<{
   statusCode: number;
   statusMessage: string;
@@ -2204,7 +2580,7 @@ export async function readUpstreamHttpResponseHead(
   let buf = Buffer.alloc(0);
 
   return await new Promise((resolve, reject) => {
-    const timeoutMs = this.webSocketUpstreamHeaderTimeoutMs;
+    const timeoutMs = backend.http.webSocketUpstreamHeaderTimeoutMs;
     let timer: NodeJS.Timeout | null = null;
     let settled = false;
 
@@ -2278,7 +2654,9 @@ export async function readUpstreamHttpResponseHead(
 
       const m = /^HTTP\/\d+\.\d+\s+(\d{3})\s*(.*)$/.exec(statusLine);
       if (!m) {
-        settleReject(new Error(`invalid http status line: ${JSON.stringify(statusLine)}`));
+        settleReject(
+          new Error(`invalid http status line: ${JSON.stringify(statusLine)}`),
+        );
         return;
       }
 
@@ -2303,7 +2681,9 @@ export async function readUpstreamHttpResponseHead(
 
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => {
-        settleReject(new Error(`websocket upstream header timeout after ${timeoutMs}ms`));
+        settleReject(
+          new Error(`websocket upstream header timeout after ${timeoutMs}ms`),
+        );
         try {
           socket.destroy();
         } catch {
@@ -2320,10 +2700,14 @@ export async function readUpstreamHttpResponseHead(
 }
 
 function sendHttpResponseHead(
-  this: any,
+  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
-  response: { status: number; statusText: string; headers: HttpResponseHeaders },
-  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  response: {
+    status: number;
+    statusText: string;
+    headers: HttpResponseHeaders;
+  },
+  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1",
 ) {
   const statusLine = `${httpVersion} ${response.status} ${response.statusText}\r\n`;
 
@@ -2348,22 +2732,22 @@ function sendHttpResponseHead(
 }
 
 function sendHttpResponse(
-  this: any,
+  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
   response: HttpHookResponse,
-  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1",
 ) {
-  sendHttpResponseHead.call(this, write, response, httpVersion);
+  sendHttpResponseHead(backend, write, response, httpVersion);
   if (response.body.length > 0) {
     write(response.body);
   }
 }
 
 async function sendChunkedBody(
-  this: any,
+  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
-  waitForWritable?: () => Promise<void>
+  waitForWritable?: () => Promise<void>,
 ): Promise<number> {
   const reader = body.getReader();
   let total = 0;
@@ -2390,10 +2774,10 @@ async function sendChunkedBody(
 }
 
 async function sendStreamBody(
-  this: any,
+  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
   write: (chunk: Buffer) => void,
-  waitForWritable?: () => Promise<void>
+  waitForWritable?: () => Promise<void>,
 ): Promise<number> {
   const reader = body.getReader();
   let total = 0;
@@ -2415,9 +2799,9 @@ async function sendStreamBody(
 }
 
 async function bufferResponseBodyWithLimit(
-  this: any,
+  backend: QemuNetworkBackend,
   body: WebReadableStream<Uint8Array>,
-  maxBytes: number
+  maxBytes: number,
 ): Promise<Buffer> {
   const reader = body.getReader();
   const chunks: Buffer[] = [];
@@ -2435,7 +2819,11 @@ async function bufferResponseBodyWithLimit(
         } catch {
           // ignore cancellation failures
         }
-        throw new HttpRequestBlockedError(`response body exceeds ${maxBytes} bytes`, 502, "Bad Gateway");
+        throw new HttpRequestBlockedError(
+          `response body exceeds ${maxBytes} bytes`,
+          502,
+          "Bad Gateway",
+        );
       }
 
       total += value.length;
@@ -2449,14 +2837,15 @@ async function bufferResponseBodyWithLimit(
 }
 
 function respondWithError(
-  this: any,
+  backend: QemuNetworkBackend,
   write: (chunk: Buffer) => void,
   status: number,
   statusText: string,
-  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
+  httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1",
 ) {
   const body = Buffer.from(`${status} ${statusText}\n`);
-  sendHttpResponse.call(this, 
+  sendHttpResponse(
+    backend,
     write,
     {
       status,
@@ -2468,11 +2857,15 @@ function respondWithError(
       },
       body,
     },
-    httpVersion
+    httpVersion,
   );
 }
 
-function buildFetchUrl(this: any, request: HttpRequestData, defaultScheme: "http" | "https") {
+function buildFetchUrl(
+  backend: QemuNetworkBackend,
+  request: HttpRequestData,
+  defaultScheme: "http" | "https",
+) {
   if (
     request.target.startsWith("http://") ||
     request.target.startsWith("https://") ||
@@ -2503,19 +2896,23 @@ type LookupResult = string | dns.LookupAddress[];
 type LookupCallback = (
   err: NodeJS.ErrnoException | null,
   address: LookupResult,
-  family?: number
+  family?: number,
 ) => void;
 
 type LookupFn = (
   hostname: string,
   options: dns.LookupOneOptions | dns.LookupAllOptions,
-  callback: (err: NodeJS.ErrnoException | null, address: LookupResult, family?: number) => void
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    address: LookupResult,
+    family?: number,
+  ) => void,
 ) => void;
 
 export async function resolveHostname(
-  this: any,
+  backend: QemuNetworkBackend,
   hostname: string,
-  policy?: { protocol: "http" | "https"; port: number }
+  policy?: { protocol: "http" | "https"; port: number },
 ): Promise<{ address: string; family: 4 | 6 }> {
   const ipFamily = net.isIP(hostname);
 
@@ -2525,19 +2922,26 @@ export async function resolveHostname(
       : normalizeLookupEntries(
           // Use all addresses so policy checks can pick the first allowed entry.
           await new Promise<dns.LookupAddress[]>((resolve, reject) => {
-            const lookup = this.options.dnsLookup ?? dns.lookup.bind(dns);
-            lookup(hostname, { all: true, verbatim: true }, (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => {
-              if (err) reject(err);
-              else resolve(addresses);
-            });
-          })
+            const lookup = backend.options.dnsLookup ?? dns.lookup.bind(dns);
+            lookup(
+              hostname,
+              { all: true, verbatim: true },
+              (
+                err: NodeJS.ErrnoException | null,
+                addresses: dns.LookupAddress[],
+              ) => {
+                if (err) reject(err);
+                else resolve(addresses);
+              },
+            );
+          }),
         );
 
   if (entries.length === 0) {
     throw new Error("DNS lookup returned no addresses");
   }
 
-  const isIpAllowed = this.options.httpHooks?.isIpAllowed;
+  const isIpAllowed = backend.options.httpHooks?.isIpAllowed;
   if (!policy || !isIpAllowed) {
     const first = entries[0]!;
     return { address: first.address, family: first.family };
@@ -2559,8 +2963,11 @@ export async function resolveHostname(
   throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
 }
 
-async function ensureRequestAllowed(this: any, request: HttpHookRequest) {
-  if (!this.options.httpHooks?.isRequestAllowed) return;
+async function ensureRequestAllowed(
+  backend: QemuNetworkBackend,
+  request: HttpHookRequest,
+) {
+  if (!backend.options.httpHooks?.isRequestAllowed) return;
 
   // Request policy is head-only: never expose request body to this callback.
   const headOnly: HttpHookRequest = {
@@ -2570,22 +2977,31 @@ async function ensureRequestAllowed(this: any, request: HttpHookRequest) {
     body: null,
   };
 
-  const allowed = await this.options.httpHooks.isRequestAllowed(headOnly);
+  const allowed = await backend.options.httpHooks.isRequestAllowed(headOnly);
   if (!allowed) {
     throw new HttpRequestBlockedError("blocked by request policy");
   }
 }
 
-async function ensureIpAllowed(this: any, parsedUrl: URL, protocol: "http" | "https", port: number) {
-  if (!this.options.httpHooks?.isIpAllowed) return;
+async function ensureIpAllowed(
+  backend: QemuNetworkBackend,
+  parsedUrl: URL,
+  protocol: "http" | "https",
+  port: number,
+) {
+  if (!backend.options.httpHooks?.isIpAllowed) return;
 
   // Resolve all A/AAAA records and ensure at least one address is permitted.
   // When using the default fetch, the guarded undici lookup will additionally
   // pin the actual connect to an allowed IP.
-  await resolveHostname.call(this, parsedUrl.hostname, { protocol, port });
+  await resolveHostname(backend, parsedUrl.hostname, { protocol, port });
 }
 
-function isSamePolicyRelevantRequestHead(this: any, a: HttpHookRequest, b: HttpHookRequest): boolean {
+function isSamePolicyRelevantRequestHead(
+  backend: QemuNetworkBackend,
+  a: HttpHookRequest,
+  b: HttpHookRequest,
+): boolean {
   if (a.method !== b.method) return false;
   if (a.url !== b.url) return false;
 
@@ -2616,8 +3032,8 @@ function isSamePolicyRelevantRequestHead(this: any, a: HttpHookRequest, b: HttpH
 }
 
 async function applyRequestHeadHooks(
-  this: any,
-  request: HttpHookRequest
+  backend: QemuNetworkBackend,
+  request: HttpHookRequest,
 ): Promise<{
   request: HttpHookRequest;
   /** optional placeholder request head to feed into `httpHooks.onRequest` */
@@ -2625,9 +3041,9 @@ async function applyRequestHeadHooks(
   bufferRequestBody: boolean;
   maxBufferedRequestBodyBytes: number | null;
 }> {
-  const hasBodyHook = Boolean(this.options.httpHooks?.onRequest);
+  const hasBodyHook = Boolean(backend.options.httpHooks?.onRequest);
 
-  if (!this.options.httpHooks?.onRequestHead) {
+  if (!backend.options.httpHooks?.onRequestHead) {
     return {
       request,
       requestForBodyHook: null,
@@ -2643,7 +3059,7 @@ async function applyRequestHeadHooks(
     body: null,
   };
 
-  const updated = await this.options.httpHooks.onRequestHead(cloned);
+  const updated = await backend.options.httpHooks.onRequestHead(cloned);
   const next = (updated ?? cloned) as HttpHookRequest & {
     bufferRequestBody?: boolean;
     maxBufferedRequestBodyBytes?: number;
@@ -2658,7 +3074,10 @@ async function applyRequestHeadHooks(
       body: null,
     },
     requestForBodyHook: next.requestForBodyHook ?? null,
-    bufferRequestBody: typeof next.bufferRequestBody === "boolean" ? next.bufferRequestBody : hasBodyHook,
+    bufferRequestBody:
+      typeof next.bufferRequestBody === "boolean"
+        ? next.bufferRequestBody
+        : hasBodyHook,
     maxBufferedRequestBodyBytes:
       typeof next.maxBufferedRequestBodyBytes === "number" &&
       Number.isFinite(next.maxBufferedRequestBodyBytes) &&
@@ -2668,8 +3087,11 @@ async function applyRequestHeadHooks(
   };
 }
 
-async function applyRequestBodyHooks(this: any, request: HttpHookRequest): Promise<HttpHookRequest> {
-  if (!this.options.httpHooks?.onRequest) {
+async function applyRequestBodyHooks(
+  backend: QemuNetworkBackend,
+  request: HttpHookRequest,
+): Promise<HttpHookRequest> {
+  if (!backend.options.httpHooks?.onRequest) {
     return request;
   }
 
@@ -2680,11 +3102,14 @@ async function applyRequestBodyHooks(this: any, request: HttpHookRequest): Promi
     body: request.body,
   };
 
-  const updated = await this.options.httpHooks.onRequest(cloned);
+  const updated = await backend.options.httpHooks.onRequest(cloned);
   return updated ?? cloned;
 }
 
-function headersToRecord(this: any, headers: Headers): HttpResponseHeaders {
+function headersToRecord(
+  backend: QemuNetworkBackend,
+  headers: Headers,
+): HttpResponseHeaders {
   const record: HttpResponseHeaders = {};
 
   headers.forEach((value, key) => {
@@ -2715,4 +3140,3 @@ function getUrlPort(url: URL, protocol: "http" | "https"): number {
   if (url.port) return Number(url.port);
   return protocol === "https" ? 443 : 80;
 }
-

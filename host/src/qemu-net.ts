@@ -18,7 +18,12 @@ import {
   loadOrCreateMitmCa,
   resolveMitmCertDir,
 } from "./mitm";
-import { buildSyntheticDnsResponse, isLocalhostDnsName, isProbablyDnsPacket, parseDnsQuery } from "./dns";
+import {
+  buildSyntheticDnsResponse,
+  isLocalhostDnsName,
+  isProbablyDnsPacket,
+  parseDnsQuery,
+} from "./dns";
 import { Agent, fetch as undiciFetch } from "undici";
 import {
   Client as SshClient,
@@ -72,7 +77,8 @@ const DEFAULT_DNS_MODE: DnsMode = "synthetic";
 const DEFAULT_SYNTHETIC_DNS_IPV4 = "192.0.2.1";
 const DEFAULT_SYNTHETIC_DNS_IPV6 = "2001:db8::1";
 const DEFAULT_SYNTHETIC_DNS_TTL_SECONDS = 60;
-const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode = "single";
+const DEFAULT_SYNTHETIC_DNS_HOST_MAPPING: SyntheticDnsHostMappingMode =
+  "single";
 
 const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
 
@@ -120,9 +126,10 @@ type UdpSession = {
   upstreamPort: number;
 };
 
-
 class GuestTlsStream extends Duplex {
-  constructor(private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>) {
+  constructor(
+    private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>,
+  ) {
     super();
   }
 
@@ -134,10 +141,14 @@ class GuestTlsStream extends Duplex {
     // data is pushed via pushEncrypted
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ) {
     Promise.resolve(this.onEncryptedWrite(Buffer.from(chunk))).then(
       () => callback(),
-      (err) => callback(err as Error)
+      (err) => callback(err as Error),
     );
   }
 }
@@ -145,7 +156,7 @@ class GuestTlsStream extends Duplex {
 class GuestSshStream extends Duplex {
   constructor(
     private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>,
-    private readonly onServerEnd: () => void | Promise<void>
+    private readonly onServerEnd: () => void | Promise<void>,
   ) {
     super();
   }
@@ -158,17 +169,21 @@ class GuestSshStream extends Duplex {
     // data is pushed via pushFromGuest
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ) {
     Promise.resolve(this.onServerWrite(Buffer.from(chunk))).then(
       () => callback(),
-      (err) => callback(err as Error)
+      (err) => callback(err as Error),
     );
   }
 
   _final(callback: (error?: Error | null) => void) {
     Promise.resolve(this.onServerEnd()).then(
       () => callback(),
-      (err) => callback(err as Error)
+      (err) => callback(err as Error),
     );
   }
 }
@@ -217,9 +232,24 @@ type TcpSession = {
   ws?: WebSocketState;
 };
 
-type SharedDispatcherEntry = {
-  dispatcher: Agent;
-  lastUsedAt: number;
+/** @internal */
+export type QemuHttpInternals = {
+  /** max intercepted http request body size in `bytes` */
+  maxHttpBodyBytes: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes: number;
+  /** whether to allow WebSocket upgrades */
+  allowWebSockets: boolean;
+  /** websocket upstream connect + tls handshake timeout in `ms` */
+  webSocketUpstreamConnectTimeoutMs: number;
+  /** websocket upstream response header timeout in `ms` */
+  webSocketUpstreamHeaderTimeoutMs: number;
+  /** semaphore limiting concurrent upstream fetches */
+  httpConcurrency: AsyncSemaphore;
+  /** shared undici dispatchers keyed by origin */
+  sharedDispatchers: Map<string, { dispatcher: Agent; lastUsedAt: number }>;
+  /** whether qemu rx is paused due to streaming request backpressure */
+  qemuRxPausedForHttpStreaming: boolean;
 };
 
 export type HttpFetch = typeof undiciFetch;
@@ -326,9 +356,9 @@ export type SshExecDecision =
       message?: string;
     };
 
-export type SshExecPolicy = (request: SshExecRequest) =>
-  | SshExecDecision
-  | Promise<SshExecDecision>;
+export type SshExecPolicy = (
+  request: SshExecRequest,
+) => SshExecDecision | Promise<SshExecDecision>;
 
 export type SshOptions = {
   /** allowed ssh host patterns (optionally with ":PORT" suffix to allow non-standard ports) */
@@ -380,16 +410,21 @@ export type HttpHooks = {
 
   /** request rewrite hook for the request head (method/url/headers only; body is always `null`) */
   onRequestHead?: (
-    request: HttpHookRequest
-  ) => Promise<HttpHookRequestHeadResult | void> | HttpHookRequestHeadResult | void;
+    request: HttpHookRequest,
+  ) =>
+    | Promise<HttpHookRequestHeadResult | void>
+    | HttpHookRequestHeadResult
+    | void;
 
   /** request rewrite hook for buffered requests (request body is provided as a Buffer) */
-  onRequest?: (request: HttpHookRequest) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
+  onRequest?: (
+    request: HttpHookRequest,
+  ) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
 
   /** response rewrite hook */
   onResponse?: (
     response: HttpHookResponse,
-    request: HttpHookRequest
+    request: HttpHookRequest,
   ) => Promise<HttpHookResponse | void> | HttpHookResponse | void;
 };
 
@@ -449,7 +484,10 @@ export type QemuNetworkOptions = {
   dnsLookup?: (
     hostname: string,
     options: dns.LookupAllOptions,
-    callback: (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+    callback: (
+      err: NodeJS.ErrnoException | null,
+      addresses: dns.LookupAddress[],
+    ) => void,
   ) => void;
 };
 
@@ -465,19 +503,32 @@ type TlsContextCacheEntry = {
 };
 
 export class QemuNetworkBackend extends EventEmitter {
-  private emitDebug(message: string) {
+  /** @internal */
+  emitDebug(message: string) {
     // Structured event for consumers (VM / SandboxServer)
     this.emit("debug", "net", stripTrailingNewline(message));
     // Legacy string log event
     this.emit("log", `[net] ${stripTrailingNewline(message)}`);
   }
+
+  /** @internal */
+  readonly options: QemuNetworkOptions;
+
   private server: net.Server | null = null;
-  private socket: net.Socket | null = null;
+
+  /** @internal */
+  socket: net.Socket | null = null;
+
   private waitingDrain = false;
-  private qemuRxPausedForHttpStreaming = false;
-  private stack: NetworkStack | null = null;
+
+  /** @internal */
+  stack: NetworkStack | null = null;
+
   private readonly udpSessions = new Map<string, UdpSession>();
-  private readonly tcpSessions = new Map<string, TcpSession>();
+
+  /** @internal */
+  readonly tcpSessions = new Map<string, TcpSession>();
+
   private readonly mitmDir: string;
   private caPromise: Promise<CaCert> | null = null;
   private tlsContexts = new Map<string, TlsContextCacheEntry>();
@@ -485,17 +536,17 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly icmpTimings = new Map<string, IcmpTiming>();
   private icmpDebugBuffer = Buffer.alloc(0);
   private icmpRxBuffer = Buffer.alloc(0);
-  private eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | null = null;
-  private readonly maxHttpBodyBytes: number;
-  private readonly maxHttpResponseBodyBytes: number;
-  private readonly maxTcpPendingWriteBytes: number;
-  private readonly allowWebSockets: boolean;
-  private readonly webSocketUpstreamConnectTimeoutMs: number;
-  private readonly webSocketUpstreamHeaderTimeoutMs: number;
+  private eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | null =
+    null;
+
+  /** @internal */
+  readonly maxTcpPendingWriteBytes: number;
+
+  /** @internal */
+  readonly http: QemuHttpInternals;
+
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
-  private readonly httpConcurrency: AsyncSemaphore;
-  private readonly sharedDispatchers = new Map<string, SharedDispatcherEntry>();
   private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
 
   private readonly dnsMode: DnsMode;
@@ -517,7 +568,9 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshCredentials: ResolvedSshCredential[];
   private readonly sshAgent: string | null;
   private sshHostKey: string | null;
-  private readonly sshHostVerifier: ((hostname: string, key: Buffer, port: number) => boolean) | null;
+  private readonly sshHostVerifier:
+    | ((hostname: string, key: Buffer, port: number) => boolean)
+    | null;
   private readonly sshExecPolicy: SshExecPolicy | null;
   private readonly sshMaxUpstreamConnectionsPerTcpSession: number;
   private readonly sshMaxUpstreamConnectionsTotal: number;
@@ -526,49 +579,64 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshUpstreamKeepaliveCountMax: number;
   private readonly sshUpstreams = new Set<SshClient>();
 
-  constructor(private readonly options: QemuNetworkOptions) {
+  constructor(options: QemuNetworkOptions) {
     super();
+    this.options = options;
+
     if (options.debug) {
       this.eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
       this.eventLoopDelay.enable();
     }
     this.mitmDir = resolveMitmCertDir(options.mitmCertDir);
-    this.maxHttpBodyBytes = options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES;
-    this.maxHttpResponseBodyBytes =
-      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES;
 
     this.maxTcpPendingWriteBytes =
       options.maxTcpPendingWriteBytes ?? DEFAULT_MAX_TCP_PENDING_WRITE_BYTES;
 
-    this.allowWebSockets = options.allowWebSockets ?? true;
-    this.webSocketUpstreamConnectTimeoutMs =
-      options.webSocketUpstreamConnectTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS;
-    this.webSocketUpstreamHeaderTimeoutMs =
-      options.webSocketUpstreamHeaderTimeoutMs ?? DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS;
-
-    this.httpConcurrency = new AsyncSemaphore(DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS);
+    this.http = {
+      maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
+      maxHttpResponseBodyBytes:
+        options.maxHttpResponseBodyBytes ??
+        DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+      allowWebSockets: options.allowWebSockets ?? true,
+      webSocketUpstreamConnectTimeoutMs:
+        options.webSocketUpstreamConnectTimeoutMs ??
+        DEFAULT_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT_MS,
+      webSocketUpstreamHeaderTimeoutMs:
+        options.webSocketUpstreamHeaderTimeoutMs ??
+        DEFAULT_WEBSOCKET_UPSTREAM_HEADER_TIMEOUT_MS,
+      httpConcurrency: new AsyncSemaphore(DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS),
+      sharedDispatchers: new Map(),
+      qemuRxPausedForHttpStreaming: false,
+    };
 
     this.tlsContextCacheMaxEntries =
-      options.tlsContextCacheMaxEntries ?? DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
-    this.tlsContextCacheTtlMs = options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
+      options.tlsContextCacheMaxEntries ??
+      DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
+    this.tlsContextCacheTtlMs =
+      options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
 
     this.dnsMode = options.dns?.mode ?? DEFAULT_DNS_MODE;
     this.trustedDnsServers = normalizeIpv4Servers(options.dns?.trustedServers);
 
     if (this.dnsMode === "trusted" && this.trustedDnsServers.length === 0) {
       throw new Error(
-        "dns mode 'trusted' requires at least one IPv4 resolver (none found). Provide an IPv4 resolver via --dns-trusted-server or configure an IPv4 DNS server on the host"
+        "dns mode 'trusted' requires at least one IPv4 resolver (none found). Provide an IPv4 resolver via --dns-trusted-server or configure an IPv4 DNS server on the host",
       );
     }
 
     this.syntheticDnsOptions = {
       ipv4: options.dns?.syntheticIPv4 ?? DEFAULT_SYNTHETIC_DNS_IPV4,
       ipv6: options.dns?.syntheticIPv6 ?? DEFAULT_SYNTHETIC_DNS_IPV6,
-      ttlSeconds: options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
+      ttlSeconds:
+        options.dns?.syntheticTtlSeconds ?? DEFAULT_SYNTHETIC_DNS_TTL_SECONDS,
     };
 
-    this.sshAllowedTargets = normalizeSshAllowedTargets(options.ssh?.allowedHosts);
-    this.sshSniffPorts = Array.from(new Set(this.sshAllowedTargets.map((t) => t.port)));
+    this.sshAllowedTargets = normalizeSshAllowedTargets(
+      options.ssh?.allowedHosts,
+    );
+    this.sshSniffPorts = Array.from(
+      new Set(this.sshAllowedTargets.map((t) => t.port)),
+    );
     this.sshSniffPortsSet = new Set(this.sshSniffPorts);
     this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
     this.sshAgent = options.ssh?.agent ?? null;
@@ -588,14 +656,20 @@ export class QemuNetworkBackend extends EventEmitter {
       !sshHostVerifier &&
       (this.sshAgent || this.sshCredentials.length > 0)
     ) {
-      const knownHostsFiles = normalizeSshKnownHostsFiles(options.ssh?.knownHostsFile);
+      const knownHostsFiles = normalizeSshKnownHostsFiles(
+        options.ssh?.knownHostsFile,
+      );
       try {
         sshHostVerifier = createOpenSshKnownHostsHostVerifier(knownHostsFiles);
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
+          err instanceof Error
+            ? err.message
+            : typeof err === "string"
+              ? err
+              : JSON.stringify(err);
         throw new Error(
-          `ssh egress requires ssh.hostVerifier to validate upstream host keys (failed to load known_hosts: ${message})`
+          `ssh egress requires ssh.hostVerifier to validate upstream host keys (failed to load known_hosts: ${message})`,
         );
       }
     }
@@ -606,29 +680,40 @@ export class QemuNetworkBackend extends EventEmitter {
       options.ssh?.maxUpstreamConnectionsPerTcpSession ??
       DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION;
     if (!Number.isInteger(sshMaxPerSession) || sshMaxPerSession <= 0) {
-      throw new Error("ssh.maxUpstreamConnectionsPerTcpSession must be an integer > 0");
+      throw new Error(
+        "ssh.maxUpstreamConnectionsPerTcpSession must be an integer > 0",
+      );
     }
 
     const sshMaxTotal =
-      options.ssh?.maxUpstreamConnectionsTotal ?? DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL;
+      options.ssh?.maxUpstreamConnectionsTotal ??
+      DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL;
     if (!Number.isInteger(sshMaxTotal) || sshMaxTotal <= 0) {
       throw new Error("ssh.maxUpstreamConnectionsTotal must be an integer > 0");
     }
 
     const sshReadyTimeoutMs =
-      options.ssh?.upstreamReadyTimeoutMs ?? DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS;
+      options.ssh?.upstreamReadyTimeoutMs ??
+      DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS;
     if (!Number.isInteger(sshReadyTimeoutMs) || sshReadyTimeoutMs <= 0) {
       throw new Error("ssh.upstreamReadyTimeoutMs must be an integer > 0");
     }
 
     const sshKeepaliveIntervalMs =
-      options.ssh?.upstreamKeepaliveIntervalMs ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS;
-    if (!Number.isInteger(sshKeepaliveIntervalMs) || sshKeepaliveIntervalMs < 0) {
-      throw new Error("ssh.upstreamKeepaliveIntervalMs must be an integer >= 0");
+      options.ssh?.upstreamKeepaliveIntervalMs ??
+      DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS;
+    if (
+      !Number.isInteger(sshKeepaliveIntervalMs) ||
+      sshKeepaliveIntervalMs < 0
+    ) {
+      throw new Error(
+        "ssh.upstreamKeepaliveIntervalMs must be an integer >= 0",
+      );
     }
 
     const sshKeepaliveCountMax =
-      options.ssh?.upstreamKeepaliveCountMax ?? DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX;
+      options.ssh?.upstreamKeepaliveCountMax ??
+      DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX;
     if (!Number.isInteger(sshKeepaliveCountMax) || sshKeepaliveCountMax < 0) {
       throw new Error("ssh.upstreamKeepaliveCountMax must be an integer >= 0");
     }
@@ -641,21 +726,38 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
-      (this.sshAllowedTargets.length > 0 ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+      (this.sshAllowedTargets.length > 0
+        ? "per-host"
+        : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
     this.syntheticDnsHostMap =
-      this.syntheticDnsHostMapping === "per-host" ? new SyntheticDnsHostMap() : null;
+      this.syntheticDnsHostMapping === "per-host"
+        ? new SyntheticDnsHostMap()
+        : null;
 
     if (this.sshAllowedTargets.length > 0 && this.dnsMode !== "synthetic") {
       throw new Error("ssh egress requires dns mode 'synthetic'");
     }
-    if (this.sshAllowedTargets.length > 0 && this.syntheticDnsHostMapping !== "per-host") {
-      throw new Error("ssh egress requires dns syntheticHostMapping='per-host'");
+    if (
+      this.sshAllowedTargets.length > 0 &&
+      this.syntheticDnsHostMapping !== "per-host"
+    ) {
+      throw new Error(
+        "ssh egress requires dns syntheticHostMapping='per-host'",
+      );
     }
-    if (this.sshAllowedTargets.length > 0 && this.sshCredentials.length === 0 && !this.sshAgent) {
-      throw new Error("ssh egress requires at least one credential or ssh agent (direct ssh is not supported)");
+    if (
+      this.sshAllowedTargets.length > 0 &&
+      this.sshCredentials.length === 0 &&
+      !this.sshAgent
+    ) {
+      throw new Error(
+        "ssh egress requires at least one credential or ssh agent (direct ssh is not supported)",
+      );
     }
     if (this.sshAllowedTargets.length > 0 && !this.sshHostVerifier) {
-      throw new Error("ssh egress requires ssh.hostVerifier to validate upstream host keys");
+      throw new Error(
+        "ssh egress requires ssh.hostVerifier to validate upstream host keys",
+      );
     }
   }
 
@@ -674,7 +776,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
   async close(): Promise<void> {
     this.detachSocket();
-    this.closeSharedDispatchers();
+    closeSharedDispatchers(this);
 
     if (this.eventLoopDelay) {
       try {
@@ -734,10 +836,10 @@ export class QemuNetworkBackend extends EventEmitter {
       this.socket.destroy();
       this.socket = null;
     }
-    this.qemuRxPausedForHttpStreaming = false;
+    this.http.qemuRxPausedForHttpStreaming = false;
     this.waitingDrain = false;
     this.cleanupSessions();
-    this.closeSharedDispatchers();
+    closeSharedDispatchers(this);
     this.stack?.reset();
   }
 
@@ -764,11 +866,15 @@ export class QemuNetworkBackend extends EventEmitter {
       },
       allowTcpFlow: (info) => {
         if (info.protocol === "ssh") {
-          const allowed = this.isSshFlowAllowed(info.key, info.dstIP, info.dstPort);
+          const allowed = this.isSshFlowAllowed(
+            info.key,
+            info.dstIP,
+            info.dstPort,
+          );
           if (!allowed) {
             if (this.options.debug) {
               this.emitDebug(
-                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
               );
             }
             return false;
@@ -784,7 +890,7 @@ export class QemuNetworkBackend extends EventEmitter {
         if (info.protocol !== "http" && info.protocol !== "tls") {
           if (this.options.debug) {
             this.emitDebug(
-              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
             );
           }
           return false;
@@ -808,11 +914,24 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.stack.on("network-activity", () => this.flush());
     this.stack.on("error", (err) => this.emit("error", err));
-    this.stack.on("tx-drop", (info: { priority: string; bytes: number; reason: string; evictedBytes?: number }) => {
-      if (!this.options.debug) return;
-      const evicted = typeof info.evictedBytes === "number" ? ` evicted=${info.evictedBytes}` : "";
-      this.emitDebug(`tx-drop priority=${info.priority} bytes=${info.bytes} reason=${info.reason}${evicted}`);
-    });
+    this.stack.on(
+      "tx-drop",
+      (info: {
+        priority: string;
+        bytes: number;
+        reason: string;
+        evictedBytes?: number;
+      }) => {
+        if (!this.options.debug) return;
+        const evicted =
+          typeof info.evictedBytes === "number"
+            ? ` evicted=${info.evictedBytes}`
+            : "";
+        this.emitDebug(
+          `tx-drop priority=${info.priority} bytes=${info.bytes} reason=${info.reason}${evicted}`,
+        );
+      },
+    );
     if (this.options.debug) {
       this.icmpTimings.clear();
       this.icmpDebugBuffer = Buffer.alloc(0);
@@ -826,7 +945,8 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private flush() {
+  /** @internal */
+  flush() {
     if (!this.socket || this.waitingDrain || !this.stack) return;
     while (this.stack.hasPendingData()) {
       const chunk = this.stack.readFromNetwork(64 * 1024);
@@ -985,7 +1105,7 @@ export class QemuNetworkBackend extends EventEmitter {
     this.emitDebug(
       `icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
         `${guestToHostLabel}processing=${processingMs.toFixed(3)}ms ` +
-        `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`
+        `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`,
     );
   }
 
@@ -1014,7 +1134,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const servers = this.trustedDnsServers;
     if (servers.length === 0) {
       throw new Error(
-        "dns mode 'trusted' requires at least one IPv4 resolver (none configured/found)"
+        "dns mode 'trusted' requires at least one IPv4 resolver (none configured/found)",
       );
     }
     const index = this.trustedDnsIndex++ % servers.length;
@@ -1034,14 +1154,15 @@ export class QemuNetworkBackend extends EventEmitter {
       !isLocalhostDnsName(query.firstQuestion.name)
     ) {
       try {
-        mappedIpv4 = this.syntheticDnsHostMap?.allocate(query.firstQuestion.name) ?? null;
+        mappedIpv4 =
+          this.syntheticDnsHostMap?.allocate(query.firstQuestion.name) ?? null;
       } catch (err) {
         // Treat mapping failures as untrusted input; fall back to the default synthetic IP.
         // This avoids guest-triggerable process-level crashes.
         mappedIpv4 = null;
         if (this.options.debug) {
           this.emitDebug(
-            `dns synthetic hostmap failed name=${JSON.stringify(query.firstQuestion.name)} err=${formatError(err)}`
+            `dns synthetic hostmap failed name=${JSON.stringify(query.firstQuestion.name)} err=${formatError(err)}`,
           );
         }
       }
@@ -1066,7 +1187,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (message.dstPort !== 53) {
       if (this.options.debug) {
         this.emitDebug(
-          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`
+          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`,
         );
       }
       return;
@@ -1075,7 +1196,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.dnsMode === "synthetic") {
       if (this.options.debug) {
         this.emitDebug(
-          `dns synthetic ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+          `dns synthetic ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`,
         );
       }
       this.handleSyntheticDns(message);
@@ -1085,7 +1206,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (this.dnsMode === "trusted" && !parseDnsQuery(message.payload)) {
       if (this.options.debug) {
         this.emitDebug(
-          `dns blocked (non-dns payload) ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+          `dns blocked (non-dns payload) ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`,
         );
       }
       return;
@@ -1097,7 +1218,10 @@ export class QemuNetworkBackend extends EventEmitter {
         ? this.options.udpSocketFactory()
         : dgram.createSocket("udp4");
 
-      const upstreamIP = this.dnsMode === "trusted" ? this.pickTrustedDnsServer() : message.dstIP;
+      const upstreamIP =
+        this.dnsMode === "trusted"
+          ? this.pickTrustedDnsServer()
+          : message.dstIP;
       const upstreamPort = 53;
 
       session = {
@@ -1113,9 +1237,12 @@ export class QemuNetworkBackend extends EventEmitter {
 
       socket.on("message", (data, rinfo) => {
         if (this.options.debug) {
-          const via = this.dnsMode === "trusted" ? ` via ${session!.upstreamIP}:${session!.upstreamPort}` : "";
+          const via =
+            this.dnsMode === "trusted"
+              ? ` via ${session!.upstreamIP}:${session!.upstreamPort}`
+              : "";
           this.emitDebug(
-            `dns recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)${via}`
+            `dns recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)${via}`,
           );
         }
 
@@ -1136,16 +1263,26 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     if (this.options.debug) {
-      const via = this.dnsMode === "trusted" ? ` via ${session.upstreamIP}:${session.upstreamPort}` : "";
+      const via =
+        this.dnsMode === "trusted"
+          ? ` via ${session.upstreamIP}:${session.upstreamPort}`
+          : "";
       this.emitDebug(
-        `dns send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)${via}`
+        `dns send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)${via}`,
       );
     }
 
-    session.socket.send(message.payload, session.upstreamPort, session.upstreamIP);
+    session.socket.send(
+      message.payload,
+      session.upstreamPort,
+      session.upstreamIP,
+    );
   }
 
-  private resolveSshCredential(hostname: string, port: number): ResolvedSshCredential | null {
+  private resolveSshCredential(
+    hostname: string,
+    port: number,
+  ): ResolvedSshCredential | null {
     const normalized = hostname.toLowerCase();
     for (const credential of this.sshCredentials) {
       if (credential.port !== port) continue;
@@ -1156,17 +1293,24 @@ export class QemuNetworkBackend extends EventEmitter {
     return null;
   }
 
-  private isSshFlowAllowed(key: string, dstIP: string, dstPort: number): boolean {
+  private isSshFlowAllowed(
+    key: string,
+    dstIP: string,
+    dstPort: number,
+  ): boolean {
     if (this.sshAllowedTargets.length === 0) return false;
 
     const session = this.tcpSessions.get(key);
     const hostname =
-      session?.syntheticHostname ?? this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ?? null;
+      session?.syntheticHostname ??
+      this.syntheticDnsHostMap?.lookupHostByIp(dstIP) ??
+      null;
     if (!hostname) return false;
 
     const normalized = hostname.toLowerCase();
     const allowed = this.sshAllowedTargets.some(
-      (target) => target.port === dstPort && matchHostname(normalized, target.pattern)
+      (target) =>
+        target.port === dstPort && matchHostname(normalized, target.pattern),
     );
     if (!allowed) return false;
 
@@ -1189,9 +1333,12 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private handleTcpConnect(message: TcpConnectMessage) {
-    const syntheticHostname = this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
+    const syntheticHostname =
+      this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
     let connectIP =
-      message.dstIP === (this.options.gatewayIP ?? "192.168.127.1") ? "127.0.0.1" : message.dstIP;
+      message.dstIP === (this.options.gatewayIP ?? "192.168.127.1")
+        ? "127.0.0.1"
+        : message.dstIP;
 
     if (syntheticHostname && this.sshSniffPortsSet.has(message.dstPort)) {
       connectIP = syntheticHostname;
@@ -1218,10 +1365,11 @@ export class QemuNetworkBackend extends EventEmitter {
     this.flush();
   }
 
-  private abortTcpSession(key: string, session: TcpSession, reason: string) {
+  /** @internal */
+  abortTcpSession(key: string, session: TcpSession, reason: string) {
     if (this.options.debug) {
       this.emitDebug(
-        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`,
       );
     }
 
@@ -1242,13 +1390,17 @@ export class QemuNetworkBackend extends EventEmitter {
     this.tcpSessions.delete(key);
   }
 
-  private queueTcpPendingWrite(key: string, session: TcpSession, data: Buffer): boolean {
+  private queueTcpPendingWrite(
+    key: string,
+    session: TcpSession,
+    data: Buffer,
+  ): boolean {
     const nextBytes = session.pendingWriteBytes + data.length;
     if (nextBytes > this.maxTcpPendingWriteBytes) {
       this.abortTcpSession(
         key,
         session,
-        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`
+        `pending-write-buffer-exceeded (${nextBytes} > ${this.maxTcpPendingWriteBytes})`,
       );
       return false;
     }
@@ -1263,7 +1415,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (!session) return;
 
     if (session.protocol === "http") {
-      this.handlePlainHttpData(message.key, session, message.data);
+      handlePlainHttpData(this, message.key, session, message.data);
       return;
     }
 
@@ -1287,7 +1439,7 @@ export class QemuNetworkBackend extends EventEmitter {
         this.abortTcpSession(
           message.key,
           session,
-          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`
+          `socket-write-buffer-exceeded (${nextWritable} > ${this.maxTcpPendingWriteBytes})`,
         );
         return;
       }
@@ -1311,7 +1463,7 @@ export class QemuNetworkBackend extends EventEmitter {
         }
         session.http.streamingBody.done = true;
         session.http.streamingBody.controller = null;
-        this.updateQemuRxPauseState();
+        updateQemuRxPauseState(this);
       }
 
       session.http = undefined;
@@ -1362,7 +1514,8 @@ export class QemuNetworkBackend extends EventEmitter {
     this.resolveFlowResume(message.key);
   }
 
-  private waitForFlowResume(key: string): Promise<void> {
+  /** @internal */
+  waitForFlowResume(key: string): Promise<void> {
     const session = this.tcpSessions.get(key);
     if (!session || !session.flowControlPaused) {
       return Promise.resolve();
@@ -1374,18 +1527,14 @@ export class QemuNetworkBackend extends EventEmitter {
     });
   }
 
-  private resolveFlowResume(key: string) {
+  /** @internal */
+  resolveFlowResume(key: string) {
     const waiters = this.flowResumeWaiters.get(key);
     if (!waiters) return;
     this.flowResumeWaiters.delete(key);
     for (const resolve of waiters) {
       resolve();
     }
-  }
-
-
-  private updateQemuRxPauseState() {
-    return updateQemuRxPauseState.call(this);
   }
 
   private closeSshProxySession(proxy?: SshProxySession) {
@@ -1428,7 +1577,10 @@ export class QemuNetworkBackend extends EventEmitter {
     return this.sshHostKey;
   }
 
-  private ensureSshProxySession(key: string, session: TcpSession): SshProxySession {
+  private ensureSshProxySession(
+    key: string,
+    session: TcpSession,
+  ): SshProxySession {
     const existing = session.sshProxy;
     if (existing) return existing;
 
@@ -1448,7 +1600,7 @@ export class QemuNetworkBackend extends EventEmitter {
       async () => {
         this.stack?.handleTcpEnd({ key });
         this.flush();
-      }
+      },
     );
 
     const server = new SshServer({
@@ -1464,7 +1616,11 @@ export class QemuNetworkBackend extends EventEmitter {
     };
 
     const onProxyError = (err: unknown) => {
-      this.abortTcpSession(key, session, `ssh-proxy-error (${formatError(err)})`);
+      this.abortTcpSession(
+        key,
+        session,
+        `ssh-proxy-error (${formatError(err)})`,
+      );
     };
 
     server.on("error", onProxyError);
@@ -1499,7 +1655,9 @@ export class QemuNetworkBackend extends EventEmitter {
     session.sshProxy = proxy;
 
     if (this.options.debug) {
-      this.emitDebug(`ssh proxy start ${session.srcIP}:${session.srcPort} -> ${session.syntheticHostname}:${session.dstPort}`);
+      this.emitDebug(
+        `ssh proxy start ${session.srcIP}:${session.srcPort} -> ${session.syntheticHostname}:${session.dstPort}`,
+      );
     }
 
     return proxy;
@@ -1527,7 +1685,9 @@ export class QemuNetworkBackend extends EventEmitter {
     sshSession.on("shell", (accept) => {
       if (typeof accept !== "function") return;
       const ch = accept();
-      ch.stderr.write("gondolin ssh proxy: interactive shells are not supported\n");
+      ch.stderr.write(
+        "gondolin ssh proxy: interactive shells are not supported\n",
+      );
       ch.exit(1);
       ch.close();
     });
@@ -1544,7 +1704,12 @@ export class QemuNetworkBackend extends EventEmitter {
         guestUsername,
       }).catch((err) => {
         try {
-          guestChannel.stderr.write(Buffer.from(`gondolin ssh proxy error: ${formatError(err)}\n`, "utf8"));
+          guestChannel.stderr.write(
+            Buffer.from(
+              `gondolin ssh proxy error: ${formatError(err)}\n`,
+              "utf8",
+            ),
+          );
         } catch {
           // ignore
         }
@@ -1574,7 +1739,8 @@ export class QemuNetworkBackend extends EventEmitter {
     command: string;
     guestUsername: string;
   }) {
-    const { key, session, proxy, guestChannel, command, guestUsername } = options;
+    const { key, session, proxy, guestChannel, command, guestUsername } =
+      options;
     const hostname = session.syntheticHostname;
     const credential = session.sshCredential;
     if (!hostname) {
@@ -1613,7 +1779,9 @@ export class QemuNetworkBackend extends EventEmitter {
           // ignore
         }
         if (this.options.debug) {
-          this.emitDebug(`ssh proxy exec denied ${hostname}:${session.dstPort} ${JSON.stringify(command)}`);
+          this.emitDebug(
+            `ssh proxy exec denied ${hostname}:${session.dstPort} ${JSON.stringify(command)}`,
+          );
         }
         return;
       }
@@ -1621,12 +1789,12 @@ export class QemuNetworkBackend extends EventEmitter {
 
     if (proxy.upstreams.size >= this.sshMaxUpstreamConnectionsPerTcpSession) {
       throw new Error(
-        `too many concurrent upstream ssh connections for this guest flow (limit ${this.sshMaxUpstreamConnectionsPerTcpSession})`
+        `too many concurrent upstream ssh connections for this guest flow (limit ${this.sshMaxUpstreamConnectionsPerTcpSession})`,
       );
     }
     if (this.sshUpstreams.size >= this.sshMaxUpstreamConnectionsTotal) {
       throw new Error(
-        `too many concurrent upstream ssh connections on host (limit ${this.sshMaxUpstreamConnectionsTotal})`
+        `too many concurrent upstream ssh connections on host (limit ${this.sshMaxUpstreamConnectionsTotal})`,
       );
     }
 
@@ -1645,7 +1813,9 @@ export class QemuNetworkBackend extends EventEmitter {
     const connectConfig: import("ssh2").ConnectConfig = {
       host: hostname,
       port: session.dstPort,
-      username: credential ? (credential.username ?? "git") : guestUsername || "git",
+      username: credential
+        ? (credential.username ?? "git")
+        : guestUsername || "git",
       readyTimeout: this.sshUpstreamReadyTimeoutMs,
       keepaliveInterval: this.sshUpstreamKeepaliveIntervalMs,
       keepaliveCountMax: this.sshUpstreamKeepaliveCountMax,
@@ -1659,7 +1829,8 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     if (this.sshHostVerifier) {
-      connectConfig.hostVerifier = (key: Buffer) => this.sshHostVerifier!(hostname, key, session.dstPort);
+      connectConfig.hostVerifier = (key: Buffer) =>
+        this.sshHostVerifier!(hostname, key, session.dstPort);
     }
 
     let upstreamChannel: SshClientChannel | null = null;
@@ -1694,19 +1865,23 @@ export class QemuNetworkBackend extends EventEmitter {
 
         upstream.once("ready", settleResolve);
         upstream.once("error", settleReject);
-        upstream.once("close", () => settleReject(new Error("upstream ssh closed before ready")));
+        upstream.once("close", () =>
+          settleReject(new Error("upstream ssh closed before ready")),
+        );
         upstream.connect(connectConfig);
       });
 
-      upstreamChannel = await new Promise<SshClientChannel>((resolve, reject) => {
-        upstream.exec(command, (err, channel) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          resolve(channel);
-        });
-      });
+      upstreamChannel = await new Promise<SshClientChannel>(
+        (resolve, reject) => {
+          upstream.exec(command, (err, channel) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(channel);
+          });
+        },
+      );
     } catch (err) {
       removeUpstream();
       try {
@@ -1772,11 +1947,19 @@ export class QemuNetworkBackend extends EventEmitter {
     });
 
     upstreamChannel.on("error", (err: Error) => {
-      this.abortTcpSession(key, session, `ssh-upstream-channel-error (${formatError(err)})`);
+      this.abortTcpSession(
+        key,
+        session,
+        `ssh-upstream-channel-error (${formatError(err)})`,
+      );
     });
 
     upstream.on("error", (err: Error) => {
-      this.abortTcpSession(key, session, `ssh-upstream-error (${formatError(err)})`);
+      this.abortTcpSession(
+        key,
+        session,
+        `ssh-upstream-error (${formatError(err)})`,
+      );
     });
   }
 
@@ -1785,7 +1968,11 @@ export class QemuNetworkBackend extends EventEmitter {
       const proxy = this.ensureSshProxySession(key, session);
       proxy.stream.pushFromGuest(data);
     } catch (err) {
-      this.abortTcpSession(key, session, `ssh-proxy-init-error (${formatError(err)})`);
+      this.abortTcpSession(
+        key,
+        session,
+        `ssh-proxy-init-error (${formatError(err)})`,
+      );
     }
   }
 
@@ -1857,7 +2044,7 @@ export class QemuNetworkBackend extends EventEmitter {
     });
 
     tlsSocket.on("data", (data) => {
-      this.handleTlsHttpData(key, session, Buffer.from(data));
+      handleTlsHttpData(this, key, session, Buffer.from(data));
     });
 
     tlsSocket.on("error", (err) => {
@@ -1884,24 +2071,11 @@ export class QemuNetworkBackend extends EventEmitter {
     return session.tls;
   }
 
-  private async handlePlainHttpData(key: string, session: TcpSession, data: Buffer) {
-    return handlePlainHttpData.call(this, key, session, data);
-  }
-
-  private async handleTlsHttpData(key: string, session: TcpSession, data: Buffer) {
-    return handleTlsHttpData.call(this, key, session, data);
-  }
-
   private handleTlsData(key: string, session: TcpSession, data: Buffer) {
     const tlsSession = this.ensureTlsSession(key, session);
     if (!tlsSession) return;
     tlsSession.stream.pushEncrypted(data);
   }
-
-  private closeSharedDispatchers() {
-    return closeSharedDispatchers.call(this);
-  }
-
 
   private getMitmDir() {
     return this.mitmDir;
@@ -1950,13 +2124,17 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     while (this.tlsContexts.size > maxEntries) {
-      const oldestKey = this.tlsContexts.keys().next().value as string | undefined;
+      const oldestKey = this.tlsContexts.keys().next().value as
+        | string
+        | undefined;
       if (!oldestKey) break;
       this.tlsContexts.delete(oldestKey);
     }
   }
 
-  private async getTlsContextAsync(servername: string): Promise<tls.SecureContext> {
+  private async getTlsContextAsync(
+    servername: string,
+  ): Promise<tls.SecureContext> {
     const normalized = servername.trim() || "unknown";
     const now = Date.now();
 
@@ -1990,9 +2168,14 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private async createTlsContext(servername: string): Promise<tls.SecureContext> {
+  private async createTlsContext(
+    servername: string,
+  ): Promise<tls.SecureContext> {
     const ca = await this.ensureCaAsync();
-    const { keyPem, certPem } = await this.ensureLeafCertificateAsync(servername, ca);
+    const { keyPem, certPem } = await this.ensureLeafCertificateAsync(
+      servername,
+      ca,
+    );
 
     return tls.createSecureContext({
       key: keyPem,
@@ -2002,12 +2185,16 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private async ensureLeafCertificateAsync(
     servername: string,
-    ca: CaCert
+    ca: CaCert,
   ): Promise<{ keyPem: string; certPem: string }> {
     const hostsDir = path.join(this.getMitmDir(), "hosts");
     await fsp.mkdir(hostsDir, { recursive: true });
 
-    const hash = crypto.createHash("sha256").update(servername).digest("hex").slice(0, 12);
+    const hash = crypto
+      .createHash("sha256")
+      .update(servername)
+      .digest("hex")
+      .slice(0, 12);
     const slug = servername.replace(/[^a-zA-Z0-9.-]/g, "_");
     const baseName = `${slug || "host"}-${hash}`;
 
@@ -2076,11 +2263,9 @@ export class QemuNetworkBackend extends EventEmitter {
       return { keyPem, certPem };
     }
   }
-
 }
 
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
-

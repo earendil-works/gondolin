@@ -9,13 +9,18 @@ import type {
   HttpHooks,
   HttpIpAllowInfo,
   HttpResponseHeaders,
+  QemuNetworkBackend,
 } from "./qemu-net";
 
 export class HttpRequestBlockedError extends Error {
   status: number;
   statusText: string;
 
-  constructor(message = "request blocked", status = 403, statusText = "Forbidden") {
+  constructor(
+    message = "request blocked",
+    status = 403,
+    statusText = "Forbidden",
+  ) {
     super(message);
     this.name = "HttpRequestBlockedError";
     this.status = status;
@@ -39,7 +44,7 @@ const DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS = 30 * 1000;
 
 export function stripHopByHopHeaders<T extends HeaderValue>(
   this: any,
-  headers: Record<string, T>
+  headers: Record<string, T>,
 ): Record<string, T> {
   const connectionValue = headers["connection"];
   const connection = Array.isArray(connectionValue)
@@ -68,7 +73,7 @@ export function stripHopByHopHeaders<T extends HeaderValue>(
 
 export function stripHopByHopHeadersForWebSocket(
   this: any,
-  headers: Record<string, string>
+  headers: Record<string, string>,
 ): Record<string, string> {
   const out: Record<string, string> = { ...headers };
 
@@ -121,13 +126,17 @@ type LookupResult = string | dns.LookupAddress[];
 type LookupCallback = (
   err: NodeJS.ErrnoException | null,
   address: LookupResult,
-  family?: number
+  family?: number,
 ) => void;
 
 type LookupFn = (
   hostname: string,
   options: dns.LookupOneOptions | dns.LookupAllOptions,
-  callback: (err: NodeJS.ErrnoException | null, address: LookupResult, family?: number) => void
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    address: LookupResult,
+    family?: number,
+  ) => void,
 ) => void;
 
 export function createLookupGuard(
@@ -137,12 +146,12 @@ export function createLookupGuard(
     protocol: "http" | "https";
   },
   isIpAllowed: NonNullable<HttpHooks["isIpAllowed"]>,
-  lookupFn: LookupFn = (dns.lookup as unknown as LookupFn).bind(dns)
+  lookupFn: LookupFn = (dns.lookup as unknown as LookupFn).bind(dns),
 ) {
   return (
     hostname: string,
     options: dns.LookupOneOptions | dns.LookupAllOptions | number,
-    callback: LookupCallback
+    callback: LookupCallback,
   ) => {
     const normalizedOptions = normalizeLookupOptions(options);
     lookupFn(hostname, normalizedOptions, (err, address, family) => {
@@ -154,7 +163,10 @@ export function createLookupGuard(
       void (async () => {
         const entries = normalizeLookupEntries(address, family);
         if (entries.length === 0) {
-          callback(new Error("DNS lookup returned no addresses"), normalizeLookupFailure(normalizedOptions));
+          callback(
+            new Error("DNS lookup returned no addresses"),
+            normalizeLookupFailure(normalizedOptions),
+          );
           return;
         }
 
@@ -183,14 +195,14 @@ export function createLookupGuard(
             allowedEntries.map((entry) => ({
               address: entry.address,
               family: entry.family,
-            }))
+            })),
           );
           return;
         }
 
         callback(
           new HttpRequestBlockedError(`blocked by policy: ${info.hostname}`),
-          normalizeLookupFailure(normalizedOptions)
+          normalizeLookupFailure(normalizedOptions),
         );
       })().catch((error) => {
         callback(error as Error, normalizeLookupFailure(normalizedOptions));
@@ -199,7 +211,10 @@ export function createLookupGuard(
   };
 }
 
-export function normalizeLookupEntries(address: LookupResult | undefined, family?: number): LookupEntry[] {
+export function normalizeLookupEntries(
+  address: LookupResult | undefined,
+  family?: number,
+): LookupEntry[] {
   if (!address) return [];
 
   if (Array.isArray(address)) {
@@ -214,13 +229,14 @@ export function normalizeLookupEntries(address: LookupResult | undefined, family
       .filter((entry) => Boolean(entry.address));
   }
 
-  const resolvedFamily = family === 6 || family === 4 ? family : net.isIP(address);
+  const resolvedFamily =
+    family === 6 || family === 4 ? family : net.isIP(address);
   if (resolvedFamily !== 4 && resolvedFamily !== 6) return [];
   return [{ address, family: resolvedFamily }];
 }
 
 export function normalizeLookupOptions(
-  options: dns.LookupOneOptions | dns.LookupAllOptions | number
+  options: dns.LookupOneOptions | dns.LookupAllOptions | number,
 ): dns.LookupOneOptions | dns.LookupAllOptions {
   if (typeof options === "number") {
     return { family: options };
@@ -228,7 +244,9 @@ export function normalizeLookupOptions(
   return options;
 }
 
-export function normalizeLookupFailure(options: dns.LookupOneOptions | dns.LookupAllOptions): LookupResult {
+export function normalizeLookupFailure(
+  options: dns.LookupOneOptions | dns.LookupAllOptions,
+): LookupResult {
   return options.all ? [] : "";
 }
 
@@ -252,7 +270,10 @@ type FetchResponseLike = {
   headers: { get: (name: string) => string | null };
 };
 
-export function getRedirectUrl(response: FetchResponseLike, currentUrl: URL): URL | null {
+export function getRedirectUrl(
+  response: FetchResponseLike,
+  currentUrl: URL,
+): URL | null {
   if (![301, 302, 303, 307, 308].includes(response.status)) return null;
   const location = response.headers.get("location");
   if (!location) return null;
@@ -267,7 +288,7 @@ export function applyRedirectRequest(
   request: HttpHookRequest,
   status: number,
   sourceUrl: URL,
-  redirectUrl: URL
+  redirectUrl: URL,
 ): HttpHookRequest {
   let method = request.method;
   let body = request.body;
@@ -305,28 +326,23 @@ export function applyRedirectRequest(
   };
 }
 
-type SharedDispatcherEntry = {
-  dispatcher: Agent;
-  lastUsedAt: number;
-};
-
-export function closeSharedDispatchers(this: any) {
-  for (const entry of (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).values()) {
+export function closeSharedDispatchers(backend: QemuNetworkBackend) {
+  for (const entry of backend.http.sharedDispatchers.values()) {
     try {
       entry.dispatcher.close();
     } catch {
       // ignore
     }
   }
-  (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).clear();
+  backend.http.sharedDispatchers.clear();
 }
 
-function pruneSharedDispatchers(this: any, now = Date.now()) {
-  if ((this.sharedDispatchers as Map<string, SharedDispatcherEntry>).size === 0) return;
+function pruneSharedDispatchers(backend: QemuNetworkBackend, now = Date.now()) {
+  if (backend.http.sharedDispatchers.size === 0) return;
 
-  for (const [key, entry] of this.sharedDispatchers as Map<string, SharedDispatcherEntry>) {
+  for (const [key, entry] of backend.http.sharedDispatchers) {
     if (now - entry.lastUsedAt <= DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS) continue;
-    (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).delete(key);
+    backend.http.sharedDispatchers.delete(key);
     try {
       entry.dispatcher.close();
     } catch {
@@ -335,14 +351,16 @@ function pruneSharedDispatchers(this: any, now = Date.now()) {
   }
 }
 
-function evictSharedDispatchersIfNeeded(this: any) {
-  while ((this.sharedDispatchers as Map<string, SharedDispatcherEntry>).size > DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS) {
-    const oldestKey = (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).keys().next().value as
+function evictSharedDispatchersIfNeeded(backend: QemuNetworkBackend) {
+  while (
+    backend.http.sharedDispatchers.size > DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS
+  ) {
+    const oldestKey = backend.http.sharedDispatchers.keys().next().value as
       | string
       | undefined;
     if (!oldestKey) break;
-    const oldest = (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).get(oldestKey);
-    (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).delete(oldestKey);
+    const oldest = backend.http.sharedDispatchers.get(oldestKey);
+    backend.http.sharedDispatchers.delete(oldestKey);
     try {
       oldest?.dispatcher.close();
     } catch {
@@ -352,25 +370,27 @@ function evictSharedDispatchersIfNeeded(this: any) {
 }
 
 export function getCheckedDispatcher(
-  this: any,
+  backend: QemuNetworkBackend,
   info: {
     hostname: string;
     port: number;
     protocol: "http" | "https";
-  }
+  },
 ): Agent | null {
-  const isIpAllowed = this.options.httpHooks?.isIpAllowed as HttpHooks["isIpAllowed"] | undefined;
+  const isIpAllowed = backend.options.httpHooks?.isIpAllowed as
+    | HttpHooks["isIpAllowed"]
+    | undefined;
   if (!isIpAllowed) return null;
 
-  pruneSharedDispatchers.call(this);
+  pruneSharedDispatchers(backend);
 
   const key = `${info.protocol}://${info.hostname}:${info.port}`;
-  const cached = (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).get(key);
+  const cached = backend.http.sharedDispatchers.get(key);
   if (cached) {
     cached.lastUsedAt = Date.now();
     // LRU: move to map tail
-    (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).delete(key);
-    (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).set(key, cached);
+    backend.http.sharedDispatchers.delete(key);
+    backend.http.sharedDispatchers.set(key, cached);
     return cached.dispatcher;
   }
 
@@ -380,7 +400,7 @@ export function getCheckedDispatcher(
       port: info.port,
       protocol: info.protocol,
     },
-    isIpAllowed
+    isIpAllowed,
   );
 
   const dispatcher = new Agent({
@@ -388,16 +408,19 @@ export function getCheckedDispatcher(
     connections: DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN,
   });
 
-  (this.sharedDispatchers as Map<string, SharedDispatcherEntry>).set(key, {
+  backend.http.sharedDispatchers.set(key, {
     dispatcher,
     lastUsedAt: Date.now(),
   });
-  evictSharedDispatchersIfNeeded.call(this);
+  evictSharedDispatchersIfNeeded(backend);
 
   return dispatcher;
 }
 
-export function caCertVerifiesLeaf(caCert: forge.pki.Certificate, leafCert: forge.pki.Certificate): boolean {
+export function caCertVerifiesLeaf(
+  caCert: forge.pki.Certificate,
+  leafCert: forge.pki.Certificate,
+): boolean {
   try {
     return caCert.verify(leafCert);
   } catch {
@@ -405,9 +428,14 @@ export function caCertVerifiesLeaf(caCert: forge.pki.Certificate, leafCert: forg
   }
 }
 
-export function privateKeyMatchesLeafCert(keyPem: string, leafCert: forge.pki.Certificate): boolean {
+export function privateKeyMatchesLeafCert(
+  keyPem: string,
+  leafCert: forge.pki.Certificate,
+): boolean {
   try {
-    const privateKey = forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey;
+    const privateKey = forge.pki.privateKeyFromPem(
+      keyPem,
+    ) as forge.pki.rsa.PrivateKey;
     const publicKey = leafCert.publicKey as forge.pki.rsa.PublicKey;
     return (
       privateKey.n.toString(16) === publicKey.n.toString(16) &&
@@ -418,7 +446,10 @@ export function privateKeyMatchesLeafCert(keyPem: string, leafCert: forge.pki.Ce
   }
 }
 
-export function headersToRecord(this: any, headers: Headers): HttpResponseHeaders {
+export function headersToRecord(
+  this: any,
+  headers: Headers,
+): HttpResponseHeaders {
   const record: HttpResponseHeaders = {};
 
   headers.forEach((value, key) => {
