@@ -21,6 +21,7 @@ import {
   stripHopByHopHeadersForWebSocket,
 } from "../src/http-utils";
 import * as qemuHttp from "../src/qemu-http";
+import * as qemuWs from "../src/qemu-ws";
 import { EventEmitter } from "node:events";
 
 function makeBackend(
@@ -1068,7 +1069,7 @@ test("qemu-net: websocket upstream connect timeout covers stalled tls handshake"
 
     await assert.rejects(
       () =>
-        qemuHttp.connectWebSocketUpstream(backend, {
+        qemuWs.connectWebSocketUpstream(backend, {
           protocol: "https",
           hostname: "example.com",
           address: "127.0.0.1",
@@ -1115,7 +1116,7 @@ test("qemu-net: websocket upstream header read times out", async () => {
 
     await assert.rejects(
       () =>
-        qemuHttp.readUpstreamHttpResponseHead(backend, socket as net.Socket),
+        qemuWs.readUpstreamHttpResponseHead(backend, socket as net.Socket),
       /websocket upstream header timeout/i,
     );
   } finally {

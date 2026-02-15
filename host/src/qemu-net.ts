@@ -50,8 +50,8 @@ import {
   handleTlsHttpData,
   updateQemuRxPauseState,
   type HttpSession,
-  type WebSocketState,
 } from "./qemu-http";
+import type { WebSocketState } from "./qemu-ws";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
