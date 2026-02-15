@@ -14,6 +14,7 @@ import type {
 } from "./qemu-net";
 
 import {
+  HttpReceiveBuffer,
   HttpRequestBlockedError,
   applyRedirectRequest,
   getCheckedDispatcher,
@@ -22,6 +23,7 @@ import {
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
 } from "./http-utils";
+import type { HttpRequestData } from "./http-utils";
 
 export const MAX_HTTP_REDIRECTS = 10;
 export const MAX_HTTP_HEADER_BYTES = 64 * 1024;
@@ -38,311 +40,6 @@ export const HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES = 256 * 1024;
 export const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
 
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
-
-export type HttpRequestData = {
-  method: string;
-  target: string;
-  version: string;
-  headers: Record<string, string>;
-  body: Buffer;
-};
-
-export class HttpReceiveBuffer {
-  private readonly chunks: Buffer[] = [];
-  private totalBytes = 0;
-
-  get length() {
-    return this.totalBytes;
-  }
-
-  append(chunk: Buffer) {
-    if (chunk.length === 0) return;
-    this.chunks.push(chunk);
-    this.totalBytes += chunk.length;
-  }
-
-  resetTo(buffer: Buffer) {
-    this.chunks.length = 0;
-    this.totalBytes = 0;
-    this.append(buffer);
-  }
-
-  /**
-   * Find the start offset of the first "\r\n\r\n" sequence or -1 if missing
-   */
-  findHeaderEnd(maxSearchBytes: number): number {
-    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
-    let matched = 0;
-    let index = 0;
-
-    for (const chunk of this.chunks) {
-      for (let i = 0; i < chunk.length; i += 1) {
-        if (index >= maxSearchBytes) return -1;
-        const b = chunk[i]!;
-
-        if (b === pattern[matched]) {
-          matched += 1;
-          if (matched === pattern.length) {
-            return index - (pattern.length - 1);
-          }
-        } else {
-          // Only possible overlap is a new '\r'.
-          matched = b === pattern[0] ? 1 : 0;
-        }
-
-        index += 1;
-      }
-    }
-
-    return -1;
-  }
-
-  /**
-   * Copies the first `n` bytes into a contiguous Buffer
-   */
-  prefix(n: number): Buffer {
-    if (n <= 0) return Buffer.alloc(0);
-    if (n >= this.totalBytes) return this.toBuffer();
-
-    const out = Buffer.allocUnsafe(n);
-    let written = 0;
-
-    for (const chunk of this.chunks) {
-      if (written >= n) break;
-      const remaining = n - written;
-      const take = Math.min(remaining, chunk.length);
-      chunk.copy(out, written, 0, take);
-      written += take;
-    }
-
-    return out;
-  }
-
-  /**
-   * Copies the bytes from `start` (inclusive) to the end into a contiguous Buffer
-   */
-  suffix(start: number): Buffer {
-    if (start <= 0) return this.toBuffer();
-    if (start >= this.totalBytes) return Buffer.alloc(0);
-
-    const outLen = this.totalBytes - start;
-    const out = Buffer.allocUnsafe(outLen);
-    let written = 0;
-    let skipped = 0;
-
-    for (const chunk of this.chunks) {
-      if (skipped + chunk.length <= start) {
-        skipped += chunk.length;
-        continue;
-      }
-
-      const chunkStart = Math.max(0, start - skipped);
-      const take = chunk.length - chunkStart;
-      chunk.copy(out, written, chunkStart, chunkStart + take);
-      written += take;
-      skipped += chunk.length;
-    }
-
-    return out;
-  }
-
-  cursor(start = 0): HttpReceiveCursor {
-    return new HttpReceiveCursor(this.chunks, this.totalBytes, start);
-  }
-
-  toBuffer(): Buffer {
-    if (this.chunks.length === 0) return Buffer.alloc(0);
-    if (this.chunks.length === 1) return this.chunks[0]!;
-    return Buffer.concat(this.chunks, this.totalBytes);
-  }
-}
-
-class HttpReceiveCursor {
-  private chunkIndex = 0;
-  private chunkOffset = 0;
-  offset: number;
-
-  constructor(
-    private readonly chunks: Buffer[],
-    private readonly totalBytes: number,
-    startOffset: number,
-  ) {
-    this.offset = startOffset;
-
-    let remaining = startOffset;
-    while (this.chunkIndex < this.chunks.length) {
-      const chunk = this.chunks[this.chunkIndex]!;
-      if (remaining < chunk.length) {
-        this.chunkOffset = remaining;
-        break;
-      }
-      remaining -= chunk.length;
-      this.chunkIndex += 1;
-    }
-
-    if (this.chunkIndex >= this.chunks.length && remaining !== 0) {
-      // Clamp: cursor can start at end, but never beyond.
-      this.offset = this.totalBytes;
-      this.chunkIndex = this.chunks.length;
-      this.chunkOffset = 0;
-    }
-  }
-
-  private cloneState() {
-    return {
-      chunkIndex: this.chunkIndex,
-      chunkOffset: this.chunkOffset,
-      offset: this.offset,
-    };
-  }
-
-  private commitState(state: {
-    chunkIndex: number;
-    chunkOffset: number;
-    offset: number;
-  }) {
-    this.chunkIndex = state.chunkIndex;
-    this.chunkOffset = state.chunkOffset;
-    this.offset = state.offset;
-  }
-
-  private readByteFrom(state: {
-    chunkIndex: number;
-    chunkOffset: number;
-    offset: number;
-  }) {
-    if (state.offset >= this.totalBytes) return null;
-
-    while (state.chunkIndex < this.chunks.length) {
-      const chunk = this.chunks[state.chunkIndex]!;
-      if (state.chunkOffset < chunk.length) {
-        const b = chunk[state.chunkOffset]!;
-        state.chunkOffset += 1;
-        state.offset += 1;
-        return b;
-      }
-      state.chunkIndex += 1;
-      state.chunkOffset = 0;
-    }
-
-    return null;
-  }
-
-  remaining() {
-    return Math.max(0, this.totalBytes - this.offset);
-  }
-
-  tryConsumeSequenceIfPresent(sequence: number[]): boolean | null {
-    const state = this.cloneState();
-
-    for (const expected of sequence) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-      if (b !== expected) return false;
-    }
-
-    this.commitState(state);
-    return true;
-  }
-
-  tryConsumeExactSequence(sequence: number[]): boolean | null {
-    const consumed = this.tryConsumeSequenceIfPresent(sequence);
-    if (consumed === null) return null;
-    if (!consumed) {
-      throw new Error("invalid chunk terminator");
-    }
-    return true;
-  }
-
-  tryReadLineAscii(maxBytes: number): string | null {
-    const state = this.cloneState();
-    const bytes: number[] = [];
-
-    while (true) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-
-      if (b === 0x0d) {
-        const b2 = this.readByteFrom(state);
-        if (b2 === null) return null;
-        if (b2 !== 0x0a) {
-          throw new Error("invalid line terminator");
-        }
-
-        this.commitState(state);
-        return Buffer.from(bytes).toString("ascii");
-      }
-
-      bytes.push(b);
-      if (bytes.length > maxBytes) {
-        throw new Error("chunk size line too large");
-      }
-    }
-  }
-
-  tryReadBytes(n: number): Buffer | null {
-    if (n === 0) return Buffer.alloc(0);
-    if (this.remaining() < n) return null;
-
-    const state = this.cloneState();
-    const firstChunk = this.chunks[state.chunkIndex];
-    if (firstChunk && state.chunkOffset + n <= firstChunk.length) {
-      const slice = firstChunk.subarray(
-        state.chunkOffset,
-        state.chunkOffset + n,
-      );
-      state.chunkOffset += n;
-      state.offset += n;
-      this.commitState(state);
-      return slice;
-    }
-
-    const out = Buffer.allocUnsafe(n);
-    let written = 0;
-
-    while (written < n) {
-      const chunk = this.chunks[state.chunkIndex];
-      if (!chunk) return null;
-
-      if (state.chunkOffset >= chunk.length) {
-        state.chunkIndex += 1;
-        state.chunkOffset = 0;
-        continue;
-      }
-
-      const available = chunk.length - state.chunkOffset;
-      const take = Math.min(available, n - written);
-      chunk.copy(out, written, state.chunkOffset, state.chunkOffset + take);
-      state.chunkOffset += take;
-      state.offset += take;
-      written += take;
-    }
-
-    this.commitState(state);
-    return out;
-  }
-
-  tryConsumeUntilDoubleCrlf(): boolean | null {
-    const pattern = [0x0d, 0x0a, 0x0d, 0x0a];
-    const state = this.cloneState();
-    let matched = 0;
-
-    while (true) {
-      const b = this.readByteFrom(state);
-      if (b === null) return null;
-
-      if (b === pattern[matched]) {
-        matched += 1;
-        if (matched === pattern.length) {
-          this.commitState(state);
-          return true;
-        }
-      } else {
-        matched = b === pattern[0] ? 1 : 0;
-      }
-    }
-  }
-}
 
 export type HttpSession = {
   buffer: HttpReceiveBuffer;
@@ -571,7 +268,6 @@ function handleWebSocketClientData(
 }
 
 function maybeSend100ContinueFromHead(
-  backend: QemuNetworkBackend,
   httpSession: HttpSession,
   head: {
     version: string;
@@ -912,7 +608,6 @@ export async function handleHttpDataWithWriter(
       await ensureIpAllowed(backend, parsedUrl, protocol, port);
 
       maybeSend100ContinueFromHead(
-        backend,
         httpSession,
         head,
         bufferedBodyBytes,
@@ -1032,7 +727,6 @@ export async function handleHttpDataWithWriter(
 
       if (!chunked.complete) {
         maybeSend100ContinueFromHead(
-          backend,
           httpSession,
           state,
           bufferedBodyBytes,
@@ -1354,7 +1048,6 @@ export async function handleHttpDataWithWriter(
     // If we know exactly how much body to expect, avoid attempting fetch until complete.
     if (bufferedBodyBytes < contentLength) {
       maybeSend100ContinueFromHead(
-        backend,
         httpSession,
         state,
         bufferedBodyBytes,

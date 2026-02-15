@@ -51,10 +51,10 @@ import {
   caCertVerifiesLeaf,
   closeSharedDispatchers,
   privateKeyMatchesLeafCert,
+  HttpReceiveBuffer,
 } from "./http-utils";
 
 import {
-  HttpReceiveBuffer,
   handlePlainHttpData,
   handleTlsHttpData,
   updateQemuRxPauseState,
