@@ -47,12 +47,14 @@ import {
   type ResolvedSshCredential,
   type SshAllowedTarget,
 } from "./ssh-utils";
-import { caCertVerifiesLeaf, privateKeyMatchesLeafCert } from "./http-utils";
+import {
+  caCertVerifiesLeaf,
+  closeSharedDispatchers,
+  privateKeyMatchesLeafCert,
+} from "./http-utils";
 
 import {
   HttpReceiveBuffer,
-  HttpRequestBlockedError,
-  closeSharedDispatchers,
   handlePlainHttpData,
   handleTlsHttpData,
   updateQemuRxPauseState,
@@ -389,8 +391,6 @@ export type SshOptions = {
   /** upstream host key verifier callback (required when `allowedHosts` is non-empty unless `knownHostsFile`/default known_hosts is used) */
   hostVerifier?: (hostname: string, key: Buffer, port: number) => boolean;
 };
-
-export { HttpRequestBlockedError };
 
 export type HttpHookRequestHeadResult = HttpHookRequest & {
   /** whether the request body must be buffered before calling `httpHooks.onRequest` */

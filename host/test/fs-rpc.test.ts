@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { FsRpcService, MemoryProvider, RealFSProvider, MAX_RPC_DATA } from "../src/vfs";
+import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
+import { FsRpcService, MAX_RPC_DATA } from "../src/vfs/rpc-service";
 
 const { errno: ERRNO } = os.constants;
 
@@ -61,7 +62,12 @@ function createTrackedService() {
   };
 }
 
-async function send(service: FsRpcService, op: string, req: Record<string, unknown>, id = 1) {
+async function send(
+  service: FsRpcService,
+  op: string,
+  req: Record<string, unknown>,
+  id = 1,
+) {
   return service.handleRequest({
     v: 1,
     t: "fs_request",
@@ -135,7 +141,8 @@ test("fs rpc readdir offsets", async () => {
     max_entries: 1,
   });
   assert.equal(first.p.err, 0);
-  const firstEntries = (first.p.res?.entries as Array<{ name: string; offset: number }>) ?? [];
+  const firstEntries =
+    (first.p.res?.entries as Array<{ name: string; offset: number }>) ?? [];
   assert.equal(firstEntries.length, 1);
   const nextOffset = firstEntries[0].offset;
 
@@ -145,7 +152,8 @@ test("fs rpc readdir offsets", async () => {
     max_entries: 1,
   });
   assert.equal(second.p.err, 0);
-  const secondEntries = (second.p.res?.entries as Array<{ name: string }>) ?? [];
+  const secondEntries =
+    (second.p.res?.entries as Array<{ name: string }>) ?? [];
   assert.equal(secondEntries.length, 1);
   assert.notEqual(secondEntries[0].name, firstEntries[0].name);
 
@@ -174,7 +182,8 @@ test("fs rpc readdir reports Linux dirent types", async () => {
   });
   assert.equal(readdir.p.err, 0);
 
-  const entries = (readdir.p.res?.entries as Array<{ name: string; type: number }>) ?? [];
+  const entries =
+    (readdir.p.res?.entries as Array<{ name: string; type: number }>) ?? [];
   const byName = new Map(entries.map((entry) => [entry.name, entry.type]));
 
   assert.equal(byName.get("pkg"), DT_DIR);
@@ -229,14 +238,23 @@ test("fs rpc unlink removes mappings and lookup returns negative ttl", async () 
     flags: 0,
   });
 
-  const lookup1 = await send(service, "lookup", { parent_ino: 1, name: "hello.txt" });
+  const lookup1 = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "hello.txt",
+  });
   assert.equal(lookup1.p.err, 0);
   const ino = (lookup1.p.res?.entry as { ino: number }).ino;
 
-  const unlink = await send(service, "unlink", { parent_ino: 1, name: "hello.txt" });
+  const unlink = await send(service, "unlink", {
+    parent_ino: 1,
+    name: "hello.txt",
+  });
   assert.equal(unlink.p.err, 0);
 
-  const lookup2 = await send(service, "lookup", { parent_ino: 1, name: "hello.txt" });
+  const lookup2 = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "hello.txt",
+  });
   assert.equal(lookup2.p.err, ERRNO.ENOENT);
   assert.equal((lookup2.p.res as any)?.entry_ttl_ms, 250);
 
@@ -249,17 +267,33 @@ test("fs rpc unlink removes mappings and lookup returns negative ttl", async () 
 test("fs rpc rename across dirs preserves ino and updates mapping", async () => {
   const service = createService();
 
-  const dirA = await send(service, "mkdir", { parent_ino: 1, name: "a", mode: 0o755 });
+  const dirA = await send(service, "mkdir", {
+    parent_ino: 1,
+    name: "a",
+    mode: 0o755,
+  });
   assert.equal(dirA.p.err, 0);
   const inoA = (dirA.p.res?.entry as any).ino as number;
 
-  const dirB = await send(service, "mkdir", { parent_ino: 1, name: "b", mode: 0o755 });
+  const dirB = await send(service, "mkdir", {
+    parent_ino: 1,
+    name: "b",
+    mode: 0o755,
+  });
   assert.equal(dirB.p.err, 0);
   const inoB = (dirB.p.res?.entry as any).ino as number;
 
-  await send(service, "create", { parent_ino: inoA, name: "file.txt", mode: 0o644, flags: 0 });
+  await send(service, "create", {
+    parent_ino: inoA,
+    name: "file.txt",
+    mode: 0o644,
+    flags: 0,
+  });
 
-  const lookupOld = await send(service, "lookup", { parent_ino: inoA, name: "file.txt" });
+  const lookupOld = await send(service, "lookup", {
+    parent_ino: inoA,
+    name: "file.txt",
+  });
   assert.equal(lookupOld.p.err, 0);
   const inoFile = (lookupOld.p.res?.entry as any).ino as number;
 
@@ -272,11 +306,17 @@ test("fs rpc rename across dirs preserves ino and updates mapping", async () => 
   });
   assert.equal(rename.p.err, 0);
 
-  const lookupNew = await send(service, "lookup", { parent_ino: inoB, name: "renamed.txt" });
+  const lookupNew = await send(service, "lookup", {
+    parent_ino: inoB,
+    name: "renamed.txt",
+  });
   assert.equal(lookupNew.p.err, 0);
   assert.equal((lookupNew.p.res?.entry as any).ino, inoFile);
 
-  const lookupGone = await send(service, "lookup", { parent_ino: inoA, name: "file.txt" });
+  const lookupGone = await send(service, "lookup", {
+    parent_ino: inoA,
+    name: "file.txt",
+  });
   assert.equal(lookupGone.p.err, ERRNO.ENOENT);
 
   // old inode should still point at the new path after renameMapping.
@@ -289,12 +329,28 @@ test("fs rpc rename across dirs preserves ino and updates mapping", async () => 
 test("fs rpc rename over existing target clears replaced inode mapping", async () => {
   const service = createService();
 
-  await send(service, "create", { parent_ino: 1, name: "a.txt", mode: 0o644, flags: 0 });
-  await send(service, "create", { parent_ino: 1, name: "b.txt", mode: 0o644, flags: 0 });
+  await send(service, "create", {
+    parent_ino: 1,
+    name: "a.txt",
+    mode: 0o644,
+    flags: 0,
+  });
+  await send(service, "create", {
+    parent_ino: 1,
+    name: "b.txt",
+    mode: 0o644,
+    flags: 0,
+  });
 
-  const lookupA = await send(service, "lookup", { parent_ino: 1, name: "a.txt" });
+  const lookupA = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "a.txt",
+  });
   const inoA = (lookupA.p.res?.entry as any).ino as number;
-  const lookupB = await send(service, "lookup", { parent_ino: 1, name: "b.txt" });
+  const lookupB = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "b.txt",
+  });
   const inoB = (lookupB.p.res?.entry as any).ino as number;
 
   const renamed = await send(service, "rename", {
@@ -306,7 +362,10 @@ test("fs rpc rename over existing target clears replaced inode mapping", async (
   });
   assert.equal(renamed.p.err, 0);
 
-  const lookupRenamed = await send(service, "lookup", { parent_ino: 1, name: "b.txt" });
+  const lookupRenamed = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "b.txt",
+  });
   assert.equal(lookupRenamed.p.err, 0);
   assert.equal((lookupRenamed.p.res?.entry as any).ino, inoA);
 
@@ -329,7 +388,10 @@ test("fs rpc link returns ENOSYS when provider lacks hard-link support", async (
   await send(service, "write", { fh, offset: 0, data: Buffer.from("hello") });
   await send(service, "release", { fh });
 
-  const lookup = await send(service, "lookup", { parent_ino: 1, name: "origin.txt" });
+  const lookup = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "origin.txt",
+  });
   const oldIno = (lookup.p.res?.entry as any).ino as number;
 
   const linked = await send(service, "link", {
@@ -343,7 +405,9 @@ test("fs rpc link returns ENOSYS when provider lacks hard-link support", async (
 });
 
 test("fs rpc link creates hard links with RealFSProvider", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gondolin-fs-rpc-link-"));
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "gondolin-fs-rpc-link-"),
+  );
   const service = new FsRpcService(new RealFSProvider(tempDir));
 
   try {
@@ -364,7 +428,10 @@ test("fs rpc link creates hard links with RealFSProvider", async () => {
     assert.equal(write.p.err, 0);
     await send(service, "release", { fh });
 
-    const lookup = await send(service, "lookup", { parent_ino: 1, name: "origin.txt" });
+    const lookup = await send(service, "lookup", {
+      parent_ino: 1,
+      name: "origin.txt",
+    });
     assert.equal(lookup.p.err, 0);
     const oldIno = (lookup.p.res?.entry as any).ino as number;
 
@@ -378,23 +445,42 @@ test("fs rpc link creates hard links with RealFSProvider", async () => {
     const hostStats = await fs.lstat(path.join(tempDir, "origin.txt"));
     assert.equal(hostStats.nlink, 2);
 
-    const linkedLookup = await send(service, "lookup", { parent_ino: 1, name: "linked.txt" });
+    const linkedLookup = await send(service, "lookup", {
+      parent_ino: 1,
+      name: "linked.txt",
+    });
     assert.equal(linkedLookup.p.err, 0);
     const linkedIno = (linkedLookup.p.res?.entry as any).ino as number;
     assert.equal(linkedIno, oldIno);
 
-    const linkedOpen = await send(service, "open", { ino: linkedIno, flags: LINUX_OPEN_FLAGS.O_RDONLY });
+    const linkedOpen = await send(service, "open", {
+      ino: linkedIno,
+      flags: LINUX_OPEN_FLAGS.O_RDONLY,
+    });
     assert.equal(linkedOpen.p.err, 0);
     const linkedFh = linkedOpen.p.res?.fh as number;
-    const linkedRead = await send(service, "read", { fh: linkedFh, offset: 0, size: 5 });
+    const linkedRead = await send(service, "read", {
+      fh: linkedFh,
+      offset: 0,
+      size: 5,
+    });
     assert.equal(linkedRead.p.err, 0);
-    assert.equal(Buffer.from(linkedRead.p.res?.data as Buffer).toString("utf8"), "hello");
+    assert.equal(
+      Buffer.from(linkedRead.p.res?.data as Buffer).toString("utf8"),
+      "hello",
+    );
     await send(service, "release", { fh: linkedFh });
 
-    const unlinkOrigin = await send(service, "unlink", { parent_ino: 1, name: "origin.txt" });
+    const unlinkOrigin = await send(service, "unlink", {
+      parent_ino: 1,
+      name: "origin.txt",
+    });
     assert.equal(unlinkOrigin.p.err, 0);
 
-    const stillLinked = await send(service, "lookup", { parent_ino: 1, name: "linked.txt" });
+    const stillLinked = await send(service, "lookup", {
+      parent_ino: 1,
+      name: "linked.txt",
+    });
     assert.equal(stillLinked.p.err, 0);
 
     const getattrLinked = await send(service, "getattr", { ino: oldIno });
@@ -428,7 +514,9 @@ test("fs rpc symlink returns ENOSYS when provider lacks symlink support", async 
 });
 
 test("fs rpc symlink creates symbolic links with RealFSProvider", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gondolin-fs-rpc-symlink-"));
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "gondolin-fs-rpc-symlink-"),
+  );
   const service = new FsRpcService(new RealFSProvider(tempDir));
 
   try {
@@ -444,7 +532,10 @@ test("fs rpc symlink creates symbolic links with RealFSProvider", async () => {
     const hostTarget = await fs.readlink(path.join(tempDir, "python"));
     assert.equal(hostTarget, "target.txt");
 
-    const lookup = await send(service, "lookup", { parent_ino: 1, name: "python" });
+    const lookup = await send(service, "lookup", {
+      parent_ino: 1,
+      name: "python",
+    });
     assert.equal(lookup.p.err, 0);
     const ino = (lookup.p.res?.entry as any).ino as number;
 
@@ -470,30 +561,57 @@ test("fs rpc open flags: O_CREAT rejected; O_TRUNC truncates; O_APPEND appends",
   await send(service, "write", { fh, offset: 0, data: Buffer.from("hello") });
   await send(service, "release", { fh });
 
-  const lookup = await send(service, "lookup", { parent_ino: 1, name: "f.txt" });
+  const lookup = await send(service, "lookup", {
+    parent_ino: 1,
+    name: "f.txt",
+  });
   const ino = (lookup.p.res?.entry as any).ino as number;
 
-  const openCreat = await send(service, "open", { ino, flags: LINUX_OPEN_FLAGS.O_CREAT | LINUX_OPEN_FLAGS.O_WRONLY });
+  const openCreat = await send(service, "open", {
+    ino,
+    flags: LINUX_OPEN_FLAGS.O_CREAT | LINUX_OPEN_FLAGS.O_WRONLY,
+  });
   assert.equal(openCreat.p.err, ERRNO.EINVAL);
 
-  const openTrunc = await send(service, "open", { ino, flags: LINUX_OPEN_FLAGS.O_WRONLY | LINUX_OPEN_FLAGS.O_TRUNC });
+  const openTrunc = await send(service, "open", {
+    ino,
+    flags: LINUX_OPEN_FLAGS.O_WRONLY | LINUX_OPEN_FLAGS.O_TRUNC,
+  });
   assert.equal(openTrunc.p.err, 0);
   const fhTrunc = openTrunc.p.res?.fh as number;
 
-  const readEmpty = await send(service, "read", { fh: fhTrunc, offset: 0, size: 10 });
+  const readEmpty = await send(service, "read", {
+    fh: fhTrunc,
+    offset: 0,
+    size: 10,
+  });
   assert.equal(readEmpty.p.err, 0);
   assert.equal(Buffer.from(readEmpty.p.res?.data as Buffer).length, 0);
 
-  await send(service, "write", { fh: fhTrunc, offset: 0, data: Buffer.from("a") });
+  await send(service, "write", {
+    fh: fhTrunc,
+    offset: 0,
+    data: Buffer.from("a"),
+  });
   await send(service, "release", { fh: fhTrunc });
 
-  const openAppend = await send(service, "open", { ino, flags: LINUX_OPEN_FLAGS.O_WRONLY | LINUX_OPEN_FLAGS.O_APPEND });
+  const openAppend = await send(service, "open", {
+    ino,
+    flags: LINUX_OPEN_FLAGS.O_WRONLY | LINUX_OPEN_FLAGS.O_APPEND,
+  });
   assert.equal(openAppend.p.err, 0);
   const fhAppend = openAppend.p.res?.fh as number;
-  await send(service, "write", { fh: fhAppend, offset: 0, data: Buffer.from("b") });
+  await send(service, "write", {
+    fh: fhAppend,
+    offset: 0,
+    data: Buffer.from("b"),
+  });
   await send(service, "release", { fh: fhAppend });
 
-  const openRead = await send(service, "open", { ino, flags: LINUX_OPEN_FLAGS.O_RDONLY });
+  const openRead = await send(service, "open", {
+    ino,
+    flags: LINUX_OPEN_FLAGS.O_RDONLY,
+  });
   assert.equal(openRead.p.err, 0);
   const fhRead = openRead.p.res?.fh as number;
   const read = await send(service, "read", { fh: fhRead, offset: 0, size: 10 });
@@ -507,7 +625,12 @@ test("fs rpc open flags: O_CREAT rejected; O_TRUNC truncates; O_APPEND appends",
 test("fs rpc metrics track ops, bytes and errors", async () => {
   const service = createService();
 
-  const created = await send(service, "create", { parent_ino: 1, name: "m.txt", mode: 0o644, flags: 0 });
+  const created = await send(service, "create", {
+    parent_ino: 1,
+    name: "m.txt",
+    mode: 0o644,
+    flags: 0,
+  });
   const fh = created.p.res?.fh as number;
 
   await send(service, "write", { fh, offset: 0, data: Buffer.from("abc") });
@@ -607,7 +730,12 @@ test("fs rpc statfs increments metrics", async () => {
 test("fs rpc service.close closes all open handles", async () => {
   const { service, getCloseCount } = createTrackedService();
 
-  const created = await send(service, "create", { parent_ino: 1, name: "x.txt", mode: 0o644, flags: 0 });
+  const created = await send(service, "create", {
+    parent_ino: 1,
+    name: "x.txt",
+    mode: 0o644,
+    flags: 0,
+  });
   assert.equal(created.p.err, 0);
   const fh = created.p.res?.fh as number;
 

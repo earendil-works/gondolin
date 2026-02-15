@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createHttpHooks } from "../src/http-hooks";
-import { HttpRequestBlockedError } from "../src/qemu-net";
+import { HttpRequestBlockedError } from "../src/http-utils";
 
 test("http hooks allowlist patterns", async () => {
   const { httpHooks } = createHttpHooks({
@@ -19,7 +19,7 @@ test("http hooks allowlist patterns", async () => {
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -30,7 +30,7 @@ test("http hooks allowlist patterns", async () => {
       port: 80,
       protocol: "http",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -41,7 +41,7 @@ test("http hooks allowlist patterns", async () => {
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -52,7 +52,7 @@ test("http hooks allowlist patterns", async () => {
       port: 443,
       protocol: "https",
     }),
-    false
+    false,
   );
 });
 
@@ -74,7 +74,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -85,7 +85,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -96,7 +96,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -107,7 +107,7 @@ test("http hooks hostname matching handles empty patterns and multiple wildcards
       port: 443,
       protocol: "https",
     }),
-    false
+    false,
   );
 });
 
@@ -126,7 +126,7 @@ test("http hooks allowlist '*' matches any hostname (but still blocks internal)"
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   // '*' does not bypass internal range blocking.
@@ -138,7 +138,7 @@ test("http hooks allowlist '*' matches any hostname (but still blocks internal)"
       port: 443,
       protocol: "https",
     }),
-    false
+    false,
   );
 });
 
@@ -157,7 +157,7 @@ test("http hooks block internal ranges by default", async () => {
       port: 80,
       protocol: "http",
     }),
-    false
+    false,
   );
 });
 
@@ -188,7 +188,7 @@ test("http hooks block internal IPv6 ranges (loopback, ULA, link-local)", async 
         protocol: "https",
       }),
       false,
-      `expected ${ip} to be blocked`
+      `expected ${ip} to be blocked`,
     );
   }
 });
@@ -209,7 +209,7 @@ test("http hooks allow non-private IPv6 (including IPv4-suffix forms)", async ()
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 
   // IPv6 with embedded IPv4 suffix (not mapped)
@@ -221,7 +221,7 @@ test("http hooks allow non-private IPv6 (including IPv4-suffix forms)", async ()
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 });
 
@@ -241,7 +241,7 @@ test("http hooks ignore invalid IP strings for internal-range checks", async () 
       port: 443,
       protocol: "https",
     }),
-    true
+    true,
   );
 });
 
@@ -261,7 +261,7 @@ test("http hooks can allow internal ranges", async () => {
       port: 80,
       protocol: "http",
     }),
-    true
+    true,
   );
 });
 
@@ -279,7 +279,7 @@ test("http hooks can enforce request policy", async () => {
       headers: {},
       body: null,
     }),
-    true
+    true,
   );
 
   assert.equal(
@@ -289,7 +289,7 @@ test("http hooks can enforce request policy", async () => {
       headers: {},
       body: null,
     }),
-    false
+    false,
   );
 });
 
@@ -379,7 +379,7 @@ test("http hooks reject URL parameter secrets on disallowed hosts when enabled",
         headers: {},
         body: null,
       }),
-    (err) => err instanceof HttpRequestBlockedError
+    (err) => err instanceof HttpRequestBlockedError,
   );
 });
 
@@ -397,9 +397,10 @@ test("http hooks replace secret placeholders in basic auth", async () => {
     },
   });
 
-  const placeholderToken = Buffer.from(`${env.BASIC_USER}:${env.BASIC_PASS}`, "utf8").toString(
-    "base64"
-  );
+  const placeholderToken = Buffer.from(
+    `${env.BASIC_USER}:${env.BASIC_PASS}`,
+    "utf8",
+  ).toString("base64");
   const expectedToken = Buffer.from("alice:s3cr3t", "utf8").toString("base64");
 
   const request = await httpHooks.onRequestHead!({
@@ -428,9 +429,10 @@ test("http hooks reject basic auth secrets on disallowed hosts", async () => {
     },
   });
 
-  const placeholderToken = Buffer.from(`${env.BASIC_USER}:${env.BASIC_PASS}`, "utf8").toString(
-    "base64"
-  );
+  const placeholderToken = Buffer.from(
+    `${env.BASIC_USER}:${env.BASIC_PASS}`,
+    "utf8",
+  ).toString("base64");
 
   await assert.rejects(
     () =>
@@ -442,7 +444,7 @@ test("http hooks reject basic auth secrets on disallowed hosts", async () => {
         },
         body: null,
       }),
-    (err) => err instanceof HttpRequestBlockedError
+    (err) => err instanceof HttpRequestBlockedError,
   );
 });
 
@@ -466,7 +468,7 @@ test("http hooks reject secrets on disallowed hosts", async () => {
         },
         body: null,
       }),
-    (err) => err instanceof HttpRequestBlockedError
+    (err) => err instanceof HttpRequestBlockedError,
   );
 });
 
@@ -490,7 +492,7 @@ test("http hooks reject already-substituted secrets on disallowed hosts", async 
         },
         body: null,
       }),
-    (err) => err instanceof HttpRequestBlockedError
+    (err) => err instanceof HttpRequestBlockedError,
   );
 });
 
@@ -520,7 +522,7 @@ test("http hooks reject secrets if onRequestHead rewrites the destination", asyn
         },
         body: null,
       }),
-    (err) => err instanceof HttpRequestBlockedError
+    (err) => err instanceof HttpRequestBlockedError,
   );
 });
 

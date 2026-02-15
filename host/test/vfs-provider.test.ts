@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { MemoryProvider, SandboxVfsProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
+import { SandboxVfsProvider } from "../src/vfs/provider";
 
 const { errno: ERRNO } = os.constants;
 
@@ -57,7 +58,7 @@ test("SandboxVfsProvider link returns ENOSYS without backend support", async () 
     (err: unknown) => {
       const error = err as NodeJS.ErrnoException;
       return error.code === "ENOSYS" || error.errno === ERRNO.ENOSYS;
-    }
+    },
   );
 });
 
@@ -71,6 +72,6 @@ test("SandboxVfsProvider sync operations reject async hooks", () => {
 
   assert.throws(
     () => vfs.openSync("/file.txt", "w"),
-    /async hook used in sync operation/
+    /async hook used in sync operation/,
   );
 });

@@ -5,7 +5,11 @@ import path from "path";
 import { execFileSync } from "child_process";
 import { Duplex, Readable } from "stream";
 
-import { createTempQcow2Overlay, ensureQemuImgAvailable, moveFile } from "./qemu-img";
+import {
+  createTempQcow2Overlay,
+  ensureQemuImgAvailable,
+  moveFile,
+} from "./qemu-img";
 import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 import { loadAssetManifest } from "./assets";
 
@@ -26,14 +30,16 @@ import {
 } from "./sandbox-server";
 import type { SandboxState } from "./sandbox-controller";
 import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
-import {
-  MemoryProvider,
-  SandboxVfsProvider,
-  VirtualProvider,
-  type VfsHooks,
-} from "./vfs";
+import { MemoryProvider } from "./vfs/node";
+import { SandboxVfsProvider, type VfsHooks } from "./vfs/provider";
+import type { VirtualProvider } from "./vfs/node";
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
-import { defaultDebugLog, resolveDebugFlags, type DebugComponent, type DebugLogFn } from "./debug";
+import {
+  defaultDebugLog,
+  resolveDebugFlags,
+  type DebugComponent,
+  type DebugLogFn,
+} from "./debug";
 import {
   IngressGateway,
   type EnableIngressOptions,
@@ -66,17 +72,16 @@ const DEFAULT_VFS_FILE_CHUNK_SIZE = 64 * 1024;
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
-  0.1
+  0.1,
 );
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_TIMEOUT_MS",
-  DEFAULT_VFS_READY_TIMEOUT_MS
+  DEFAULT_VFS_READY_TIMEOUT_MS,
 );
 const VFS_READY_ATTEMPTS = Math.max(
   1,
-  Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000))
+  Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000)),
 );
-
 
 function resolveEnvNumber(name: string, fallback: number) {
   const raw = process.env[name];
@@ -241,7 +246,6 @@ export type VmDeleteFileOptions = {
   signal?: AbortSignal;
 };
 
-
 export type VMState = SandboxState | "unknown";
 
 type RootDiskState = {
@@ -300,7 +304,9 @@ export class VM {
   private vfsReadyPromise: Promise<void> | null = null;
   private qemuChecked = false;
   private debugLog: DebugLogFn | null = null;
-  private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
+  private debugListener:
+    | ((component: DebugComponent, message: string) => void)
+    | null = null;
   private sshAccess: SshAccess | null = null;
   private gondolinEtc: ReturnType<typeof createGondolinEtcMount> | null = null;
   private ingressAccess: IngressAccess | null = null;
@@ -331,16 +337,23 @@ export class VM {
     if (options.ssh && sandboxOptions.ssh === undefined) {
       sandboxOptions.ssh = options.ssh;
     }
-    if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
+    if (
+      options.maxHttpBodyBytes !== undefined &&
+      sandboxOptions.maxHttpBodyBytes === undefined
+    ) {
       sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
     if (
       options.maxHttpResponseBodyBytes !== undefined &&
       (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
     ) {
-      (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
+      (sandboxOptions as any).maxHttpResponseBodyBytes =
+        options.maxHttpResponseBodyBytes;
     }
-    if (options.allowWebSockets !== undefined && sandboxOptions.allowWebSockets === undefined) {
+    if (
+      options.allowWebSockets !== undefined &&
+      sandboxOptions.allowWebSockets === undefined
+    ) {
       sandboxOptions.allowWebSockets = options.allowWebSockets;
     }
     if (options.memory && sandboxOptions.memory === undefined) {
@@ -351,7 +364,8 @@ export class VM {
     }
 
     // Resolve options with asset fetching
-    const resolvedSandboxOptions = await resolveSandboxServerOptionsAsync(sandboxOptions);
+    const resolvedSandboxOptions =
+      await resolveSandboxServerOptionsAsync(sandboxOptions);
 
     // Create VM with pre-resolved options
     return new VM(options, resolvedSandboxOptions);
@@ -367,13 +381,16 @@ export class VM {
    * @param options VM configuration options
    * @param resolvedSandboxOptions Optional pre-resolved sandbox options (from VM.create())
    */
-  constructor(options: VMOptions = {}, resolvedSandboxOptions?: ResolvedSandboxServerOptions) {
+  constructor(
+    options: VMOptions = {},
+    resolvedSandboxOptions?: ResolvedSandboxServerOptions,
+  ) {
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
       options.sandbox?.mitmCertDir,
-      options.sandbox?.netEnabled ?? true
+      options.sandbox?.netEnabled ?? true,
     );
 
     // Inject a guarded /etc/gondolin mount (host-authoritative ingress configuration)
@@ -387,7 +404,10 @@ export class VM {
         gondolinMounts = {
           "/etc/gondolin": etcProvider,
         };
-        gondolinHooks = createGondolinEtcHooks(this.gondolinEtc.listeners, etcProvider) as VfsHooks;
+        gondolinHooks = createGondolinEtcHooks(
+          this.gondolinEtc.listeners,
+          etcProvider,
+        ) as VfsHooks;
       }
     }
 
@@ -400,7 +420,10 @@ export class VM {
             hooks: mergedHooks,
           };
 
-    const resolvedVfs = resolveVmVfs(vfsOptions, { ...mitmMounts, ...gondolinMounts });
+    const resolvedVfs = resolveVmVfs(vfsOptions, {
+      ...mitmMounts,
+      ...gondolinMounts,
+    });
     this.vfs = resolvedVfs.provider;
     this.defaultEnv = options.env;
     let fuseMounts = resolvedVfs.mounts;
@@ -416,7 +439,7 @@ export class VM {
       const injectedMounts = resolveMitmMounts(
         undefined,
         sandboxOptions.mitmCertDir,
-        sandboxOptions.netEnabled ?? true
+        sandboxOptions.netEnabled ?? true,
       );
       if (Object.keys(injectedMounts).length > 0) {
         const normalized = normalizeMountMap({
@@ -450,16 +473,23 @@ export class VM {
     if (options.ssh && sandboxOptions.ssh === undefined) {
       sandboxOptions.ssh = options.ssh;
     }
-    if (options.maxHttpBodyBytes !== undefined && sandboxOptions.maxHttpBodyBytes === undefined) {
+    if (
+      options.maxHttpBodyBytes !== undefined &&
+      sandboxOptions.maxHttpBodyBytes === undefined
+    ) {
       sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
     if (
       options.maxHttpResponseBodyBytes !== undefined &&
       (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
     ) {
-      (sandboxOptions as any).maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
+      (sandboxOptions as any).maxHttpResponseBodyBytes =
+        options.maxHttpResponseBodyBytes;
     }
-    if (options.allowWebSockets !== undefined && sandboxOptions.allowWebSockets === undefined) {
+    if (
+      options.allowWebSockets !== undefined &&
+      sandboxOptions.allowWebSockets === undefined
+    ) {
       sandboxOptions.allowWebSockets = options.allowWebSockets;
     }
     if (this.vfs && sandboxOptions.vfsProvider === undefined) {
@@ -487,8 +517,12 @@ export class VM {
     // - Otherwise create an ephemeral qcow2 overlay backed by the base rootfs.
     const userRootDiskPath = sandboxOptions.rootDiskPath;
     if (userRootDiskPath) {
-      const format = sandboxOptions.rootDiskFormat ?? resolved.rootDiskFormat ?? inferDiskFormatFromPath(userRootDiskPath);
-      const snapshot = sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
+      const format =
+        sandboxOptions.rootDiskFormat ??
+        resolved.rootDiskFormat ??
+        inferDiskFormatFromPath(userRootDiskPath);
+      const snapshot =
+        sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
       const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
 
       resolved.rootDiskPath = userRootDiskPath;
@@ -504,7 +538,10 @@ export class VM {
     } else {
       ensureQemuImgAvailable();
       const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
-      const overlayPath = createTempQcow2Overlay(resolved.rootfsPath, backingFormat);
+      const overlayPath = createTempQcow2Overlay(
+        resolved.rootfsPath,
+        backingFormat,
+      );
 
       resolved.rootDiskPath = overlayPath;
       resolved.rootDiskFormat = "qcow2";
@@ -529,7 +566,8 @@ export class VM {
 
     if (anyDebug) {
       // If the user didn't provide a debug sink, default to console.log
-      this.debugLog = options.debugLog === undefined ? defaultDebugLog : options.debugLog;
+      this.debugLog =
+        options.debugLog === undefined ? defaultDebugLog : options.debugLog;
 
       // Always attach the listener so `vm.setDebugLog()` can enable logging later.
       this.debugListener = (component, message) => {
@@ -575,12 +613,12 @@ export class VM {
 
   /**
    * Execute a command in the sandbox.
-   * 
+   *
    * Returns an ExecProcess which can be:
    * - awaited for a buffered result with strings
    * - iterated for streaming output (requires stdout: "pipe")
    * - used with stdin via write()/end()
-   * 
+   *
    * @example
    * ```typescript
    * // String form runs via `/bin/sh -lc "..."`
@@ -590,12 +628,12 @@ export class VM {
    * // Array form executes an executable directly (does not search `$PATH`)
    * const r2 = await vm.exec(["/bin/echo", "hello"]);
    * console.log(r2.stdout); // 'hello\n'
-   * 
+   *
    * // Streaming output (piped stdout)
    * for await (const line of vm.exec(["/bin/tail", "-f", "/var/log/syslog"], { stdout: "pipe" })) {
    *   console.log(line);
    * }
-   * 
+   *
    * // Interactive with stdin
    * const proc = vm.exec(["/bin/cat"], { stdin: true });
    * proc.write("hello\n");
@@ -611,7 +649,10 @@ export class VM {
   /**
    * Create a readable stream for a guest file.
    */
-  async readFileStream(filePath: string, options: VmReadFileStreamOptions = {}): Promise<Readable> {
+  async readFileStream(
+    filePath: string,
+    options: VmReadFileStreamOptions = {},
+  ): Promise<Readable> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
     }
@@ -650,10 +691,13 @@ export class VM {
    * Read a file from inside the running guest.
    */
   readFile(filePath: string, options: VmReadFileTextOptions): Promise<string>;
-  readFile(filePath: string, options?: VmReadFileBufferOptions): Promise<Buffer>;
+  readFile(
+    filePath: string,
+    options?: VmReadFileBufferOptions,
+  ): Promise<Buffer>;
   async readFile(
     filePath: string,
-    options: VmReadFileOptions = {}
+    options: VmReadFileOptions = {},
   ): Promise<string | Buffer> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
@@ -706,14 +750,17 @@ export class VM {
   async writeFile(
     filePath: string,
     data: VmWriteFileInput,
-    options: VmWriteFileOptions = {}
+    options: VmWriteFileOptions = {},
   ): Promise<void> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
     }
 
     const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
-    const payload = typeof data === "string" ? Buffer.from(data, options.encoding ?? "utf-8") : data;
+    const payload =
+      typeof data === "string"
+        ? Buffer.from(data, options.encoding ?? "utf-8")
+        : data;
 
     if (vfsPath) {
       try {
@@ -746,7 +793,10 @@ export class VM {
   /**
    * Delete a file or directory inside the running guest.
    */
-  async deleteFile(filePath: string, options: VmDeleteFileOptions = {}): Promise<void> {
+  async deleteFile(
+    filePath: string,
+    options: VmDeleteFileOptions = {},
+  ): Promise<void> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
     }
@@ -786,7 +836,10 @@ export class VM {
     }
   }
 
-  private resolveVfsShortcutPath(filePath: string, cwd?: string): string | null {
+  private resolveVfsShortcutPath(
+    filePath: string,
+    cwd?: string,
+  ): string | null {
     if (!this.vfs) return null;
 
     const absolutePath = resolveAbsoluteGuestPath(filePath, cwd);
@@ -805,14 +858,20 @@ export class VM {
     return null;
   }
 
-  private readFileStreamFromVfs(filePath: string, options: VmReadFileStreamOptions): Readable {
+  private readFileStreamFromVfs(
+    filePath: string,
+    options: VmReadFileStreamOptions,
+  ): Readable {
     assertNotAborted(options.signal, "file read aborted");
     const chunkSize =
-      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ?? DEFAULT_VFS_FILE_CHUNK_SIZE;
+      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ??
+      DEFAULT_VFS_FILE_CHUNK_SIZE;
     const highWaterMark = normalizePositiveInt(options.highWaterMark);
     const stream = Readable.from(
       this.iterateVfsFileChunks(filePath, chunkSize, options.signal),
-      highWaterMark ? { objectMode: false, highWaterMark } : { objectMode: false }
+      highWaterMark
+        ? { objectMode: false, highWaterMark }
+        : { objectMode: false },
     );
     stream.on("error", () => {
       // keep process alive if caller does not attach an error handler
@@ -822,12 +881,17 @@ export class VM {
 
   private async readFileFromVfs(
     filePath: string,
-    options: { chunkSize?: number; signal?: AbortSignal }
+    options: { chunkSize?: number; signal?: AbortSignal },
   ): Promise<Buffer> {
     const chunkSize =
-      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ?? DEFAULT_VFS_FILE_CHUNK_SIZE;
+      normalizePositiveInt(options.chunkSize, DEFAULT_VFS_FILE_CHUNK_SIZE) ??
+      DEFAULT_VFS_FILE_CHUNK_SIZE;
     const chunks: Buffer[] = [];
-    for await (const chunk of this.iterateVfsFileChunks(filePath, chunkSize, options.signal)) {
+    for await (const chunk of this.iterateVfsFileChunks(
+      filePath,
+      chunkSize,
+      options.signal,
+    )) {
       chunks.push(chunk);
     }
     return Buffer.concat(chunks);
@@ -836,7 +900,7 @@ export class VM {
   private async *iterateVfsFileChunks(
     filePath: string,
     chunkSize: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): AsyncIterable<Buffer> {
     const vfs = this.vfs;
     if (!vfs) {
@@ -851,7 +915,12 @@ export class VM {
 
       while (true) {
         assertNotAborted(signal, "file read aborted");
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          buffer.length,
+          offset,
+        );
         if (bytesRead === 0) {
           return;
         }
@@ -864,7 +933,11 @@ export class VM {
     }
   }
 
-  private async writeFileToVfs(filePath: string, input: VmWriteFileInput, signal?: AbortSignal): Promise<void> {
+  private async writeFileToVfs(
+    filePath: string,
+    input: VmWriteFileInput,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const vfs = this.vfs;
     if (!vfs) {
       throw new Error("vfs provider is not available");
@@ -883,7 +956,7 @@ export class VM {
             chunk,
             offset,
             chunk.length - offset,
-            position + offset
+            position + offset,
           );
           if (bytesWritten <= 0) {
             throw new Error("short write");
@@ -900,7 +973,7 @@ export class VM {
 
   private async deleteVfsPath(
     filePath: string,
-    options: { force?: boolean; recursive?: boolean; signal?: AbortSignal }
+    options: { force?: boolean; recursive?: boolean; signal?: AbortSignal },
   ): Promise<void> {
     const vfs = this.vfs;
     if (!vfs) {
@@ -928,7 +1001,10 @@ export class VM {
     }
   }
 
-  private async deleteVfsTree(filePath: string, signal?: AbortSignal): Promise<void> {
+  private async deleteVfsTree(
+    filePath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const vfs = this.vfs;
     if (!vfs) {
       throw new Error("vfs provider is not available");
@@ -962,18 +1038,18 @@ export class VM {
 
   /**
    * Start an interactive shell session.
-   * 
+   *
    * By default, attaches to process.stdin/stdout/stderr when running in a TTY.
-   * 
+   *
    * @example
    * ```typescript
    * // Simple interactive shell
    * const result = await vm.shell();
    * process.exit(result.exitCode);
-   * 
+   *
    * // Custom command (absolute path required)
    * const result = await vm.shell({ command: "/bin/sh" });
-   * 
+   *
    * // Manual control
    * const proc = vm.shell({ attach: false });
    * proc.write('ls\n');
@@ -1009,7 +1085,7 @@ export class VM {
       proc.attach(
         process.stdin as NodeJS.ReadStream,
         process.stdout as NodeJS.WriteStream,
-        process.stderr as NodeJS.WriteStream
+        process.stderr as NodeJS.WriteStream,
       );
     }
 
@@ -1044,7 +1120,7 @@ export class VM {
         // ignore
       }
       throw new Error(
-        `failed to run ssh-keygen (needed for vm.enableSsh): ${err instanceof Error ? err.message : String(err)}`
+        `failed to run ssh-keygen (needed for vm.enableSsh): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
@@ -1154,22 +1230,22 @@ fi
       setupResult.exitCode !== 125
     ) {
       throw new Error(
-        `failed to configure ssh in guest (exit ${setupResult.exitCode}): ${setupResult.stderr.trim()}`
+        `failed to configure ssh in guest (exit ${setupResult.exitCode}): ${setupResult.stderr.trim()}`,
       );
     }
     if (setupResult.exitCode === 127) {
       throw new Error(
-        "sshd not available in guest image. Rebuild guest assets with openssh installed (default images should include it)."
+        "sshd not available in guest image. Rebuild guest assets with openssh installed (default images should include it).",
       );
     }
     if (setupResult.exitCode === 126) {
       throw new Error(
-        "sandboxssh not available in guest image. Rebuild guest assets to include sandboxssh."
+        "sandboxssh not available in guest image. Rebuild guest assets to include sandboxssh.",
       );
     }
     if (setupResult.exitCode === 125) {
       throw new Error(
-        `ssh user '${user}' does not exist in guest image (vm.enableSsh({ user }))`
+        `ssh user '${user}' does not exist in guest image (vm.enableSsh({ user }))`,
       );
     }
 
@@ -1185,7 +1261,11 @@ fi
     while (Date.now() < deadline) {
       let probe: Duplex | null = null;
       try {
-        const stream = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 2000 });
+        const stream = await server.openTcpStream({
+          host: "127.0.0.1",
+          port: 22,
+          timeoutMs: 2000,
+        });
         probe = stream;
 
         // sshd sends its banner immediately after accepting a TCP connection.
@@ -1215,7 +1295,9 @@ fi
         });
 
         if (!banner.startsWith("SSH-")) {
-          throw new Error(`unexpected ssh banner: ${JSON.stringify(banner.slice(0, 32))}`);
+          throw new Error(
+            `unexpected ssh banner: ${JSON.stringify(banner.slice(0, 32))}`,
+          );
         }
 
         lastErr = null;
@@ -1229,7 +1311,8 @@ fi
     }
 
     if (lastErr) {
-      const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      const detail =
+        lastErr instanceof Error ? lastErr.message : String(lastErr);
       throw new Error(`ssh port-forward is not available: ${detail}`);
     }
 
@@ -1249,7 +1332,10 @@ fi
           return;
         }
         try {
-          const tunnel = await server.openTcpStream({ host: "127.0.0.1", port: 22 });
+          const tunnel = await server.openTcpStream({
+            host: "127.0.0.1",
+            port: 22,
+          });
           tunnel.on("error", () => socket.destroy());
           socket.on("error", (err) => tunnel.destroy(err));
           socket.pipe(tunnel).pipe(socket);
@@ -1286,7 +1372,9 @@ fi
         `-o ForwardAgent=no -o ClearAllForwardings=yes -o IdentitiesOnly=yes ` +
         `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${user}@${host}`,
       close: async () => {
-        await new Promise<void>((resolve) => forwardServer.close(() => resolve()));
+        await new Promise<void>((resolve) =>
+          forwardServer.close(() => resolve()),
+        );
         try {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch {
@@ -1326,14 +1414,16 @@ fi
    * The gateway listens on a single host port and routes requests to guest-local
    * HTTP servers as configured by /etc/gondolin/listeners.
    */
-  async enableIngress(options: EnableIngressOptions = {}): Promise<IngressAccess> {
+  async enableIngress(
+    options: EnableIngressOptions = {},
+  ): Promise<IngressAccess> {
     if (this.ingressAccess) return this.ingressAccess;
 
     await this.start();
 
     if (!this.gondolinEtc) {
       throw new Error(
-        "ingress requires the /etc/gondolin mount. Ensure VFS is enabled and that /etc/gondolin is not overridden by a custom mount."
+        "ingress requires the /etc/gondolin mount. Ensure VFS is enabled and that /etc/gondolin is not overridden by a custom mount.",
       );
     }
 
@@ -1415,7 +1505,7 @@ fi
     argv: string[],
     options: ExecOptions,
     session: ExecSession,
-    stdinSetting: ExecStdin | undefined
+    stdinSetting: ExecStdin | undefined,
   ) {
     try {
       await this.start();
@@ -1439,7 +1529,11 @@ fi
       this.markSessionReady(session);
 
       // Pipe stdin if provided (and not just `true`)
-      if (session.stdinEnabled && stdinSetting !== true && stdinSetting !== undefined) {
+      if (
+        session.stdinEnabled &&
+        stdinSetting !== true &&
+        stdinSetting !== undefined
+      ) {
         void this.pipeStdin(id, stdinSetting, session);
       }
     } catch (err) {
@@ -1463,7 +1557,9 @@ fi
 
   private async startInternal() {
     if (this.checkpointed) {
-      throw new Error("vm was checkpointed and cannot be restarted; resume the checkpoint instead");
+      throw new Error(
+        "vm was checkpointed and cannot be restarted; resume the checkpoint instead",
+      );
     }
 
     this.ensureQemuAvailable();
@@ -1592,8 +1688,13 @@ fi
   }
 
   private sendStdinDataNow(id: number, data: Buffer | string) {
-    const payload = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
-    for (let offset = 0; offset < payload.length; offset += DEFAULT_STDIN_CHUNK) {
+    const payload =
+      typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+    for (
+      let offset = 0;
+      offset < payload.length;
+      offset += DEFAULT_STDIN_CHUNK
+    ) {
       const slice = payload.subarray(offset, offset + DEFAULT_STDIN_CHUNK);
       this.sendJson({
         type: "stdin",
@@ -1652,7 +1753,7 @@ fi
         },
         () => {
           this.handleDisconnect(new Error("sandbox connection closed"));
-        }
+        },
       );
     })().finally(() => {
       this.connectPromise = null;
@@ -1726,10 +1827,16 @@ fi
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     // Use internal exec that bypasses VFS check
-    const result = await this.execInternalNoVfsWait(["/bin/sh", "-c", script, "sh", mountPoint]);
+    const result = await this.execInternalNoVfsWait([
+      "/bin/sh",
+      "-c",
+      script,
+      "sh",
+      mountPoint,
+    ]);
     if (result.exitCode !== 0) {
       throw new Error(
-        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
+        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
@@ -1754,17 +1861,23 @@ fi
     ]);
     if (result.exitCode !== 0) {
       throw new Error(
-        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
+        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
 
   private async waitForPath(entryPath: string) {
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do [ -e "$1" ] && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-    const result = await this.execInternalNoVfsWait(["/bin/sh", "-c", script, "sh", entryPath]);
+    const result = await this.execInternalNoVfsWait([
+      "/bin/sh",
+      "-c",
+      script,
+      "sh",
+      entryPath,
+    ]);
     if (result.exitCode !== 0) {
       throw new Error(
-        `vfs path ${entryPath} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
+        `vfs path ${entryPath} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
@@ -1842,10 +1955,9 @@ fi
 
     let message: StatusMessage | ExecResponseMessage | ErrorMessage;
     try {
-      message = JSON.parse(typeof data === "string" ? data : data.toString()) as
-        | StatusMessage
-        | ExecResponseMessage
-        | ErrorMessage;
+      message = JSON.parse(
+        typeof data === "string" ? data : data.toString(),
+      ) as StatusMessage | ExecResponseMessage | ErrorMessage;
     } catch {
       return;
     }
@@ -1917,7 +2029,8 @@ fi
 
   private handleDisconnect(error?: Error) {
     this.connection = null;
-    const disconnectError = error ?? new Error("sandbox connection disconnected");
+    const disconnectError =
+      error ?? new Error("sandbox connection disconnected");
     if (this.statusReject) {
       this.statusReject(disconnectError);
       this.statusReject = null;
@@ -1955,7 +2068,9 @@ fi
       throw new Error("checkpointPath is required");
     }
     if (!path.isAbsolute(checkpointPath)) {
-      throw new Error(`checkpointPath must be an absolute path (got: ${checkpointPath})`);
+      throw new Error(
+        `checkpointPath must be an absolute path (got: ${checkpointPath})`,
+      );
     }
 
     const rootDisk = this.rootDisk;
@@ -1963,10 +2078,14 @@ fi
       throw new Error("vm has no root disk");
     }
     if (rootDisk.snapshot) {
-      throw new Error("cannot checkpoint: root disk is running in qemu snapshot mode");
+      throw new Error(
+        "cannot checkpoint: root disk is running in qemu snapshot mode",
+      );
     }
     if (rootDisk.format !== "qcow2") {
-      throw new Error(`cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`);
+      throw new Error(
+        `cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`,
+      );
     }
 
     // Ensure the disk isn't deleted by close().
@@ -1990,7 +2109,10 @@ fi
 
     moveFile(rootDisk.path, resolvedCheckpointPath);
 
-    const checkpointName = path.basename(resolvedCheckpointPath, path.extname(resolvedCheckpointPath));
+    const checkpointName = path.basename(
+      resolvedCheckpointPath,
+      path.extname(resolvedCheckpointPath),
+    );
 
     const guestAssets = {
       kernelPath: this.resolvedSandboxOptions.kernelPath,
@@ -1999,8 +2121,10 @@ fi
     };
 
     const commonDir =
-      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.initrdPath) &&
-      path.dirname(guestAssets.kernelPath) === path.dirname(guestAssets.rootfsPath)
+      path.dirname(guestAssets.kernelPath) ===
+        path.dirname(guestAssets.initrdPath) &&
+      path.dirname(guestAssets.kernelPath) ===
+        path.dirname(guestAssets.rootfsPath)
         ? path.dirname(guestAssets.kernelPath)
         : null;
 
@@ -2009,7 +2133,7 @@ fi
 
     if (!guestAssetBuildId) {
       throw new Error(
-        "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)"
+        "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)",
       );
     }
 
@@ -2028,10 +2152,15 @@ fi
     this.rootDisk = null;
     this.checkpointed = true;
 
-    return new VmCheckpoint(resolvedCheckpointPath, data, this.baseOptionsForClone, { isDirectory: false });
+    return new VmCheckpoint(
+      resolvedCheckpointPath,
+      data,
+      this.baseOptionsForClone,
+      { isDirectory: false },
+    );
   }
 
-  private sendJson(message: ClientMessage) { 
+  private sendJson(message: ClientMessage) {
     if (!this.connection) {
       throw new Error("sandbox connection is not available");
     }
@@ -2050,7 +2179,10 @@ function normalizeGuestPath(inputPath: string): string {
   return normalized;
 }
 
-function resolveAbsoluteGuestPath(filePath: string, cwd?: string): string | null {
+function resolveAbsoluteGuestPath(
+  filePath: string,
+  cwd?: string,
+): string | null {
   if (filePath.startsWith("/")) {
     return normalizeGuestPath(filePath);
   }
@@ -2066,7 +2198,10 @@ function isPathWithinMount(filePath: string, mountPath: string): boolean {
   return filePath.startsWith(`${mountPath}/`);
 }
 
-function mapFuseGuestPathToVfsPath(filePath: string, fuseMount: string): string {
+function mapFuseGuestPathToVfsPath(
+  filePath: string,
+  fuseMount: string,
+): string {
   if (fuseMount === "/") {
     return filePath;
   }
@@ -2076,14 +2211,20 @@ function mapFuseGuestPathToVfsPath(filePath: string, fuseMount: string): string 
   return filePath.slice(fuseMount.length);
 }
 
-function normalizePositiveInt(value: number | undefined, fallback?: number): number | undefined {
+function normalizePositiveInt(
+  value: number | undefined,
+  fallback?: number,
+): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return fallback;
   }
   return Math.trunc(value);
 }
 
-function assertNotAborted(signal: AbortSignal | undefined, message: string): void {
+function assertNotAborted(
+  signal: AbortSignal | undefined,
+  message: string,
+): void {
   if (signal?.aborted) {
     throw new Error(message);
   }
@@ -2100,7 +2241,9 @@ function isNoEntryError(err: unknown): boolean {
   );
 }
 
-async function* toFileBufferIterable(input: VmWriteFileInput): AsyncIterable<Buffer> {
+async function* toFileBufferIterable(
+  input: VmWriteFileInput,
+): AsyncIterable<Buffer> {
   if (typeof input === "string") {
     yield Buffer.from(input, "utf-8");
     return;
@@ -2147,7 +2290,10 @@ async function* toFileBufferIterable(input: VmWriteFileInput): AsyncIterable<Buf
   throw new Error("unsupported write input type");
 }
 
-function normalizeCommand(command: ExecInput, options: ExecOptions): {
+function normalizeCommand(
+  command: ExecInput,
+  options: ExecOptions,
+): {
   cmd: string;
   argv: string[];
 } {
@@ -2181,13 +2327,15 @@ type ResolvedVfs = {
 
 function resolveVmVfs(
   options?: VmVfsOptions | null,
-  injectedMounts?: Record<string, VirtualProvider>
+  injectedMounts?: Record<string, VirtualProvider>,
 ): ResolvedVfs {
   if (options === null) {
     return { provider: null, mounts: {} };
   }
   const hooks = options?.hooks ?? {};
-  const mounts: Record<string, VirtualProvider> = { ...(options?.mounts ?? {}) };
+  const mounts: Record<string, VirtualProvider> = {
+    ...(options?.mounts ?? {}),
+  };
 
   if (injectedMounts) {
     for (const [mountPath, provider] of Object.entries(injectedMounts)) {
@@ -2246,7 +2394,7 @@ function wrapProvider(provider: VirtualProvider, hooks: VfsHooks) {
 
 function resolveFuseConfig(
   options?: VmVfsOptions | null,
-  mounts?: Record<string, VirtualProvider>
+  mounts?: Record<string, VirtualProvider>,
 ) {
   const fuseMount = normalizeMountPath(options?.fuseMount ?? "/data");
   const mountPaths = listMountPaths(mounts ?? options?.mounts);
@@ -2257,7 +2405,7 @@ function resolveFuseConfig(
 function resolveMitmMounts(
   options?: VmVfsOptions | null,
   mitmCertDir?: string,
-  netEnabled = true
+  netEnabled = true,
 ): Record<string, VirtualProvider> {
   if (options === null || !netEnabled) return {};
 
@@ -2296,7 +2444,11 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<Buffer> {
 }
 
 async function* toAsyncIterable(value: ExecStdin): AsyncIterable<Buffer> {
-  if (typeof value === "string" || Buffer.isBuffer(value) || typeof value === "boolean") {
+  if (
+    typeof value === "string" ||
+    Buffer.isBuffer(value) ||
+    typeof value === "boolean"
+  ) {
     return;
   }
 
@@ -2317,7 +2469,10 @@ async function* toAsyncIterable(value: ExecStdin): AsyncIterable<Buffer> {
   throw new Error("unsupported stdin type");
 }
 
-function buildShellEnv(baseEnv?: EnvInput, extraEnv?: EnvInput): string[] | undefined {
+function buildShellEnv(
+  baseEnv?: EnvInput,
+  extraEnv?: EnvInput,
+): string[] | undefined {
   const envMap = mergeEnvMap(baseEnv, extraEnv);
   if (envMap.size === 0) {
     const term = resolveTermValue();
@@ -2340,12 +2495,18 @@ function resolveTermValue(): string | null {
   return term;
 }
 
-function mergeEnvInputs(baseEnv?: EnvInput, extraEnv?: EnvInput): string[] | undefined {
+function mergeEnvInputs(
+  baseEnv?: EnvInput,
+  extraEnv?: EnvInput,
+): string[] | undefined {
   const envMap = mergeEnvMap(baseEnv, extraEnv);
   return envMap.size > 0 ? mapToEnvArray(envMap) : undefined;
 }
 
-function mergeEnvMap(baseEnv?: EnvInput, extraEnv?: EnvInput): Map<string, string> {
+function mergeEnvMap(
+  baseEnv?: EnvInput,
+  extraEnv?: EnvInput,
+): Map<string, string> {
   const envMap = new Map<string, string>();
   for (const [key, value] of envInputToEntries(baseEnv)) {
     envMap.set(key, value);

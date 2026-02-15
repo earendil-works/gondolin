@@ -32,14 +32,21 @@ import {
   encodeOutputFrame,
   ServerMessage,
 } from "./control-protocol";
-import { SandboxController, SandboxConfig, SandboxState, type SandboxLogStream } from "./sandbox-controller";
+import {
+  SandboxController,
+  SandboxConfig,
+  SandboxState,
+  type SandboxLogStream,
+} from "./sandbox-controller";
 import {
   QemuNetworkBackend,
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
 } from "./qemu-net";
 import type { DnsOptions, HttpFetch, HttpHooks, SshOptions } from "./qemu-net";
-import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
+import { FsRpcService } from "./vfs/rpc-service";
+import { SandboxVfsProvider } from "./vfs/provider";
+import type { VirtualProvider } from "./vfs/node";
 import {
   debugFlagsToArray,
   parseDebugEnv,
@@ -59,7 +66,7 @@ import {
 
 /**
  * Path to guest image assets.
- * 
+ *
  * Can be either:
  * - A string path to a directory containing the assets (vmlinuz-virt, initramfs.cpio.lz4, rootfs.ext4)
  * - An object with explicit paths to each asset file
@@ -151,7 +158,6 @@ export type SandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
   /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
@@ -240,7 +246,6 @@ export type ResolvedSandboxServerOptions = {
   /** kernel cmdline append string */
   append?: string;
 
-
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
   /** max stdin buffered for a single queued (not yet active) exec in `bytes` */
@@ -309,7 +314,9 @@ function resolveImagePath(imagePath: ImagePath): GuestAssets {
   return imagePath;
 }
 
-function normalizeArch(value: string | null | undefined): "arm64" | "x64" | null {
+function normalizeArch(
+  value: string | null | undefined,
+): "arm64" | "x64" | null {
   if (!value) return null;
   const lower = value.toLowerCase();
   if (lower === "arm64" || lower === "aarch64") return "arm64";
@@ -320,10 +327,14 @@ function normalizeArch(value: string | null | undefined): "arm64" | "x64" | null
 function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   const lower = qemuPath.toLowerCase();
   if (lower.includes("aarch64") || lower.includes("arm64")) return "arm64";
-  if (lower.includes("x86_64") || lower.includes("x64") || lower.includes("amd64")) return "x64";
+  if (
+    lower.includes("x86_64") ||
+    lower.includes("x64") ||
+    lower.includes("amd64")
+  )
+    return "x64";
   return null;
 }
-
 
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
   const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
@@ -360,7 +371,7 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
  */
 export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
-  assets?: GuestAssets
+  assets?: GuestAssets,
 ): ResolvedSandboxServerOptions {
   // Resolve image paths: explicit imagePath > assets parameter > local dev paths
   let resolvedAssets: Partial<GuestAssets>;
@@ -380,28 +391,29 @@ export function resolveSandboxServerOptions(
   const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
   const defaultVirtio = path.resolve(
     tmpDir,
-    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`
+    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`,
   );
   const defaultVirtioFs = path.resolve(
     tmpDir,
-    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`
+    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`,
   );
   const defaultVirtioSsh = path.resolve(
     tmpDir,
-    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`
+    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`,
   );
   const defaultVirtioIngress = path.resolve(
     tmpDir,
-    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`
+    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
   );
   const defaultNetSock = path.resolve(
     tmpDir,
-    `gondolin-net-${randomUUID().slice(0, 8)}.sock`
+    `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
   );
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = detectHostArch();
-  const defaultQemu = hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  const defaultQemu =
+    hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
@@ -410,10 +422,10 @@ export function resolveSandboxServerOptions(
   if (!kernelPath || !initrdPath || !rootfsPath) {
     throw new Error(
       "Guest assets not found. Either:\n" +
-      "  1. Run from the gondolin repository with built guest images\n" +
-      "  2. Use SandboxServer.create() to auto-download assets\n" +
-      "  3. Provide imagePath option (directory path or explicit paths)\n" +
-      "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets"
+        "  1. Run from the gondolin repository with built guest images\n" +
+        "  2. Use SandboxServer.create() to auto-download assets\n" +
+        "  3. Provide imagePath option (directory path or explicit paths)\n" +
+        "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
   }
 
@@ -436,22 +448,24 @@ export function resolveSandboxServerOptions(
         `  qemu binary:  ${qemuArch} (${qemuPath})\n` +
         `  host arch:    ${host}\n\n` +
         "Fix: use a matching qemuPath (e.g. qemu-system-aarch64 vs qemu-system-x86_64) " +
-        "or rebuild/download guest assets for the correct architecture."
+        "or rebuild/download guest assets for the correct architecture.",
     );
   }
 
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;
-  const rootDiskFormat = options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
-  const rootDiskSnapshot = options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
+  const rootDiskFormat =
+    options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
+  const rootDiskSnapshot =
+    options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
     options.maxQueuedStdinBytes ?? DEFAULT_MAX_QUEUED_STDIN_BYTES,
-    maxStdinBytes
+    maxStdinBytes,
   );
   const maxTotalQueuedStdinBytes = Math.max(
     options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
-    maxQueuedStdinBytes
+    maxQueuedStdinBytes,
   );
 
   return {
@@ -467,7 +481,8 @@ export function resolveSandboxServerOptions(
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
     virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
-    virtioIngressSocketPath: options.virtioIngressSocketPath ?? defaultVirtioIngress,
+    virtioIngressSocketPath:
+      options.virtioIngressSocketPath ?? defaultVirtioIngress,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
@@ -501,7 +516,7 @@ export function resolveSandboxServerOptions(
  * This is the recommended way to get resolved options for production use.
  */
 export async function resolveSandboxServerOptionsAsync(
-  options: SandboxServerOptions = {}
+  options: SandboxServerOptions = {},
 ): Promise<ResolvedSandboxServerOptions> {
   // If imagePath is explicitly provided, use sync version (no download needed)
   if (options.imagePath !== undefined) {
@@ -568,7 +583,7 @@ class VirtioBridge {
 
   constructor(
     private readonly socketPath: string,
-    private readonly maxPendingBytes: number = 8 * 1024 * 1024
+    private readonly maxPendingBytes: number = 8 * 1024 * 1024,
   ) {}
 
   connect() {
@@ -769,7 +784,7 @@ class TcpForwardStream extends Duplex {
   constructor(
     readonly id: number,
     private readonly sendFrame: (message: object) => boolean,
-    private readonly onDispose: () => void
+    private readonly onDispose: () => void,
   ) {
     super();
     this.on("close", () => {
@@ -781,7 +796,11 @@ class TcpForwardStream extends Duplex {
     // no-op; data is pushed from the virtio handler
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
     if (this.closedByRemote) {
       callback(new Error("tcp stream closed"));
       return;
@@ -813,7 +832,10 @@ class TcpForwardStream extends Duplex {
     callback();
   }
 
-  _destroy(_error: Error | null, callback: (error?: Error | null) => void): void {
+  _destroy(
+    _error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
     if (!this.closedByRemote && !this.closeSent) {
       this.closeSent = true;
       this.sendFrame({ v: 1, t: "tcp_close", id: this.id, p: {} });
@@ -844,7 +866,8 @@ function parseMac(value: string): Buffer | null {
   const parts = value.split(":");
   if (parts.length !== 6) return null;
   const bytes = parts.map((part) => Number.parseInt(part, 16));
-  if (bytes.some((byte) => !Number.isFinite(byte) || byte < 0 || byte > 255)) return null;
+  if (bytes.some((byte) => !Number.isFinite(byte) || byte < 0 || byte > 255))
+    return null;
   return Buffer.from(bytes);
 }
 
@@ -911,8 +934,11 @@ class LocalSandboxClient implements SandboxClient {
   private closed = false;
 
   constructor(
-    private readonly onMessage: (data: Buffer | string, isBinary: boolean) => void,
-    private readonly onClose?: () => void
+    private readonly onMessage: (
+      data: Buffer | string,
+      isBinary: boolean,
+    ) => void,
+    private readonly onClose?: () => void,
   ) {}
 
   sendJson(message: ServerMessage): boolean {
@@ -951,7 +977,10 @@ export class SandboxServer extends EventEmitter {
     const normalized = stripTrailingNewline(message);
     this.emit("debug", component, normalized);
     // Legacy string log event
-    this.emit("log", `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""));
+    this.emit(
+      "log",
+      `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""),
+    );
   }
 
   private normalizeQemuHintLine(line: string): string | null {
@@ -1005,11 +1034,17 @@ export class SandboxServer extends EventEmitter {
   private readonly network: QemuNetworkBackend | null;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
-  private tcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+  private tcpOpenWaiters = new Map<
+    number,
+    { resolve: () => void; reject: (err: Error) => void }
+  >();
   private nextTcpStreamId = 1;
 
   private ingressTcpStreams = new Map<number, TcpForwardStream>();
-  private ingressTcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+  private ingressTcpOpenWaiters = new Map<
+    number,
+    { resolve: () => void; reject: (err: Error) => void }
+  >();
   private nextIngressTcpStreamId = 1;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
@@ -1020,10 +1055,17 @@ export class SandboxServer extends EventEmitter {
 
   // Exec requests that are accepted by the host API but not yet started on the
   // guest control channel (currently only used while a file operation is active)
-  private execQueue: Array<{ client: SandboxClient; message: ExecCommandMessage; payload: any }> = [];
+  private execQueue: Array<{
+    client: SandboxClient;
+    message: ExecCommandMessage;
+    payload: any;
+  }> = [];
   /** exec ids whose exec_request frame has been sent to sandboxd */
   private startedExecs = new Set<number>();
-  private queuedStdin = new Map<number, Array<{ data: Buffer; eof: boolean }>>();
+  private queuedStdin = new Map<
+    number,
+    Array<{ data: Buffer; eof: boolean }>
+  >();
   private queuedStdinBytes = new Map<number, number>();
   /** total bytes buffered in queuedStdin across all queued exec ids in `bytes` */
   private queuedStdinBytesTotal = 0;
@@ -1032,7 +1074,10 @@ export class SandboxServer extends EventEmitter {
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
-  private pendingExecWindows = new Map<number, { stdout: number; stderr: number }>();
+  private pendingExecWindows = new Map<
+    number,
+    { stdout: number; stderr: number }
+  >();
   private nextFileOpId = 1;
   private activeFileOpId: number | null = null;
   private fileOps = new Map<number, FileOperation>();
@@ -1066,7 +1111,9 @@ export class SandboxServer extends EventEmitter {
    * @param options Server configuration options
    * @returns A configured SandboxServer instance
    */
-  static async create(options: SandboxServerOptions = {}): Promise<SandboxServer> {
+  static async create(
+    options: SandboxServerOptions = {},
+  ): Promise<SandboxServer> {
     const resolvedOptions = await resolveSandboxServerOptionsAsync(options);
     return new SandboxServer(resolvedOptions);
   }
@@ -1080,7 +1127,9 @@ export class SandboxServer extends EventEmitter {
    *
    * @param options Server configuration options (or pre-resolved options)
    */
-  constructor(options: SandboxServerOptions | ResolvedSandboxServerOptions = {}) {
+  constructor(
+    options: SandboxServerOptions | ResolvedSandboxServerOptions = {},
+  ) {
     super();
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
@@ -1111,7 +1160,9 @@ export class SandboxServer extends EventEmitter {
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
-    const baseAppend = (this.options.append ?? `console=${consoleDevice} initramfs_async=1`).trim();
+    const baseAppend = (
+      this.options.append ?? `console=${consoleDevice} initramfs_async=1`
+    ).trim();
     this.baseAppend = baseAppend;
 
     const sandboxConfig: SandboxConfig = {
@@ -1127,7 +1178,9 @@ export class SandboxServer extends EventEmitter {
       virtioFsSocketPath: this.options.virtioFsSocketPath,
       virtioSshSocketPath: this.options.virtioSshSocketPath,
       virtioIngressSocketPath: this.options.virtioIngressSocketPath,
-      netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
+      netSocketPath: this.options.netEnabled
+        ? this.options.netSocketPath
+        : undefined,
       netMac: this.options.netMac,
       append: this.baseAppend,
       machineType: this.options.machineType,
@@ -1145,10 +1198,13 @@ export class SandboxServer extends EventEmitter {
     // can cause spurious queue_full errors under slower virtio transport.
     const maxPendingBytes = Math.max(
       8 * 1024 * 1024,
-      (this.options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES) * 2
+      (this.options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES) * 2,
     );
 
-    this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
+    this.bridge = new VirtioBridge(
+      this.options.virtioSocketPath,
+      maxPendingBytes,
+    );
     this.bridge.onWritable = () => {
       this.scheduleExecWindowFlush();
       this.scheduleExecIoFlush();
@@ -1156,19 +1212,26 @@ export class SandboxServer extends EventEmitter {
     };
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
-    this.sshBridge = new VirtioBridge(this.options.virtioSshSocketPath, Math.max(maxPendingBytes, 64 * 1024 * 1024));
+    this.sshBridge = new VirtioBridge(
+      this.options.virtioSshSocketPath,
+      Math.max(maxPendingBytes, 64 * 1024 * 1024),
+    );
     // Ingress proxy streams can also be long-lived and high-throughput.
     this.ingressBridge = new VirtioBridge(
       this.options.virtioIngressSocketPath,
-      Math.max(maxPendingBytes, 64 * 1024 * 1024)
+      Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
-          logger: this.hasDebug("vfs") ? (message) => this.emitDebug("vfs", message) : undefined,
+          logger: this.hasDebug("vfs")
+            ? (message) => this.emitDebug("vfs", message)
+            : undefined,
         })
       : null;
 
-    const mac = parseMac(this.options.netMac) ?? Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    const mac =
+      parseMac(this.options.netMac) ??
+      Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     this.network = this.options.netEnabled
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,
@@ -1268,54 +1331,67 @@ export class SandboxServer extends EventEmitter {
       this.emit("exit", info);
     });
 
-    this.controller.on("log", (chunkOrEntry: string | any, streamArg?: SandboxLogStream) => {
-      // Backwards/forwards compatibility: accept either (chunk, stream) or an
-      // object payload.
-      let stream: SandboxLogStream = "stderr";
-      let chunk: string;
+    this.controller.on(
+      "log",
+      (chunkOrEntry: string | any, streamArg?: SandboxLogStream) => {
+        // Backwards/forwards compatibility: accept either (chunk, stream) or an
+        // object payload.
+        let stream: SandboxLogStream = "stderr";
+        let chunk: string;
 
-      if (typeof chunkOrEntry === "string") {
-        chunk = chunkOrEntry;
-        if (streamArg === "stdout" || streamArg === "stderr") {
-          stream = streamArg;
-        }
-      } else {
-        chunk = typeof chunkOrEntry?.chunk === "string" ? chunkOrEntry.chunk : String(chunkOrEntry ?? "");
-        if (chunkOrEntry?.stream === "stdout" || chunkOrEntry?.stream === "stderr") {
-          stream = chunkOrEntry.stream;
-        }
-      }
-
-      let buffer = stream === "stdout" ? this.qemuStdoutBuffer : this.qemuStderrBuffer;
-      buffer += chunk;
-
-      let newlineIndex = buffer.indexOf("\n");
-      while (newlineIndex !== -1) {
-        const line = buffer.slice(0, newlineIndex + 1);
-        buffer = buffer.slice(newlineIndex + 1);
-
-        // Only use stderr for client-visible error hints to avoid leaking
-        // untrusted guest console output from -serial stdio.
-        if (stream === "stderr") {
-          this.recordQemuLogLine(line);
-        }
-
-        if (this.hasDebug("protocol")) {
-          const normalized = this.normalizeQemuHintLine(line);
-          if (normalized) {
-            this.emitDebug("qemu", stream === "stderr" ? normalized : `stdout: ${normalized}`);
+        if (typeof chunkOrEntry === "string") {
+          chunk = chunkOrEntry;
+          if (streamArg === "stdout" || streamArg === "stderr") {
+            stream = streamArg;
+          }
+        } else {
+          chunk =
+            typeof chunkOrEntry?.chunk === "string"
+              ? chunkOrEntry.chunk
+              : String(chunkOrEntry ?? "");
+          if (
+            chunkOrEntry?.stream === "stdout" ||
+            chunkOrEntry?.stream === "stderr"
+          ) {
+            stream = chunkOrEntry.stream;
           }
         }
 
-        newlineIndex = buffer.indexOf("\n");
-      }
+        let buffer =
+          stream === "stdout" ? this.qemuStdoutBuffer : this.qemuStderrBuffer;
+        buffer += chunk;
 
-      if (stream === "stdout") {
-        this.qemuStdoutBuffer = buffer;
-      } else {
-        this.qemuStderrBuffer = buffer;
-      }
-    });
+        let newlineIndex = buffer.indexOf("\n");
+        while (newlineIndex !== -1) {
+          const line = buffer.slice(0, newlineIndex + 1);
+          buffer = buffer.slice(newlineIndex + 1);
+
+          // Only use stderr for client-visible error hints to avoid leaking
+          // untrusted guest console output from -serial stdio.
+          if (stream === "stderr") {
+            this.recordQemuLogLine(line);
+          }
+
+          if (this.hasDebug("protocol")) {
+            const normalized = this.normalizeQemuHintLine(line);
+            if (normalized) {
+              this.emitDebug(
+                "qemu",
+                stream === "stderr" ? normalized : `stdout: ${normalized}`,
+              );
+            }
+          }
+
+          newlineIndex = buffer.indexOf("\n");
+        }
+
+        if (stream === "stdout") {
+          this.qemuStdoutBuffer = buffer;
+        } else {
+          this.qemuStderrBuffer = buffer;
+        }
+      },
+    );
 
     this.bridge.onMessage = (message) => {
       if (this.hasDebug("protocol")) {
@@ -1339,7 +1415,12 @@ export class SandboxServer extends EventEmitter {
         if (!client) return;
         const data = message.p.data;
         try {
-          if (!sendBinary(client, encodeOutputFrame(message.id, message.p.stream, data))) {
+          if (
+            !sendBinary(
+              client,
+              encodeOutputFrame(message.id, message.p.stream, data),
+            )
+          ) {
             this.inflight.delete(message.id);
             this.stdinAllowed.delete(message.id);
             this.stdinCredits.delete(message.id);
@@ -1353,7 +1434,7 @@ export class SandboxServer extends EventEmitter {
         if (this.hasDebug("exec")) {
           this.emitDebug(
             "exec",
-            `exec done id=${message.id} exit=${message.p.exit_code}${message.p.signal ? ` signal=${message.p.signal}` : ""}`
+            `exec done id=${message.id} exit=${message.p.exit_code}${message.p.signal ? ` signal=${message.p.signal}` : ""}`,
           );
         }
         const client = this.inflight.get(message.id);
@@ -1392,7 +1473,10 @@ export class SandboxServer extends EventEmitter {
 
         const data = message.p.data;
         if (!Buffer.isBuffer(data)) {
-          this.rejectFileOperation(message.id, new Error("invalid file_read_data payload"));
+          this.rejectFileOperation(
+            message.id,
+            new Error("invalid file_read_data payload"),
+          );
           return;
         }
 
@@ -1406,7 +1490,8 @@ export class SandboxServer extends EventEmitter {
       } else if (message.t === "error") {
         const code = String(message.p.code ?? "");
         const client = this.inflight.get(message.id);
-        const isExecLifecycleTracked = this.startedExecs.has(message.id) || this.inflight.has(message.id);
+        const isExecLifecycleTracked =
+          this.startedExecs.has(message.id) || this.inflight.has(message.id);
         const nonTerminalExecError =
           isExecLifecycleTracked && this.isNonTerminalExecErrorCode(code);
 
@@ -1435,7 +1520,10 @@ export class SandboxServer extends EventEmitter {
           this.clearQueuedStdin(message.id);
           this.queuedPtyResize.delete(message.id);
         } else if (this.fileOps.has(message.id)) {
-          this.rejectFileOperation(message.id, new Error(`${message.p.code}: ${message.p.message}`));
+          this.rejectFileOperation(
+            message.id,
+            new Error(`${message.p.code}: ${message.p.message}`),
+          );
         } else if (this.startedExecs.has(message.id)) {
           // Orphaned exec (client disconnected): still clear guest-side lifecycle
           // tracking when sandboxd reports terminal failure.
@@ -1448,7 +1536,7 @@ export class SandboxServer extends EventEmitter {
         } else if (message.id === 0 && this.activeFileOpId !== null) {
           this.rejectFileOperation(
             this.activeFileOpId,
-            new Error(`${message.p.code}: ${message.p.message}`)
+            new Error(`${message.p.code}: ${message.p.message}`),
           );
         }
       } else if (message.t === "vfs_ready") {
@@ -1461,8 +1549,12 @@ export class SandboxServer extends EventEmitter {
     this.fsBridge.onMessage = (message) => {
       if (this.hasDebug("protocol")) {
         const id = isValidRequestId(message.id) ? message.id : "?";
-        const extra = message.t === "fs_request" ? ` op=${(message as any).p?.op}` : "";
-        this.emitDebug("protocol", `virtiofs rx t=${message.t} id=${id}${extra}`);
+        const extra =
+          message.t === "fs_request" ? ` op=${(message as any).p?.op}` : "";
+        this.emitDebug(
+          "protocol",
+          `virtiofs rx t=${message.t} id=${id}${extra}`,
+        );
       }
       if (!isValidRequestId(message.id)) {
         return;
@@ -1492,7 +1584,8 @@ export class SandboxServer extends EventEmitter {
           }
         })
         .catch((err) => {
-          const detail = err instanceof Error ? err.message : "fs handler error";
+          const detail =
+            err instanceof Error ? err.message : "fs handler error";
           this.fsBridge.send({
             v: 1,
             t: "fs_response",
@@ -1516,7 +1609,10 @@ export class SandboxServer extends EventEmitter {
             : message.t === "tcp_opened"
               ? ` ok=${Boolean((message as any).p?.ok)}`
               : "";
-        this.emitDebug("protocol", `virtiossh rx t=${message.t} id=${id}${extra}`);
+        this.emitDebug(
+          "protocol",
+          `virtiossh rx t=${message.t} id=${id}${extra}`,
+        );
       }
 
       if (!isValidRequestId(message.id)) return;
@@ -1527,7 +1623,10 @@ export class SandboxServer extends EventEmitter {
         this.tcpOpenWaiters.delete(message.id);
 
         const ok = Boolean((message as any).p?.ok);
-        const msg = typeof (message as any).p?.message === "string" ? (message as any).p.message : "tcp_open failed";
+        const msg =
+          typeof (message as any).p?.message === "string"
+            ? (message as any).p.message
+            : "tcp_open failed";
 
         if (ok) {
           waiter.resolve();
@@ -1586,7 +1685,10 @@ export class SandboxServer extends EventEmitter {
             : message.t === "tcp_opened"
               ? ` ok=${Boolean((message as any).p?.ok)}`
               : "";
-        this.emitDebug("protocol", `virtioingress rx t=${message.t} id=${id}${extra}`);
+        this.emitDebug(
+          "protocol",
+          `virtioingress rx t=${message.t} id=${id}${extra}`,
+        );
       }
 
       if (!isValidRequestId(message.id)) return;
@@ -1597,7 +1699,10 @@ export class SandboxServer extends EventEmitter {
         this.ingressTcpOpenWaiters.delete(message.id);
 
         const ok = Boolean((message as any).p?.ok);
-        const msg = typeof (message as any).p?.message === "string" ? (message as any).p.message : "tcp_open failed";
+        const msg =
+          typeof (message as any).p?.message === "string"
+            ? (message as any).p.message
+            : "tcp_open failed";
 
         if (ok) {
           waiter.resolve();
@@ -1635,7 +1740,10 @@ export class SandboxServer extends EventEmitter {
 
     this.ingressBridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
-      this.emit("error", new Error(`[ingress] virtio decode error: ${message}`));
+      this.emit(
+        "error",
+        new Error(`[ingress] virtio decode error: ${message}`),
+      );
       // Fail any pending opens.
       for (const [id, waiter] of this.ingressTcpOpenWaiters.entries()) {
         waiter.reject(new Error("ingress virtio bridge error"));
@@ -1652,7 +1760,7 @@ export class SandboxServer extends EventEmitter {
       this.emit("error", new Error(`[virtio] bridge error: ${message}`));
       this.failInflight(
         "protocol_error",
-        `virtio bridge error: ${message}` + this.formatQemuLogHint()
+        `virtio bridge error: ${message}` + this.formatQemuLogHint(),
       );
     };
 
@@ -1676,7 +1784,7 @@ export class SandboxServer extends EventEmitter {
 
   connect(
     onMessage: (data: Buffer | string, isBinary: boolean) => void,
-    onClose?: () => void
+    onClose?: () => void,
   ): SandboxConnection {
     const client = new LocalSandboxClient(onMessage, onClose);
     this.attachClient(client);
@@ -1689,14 +1797,19 @@ export class SandboxServer extends EventEmitter {
   /**
    * Create a readable stream for a guest file.
    */
-  async readGuestFileStream(filePath: string, options: GuestFileReadOptions = {}): Promise<Readable> {
+  async readGuestFileStream(
+    filePath: string,
+    options: GuestFileReadOptions = {},
+  ): Promise<Readable> {
     this.assertGuestPath(filePath, "filePath");
     await this.start();
     await this.waitForExecIdle(options.signal);
 
     const id = this.allocateFileOpId();
     const highWaterMark =
-      typeof options.highWaterMark === "number" && Number.isFinite(options.highWaterMark) && options.highWaterMark > 0
+      typeof options.highWaterMark === "number" &&
+      Number.isFinite(options.highWaterMark) &&
+      options.highWaterMark > 0
         ? Math.trunc(options.highWaterMark)
         : undefined;
 
@@ -1708,7 +1821,9 @@ export class SandboxServer extends EventEmitter {
     });
     void done.catch(() => {});
 
-    const stream = new PassThrough(highWaterMark ? { highWaterMark } : undefined);
+    const stream = new PassThrough(
+      highWaterMark ? { highWaterMark } : undefined,
+    );
     stream.on("error", () => {
       // keep process alive if caller does not attach an error handler
     });
@@ -1731,7 +1846,8 @@ export class SandboxServer extends EventEmitter {
         onAbort();
       } else {
         options.signal.addEventListener("abort", onAbort, { once: true });
-        abortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
+        abortCleanup = () =>
+          options.signal!.removeEventListener("abort", onAbort);
       }
     }
 
@@ -1741,7 +1857,7 @@ export class SandboxServer extends EventEmitter {
       },
       () => {
         abortCleanup?.();
-      }
+      },
     );
 
     try {
@@ -1751,7 +1867,7 @@ export class SandboxServer extends EventEmitter {
           cwd: options.cwd,
           chunk_size: options.chunkSize,
         }),
-        options.signal
+        options.signal,
       );
 
       // The guest may reject unsupported requests immediately (e.g. older
@@ -1772,7 +1888,10 @@ export class SandboxServer extends EventEmitter {
   /**
    * Read an entire guest file into a Buffer.
    */
-  async readGuestFile(filePath: string, options: GuestFileReadOptions = {}): Promise<Buffer> {
+  async readGuestFile(
+    filePath: string,
+    options: GuestFileReadOptions = {},
+  ): Promise<Buffer> {
     const stream = await this.readGuestFileStream(filePath, options);
     const chunks: Buffer[] = [];
 
@@ -1792,8 +1911,13 @@ export class SandboxServer extends EventEmitter {
    */
   async writeGuestFile(
     filePath: string,
-    input: Buffer | Uint8Array | string | Readable | AsyncIterable<Buffer | Uint8Array | string>,
-    options: GuestFileWriteOptions = {}
+    input:
+      | Buffer
+      | Uint8Array
+      | string
+      | Readable
+      | AsyncIterable<Buffer | Uint8Array | string>,
+    options: GuestFileWriteOptions = {},
   ): Promise<void> {
     this.assertGuestPath(filePath, "filePath");
     await this.start();
@@ -1826,25 +1950,34 @@ export class SandboxServer extends EventEmitter {
           cwd: options.cwd,
           truncate: true,
         }),
-        options.signal
+        options.signal,
       );
       requestStarted = true;
 
       for await (const chunk of toBufferIterable(input)) {
         for (let offset = 0; offset < chunk.length; offset += CHUNK) {
           const slice = chunk.subarray(offset, offset + CHUNK);
-          await this.sendControlMessage(buildFileWriteData(id, slice), options.signal);
+          await this.sendControlMessage(
+            buildFileWriteData(id, slice),
+            options.signal,
+          );
         }
       }
 
-      await this.sendControlMessage(buildFileWriteData(id, Buffer.alloc(0), true), options.signal);
+      await this.sendControlMessage(
+        buildFileWriteData(id, Buffer.alloc(0), true),
+        options.signal,
+      );
       eofSent = true;
 
       await done;
     } catch (err) {
       if (requestStarted && !eofSent) {
         try {
-          await this.sendControlMessage(buildFileWriteData(id, Buffer.alloc(0), true), undefined);
+          await this.sendControlMessage(
+            buildFileWriteData(id, Buffer.alloc(0), true),
+            undefined,
+          );
         } catch {
           // ignore
         }
@@ -1858,7 +1991,10 @@ export class SandboxServer extends EventEmitter {
   /**
    * Delete a guest file or directory.
    */
-  async deleteGuestFile(filePath: string, options: GuestFileDeleteOptions = {}): Promise<void> {
+  async deleteGuestFile(
+    filePath: string,
+    options: GuestFileDeleteOptions = {},
+  ): Promise<void> {
     this.assertGuestPath(filePath, "filePath");
     await this.start();
     await this.waitForExecIdle(options.signal);
@@ -1887,7 +2023,7 @@ export class SandboxServer extends EventEmitter {
           force: options.force,
           recursive: options.recursive,
         }),
-        options.signal
+        options.signal,
       );
 
       await done;
@@ -1904,7 +2040,11 @@ export class SandboxServer extends EventEmitter {
    * This is implemented via a dedicated virtio-serial port and does not use the
    * guest network stack.
    */
-  async openTcpStream(target: { host: string; port: number; timeoutMs?: number }): Promise<Duplex> {
+  async openTcpStream(target: {
+    host: string;
+    port: number;
+    timeoutMs?: number;
+  }): Promise<Duplex> {
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -1923,14 +2063,18 @@ export class SandboxServer extends EventEmitter {
     this.nextTcpStreamId = (id + 1) >>> 0;
     if (this.nextTcpStreamId === 0) this.nextTcpStreamId = 1;
 
-    const stream = new TcpForwardStream(id, (m) => this.sshBridge.send(m), () => {
-      this.tcpStreams.delete(id);
-      const waiter = this.tcpOpenWaiters.get(id);
-      if (waiter) {
-        this.tcpOpenWaiters.delete(id);
-        waiter.reject(new Error("tcp stream closed"));
-      }
-    });
+    const stream = new TcpForwardStream(
+      id,
+      (m) => this.sshBridge.send(m),
+      () => {
+        this.tcpStreams.delete(id);
+        const waiter = this.tcpOpenWaiters.get(id);
+        if (waiter) {
+          this.tcpOpenWaiters.delete(id);
+          waiter.reject(new Error("tcp stream closed"));
+        }
+      },
+    );
 
     this.tcpStreams.set(id, stream);
 
@@ -1960,7 +2104,10 @@ export class SandboxServer extends EventEmitter {
       await Promise.race([
         openedPromise,
         new Promise<void>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("tcp_open timeout")), timeoutMs);
+          timeout = setTimeout(
+            () => reject(new Error("tcp_open timeout")),
+            timeoutMs,
+          );
         }),
       ]);
       return stream;
@@ -1978,7 +2125,11 @@ export class SandboxServer extends EventEmitter {
    * This is intended for the host-side ingress gateway and should not be exposed
    * as a generic port-forwarding primitive.
    */
-  async openIngressStream(target: { host: string; port: number; timeoutMs?: number }): Promise<Duplex> {
+  async openIngressStream(target: {
+    host: string;
+    port: number;
+    timeoutMs?: number;
+  }): Promise<Duplex> {
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -1994,21 +2145,29 @@ export class SandboxServer extends EventEmitter {
     // Allocate stream id
     let id = this.nextIngressTcpStreamId;
     for (let i = 0; i < 0xffffffff; i++) {
-      if (!this.ingressTcpStreams.has(id) && !this.ingressTcpOpenWaiters.has(id)) break;
+      if (
+        !this.ingressTcpStreams.has(id) &&
+        !this.ingressTcpOpenWaiters.has(id)
+      )
+        break;
       id = (id + 1) >>> 0;
       if (id === 0) id = 1;
     }
     this.nextIngressTcpStreamId = (id + 1) >>> 0;
     if (this.nextIngressTcpStreamId === 0) this.nextIngressTcpStreamId = 1;
 
-    const stream = new TcpForwardStream(id, (m) => this.ingressBridge.send(m), () => {
-      this.ingressTcpStreams.delete(id);
-      const waiter = this.ingressTcpOpenWaiters.get(id);
-      if (waiter) {
-        this.ingressTcpOpenWaiters.delete(id);
-        waiter.reject(new Error("tcp stream closed"));
-      }
-    });
+    const stream = new TcpForwardStream(
+      id,
+      (m) => this.ingressBridge.send(m),
+      () => {
+        this.ingressTcpStreams.delete(id);
+        const waiter = this.ingressTcpOpenWaiters.get(id);
+        if (waiter) {
+          this.ingressTcpOpenWaiters.delete(id);
+          waiter.reject(new Error("tcp stream closed"));
+        }
+      },
+    );
 
     this.ingressTcpStreams.set(id, stream);
 
@@ -2038,7 +2197,10 @@ export class SandboxServer extends EventEmitter {
       await Promise.race([
         openedPromise,
         new Promise<void>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("tcp_open timeout")), timeoutMs);
+          timeout = setTimeout(
+            () => reject(new Error("tcp_open timeout")),
+            timeoutMs,
+          );
         }),
       ]);
       return stream;
@@ -2078,7 +2240,10 @@ export class SandboxServer extends EventEmitter {
 
   private handleVfsError(message: string, code = "vfs_error") {
     if (this.hasDebug("vfs")) {
-      this.emitDebug("vfs", `vfs_error code=${code} message=${stripTrailingNewline(message)}`);
+      this.emitDebug(
+        "vfs",
+        `vfs_error code=${code} message=${stripTrailingNewline(message)}`,
+      );
     }
     this.vfsReady = false;
     this.clearVfsReadyTimer();
@@ -2194,7 +2359,11 @@ export class SandboxServer extends EventEmitter {
   private allocateFileOpId(): number {
     let id = this.nextFileOpId;
     for (let i = 0; i <= MAX_REQUEST_ID; i += 1) {
-      if (!this.inflight.has(id) && !this.startedExecs.has(id) && !this.fileOps.has(id)) {
+      if (
+        !this.inflight.has(id) &&
+        !this.startedExecs.has(id) &&
+        !this.fileOps.has(id)
+      ) {
         this.nextFileOpId = id + 1;
         if (this.nextFileOpId > MAX_REQUEST_ID) this.nextFileOpId = 1;
         return id;
@@ -2206,7 +2375,11 @@ export class SandboxServer extends EventEmitter {
   }
 
   private async waitForExecIdle(signal?: AbortSignal): Promise<void> {
-    while (this.startedExecs.size > 0 || this.activeFileOpId !== null || this.execQueue.length > 0) {
+    while (
+      this.startedExecs.size > 0 ||
+      this.activeFileOpId !== null ||
+      this.execQueue.length > 0
+    ) {
       if (signal?.aborted) {
         throw new Error("operation aborted");
       }
@@ -2248,7 +2421,9 @@ export class SandboxServer extends EventEmitter {
 
       if (signal) {
         const onAbort = () => {
-          this.bridgeWritableWaiters = this.bridgeWritableWaiters.filter((entry) => entry !== waiter);
+          this.bridgeWritableWaiters = this.bridgeWritableWaiters.filter(
+            (entry) => entry !== waiter,
+          );
           reject(new Error("operation aborted"));
         };
         signal.addEventListener("abort", onAbort, { once: true });
@@ -2259,7 +2434,10 @@ export class SandboxServer extends EventEmitter {
     });
   }
 
-  private async sendControlMessage(message: object, signal?: AbortSignal): Promise<void> {
+  private async sendControlMessage(
+    message: object,
+    signal?: AbortSignal,
+  ): Promise<void> {
     while (!this.bridge.send(message)) {
       await this.waitForBridgeWritable(signal);
     }
@@ -2328,14 +2506,19 @@ export class SandboxServer extends EventEmitter {
 
     // Remove any queued exec requests owned by this client.
     if (this.execQueue.length > 0) {
-      this.execQueue = this.execQueue.filter((entry) => entry.client !== client);
+      this.execQueue = this.execQueue.filter(
+        (entry) => entry.client !== client,
+      );
     }
   }
 
   private clearQueuedStdin(id: number) {
     const bytes = this.queuedStdinBytes.get(id) ?? 0;
     if (bytes > 0) {
-      this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - bytes);
+      this.queuedStdinBytesTotal = Math.max(
+        0,
+        this.queuedStdinBytesTotal - bytes,
+      );
     }
     this.queuedStdin.delete(id);
     this.queuedStdinBytes.delete(id);
@@ -2408,7 +2591,8 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    const changed = !this.bootConfig || !isSameSandboxFsConfig(this.bootConfig, config);
+    const changed =
+      !this.bootConfig || !isSameSandboxFsConfig(this.bootConfig, config);
     this.bootConfig = config;
 
     const append = buildSandboxfsAppend(this.baseAppend, config);
@@ -2459,7 +2643,10 @@ export class SandboxServer extends EventEmitter {
     this.flushQueuedStdinFor(id);
     this.flushPendingExecWindowsFor(id);
 
-    if ((this.queuedStdin.get(id)?.length ?? 0) > 0 || this.queuedPtyResize.has(id)) {
+    if (
+      (this.queuedStdin.get(id)?.length ?? 0) > 0 ||
+      this.queuedPtyResize.has(id)
+    ) {
       this.scheduleExecIoFlush();
     }
   }
@@ -2492,11 +2679,18 @@ export class SandboxServer extends EventEmitter {
         .map((entry) => String(entry).split("=", 1)[0])
         .filter((k) => k && k.length > 0);
       const cwd = message.cwd ? ` cwd=${message.cwd}` : "";
-      const argv = (message.argv ?? []).length > 0 ? ` argv=${JSON.stringify(message.argv)}` : "";
-      const env = envKeys.length > 0 ? ` envKeys=${JSON.stringify(envKeys)}` : "";
+      const argv =
+        (message.argv ?? []).length > 0
+          ? ` argv=${JSON.stringify(message.argv)}`
+          : "";
+      const env =
+        envKeys.length > 0 ? ` envKeys=${JSON.stringify(envKeys)}` : "";
       const stdin = message.stdin ? " stdin" : "";
       const pty = message.pty ? " pty" : "";
-      this.emitDebug("exec", `exec start id=${message.id} cmd=${message.cmd}${cwd}${argv}${env}${stdin}${pty}`);
+      this.emitDebug(
+        "exec",
+        `exec start id=${message.id} cmd=${message.cmd}${cwd}${argv}${env}${stdin}${pty}`,
+      );
     }
     if (!isValidRequestId(message.id) || !message.cmd) {
       sendError(client, {
@@ -2518,14 +2712,22 @@ export class SandboxServer extends EventEmitter {
     }
 
     const validWindow = (v: unknown) =>
-      v === undefined || (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff);
+      v === undefined ||
+      (typeof v === "number" &&
+        Number.isInteger(v) &&
+        v >= 0 &&
+        v <= 0xffffffff);
 
-    if (!validWindow(message.stdout_window) || !validWindow(message.stderr_window)) {
+    if (
+      !validWindow(message.stdout_window) ||
+      !validWindow(message.stderr_window)
+    ) {
       sendError(client, {
         type: "error",
         id: message.id,
         code: "invalid_request",
-        message: "stdout_window/stderr_window must be uint32 byte counts (0 = default)",
+        message:
+          "stdout_window/stderr_window must be uint32 byte counts (0 = default)",
       });
       return;
     }
@@ -2573,7 +2775,10 @@ export class SandboxServer extends EventEmitter {
   private handleStdin(client: SandboxClient, message: StdinCommandMessage) {
     if (this.hasDebug("exec")) {
       const bytes = message.data ? estimateBase64Bytes(message.data) : 0;
-      this.emitDebug("exec", `stdin id=${message.id} bytes=${bytes}${message.eof ? " eof" : ""}`);
+      this.emitDebug(
+        "exec",
+        `stdin id=${message.id} bytes=${bytes}${message.eof ? " eof" : ""}`,
+      );
     }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
@@ -2626,7 +2831,9 @@ export class SandboxServer extends EventEmitter {
       return;
     }
 
-    const queueStdinChunk = (cancelNotStartedExecOnOverflow: boolean): boolean => {
+    const queueStdinChunk = (
+      cancelNotStartedExecOnOverflow: boolean,
+    ): boolean => {
       const queuedBytes = this.queuedStdinBytes.get(message.id) ?? 0;
       const nextBytes = queuedBytes + data.length;
       const nextTotal = this.queuedStdinBytesTotal + data.length;
@@ -2646,7 +2853,10 @@ export class SandboxServer extends EventEmitter {
           message: overflowMessage,
         });
 
-        if (cancelNotStartedExecOnOverflow && !this.startedExecs.has(message.id)) {
+        if (
+          cancelNotStartedExecOnOverflow &&
+          !this.startedExecs.has(message.id)
+        ) {
           // Cancel queued execs on stdin overflow to avoid running with partial
           // stdin once file-operation gating is lifted.
           this.inflight.delete(message.id);
@@ -2656,7 +2866,9 @@ export class SandboxServer extends EventEmitter {
           this.pendingExecWindows.delete(message.id);
           this.clearQueuedStdin(message.id);
           this.queuedPtyResize.delete(message.id);
-          this.execQueue = this.execQueue.filter((entry) => entry.message.id !== message.id);
+          this.execQueue = this.execQueue.filter(
+            (entry) => entry.message.id !== message.id,
+          );
         }
 
         return false;
@@ -2690,9 +2902,15 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
-  private handlePtyResize(client: SandboxClient, message: PtyResizeCommandMessage) {
+  private handlePtyResize(
+    client: SandboxClient,
+    message: PtyResizeCommandMessage,
+  ) {
     if (this.hasDebug("exec")) {
-      this.emitDebug("exec", `pty_resize id=${message.id} rows=${message.rows} cols=${message.cols}`);
+      this.emitDebug(
+        "exec",
+        `pty_resize id=${message.id} rows=${message.rows} cols=${message.cols}`,
+      );
     }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
@@ -2715,7 +2933,12 @@ export class SandboxServer extends EventEmitter {
 
     const rows = Number(message.rows);
     const cols = Number(message.cols);
-    if (!Number.isFinite(rows) || !Number.isFinite(cols) || rows < 1 || cols < 1) {
+    if (
+      !Number.isFinite(rows) ||
+      !Number.isFinite(cols) ||
+      rows < 1 ||
+      cols < 1
+    ) {
       sendError(client, {
         type: "error",
         id: message.id,
@@ -2844,7 +3067,10 @@ export class SandboxServer extends EventEmitter {
       this.stdinCredits.set(id, credit);
 
       remainingBytes = Math.max(0, remainingBytes - toSend);
-      this.queuedStdinBytesTotal = Math.max(0, this.queuedStdinBytesTotal - toSend);
+      this.queuedStdinBytesTotal = Math.max(
+        0,
+        this.queuedStdinBytesTotal - toSend,
+      );
 
       if (toSend < chunk.data.length) {
         // Partial send: keep the remaining tail queued.
@@ -2918,7 +3144,10 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
-  private handleExecWindow(client: SandboxClient, message: ExecWindowCommandMessage) {
+  private handleExecWindow(
+    client: SandboxClient,
+    message: ExecWindowCommandMessage,
+  ) {
     if (!isValidRequestId(message.id)) {
       sendError(client, {
         type: "error",
@@ -2943,7 +3172,10 @@ export class SandboxServer extends EventEmitter {
 
     const valid = (v: unknown) =>
       v === undefined ||
-      (typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 0xffffffff);
+      (typeof v === "number" &&
+        Number.isInteger(v) &&
+        v > 0 &&
+        v <= 0xffffffff);
 
     if (!valid(stdout) || !valid(stderr)) {
       sendError(client, {
@@ -3010,8 +3242,13 @@ export class SandboxServer extends EventEmitter {
   }
 }
 
-function normalizeSandboxFsConfig(message: BootCommandMessage): SandboxFsConfig {
-  const fuseMount = normalizeMountPath(message.fuseMount ?? "/data", "fuseMount");
+function normalizeSandboxFsConfig(
+  message: BootCommandMessage,
+): SandboxFsConfig {
+  const fuseMount = normalizeMountPath(
+    message.fuseMount ?? "/data",
+    "fuseMount",
+  );
   const fuseBinds = normalizeBindList(message.fuseBinds ?? []);
   return {
     fuseMount,
@@ -3066,11 +3303,19 @@ function buildSandboxfsAppend(baseAppend: string, config: SandboxFsConfig) {
   if (config.fuseBinds.length > 0) {
     pieces.push(`sandboxfs.bind=${config.fuseBinds.join(",")}`);
   }
-  return pieces.filter((piece) => piece.length > 0).join(" ").trim();
+  return pieces
+    .filter((piece) => piece.length > 0)
+    .join(" ")
+    .trim();
 }
 
 async function* toBufferIterable(
-  input: Buffer | Uint8Array | string | Readable | AsyncIterable<Buffer | Uint8Array | string>
+  input:
+    | Buffer
+    | Uint8Array
+    | string
+    | Readable
+    | AsyncIterable<Buffer | Uint8Array | string>,
 ): AsyncIterable<Buffer> {
   if (typeof input === "string") {
     yield Buffer.from(input, "utf-8");
@@ -3103,7 +3348,9 @@ async function* toBufferIterable(
   }
 
   if (typeof (input as any)?.[Symbol.asyncIterator] === "function") {
-    for await (const chunk of input as AsyncIterable<Buffer | Uint8Array | string>) {
+    for await (const chunk of input as AsyncIterable<
+      Buffer | Uint8Array | string
+    >) {
       if (typeof chunk === "string") {
         yield Buffer.from(chunk, "utf-8");
       } else if (Buffer.isBuffer(chunk)) {

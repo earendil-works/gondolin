@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MemoryProvider, type VirtualProvider } from "../src/vfs";
+import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
 import { createExecSession } from "../src/exec";
 import { VM, __test, type VMOptions } from "../src/vm";
 
@@ -82,12 +82,15 @@ test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", 
 
 test("vm internals: resolveMitmMounts injects /etc/ssl/certs unless already mounted", () => {
   const injected = __test.resolveMitmMounts(undefined, undefined, true);
-  assert.ok(injected["/etc/ssl/certs"], "expected mitm mounts to include /etc/ssl/certs");
+  assert.ok(
+    injected["/etc/ssl/certs"],
+    "expected mitm mounts to include /etc/ssl/certs",
+  );
 
   const custom = __test.resolveMitmMounts(
     { mounts: { "/etc/ssl/certs": new MemoryProvider() } },
     undefined,
-    true
+    true,
   );
   assert.deepEqual(custom, {});
 
@@ -156,7 +159,9 @@ test("vm internals: file helpers short-circuit VFS mounts", async () => {
 
     await vm.writeFile("/workspace/hello.txt", "hello world");
 
-    const text = await vm.readFile("/workspace/hello.txt", { encoding: "utf-8" });
+    const text = await vm.readFile("/workspace/hello.txt", {
+      encoding: "utf-8",
+    });
     assert.equal(text, "hello world");
 
     const stream = await vm.readFileStream("/workspace/hello.txt");
@@ -168,7 +173,9 @@ test("vm internals: file helpers short-circuit VFS mounts", async () => {
     assert.equal(Buffer.concat(chunks).toString("utf-8"), "hello world");
 
     await vm.writeFile("/data/workspace/from-fuse.txt", "fuse-path");
-    const fromFuse = await vm.readFile("/workspace/from-fuse.txt", { encoding: "utf-8" });
+    const fromFuse = await vm.readFile("/workspace/from-fuse.txt", {
+      encoding: "utf-8",
+    });
     assert.equal(fromFuse, "fuse-path");
 
     await vm.deleteFile("/workspace/hello.txt");
@@ -176,12 +183,20 @@ test("vm internals: file helpers short-circuit VFS mounts", async () => {
       () => provider.stat("/hello.txt"),
       (err: unknown) => {
         const e = err as NodeJS.ErrnoException;
-        return e.code === "ENOENT" || e.code === "ERRNO_2" || e.errno === 2 || e.errno === -2;
-      }
+        return (
+          e.code === "ENOENT" ||
+          e.code === "ERRNO_2" ||
+          e.errno === 2 ||
+          e.errno === -2
+        );
+      },
     );
 
     await provider.mkdir("/dir");
-    await assert.rejects(() => vm.deleteFile("/workspace/dir"), /failed to delete guest file/);
+    await assert.rejects(
+      () => vm.deleteFile("/workspace/dir"),
+      /failed to delete guest file/,
+    );
     await vm.deleteFile("/workspace/dir", { recursive: true });
   } finally {
     cleanup();
@@ -219,7 +234,11 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
       close: () => {},
     };
 
-    const session = createExecSession(1, { stdinEnabled: true, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
+    const session = createExecSession(1, {
+      stdinEnabled: true,
+      stdout: { mode: "buffer" },
+      stderr: { mode: "buffer" },
+    });
     (vm as any).sessions.set(1, session);
 
     // Queue stdin + resize before the request is marked ready.
@@ -233,10 +252,19 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
 
     assert.deepEqual(
       sent.map((m) => m.type),
-      ["pty_resize", "stdin", "stdin"]
+      ["pty_resize", "stdin", "stdin"],
     );
-    assert.deepEqual(sent[0], { type: "pty_resize", id: 1, rows: 24, cols: 80 });
-    assert.deepEqual(sent[1], { type: "stdin", id: 1, data: Buffer.from("hi").toString("base64") });
+    assert.deepEqual(sent[0], {
+      type: "pty_resize",
+      id: 1,
+      rows: 24,
+      cols: 80,
+    });
+    assert.deepEqual(sent[1], {
+      type: "stdin",
+      id: 1,
+      data: Buffer.from("hi").toString("base64"),
+    });
     assert.deepEqual(sent[2], { type: "stdin", id: 1, eof: true });
   } finally {
     cleanup();
@@ -329,8 +357,16 @@ test("vm internals: handleDisconnect rejects pending state waiters and sessions"
   try {
     const waiter = (vm as any).waitForState("running");
 
-    const session1 = createExecSession(1, { stdinEnabled: false, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
-    const session2 = createExecSession(2, { stdinEnabled: false, stdout: { mode: "buffer" }, stderr: { mode: "buffer" } });
+    const session1 = createExecSession(1, {
+      stdinEnabled: false,
+      stdout: { mode: "buffer" },
+      stderr: { mode: "buffer" },
+    });
+    const session2 = createExecSession(2, {
+      stdinEnabled: false,
+      stdout: { mode: "buffer" },
+      stderr: { mode: "buffer" },
+    });
     (vm as any).sessions.set(1, session1);
     (vm as any).sessions.set(2, session2);
 

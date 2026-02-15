@@ -4,7 +4,7 @@ import { Duplex, Readable, Writable } from "node:stream";
 import test from "node:test";
 
 import { GondolinListeners, IngressGateway } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 
 class CaptureDuplex extends Duplex {
   readonly written: Buffer[] = [];
@@ -13,7 +13,11 @@ class CaptureDuplex extends Duplex {
     // driven by push() from the test
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, cb: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    cb: (error?: Error | null) => void,
+  ) {
     this.written.push(Buffer.from(chunk));
     cb();
   }
@@ -45,7 +49,11 @@ class CaptureResponse extends Writable {
     this.headersSent = true;
   }
 
-  _write(chunk: Buffer, _encoding: BufferEncoding, cb: (error?: Error | null) => void) {
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    cb: (error?: Error | null) => void,
+  ) {
     this.bodyChunks.push(Buffer.from(chunk));
     cb();
   }
@@ -194,7 +202,7 @@ test("IngressGateway hooks: bufferResponseBody enables body rewrites", async () 
             "Transfer-Encoding: chunked\r\n" +
             "\r\n" +
             "5\r\nhello\r\n" +
-            "0\r\n\r\n"
+            "0\r\n\r\n",
         );
         upstream.push(null);
       });

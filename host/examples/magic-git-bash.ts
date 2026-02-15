@@ -20,18 +20,25 @@ import path from "node:path";
 
 import { createHttpHooks } from "../src/http-hooks";
 import {
+  RealFSProvider,
+  type VirtualFileHandle,
+  type VirtualProvider,
+} from "../src/vfs/node";
+import { ReadonlyProvider } from "../src/vfs/readonly";
+import { ReadonlyVirtualProvider } from "../src/vfs/readonly-virtual";
+import {
   createVirtualDirStats,
   formatVirtualEntries,
   normalizeVfsPath,
-  ReadonlyProvider,
-  ReadonlyVirtualProvider,
-  RealFSProvider,
-} from "../src/vfs";
-import type { VirtualFileHandle, VirtualProvider } from "../src/vfs";
+} from "../src/vfs/utils";
 import { createErrnoError } from "../src/vfs/errors";
 import { VM } from "../src/vm";
 
-const ALLOWED_HOSTS = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
+const ALLOWED_HOSTS = [
+  "registry.npmjs.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+];
 
 const { errno: ERRNO } = os.constants;
 
@@ -41,7 +48,9 @@ type ResolvedPath =
   | { kind: "repo"; owner: string; repo: string; relativePath: string };
 
 class MagicGitProvider extends ReadonlyVirtualProvider {
-  private readonly cloneRoot = fs.mkdtempSync(path.join(os.tmpdir(), "magic-git-"));
+  private readonly cloneRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "magic-git-"),
+  );
   private readonly owners = new Map<string, string[]>();
   private readonly repos = new Map<string, VirtualProvider>();
 
@@ -49,12 +58,20 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
     return true;
   }
 
-  protected openReadonlySync(entryPath: string, flags: string, mode?: number): VirtualFileHandle {
+  protected openReadonlySync(
+    entryPath: string,
+    flags: string,
+    mode?: number,
+  ): VirtualFileHandle {
     const resolved = this.resolve(entryPath);
     if (resolved.kind !== "repo" || isRepoRoot(resolved)) {
       throw createErrnoError(ERRNO.EISDIR, "open", entryPath);
     }
-    return this.getRepoProvider(resolved).openSync(resolved.relativePath, flags, mode);
+    return this.getRepoProvider(resolved).openSync(
+      resolved.relativePath,
+      flags,
+      mode,
+    );
   }
 
   statSync(entryPath: string, options?: object) {
@@ -63,7 +80,10 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
       if (isRepoRoot(resolved)) {
         return createVirtualDirStats();
       }
-      return this.getRepoProvider(resolved).statSync(resolved.relativePath, options);
+      return this.getRepoProvider(resolved).statSync(
+        resolved.relativePath,
+        options,
+      );
     }
     if (resolved.kind === "owner") {
       this.listRepos(resolved.owner, "stat", entryPath);
@@ -77,7 +97,10 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
       if (isRepoRoot(resolved)) {
         return createVirtualDirStats();
       }
-      return this.getRepoProvider(resolved).lstatSync(resolved.relativePath, options);
+      return this.getRepoProvider(resolved).lstatSync(
+        resolved.relativePath,
+        options,
+      );
     }
     if (resolved.kind === "owner") {
       this.listRepos(resolved.owner, "lstat", entryPath);
@@ -87,9 +110,14 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
 
   readdirSync(entryPath: string, options?: object) {
     const resolved = this.resolve(entryPath);
-    const withTypes = Boolean((options as { withFileTypes?: boolean } | undefined)?.withFileTypes);
+    const withTypes = Boolean(
+      (options as { withFileTypes?: boolean } | undefined)?.withFileTypes,
+    );
     if (resolved.kind === "repo") {
-      return this.getRepoProvider(resolved).readdirSync(resolved.relativePath, options);
+      return this.getRepoProvider(resolved).readdirSync(
+        resolved.relativePath,
+        options,
+      );
     }
     if (resolved.kind === "owner") {
       const repos = this.listRepos(resolved.owner, "readdir", entryPath);
@@ -168,9 +196,11 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
       const output = execFileSync(
         "gh",
         ["repo", "list", owner, "--limit", "1000", "--json", "name"],
-        { encoding: "utf8" }
+        { encoding: "utf8" },
       );
-      const repos = (JSON.parse(output) as Array<{ name: string }>).map((repo) => repo.name);
+      const repos = (JSON.parse(output) as Array<{ name: string }>).map(
+        (repo) => repo.name,
+      );
       this.owners.set(owner, repos);
       return repos;
     } catch {
@@ -191,7 +221,9 @@ class MagicGitProvider extends ReadonlyVirtualProvider {
     const repoPath = path.join(this.cloneRoot, resolved.owner, resolved.repo);
     if (!fs.existsSync(repoPath)) {
       fs.mkdirSync(path.dirname(repoPath), { recursive: true });
-      execFileSync("gh", ["repo", "clone", key, repoPath], { stdio: "inherit" });
+      execFileSync("gh", ["repo", "clone", key, repoPath], {
+        stdio: "inherit",
+      });
     }
 
     const provider = new ReadonlyProvider(new RealFSProvider(repoPath));
@@ -208,7 +240,9 @@ async function main(): Promise<number> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     console.log("Usage: pnpm exec tsx examples/magic-git-bash.ts");
     console.log();
-    console.log("Starts a bash shell with /git mounted and npm/pypi network access.");
+    console.log(
+      "Starts a bash shell with /git mounted and npm/pypi network access.",
+    );
     console.log();
     console.log("Inside the VM, try:");
     console.log("  ls -la /git/<owner>/<repo>");

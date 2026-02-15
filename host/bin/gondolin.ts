@@ -4,8 +4,9 @@ import net from "net";
 import path from "path";
 
 import { VM } from "../src/vm";
-import type { VirtualProvider } from "../src/vfs";
-import { MemoryProvider, RealFSProvider, ReadonlyProvider } from "../src/vfs";
+import type { VirtualProvider } from "../src/vfs/node";
+import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
+import { ReadonlyProvider } from "../src/vfs/readonly";
 import { createHttpHooks } from "../src/http-hooks";
 import {
   FrameReader,
@@ -42,13 +43,19 @@ function renderCliError(err: unknown) {
   const code = (err as any)?.code;
   const binary = (err as any)?.path;
 
-  if (code === "ENOENT" && typeof binary === "string" && binary.includes("qemu")) {
+  if (
+    code === "ENOENT" &&
+    typeof binary === "string" &&
+    binary.includes("qemu")
+  ) {
     console.error(`Error: QEMU binary '${binary}' not found.`);
     console.error("Please install QEMU to run the sandbox.");
     if (process.platform === "darwin") {
       console.error("  brew install qemu");
     } else {
-      console.error("  sudo apt install qemu-system (or equivalent for your distro)");
+      console.error(
+        "  sudo apt install qemu-system (or equivalent for your distro)",
+      );
     }
     return;
   }
@@ -60,9 +67,13 @@ function renderCliError(err: unknown) {
 function usage() {
   console.log("Usage: gondolin <command> [options]");
   console.log("Commands:");
-  console.log("  exec         Run a command via the virtio socket or in-process VM");
+  console.log(
+    "  exec         Run a command via the virtio socket or in-process VM",
+  );
   console.log("  bash         Start an interactive bash session in the VM");
-  console.log("  build        Build custom guest assets (kernel, initramfs, rootfs)");
+  console.log(
+    "  build        Build custom guest assets (kernel, initramfs, rootfs)",
+  );
   console.log("  help         Show this help");
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
@@ -74,52 +85,88 @@ function bashUsage() {
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("Command Options:");
-  console.log("  --                              Everything after -- is treated as command + args");
-  console.log("  --cwd PATH                      Working directory for the command");
-  console.log("  --env KEY=VALUE                 Set environment variable (can repeat)");
+  console.log(
+    "  --                              Everything after -- is treated as command + args",
+  );
+  console.log(
+    "  --cwd PATH                      Working directory for the command",
+  );
+  console.log(
+    "  --env KEY=VALUE                 Set environment variable (can repeat)",
+  );
   console.log();
   console.log("VFS Options:");
-  console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
-  console.log("                                  Append :ro for read-only mount");
-  console.log("  --mount-memfs PATH              Create memory-backed mount at path");
+  console.log(
+    "  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path",
+  );
+  console.log(
+    "                                  Append :ro for read-only mount",
+  );
+  console.log(
+    "  --mount-memfs PATH              Create memory-backed mount at path",
+  );
   console.log();
   console.log("Network Options:");
-  console.log("  --allow-host HOST               Allow HTTP requests to host (can repeat)");
+  console.log(
+    "  --allow-host HOST               Allow HTTP requests to host (can repeat)",
+  );
   console.log("  --host-secret NAME@HOST[,HOST...][=VALUE]");
-  console.log("                                  Add secret for specified hosts");
-  console.log("                                  If =VALUE is omitted, reads from $NAME");
-  console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
-  console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
-  console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
-  console.log("  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)");
   console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
+    "                                  Add secret for specified hosts",
   );
   console.log(
-    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
+    "                                  If =VALUE is omitted, reads from $NAME",
   );
   console.log(
-    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)"
+    "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
   );
   console.log(
-    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
+    "  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)",
   );
-  console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
+  console.log(
+    "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
+  );
+  console.log(
+    "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
+  );
+  console.log(
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
+  );
+  console.log(
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
+  );
+  console.log(
+    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
+  );
+  console.log(
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
+  );
+  console.log(
+    "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+  );
   console.log();
   console.log("Ingress:");
   console.log(
-    "  --listen [HOST:PORT]            Start host ingress gateway (default: 127.0.0.1:0)"
+    "  --listen [HOST:PORT]            Start host ingress gateway (default: 127.0.0.1:0)",
   );
   console.log();
   console.log("Debugging:");
-  console.log("  --ssh                           Enable SSH access via a localhost port forward");
+  console.log(
+    "  --ssh                           Enable SSH access via a localhost port forward",
+  );
   console.log("  --ssh-user USER                 SSH username (default: root)");
-  console.log("  --ssh-port PORT                 Local listen port (default: 0 = ephemeral)");
-  console.log("  --ssh-listen HOST               Local listen host (default: 127.0.0.1)");
+  console.log(
+    "  --ssh-port PORT                 Local listen port (default: 0 = ephemeral)",
+  );
+  console.log(
+    "  --ssh-listen HOST               Local listen host (default: 127.0.0.1)",
+  );
   console.log();
   console.log("Examples:");
   console.log("  gondolin bash --mount-hostfs /home/user/project:/workspace");
-  console.log("  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp");
+  console.log(
+    "  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp",
+  );
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
   console.log("  gondolin bash --cmd claude --cwd /workspace");
@@ -132,38 +179,56 @@ function execUsage() {
   console.log("Usage:");
   console.log("  gondolin exec --sock PATH -- CMD [ARGS...]");
   console.log(
-    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
+    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
   );
-  console.log("  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)");
+  console.log(
+    "  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)",
+  );
   console.log();
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
   console.log("VFS Options (VM mode only):");
-  console.log("  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path");
-  console.log("  --mount-memfs PATH              Create memory-backed mount at path");
+  console.log(
+    "  --mount-hostfs HOST:GUEST[:ro]  Mount host directory at guest path",
+  );
+  console.log(
+    "  --mount-memfs PATH              Create memory-backed mount at path",
+  );
   console.log();
   console.log("Network Options (VM mode only):");
   console.log("  --allow-host HOST               Allow HTTP requests to host");
   console.log("  --host-secret NAME@HOST[,HOST...][=VALUE]");
-  console.log("                                  Add secret for specified hosts");
-  console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
-  console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
-  console.log("  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host");
-  console.log("  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)");
   console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)"
+    "                                  Add secret for specified hosts",
   );
   console.log(
-    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)"
+    "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
   );
   console.log(
-    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)"
+    "  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)",
   );
   console.log(
-    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=..."
+    "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
   );
-  console.log("  --disable-websockets            Disable WebSocket upgrades (egress + ingress)");
+  console.log(
+    "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
+  );
+  console.log(
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
+  );
+  console.log(
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
+  );
+  console.log(
+    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
+  );
+  console.log(
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
+  );
+  console.log(
+    "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+  );
 }
 
 type MountSpec = {
@@ -237,7 +302,11 @@ function parseMount(spec: string): MountSpec {
   let rest: string[];
 
   // Check if this looks like a Windows drive letter (single letter followed by nothing before the colon)
-  if (parts[0].length === 1 && /^[a-zA-Z]$/.test(parts[0]) && parts.length >= 3) {
+  if (
+    parts[0].length === 1 &&
+    /^[a-zA-Z]$/.test(parts[0]) &&
+    parts.length >= 3
+  ) {
     hostPath = `${parts[0]}:${parts[1]}`;
     rest = parts.slice(2);
   } else {
@@ -271,7 +340,7 @@ function parseHostSecret(spec: string): SecretSpec {
   const atIndex = spec.indexOf("@");
   if (atIndex === -1) {
     throw new Error(
-      `Invalid host-secret format: ${spec} (expected NAME@HOST[,HOST...][=VALUE])`
+      `Invalid host-secret format: ${spec} (expected NAME@HOST[,HOST...][=VALUE])`,
     );
   }
 
@@ -315,19 +384,25 @@ function parseSshCredential(spec: string): SshCredentialSpec {
   // Prefer passphrase-env to avoid leaking secrets into shell history.
   const eq = spec.indexOf("=");
   if (eq === -1) {
-    throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`,
+    );
   }
 
   const left = spec.slice(0, eq).trim();
   const right = spec.slice(eq + 1).trim();
   if (!left || !right) {
-    throw new Error(`Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`);
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`,
+    );
   }
 
   const [keyPathRaw, ...opts] = right.split(",");
   const keyPath = keyPathRaw.trim();
   if (!keyPath) {
-    throw new Error(`Invalid --ssh-credential format: ${spec} (missing KEY_PATH)`);
+    throw new Error(
+      `Invalid --ssh-credential format: ${spec} (missing KEY_PATH)`,
+    );
   }
 
   let passphrase: string | undefined;
@@ -340,14 +415,16 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     if (opt.startsWith("passphrase-env=")) {
       passphraseEnv = opt.slice("passphrase-env=".length);
       if (!passphraseEnv) {
-        throw new Error(`Invalid --ssh-credential option: ${opt} (missing env var name)`);
+        throw new Error(
+          `Invalid --ssh-credential option: ${opt} (missing env var name)`,
+        );
       }
       continue;
     }
 
     if (opt === "passphrase-ask") {
       throw new Error(
-        `Invalid --ssh-credential option: ${opt} (interactive prompting is not supported; use passphrase-env=ENV)`
+        `Invalid --ssh-credential option: ${opt} (interactive prompting is not supported; use passphrase-env=ENV)`,
       );
     }
 
@@ -361,7 +438,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
 
   if (passphraseEnv && passphrase !== undefined) {
     throw new Error(
-      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase and passphrase-env)`
+      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase and passphrase-env)`,
     );
   }
 
@@ -369,7 +446,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
     const envValue = process.env[passphraseEnv];
     if (envValue === undefined) {
       throw new Error(
-        `--ssh-credential passphrase env var '${passphraseEnv}' is not set (for ${left})`
+        `--ssh-credential passphrase env var '${passphraseEnv}' is not set (for ${left})`,
       );
     }
     passphrase = envValue;
@@ -384,7 +461,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
   const host = left.slice(at + 1).trim();
   if (!username || !host) {
     throw new Error(
-      `Invalid --ssh-credential format: ${spec} (expected USER@HOST=KEY_PATH)`
+      `Invalid --ssh-credential format: ${spec} (expected USER@HOST=KEY_PATH)`,
     );
   }
 
@@ -416,11 +493,15 @@ function parseListenSpec(spec: string): { host: string; port: number } {
     }
     host = portStr.slice(1, bracketEnd);
     if (!host) {
-      throw new Error(`Invalid --listen value: ${spec} (empty host in brackets)`);
+      throw new Error(
+        `Invalid --listen value: ${spec} (empty host in brackets)`,
+      );
     }
     const rest = portStr.slice(bracketEnd + 1);
     if (!rest.startsWith(":")) {
-      throw new Error(`Invalid --listen value: ${spec} (expected :PORT after ])`);
+      throw new Error(
+        `Invalid --listen value: ${spec} (expected :PORT after ])`,
+      );
     }
     portStr = rest.slice(1);
   } else if (portStr.includes(":")) {
@@ -489,11 +570,17 @@ function buildVmOptions(common: CommonOptions) {
       throw new Error("--dns-trusted-server requires --dns trusted");
     }
     if (common.dnsMode !== "trusted") {
-      throw new Error("--dns-trusted-server can only be used with --dns trusted");
+      throw new Error(
+        "--dns-trusted-server can only be used with --dns trusted",
+      );
     }
   }
 
-  if (common.dnsSyntheticHostMapping && common.dnsMode && common.dnsMode !== "synthetic") {
+  if (
+    common.dnsSyntheticHostMapping &&
+    common.dnsMode &&
+    common.dnsMode !== "synthetic"
+  ) {
     throw new Error("--dns-synthetic-host-mapping requires --dns synthetic");
   }
 
@@ -506,7 +593,9 @@ function buildVmOptions(common: CommonOptions) {
   }
 
   if (common.sshAgent && common.sshAllowedHosts.length === 0) {
-    throw new Error("--ssh-agent requires at least one --ssh-allow-host (or --ssh-credential)");
+    throw new Error(
+      "--ssh-agent requires at least one --ssh-allow-host (or --ssh-credential)",
+    );
   }
 
   if (common.sshAllowedHosts.length > 0) {
@@ -527,7 +616,9 @@ function buildVmOptions(common: CommonOptions) {
           common.sshCredentials.map((credential) => {
             const resolvedPath = path.resolve(credential.keyPath);
             if (!fs.existsSync(resolvedPath)) {
-              throw new Error(`SSH key file does not exist: ${credential.keyPath}`);
+              throw new Error(
+                `SSH key file does not exist: ${credential.keyPath}`,
+              );
             }
             return [
               credential.host,
@@ -537,12 +628,14 @@ function buildVmOptions(common: CommonOptions) {
                 passphrase: credential.passphrase,
               },
             ];
-          })
+          }),
         )
       : undefined;
 
   const dns =
-    common.dnsMode || common.dnsTrustedServers.length > 0 || common.dnsSyntheticHostMapping
+    common.dnsMode ||
+    common.dnsTrustedServers.length > 0 ||
+    common.dnsSyntheticHostMapping
       ? {
           mode: common.dnsMode,
           trustedServers: common.dnsTrustedServers,
@@ -561,7 +654,9 @@ function buildVmOptions(common: CommonOptions) {
             credentials: sshCredentials,
             agent: common.sshAgent,
             knownHostsFile:
-              common.sshKnownHostsFiles.length > 0 ? common.sshKnownHostsFiles : undefined,
+              common.sshKnownHostsFiles.length > 0
+                ? common.sshKnownHostsFiles
+                : undefined,
           }
         : undefined,
     env,
@@ -643,7 +738,8 @@ function parseExecArgs(argv: string[]): ExecArgs {
       case "--dns-trusted-server": {
         const ip = optionArgs[++i];
         if (!ip) fail("--dns-trusted-server requires an argument");
-        if (net.isIP(ip) !== 4) fail("--dns-trusted-server must be a valid IPv4 address");
+        if (net.isIP(ip) !== 4)
+          fail("--dns-trusted-server must be a valid IPv4 address");
         args.common.dnsTrustedServers.push(ip);
         return i;
       }
@@ -711,7 +807,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
 
     for (let i = 0; i < optionArgs.length; i += 1) {
       const arg = optionArgs[i];
-      
+
       // Try parsing as common option first
       const newIndex = parseCommonOption(optionArgs, i);
       if (newIndex >= 0) {
@@ -751,7 +847,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    
+
     // Try parsing as common option first
     const newIndex = parseCommonOption(argv, i);
     if (newIndex >= 0) {
@@ -799,7 +895,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
 }
 
 function buildCommandPayload(command: Command) {
-  const payload: { cmd: string; argv?: string[]; env?: string[]; cwd?: string } = {
+  const payload: {
+    cmd: string;
+    argv?: string[];
+    env?: string[];
+    cwd?: string;
+  } = {
     cmd: command.cmd,
   };
 
@@ -894,7 +995,9 @@ function runExecSocket(args: ExecArgs) {
         }
       } else if (message.t === "exec_response") {
         if (inflightId !== null && message.id !== inflightId) {
-          console.error(`unexpected response id ${message.id} (expected ${inflightId})`);
+          console.error(
+            `unexpected response id ${message.id} (expected ${inflightId})`,
+          );
           finish(1);
           return;
         }
@@ -1052,7 +1155,9 @@ function parseBashArgs(argv: string[]): BashArgs {
       case "--dns-synthetic-host-mapping": {
         const mode = argv[++i] as any;
         if (mode !== "single" && mode !== "per-host") {
-          console.error("--dns-synthetic-host-mapping must be one of: single, per-host");
+          console.error(
+            "--dns-synthetic-host-mapping must be one of: single, per-host",
+          );
           process.exit(1);
         }
         args.dnsSyntheticHostMapping = mode;
@@ -1217,7 +1322,7 @@ async function runBash(argv: string[]) {
       });
       process.stderr.write(`Ingress enabled: ${ingressAccess.url}\n`);
       process.stderr.write(
-        "Configure routes by editing /etc/gondolin/listeners inside the VM.\n"
+        "Configure routes by editing /etc/gondolin/listeners inside the VM.\n",
       );
     }
 
@@ -1227,7 +1332,7 @@ async function runBash(argv: string[]) {
       attach: false,
       cwd: args.cwd,
       command: args.command,
-      env: args.env && args.env.length > 0 ? args.env : undefined
+      env: args.env && args.env.length > 0 ? args.env : undefined,
     });
 
     const stdin = process.stdin as NodeJS.ReadStream;
@@ -1243,40 +1348,47 @@ async function runBash(argv: string[]) {
 
     // This intentionally shares logic with ExecProcess.attach() via attachTty()
     // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
-    const { cleanup } = attachTty(stdin, stdout, stderr, proc.stdout, proc.stderr, {
-      write: (chunk) => proc.write(chunk),
-      end: () => proc.end(),
-      resize: (rows, cols) => proc.resize(rows, cols),
-      escape: {
-        byte: ESCAPE_BYTE,
-        onEscape: () => {
-          // Detach output immediately (Ctrl-] should stop forwarding stdout/stderr too).
-          if (proc.stdout) {
-            try {
-              proc.stdout.unpipe(stdout);
-            } catch {
-              // ignore
+    const { cleanup } = attachTty(
+      stdin,
+      stdout,
+      stderr,
+      proc.stdout,
+      proc.stderr,
+      {
+        write: (chunk) => proc.write(chunk),
+        end: () => proc.end(),
+        resize: (rows, cols) => proc.resize(rows, cols),
+        escape: {
+          byte: ESCAPE_BYTE,
+          onEscape: () => {
+            // Detach output immediately (Ctrl-] should stop forwarding stdout/stderr too).
+            if (proc.stdout) {
+              try {
+                proc.stdout.unpipe(stdout);
+              } catch {
+                // ignore
+              }
+              proc.stdout.pause();
             }
-            proc.stdout.pause();
-          }
-          if (proc.stderr) {
-            try {
-              proc.stderr.unpipe(stderr);
-            } catch {
-              // ignore
+            if (proc.stderr) {
+              try {
+                proc.stderr.unpipe(stderr);
+              } catch {
+                // ignore
+              }
+              proc.stderr.pause();
             }
-            proc.stderr.pause();
-          }
 
-          process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
-          resolveEscape();
+            process.stderr.write("\n[gondolin] detached (Ctrl-])\n");
+            resolveEscape();
+          },
         },
       },
-    });
+    );
 
     void proc.result.then(
       () => cleanup(),
-      () => cleanup()
+      () => cleanup(),
     );
 
     const raced = await Promise.race([
@@ -1328,11 +1440,21 @@ function buildUsage() {
   console.log("Build custom guest assets (kernel, initramfs, rootfs).");
   console.log();
   console.log("Options:");
-  console.log("  --init-config           Generate a default build configuration");
-  console.log("  --config FILE           Use the specified build configuration file");
-  console.log("  --output DIR            Output directory for built assets (required for build)");
-  console.log("  --arch ARCH             Target architecture (aarch64, x86_64)");
-  console.log("  --verify DIR            Verify assets in directory against manifest");
+  console.log(
+    "  --init-config           Generate a default build configuration",
+  );
+  console.log(
+    "  --config FILE           Use the specified build configuration file",
+  );
+  console.log(
+    "  --output DIR            Output directory for built assets (required for build)",
+  );
+  console.log(
+    "  --arch ARCH             Target architecture (aarch64, x86_64)",
+  );
+  console.log(
+    "  --verify DIR            Verify assets in directory against manifest",
+  );
   console.log("  --quiet                 Reduce output verbosity");
   console.log();
   console.log("Workflows:");
@@ -1343,7 +1465,9 @@ function buildUsage() {
   console.log("  2. Edit the config to customize packages, settings, etc.");
   console.log();
   console.log("  3. Build assets:");
-  console.log("     gondolin build --config build-config.json --output ./my-assets");
+  console.log(
+    "     gondolin build --config build-config.json --output ./my-assets",
+  );
   console.log();
   console.log("  4. Use custom assets with VM:");
   console.log("     GONDOLIN_GUEST_DIR=./my-assets gondolin bash");
@@ -1528,7 +1652,12 @@ async function runBuild(argv: string[]) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
 
-  if (!command || command === "help" || command === "--help" || command === "-h") {
+  if (
+    !command ||
+    command === "help" ||
+    command === "--help" ||
+    command === "-h"
+  ) {
     usage();
     process.exit(command ? 0 : 1);
   }

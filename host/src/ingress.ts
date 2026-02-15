@@ -1,9 +1,13 @@
 import { EventEmitter } from "events";
-import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "http";
+import http, {
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from "http";
 import net from "net";
 import type { Duplex, Writable } from "stream";
 
-import type { VirtualProvider } from "./vfs";
+import type { VirtualProvider } from "./vfs/node";
 import type { SandboxServer } from "./sandbox-server";
 
 const MAX_LISTENERS_FILE_BYTES = 64 * 1024;
@@ -60,27 +64,37 @@ export function parseListenersFile(text: string): ParsedListenersFile {
 
     const parts = line.split(/\s+/g);
     if (parts.length < 2) {
-      throw new Error(`invalid listeners file line ${lineNo + 1}: expected '<prefix> <backend>'`);
+      throw new Error(
+        `invalid listeners file line ${lineNo + 1}: expected '<prefix> <backend>'`,
+      );
     }
 
     const prefix = parts[0]!;
     const backend = parts[1]!;
 
     if (!prefix.startsWith("/")) {
-      throw new Error(`invalid listeners file line ${lineNo + 1}: prefix must start with '/'`);
+      throw new Error(
+        `invalid listeners file line ${lineNo + 1}: prefix must start with '/'`,
+      );
     }
 
     if (!backend.startsWith(":")) {
-      throw new Error(`invalid listeners file line ${lineNo + 1}: backend must be ':<port>'`);
+      throw new Error(
+        `invalid listeners file line ${lineNo + 1}: backend must be ':<port>'`,
+      );
     }
 
     const portText = backend.slice(1);
     if (!/^\d+$/.test(portText)) {
-      throw new Error(`invalid listeners file line ${lineNo + 1}: invalid port`);
+      throw new Error(
+        `invalid listeners file line ${lineNo + 1}: invalid port`,
+      );
     }
     const port = Number.parseInt(portText, 10);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new Error(`invalid listeners file line ${lineNo + 1}: invalid port`);
+      throw new Error(
+        `invalid listeners file line ${lineNo + 1}: invalid port`,
+      );
     }
 
     let stripPrefix = true;
@@ -88,14 +102,19 @@ export function parseListenersFile(text: string): ParsedListenersFile {
     for (const opt of parts.slice(2)) {
       const eq = opt.indexOf("=");
       if (eq === -1) {
-        throw new Error(`invalid listeners file line ${lineNo + 1}: invalid option '${opt}'`);
+        throw new Error(
+          `invalid listeners file line ${lineNo + 1}: invalid option '${opt}'`,
+        );
       }
       const key = opt.slice(0, eq);
       const value = opt.slice(eq + 1);
       if (key === "strip_prefix") {
         if (value === "true") stripPrefix = true;
         else if (value === "false") stripPrefix = false;
-        else throw new Error(`invalid listeners file line ${lineNo + 1}: strip_prefix must be true|false`);
+        else
+          throw new Error(
+            `invalid listeners file line ${lineNo + 1}: strip_prefix must be true|false`,
+          );
       } else {
         // forward-compatible: ignore unknown keys
       }
@@ -143,7 +162,9 @@ function stripPrefix(pathname: string, prefix: string): string {
   return pathname;
 }
 
-function normalizeIncomingHeaders(headers: IncomingHttpHeaders): Record<string, string | string[]> {
+function normalizeIncomingHeaders(
+  headers: IncomingHttpHeaders,
+): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) continue;
@@ -192,13 +213,15 @@ function parseContentLength(raw: string | string[] | undefined): number | null {
   return n;
 }
 
-function filterHopByHop(headers: Record<string, string | string[]>): Record<string, string | string[]> {
+function filterHopByHop(
+  headers: Record<string, string | string[]>,
+): Record<string, string | string[]> {
   const connection = joinHeaderValue(headers["connection"]).toLowerCase();
   const connectionTokens = new Set(
     connection
       .split(",")
       .map((x) => x.trim().toLowerCase())
-      .filter(Boolean)
+      .filter(Boolean),
   );
 
   const out: Record<string, string | string[]> = {};
@@ -211,7 +234,7 @@ function filterHopByHop(headers: Record<string, string | string[]>): Record<stri
 }
 
 function filterHopByHopForUpgrade(
-  headers: Record<string, string | string[]>
+  headers: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = { ...headers };
 
@@ -231,7 +254,7 @@ function filterHopByHopForUpgrade(
     connection
       .split(",")
       .map((x) => x.trim().toLowerCase())
-      .filter(Boolean)
+      .filter(Boolean),
   );
 
   for (const token of connectionTokens) {
@@ -242,7 +265,9 @@ function filterHopByHopForUpgrade(
   return out;
 }
 
-function normalizeHeaderRecord(headers: Record<string, string | string[]>): IngressHeaders {
+function normalizeHeaderRecord(
+  headers: Record<string, string | string[]>,
+): IngressHeaders {
   const out: IngressHeaders = {};
   for (const [k, v] of Object.entries(headers)) {
     out[k.toLowerCase()] = v;
@@ -250,7 +275,10 @@ function normalizeHeaderRecord(headers: Record<string, string | string[]>): Ingr
   return out;
 }
 
-function applyHeaderPatch(base: IngressHeaders, patch: IngressHeaderPatch): IngressHeaders {
+function applyHeaderPatch(
+  base: IngressHeaders,
+  patch: IngressHeaderPatch,
+): IngressHeaders {
   const out: IngressHeaders = { ...base };
   for (const [k, v] of Object.entries(patch)) {
     const key = k.toLowerCase();
@@ -268,7 +296,10 @@ function coerceError(err: unknown): Error {
   return new Error(String(err));
 }
 
-async function waitForReadableOrThrow(stream: Duplex, closedMessage: string): Promise<void> {
+async function waitForReadableOrThrow(
+  stream: Duplex,
+  closedMessage: string,
+): Promise<void> {
   const s = stream as any;
   if (s.destroyed || s.readableEnded) {
     throw new Error(closedMessage);
@@ -295,7 +326,10 @@ async function waitForReadableOrThrow(stream: Duplex, closedMessage: string): Pr
   });
 }
 
-async function writeStream(stream: Writable, chunk: Buffer | string): Promise<void> {
+async function writeStream(
+  stream: Writable,
+  chunk: Buffer | string,
+): Promise<void> {
   const s = stream as any;
   if (s.destroyed || s.writableEnded || s.writableFinished) {
     throw new Error("stream closed");
@@ -347,7 +381,10 @@ async function writeStream(stream: Writable, chunk: Buffer | string): Promise<vo
   });
 }
 
-function parseStatusLine(line: string): { statusCode: number; statusMessage: string } {
+function parseStatusLine(line: string): {
+  statusCode: number;
+  statusMessage: string;
+} {
   // HTTP/1.1 200 OK
   const m = /^HTTP\/\d+\.\d+\s+(\d{3})\s*(.*)$/.exec(line);
   if (!m) throw new Error(`invalid http status line: ${JSON.stringify(line)}`);
@@ -377,7 +414,14 @@ function parseHeaders(raw: string): Record<string, string | string[]> {
   return headers;
 }
 
-async function readHttpHead(stream: Duplex): Promise<{ statusCode: number; statusMessage: string; headers: Record<string, string | string[]>; rest: Buffer }> {
+async function readHttpHead(
+  stream: Duplex,
+): Promise<{
+  statusCode: number;
+  statusMessage: string;
+  headers: Record<string, string | string[]>;
+  rest: Buffer;
+}> {
   let buf = Buffer.alloc(0);
   while (true) {
     const idx = buf.indexOf("\r\n\r\n");
@@ -403,11 +447,17 @@ async function readHttpHead(stream: Duplex): Promise<{ statusCode: number; statu
 
     // Note: Duplex streams can emit "close" without "end" when destroyed.
     // Treat that as an upstream close so we don't hang waiting for headers.
-    await waitForReadableOrThrow(stream, "upstream closed before sending headers");
+    await waitForReadableOrThrow(
+      stream,
+      "upstream closed before sending headers",
+    );
   }
 }
 
-async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerator<Buffer> {
+async function* decodeChunkedBody(
+  stream: Duplex,
+  initial: Buffer,
+): AsyncGenerator<Buffer> {
   let buf = initial;
 
   const readMore = async () => {
@@ -417,7 +467,10 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
         buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
         return;
       }
-      await waitForReadableOrThrow(stream, "upstream closed during chunked body");
+      await waitForReadableOrThrow(
+        stream,
+        "upstream closed during chunked body",
+      );
     }
   };
 
@@ -434,7 +487,8 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
     const semi = line.indexOf(";");
     const sizeStr = (semi === -1 ? line : line.slice(0, semi)).trim();
     const size = Number.parseInt(sizeStr, 16);
-    if (!Number.isFinite(size) || size < 0) throw new Error("invalid chunk size");
+    if (!Number.isFinite(size) || size < 0)
+      throw new Error("invalid chunk size");
 
     if (size === 0) {
       // Consume trailer part (0 or more header lines), terminated by an empty line.
@@ -475,12 +529,17 @@ async function* decodeChunkedBody(stream: Duplex, initial: Buffer): AsyncGenerat
     while (buf.length < 2) {
       await readMore();
     }
-    if (buf[0] !== 13 || buf[1] !== 10) throw new Error("invalid chunk terminator");
+    if (buf[0] !== 13 || buf[1] !== 10)
+      throw new Error("invalid chunk terminator");
     buf = buf.subarray(2);
   }
 }
 
-async function* readFixedBody(stream: Duplex, initial: Buffer, length: number): AsyncGenerator<Buffer> {
+async function* readFixedBody(
+  stream: Duplex,
+  initial: Buffer,
+  length: number,
+): AsyncGenerator<Buffer> {
   let remaining = length;
   let buf = initial;
 
@@ -490,7 +549,10 @@ async function* readFixedBody(stream: Duplex, initial: Buffer, length: number): 
       if (chunk) {
         buf = chunk;
       } else {
-        await waitForReadableOrThrow(stream, "upstream closed before content-length satisfied");
+        await waitForReadableOrThrow(
+          stream,
+          "upstream closed before content-length satisfied",
+        );
         continue;
       }
     }
@@ -502,14 +564,20 @@ async function* readFixedBody(stream: Duplex, initial: Buffer, length: number): 
   }
 }
 
-async function* readToEnd(stream: Duplex, initial: Buffer): AsyncGenerator<Buffer> {
+async function* readToEnd(
+  stream: Duplex,
+  initial: Buffer,
+): AsyncGenerator<Buffer> {
   if (initial.length > 0) yield initial;
   for await (const chunk of stream) {
     yield Buffer.from(chunk as Buffer);
   }
 }
 
-async function bufferAsyncIterable(iter: AsyncIterable<Buffer>, maxBytes: number): Promise<Buffer> {
+async function bufferAsyncIterable(
+  iter: AsyncIterable<Buffer>,
+  maxBytes: number,
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
 
@@ -667,7 +735,10 @@ export class GondolinListeners extends EventEmitter {
 
 export type IngressHeaderValue = string | string[];
 export type IngressHeaders = Record<string, IngressHeaderValue>;
-export type IngressHeaderPatch = Record<string, IngressHeaderValue | null | undefined>;
+export type IngressHeaderPatch = Record<
+  string,
+  IngressHeaderValue | null | undefined
+>;
 
 export class IngressRequestBlockedError extends Error {
   /** http status code */
@@ -677,7 +748,12 @@ export class IngressRequestBlockedError extends Error {
   /** response body */
   readonly body: string;
 
-  constructor(message = "request blocked", statusCode = 403, statusMessage = "Forbidden", body = "forbidden\n") {
+  constructor(
+    message = "request blocked",
+    statusCode = 403,
+    statusMessage = "Forbidden",
+    body = "forbidden\n",
+  ) {
     super(message);
     this.name = "IngressRequestBlockedError";
     this.statusCode = statusCode;
@@ -764,12 +840,17 @@ export type IngressGatewayHooks = {
   /** allow/deny callback */
   isAllowed?: (info: IngressAllowInfo) => Promise<boolean> | boolean;
   /** request rewrite hook (rewrite headers / upstream target) */
-  onRequest?: (request: IngressHookRequest) => Promise<IngressHookRequestPatch | void> | IngressHookRequestPatch | void;
+  onRequest?: (
+    request: IngressHookRequest,
+  ) => Promise<IngressHookRequestPatch | void> | IngressHookRequestPatch | void;
   /** response rewrite hook (rewrite status / headers and optionally body) */
   onResponse?: (
     response: IngressHookResponse,
-    request: IngressHookRequest
-  ) => Promise<IngressHookResponsePatch | void> | IngressHookResponsePatch | void;
+    request: IngressHookRequest,
+  ) =>
+    | Promise<IngressHookResponsePatch | void>
+    | IngressHookResponsePatch
+    | void;
 };
 
 export type EnableIngressOptions = {
@@ -808,12 +889,19 @@ export class IngressGateway {
   constructor(
     private readonly sandbox: SandboxServer,
     private readonly listeners: GondolinListeners,
-    options: Pick<EnableIngressOptions, "hooks" | "bufferResponseBody" | "maxBufferedResponseBodyBytes" | "allowWebSockets"> = {}
+    options: Pick<
+      EnableIngressOptions,
+      | "hooks"
+      | "bufferResponseBody"
+      | "maxBufferedResponseBodyBytes"
+      | "allowWebSockets"
+    > = {},
   ) {
     this.hooks = options.hooks ?? null;
     this.allowWebSockets = options.allowWebSockets ?? true;
     this.bufferResponseBody = options.bufferResponseBody ?? false;
-    this.maxBufferedResponseBodyBytes = options.maxBufferedResponseBodyBytes ?? 2 * 1024 * 1024;
+    this.maxBufferedResponseBodyBytes =
+      options.maxBufferedResponseBodyBytes ?? 2 * 1024 * 1024;
   }
 
   async listen(options: EnableIngressOptions = {}): Promise<IngressAccess> {
@@ -899,7 +987,10 @@ export class IngressGateway {
     return best;
   }
 
-  private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     let upstream: Duplex | null = null;
     let upstreamError: unknown = null;
 
@@ -926,14 +1017,22 @@ export class IngressGateway {
       const incoming = normalizeIncomingHeaders(req.headers);
 
       if (hooks?.isAllowed) {
-        const allowed = await hooks.isAllowed({ clientIp, method: clientMethod, path, headers: incoming, route });
+        const allowed = await hooks.isAllowed({
+          clientIp,
+          method: clientMethod,
+          path,
+          headers: incoming,
+          route,
+        });
         if (!allowed) {
           throw new IngressRequestBlockedError();
         }
       }
 
       // Rewrite path
-      const backendPathname = route.stripPrefix ? stripPrefix(url.pathname, route.prefix) : url.pathname;
+      const backendPathname = route.stripPrefix
+        ? stripPrefix(url.pathname, route.prefix)
+        : url.pathname;
 
       // Response buffering defaults (can be overridden per-request via onRequest)
       let bufferResponseBody = this.bufferResponseBody;
@@ -956,7 +1055,8 @@ export class IngressGateway {
       delete hookRequest.headers["transfer-encoding"];
       delete hookRequest.headers["expect"];
 
-      const hostHeader = typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
+      const hostHeader =
+        typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
       hookRequest.headers["host"] = hostHeader;
       hookRequest.headers["connection"] = "close";
 
@@ -979,13 +1079,20 @@ export class IngressGateway {
         const patch = await hooks.onRequest(hookRequest);
         if (patch) {
           if (patch.method !== undefined) hookRequest.method = patch.method;
-          if (patch.backendHost !== undefined) hookRequest.backendHost = patch.backendHost;
-          if (patch.backendPort !== undefined) hookRequest.backendPort = patch.backendPort;
-          if (patch.backendTarget !== undefined) hookRequest.backendTarget = patch.backendTarget;
+          if (patch.backendHost !== undefined)
+            hookRequest.backendHost = patch.backendHost;
+          if (patch.backendPort !== undefined)
+            hookRequest.backendPort = patch.backendPort;
+          if (patch.backendTarget !== undefined)
+            hookRequest.backendTarget = patch.backendTarget;
           if (patch.headers) {
-            hookRequest.headers = applyHeaderPatch(hookRequest.headers, patch.headers);
+            hookRequest.headers = applyHeaderPatch(
+              hookRequest.headers,
+              patch.headers,
+            );
           }
-          if (patch.bufferResponseBody !== undefined) bufferResponseBody = patch.bufferResponseBody;
+          if (patch.bufferResponseBody !== undefined)
+            bufferResponseBody = patch.bufferResponseBody;
           if (patch.maxBufferedResponseBodyBytes !== undefined) {
             maxBufferedResponseBodyBytes = patch.maxBufferedResponseBodyBytes;
           }
@@ -994,20 +1101,35 @@ export class IngressGateway {
 
       hookRequest.method = (hookRequest.method ?? "GET").toUpperCase();
 
-      if (hookRequest.backendHost !== "127.0.0.1" && hookRequest.backendHost !== "localhost") {
-        throw new Error(`invalid ingress backend host: ${hookRequest.backendHost}`);
+      if (
+        hookRequest.backendHost !== "127.0.0.1" &&
+        hookRequest.backendHost !== "localhost"
+      ) {
+        throw new Error(
+          `invalid ingress backend host: ${hookRequest.backendHost}`,
+        );
       }
 
-      if (!Number.isInteger(hookRequest.backendPort) || hookRequest.backendPort <= 0 || hookRequest.backendPort > 65535) {
-        throw new Error(`invalid ingress backend port: ${hookRequest.backendPort}`);
+      if (
+        !Number.isInteger(hookRequest.backendPort) ||
+        hookRequest.backendPort <= 0 ||
+        hookRequest.backendPort > 65535
+      ) {
+        throw new Error(
+          `invalid ingress backend port: ${hookRequest.backendPort}`,
+        );
       }
 
       if (!hookRequest.backendTarget.startsWith("/")) {
-        throw new Error(`invalid ingress backend target: ${hookRequest.backendTarget}`);
+        throw new Error(
+          `invalid ingress backend target: ${hookRequest.backendTarget}`,
+        );
       }
 
       // Enforce hop-by-hop filtering after the user hook
-      hookRequest.headers = normalizeHeaderRecord(filterHopByHop(hookRequest.headers as any));
+      hookRequest.headers = normalizeHeaderRecord(
+        filterHopByHop(hookRequest.headers as any),
+      );
 
       // Remove body framing headers; we choose framing ourselves.
       delete hookRequest.headers["content-length"];
@@ -1023,9 +1145,13 @@ export class IngressGateway {
         clientMethod === "PUT" ||
         clientMethod === "PATCH";
 
-      const incomingTeTokens = parseTransferEncoding(incoming["transfer-encoding"]);
+      const incomingTeTokens = parseTransferEncoding(
+        incoming["transfer-encoding"],
+      );
       const hasTransferEncoding = incomingTeTokens.length > 0;
-      const incomingContentLength = parseContentLength(incoming["content-length"]);
+      const incomingContentLength = parseContentLength(
+        incoming["content-length"],
+      );
 
       let useChunked = false;
 
@@ -1048,7 +1174,9 @@ export class IngressGateway {
 
       // Send request line + headers
       const headerLines: string[] = [];
-      headerLines.push(`${hookRequest.method} ${hookRequest.backendTarget} HTTP/1.1`);
+      headerLines.push(
+        `${hookRequest.method} ${hookRequest.backendTarget} HTTP/1.1`,
+      );
       for (const [k, v] of Object.entries(hookRequest.headers)) {
         if (v === undefined) continue;
         if (Array.isArray(v)) {
@@ -1067,7 +1195,10 @@ export class IngressGateway {
           for await (const chunk of req) {
             const b = Buffer.from(chunk as Buffer);
             if (b.length === 0) continue;
-            await writeStream(upstream, Buffer.from(b.length.toString(16) + "\r\n", "ascii"));
+            await writeStream(
+              upstream,
+              Buffer.from(b.length.toString(16) + "\r\n", "ascii"),
+            );
             await writeStream(upstream, b);
             await writeStream(upstream, "\r\n");
           }
@@ -1090,7 +1221,9 @@ export class IngressGateway {
       delete respHeaders["transfer-encoding"];
 
       // Body mode
-      const upstreamTeTokens = parseTransferEncoding(head.headers["transfer-encoding"]);
+      const upstreamTeTokens = parseTransferEncoding(
+        head.headers["transfer-encoding"],
+      );
       const isChunked = upstreamTeTokens.includes("chunked");
       const contentLength = parseContentLength(head.headers["content-length"]);
 
@@ -1111,7 +1244,8 @@ export class IngressGateway {
           ? readFixedBody(upstream, head.rest, contentLength)
           : readToEnd(upstream, head.rest);
 
-      const shouldBufferResponseBody = bufferResponseBody && !!hooks?.onResponse;
+      const shouldBufferResponseBody =
+        bufferResponseBody && !!hooks?.onResponse;
       if (shouldBufferResponseBody) {
         const max = maxBufferedResponseBodyBytes;
         if (!Number.isInteger(max) || max <= 0) {
@@ -1123,21 +1257,33 @@ export class IngressGateway {
       if (hooks?.onResponse) {
         const patch = await hooks.onResponse(responseForHook, hookRequest);
         if (patch) {
-          if (patch.statusCode !== undefined) responseForHook.statusCode = patch.statusCode;
-          if (patch.statusMessage !== undefined) responseForHook.statusMessage = patch.statusMessage;
-          if (patch.headers) responseForHook.headers = applyHeaderPatch(responseForHook.headers, patch.headers);
+          if (patch.statusCode !== undefined)
+            responseForHook.statusCode = patch.statusCode;
+          if (patch.statusMessage !== undefined)
+            responseForHook.statusMessage = patch.statusMessage;
+          if (patch.headers)
+            responseForHook.headers = applyHeaderPatch(
+              responseForHook.headers,
+              patch.headers,
+            );
           if (patch.body !== undefined) responseForHook.body = patch.body;
         }
       }
 
-      const finalHeaders = normalizeHeaderRecord(filterHopByHop(responseForHook.headers as any));
+      const finalHeaders = normalizeHeaderRecord(
+        filterHopByHop(responseForHook.headers as any),
+      );
 
       // If we buffered the response (or a hook provided an explicit replacement body), send it with a fixed content-length.
       if (responseForHook.body !== undefined) {
         delete finalHeaders["transfer-encoding"];
         finalHeaders["content-length"] = String(responseForHook.body.length);
 
-        res.writeHead(responseForHook.statusCode, responseForHook.statusMessage, finalHeaders as any);
+        res.writeHead(
+          responseForHook.statusCode,
+          responseForHook.statusMessage,
+          finalHeaders as any,
+        );
         if (responseForHook.body.length > 0) {
           await writeStream(res, responseForHook.body);
         }
@@ -1145,7 +1291,11 @@ export class IngressGateway {
         return;
       }
 
-      res.writeHead(responseForHook.statusCode, responseForHook.statusMessage, finalHeaders as any);
+      res.writeHead(
+        responseForHook.statusCode,
+        responseForHook.statusMessage,
+        finalHeaders as any,
+      );
 
       for await (const chunk of bodyIter) {
         await writeStream(res, chunk);
@@ -1160,7 +1310,9 @@ export class IngressGateway {
             return;
           }
 
-          res.writeHead(err.statusCode, err.statusMessage, { "content-type": "text/plain" });
+          res.writeHead(err.statusCode, err.statusMessage, {
+            "content-type": "text/plain",
+          });
           res.end(err.body);
         } catch {
           // ignore
@@ -1193,7 +1345,9 @@ export class IngressGateway {
     } finally {
       if (upstream) {
         try {
-          upstream.destroy(upstreamError instanceof Error ? upstreamError : undefined);
+          upstream.destroy(
+            upstreamError instanceof Error ? upstreamError : undefined,
+          );
         } catch {
           // ignore
         }
@@ -1201,15 +1355,24 @@ export class IngressGateway {
     }
   }
 
-  private isWebSocketUpgradeRequest(headers: Record<string, string | string[]>): boolean {
+  private isWebSocketUpgradeRequest(
+    headers: Record<string, string | string[]>,
+  ): boolean {
     const upgrade = joinHeaderValue(headers["upgrade"])?.toLowerCase() ?? "";
 
     if (upgrade === "websocket") return true;
-    if (headers["sec-websocket-key"] || headers["sec-websocket-version"]) return true;
+    if (headers["sec-websocket-key"] || headers["sec-websocket-version"])
+      return true;
     return false;
   }
 
-  private writeRawHttpResponse(socket: net.Socket, statusCode: number, statusMessage: string, headers: Record<string, string>, body: Buffer) {
+  private writeRawHttpResponse(
+    socket: net.Socket,
+    statusCode: number,
+    statusMessage: string,
+    headers: Record<string, string>,
+    body: Buffer,
+  ) {
     const lines: string[] = [];
     lines.push(`HTTP/1.1 ${statusCode} ${statusMessage}`);
     for (const [k, v] of Object.entries(headers)) {
@@ -1227,7 +1390,11 @@ export class IngressGateway {
     }
   }
 
-  private async handleUpgrade(req: IncomingMessage, socket: net.Socket, head: Buffer): Promise<void> {
+  private async handleUpgrade(
+    req: IncomingMessage,
+    socket: net.Socket,
+    head: Buffer,
+  ): Promise<void> {
     let upstream: Duplex | null = null;
 
     try {
@@ -1242,7 +1409,7 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
@@ -1262,7 +1429,7 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
@@ -1280,7 +1447,7 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
@@ -1303,7 +1470,7 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
@@ -1320,20 +1487,28 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
       }
 
       if (hooks?.isAllowed) {
-        const allowed = await hooks.isAllowed({ clientIp, method: clientMethod, path, headers: incoming, route });
+        const allowed = await hooks.isAllowed({
+          clientIp,
+          method: clientMethod,
+          path,
+          headers: incoming,
+          route,
+        });
         if (!allowed) {
           throw new IngressRequestBlockedError();
         }
       }
 
-      const backendPathname = route.stripPrefix ? stripPrefix(url.pathname, route.prefix) : url.pathname;
+      const backendPathname = route.stripPrefix
+        ? stripPrefix(url.pathname, route.prefix)
+        : url.pathname;
 
       let hookRequest: IngressHookRequest = {
         clientIp,
@@ -1373,11 +1548,17 @@ export class IngressGateway {
         const patch = await hooks.onRequest(hookRequest);
         if (patch) {
           if (patch.method !== undefined) hookRequest.method = patch.method;
-          if (patch.backendHost !== undefined) hookRequest.backendHost = patch.backendHost;
-          if (patch.backendPort !== undefined) hookRequest.backendPort = patch.backendPort;
-          if (patch.backendTarget !== undefined) hookRequest.backendTarget = patch.backendTarget;
+          if (patch.backendHost !== undefined)
+            hookRequest.backendHost = patch.backendHost;
+          if (patch.backendPort !== undefined)
+            hookRequest.backendPort = patch.backendPort;
+          if (patch.backendTarget !== undefined)
+            hookRequest.backendTarget = patch.backendTarget;
           if (patch.headers) {
-            hookRequest.headers = applyHeaderPatch(hookRequest.headers, patch.headers);
+            hookRequest.headers = applyHeaderPatch(
+              hookRequest.headers,
+              patch.headers,
+            );
           }
         }
       }
@@ -1395,26 +1576,41 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
       }
 
-      if (hookRequest.backendHost !== "127.0.0.1" && hookRequest.backendHost !== "localhost") {
-        throw new Error(`invalid ingress backend host: ${hookRequest.backendHost}`);
+      if (
+        hookRequest.backendHost !== "127.0.0.1" &&
+        hookRequest.backendHost !== "localhost"
+      ) {
+        throw new Error(
+          `invalid ingress backend host: ${hookRequest.backendHost}`,
+        );
       }
 
-      if (!Number.isInteger(hookRequest.backendPort) || hookRequest.backendPort <= 0 || hookRequest.backendPort > 65535) {
-        throw new Error(`invalid ingress backend port: ${hookRequest.backendPort}`);
+      if (
+        !Number.isInteger(hookRequest.backendPort) ||
+        hookRequest.backendPort <= 0 ||
+        hookRequest.backendPort > 65535
+      ) {
+        throw new Error(
+          `invalid ingress backend port: ${hookRequest.backendPort}`,
+        );
       }
 
       if (!hookRequest.backendTarget.startsWith("/")) {
-        throw new Error(`invalid ingress backend target: ${hookRequest.backendTarget}`);
+        throw new Error(
+          `invalid ingress backend target: ${hookRequest.backendTarget}`,
+        );
       }
 
       // Enforce hop-by-hop filtering after the user hook
-      hookRequest.headers = normalizeHeaderRecord(filterHopByHopForUpgrade(hookRequest.headers as any));
+      hookRequest.headers = normalizeHeaderRecord(
+        filterHopByHopForUpgrade(hookRequest.headers as any),
+      );
 
       // Remove body framing headers; websocket handshakes do not send a body.
       delete hookRequest.headers["content-length"];
@@ -1429,7 +1625,9 @@ export class IngressGateway {
 
       // Send request line + headers
       const headerLines: string[] = [];
-      headerLines.push(`${hookRequest.method} ${hookRequest.backendTarget} HTTP/1.1`);
+      headerLines.push(
+        `${hookRequest.method} ${hookRequest.backendTarget} HTTP/1.1`,
+      );
       for (const [k, v] of Object.entries(hookRequest.headers)) {
         if (v === undefined) continue;
         if (Array.isArray(v)) {
@@ -1459,14 +1657,22 @@ export class IngressGateway {
       if (hooks?.onResponse) {
         const patch = await hooks.onResponse(responseForHook, hookRequest);
         if (patch) {
-          if (patch.statusCode !== undefined) responseForHook.statusCode = patch.statusCode;
-          if (patch.statusMessage !== undefined) responseForHook.statusMessage = patch.statusMessage;
-          if (patch.headers) responseForHook.headers = applyHeaderPatch(responseForHook.headers, patch.headers);
+          if (patch.statusCode !== undefined)
+            responseForHook.statusCode = patch.statusCode;
+          if (patch.statusMessage !== undefined)
+            responseForHook.statusMessage = patch.statusMessage;
+          if (patch.headers)
+            responseForHook.headers = applyHeaderPatch(
+              responseForHook.headers,
+              patch.headers,
+            );
           if (patch.body !== undefined) responseForHook.body = patch.body;
         }
       }
 
-      const finalHeaders = normalizeHeaderRecord(responseForHook.headers as any);
+      const finalHeaders = normalizeHeaderRecord(
+        responseForHook.headers as any,
+      );
 
       // If hooks provided an explicit body, treat it as a regular HTTP response (no upgrade).
       if (responseForHook.body && responseForHook.body.length > 0) {
@@ -1476,13 +1682,16 @@ export class IngressGateway {
 
       // Write response head
       const outLines: string[] = [];
-      outLines.push(`HTTP/1.1 ${responseForHook.statusCode} ${responseForHook.statusMessage}`);
+      outLines.push(
+        `HTTP/1.1 ${responseForHook.statusCode} ${responseForHook.statusMessage}`,
+      );
       for (const [k, v] of Object.entries(finalHeaders)) {
         if (v === undefined) continue;
         const name = k.replace(/[\r\n:]+/g, "");
         if (!name) continue;
         if (Array.isArray(v)) {
-          for (const vv of v) outLines.push(`${name}: ${String(vv).replace(/[\r\n]+/g, " ")}`);
+          for (const vv of v)
+            outLines.push(`${name}: ${String(vv).replace(/[\r\n]+/g, " ")}`);
         } else {
           outLines.push(`${name}: ${String(v).replace(/[\r\n]+/g, " ")}`);
         }
@@ -1541,7 +1750,7 @@ export class IngressGateway {
             "content-length": String(body.length),
             connection: "close",
           },
-          body
+          body,
         );
         socket.destroy();
         return;
@@ -1561,7 +1770,7 @@ export class IngressGateway {
           "content-length": String(body.length),
           connection: "close",
         },
-        body
+        body,
       );
       socket.destroy();
     } finally {
@@ -1576,7 +1785,9 @@ export type GondolinEtcMount = {
   listeners: GondolinListeners;
 };
 
-export function createGondolinEtcMount(provider: VirtualProvider): GondolinEtcMount {
+export function createGondolinEtcMount(
+  provider: VirtualProvider,
+): GondolinEtcMount {
   const listeners = new GondolinListeners(provider);
   // Ensure file exists with canonical empty content.
   try {
@@ -1591,9 +1802,18 @@ function isGondolinListenersRelevantPath(path: string | undefined): boolean {
   return path === "/etc/gondolin/listeners";
 }
 
-const LISTENERS_RELOAD_OPS = new Set(["writeFile", "truncate", "rename", "unlink", "release"]);
+const LISTENERS_RELOAD_OPS = new Set([
+  "writeFile",
+  "truncate",
+  "rename",
+  "unlink",
+  "release",
+]);
 
-export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider?: VirtualProvider) {
+export function createGondolinEtcHooks(
+  listeners: GondolinListeners,
+  etcProvider?: VirtualProvider,
+) {
   return {
     after: (ctx: {
       op: string;
@@ -1617,10 +1837,21 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
         listeners.notifyDirty();
       }
     },
-    before: (ctx: { op: string; path?: string; data?: Buffer; size?: number; offset?: number; length?: number }) => {
+    before: (ctx: {
+      op: string;
+      path?: string;
+      data?: Buffer;
+      size?: number;
+      offset?: number;
+      length?: number;
+    }) => {
       if (!isGondolinListenersRelevantPath(ctx.path)) return;
 
-      if (ctx.op === "writeFile" && ctx.data && ctx.data.length > MAX_LISTENERS_FILE_BYTES) {
+      if (
+        ctx.op === "writeFile" &&
+        ctx.data &&
+        ctx.data.length > MAX_LISTENERS_FILE_BYTES
+      ) {
         throw new ListenersFileTooLargeError();
       }
 
@@ -1635,7 +1866,9 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
         let offset = ctx.offset;
         if (typeof offset !== "number") {
           if (!etcProvider) {
-            throw new Error("/etc/gondolin/listeners append writes not supported");
+            throw new Error(
+              "/etc/gondolin/listeners append writes not supported",
+            );
           }
           try {
             offset = etcProvider.statSync("/listeners").size;
@@ -1653,7 +1886,11 @@ export function createGondolinEtcHooks(listeners: GondolinListeners, etcProvider
         }
       }
 
-      if (ctx.op === "truncate" && typeof ctx.size === "number" && ctx.size > MAX_LISTENERS_FILE_BYTES) {
+      if (
+        ctx.op === "truncate" &&
+        typeof ctx.size === "number" &&
+        ctx.size > MAX_LISTENERS_FILE_BYTES
+      ) {
         throw new ListenersFileTooLargeError();
       }
     },

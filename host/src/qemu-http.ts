@@ -23,20 +23,6 @@ import {
   stripHopByHopHeadersForWebSocket,
 } from "./http-utils";
 
-export {
-  HttpRequestBlockedError,
-  applyRedirectRequest,
-  closeSharedDispatchers,
-  createLookupGuard,
-  getCheckedDispatcher,
-  getRedirectUrl,
-  normalizeLookupEntries,
-  normalizeLookupFailure,
-  normalizeLookupOptions,
-  stripHopByHopHeaders,
-  stripHopByHopHeadersForWebSocket,
-} from "./http-utils";
-
 export const MAX_HTTP_REDIRECTS = 10;
 export const MAX_HTTP_HEADER_BYTES = 64 * 1024;
 export const MAX_HTTP_PIPELINE_BYTES = 64 * 1024;

@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { RealFSProvider } from "../src/vfs";
+import { RealFSProvider } from "../src/vfs/node";
 import { VM } from "../src/vm";
 
 const GUEST_WORKSPACE = "/workspace";
@@ -26,7 +26,12 @@ const GUEST_WORKSPACE = "/workspace";
 function parseBoolEnv(value: string | undefined): boolean {
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+  return (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  );
 }
 
 function createDebugLogger(enabled: boolean) {
@@ -43,22 +48,40 @@ function printUsage() {
   console.log();
   console.log("Examples:");
   console.log("  pnpm exec tsx examples/uv.ts hello.py");
-  console.log("  pnpm exec tsx examples/uv.ts --with requests scripts/fetch.py");
+  console.log(
+    "  pnpm exec tsx examples/uv.ts --with requests scripts/fetch.py",
+  );
   console.log();
   console.log("Debugging:");
-  console.log("  GONDOLIN_UV_DEBUG=1 pnpm exec tsx examples/uv.ts --with flask python -c \"import jinja2; print('ok')\"");
-  console.log("  # Optional: add GONDOLIN_UV_DEBUG_GONDOLIN=1 for VM internals (very verbose)");
-  console.log("  # Optional: set GONDOLIN_UV_HEARTBEAT_MS=2000 for periodic progress logs");
-  console.log("  # Optional: set GONDOLIN_UV_SERIAL=1 to force uv concurrency to 1");
+  console.log(
+    "  GONDOLIN_UV_DEBUG=1 pnpm exec tsx examples/uv.ts --with flask python -c \"import jinja2; print('ok')\"",
+  );
+  console.log(
+    "  # Optional: add GONDOLIN_UV_DEBUG_GONDOLIN=1 for VM internals (very verbose)",
+  );
+  console.log(
+    "  # Optional: set GONDOLIN_UV_HEARTBEAT_MS=2000 for periodic progress logs",
+  );
+  console.log(
+    "  # Optional: set GONDOLIN_UV_SERIAL=1 to force uv concurrency to 1",
+  );
   console.log("  # Default: guest-local cache at /tmp/.cache/uv");
-  console.log("  # Optional: set GONDOLIN_UV_SHARED_CACHE=1 to use host-shared ~/.cache/gondolin-uv");
+  console.log(
+    "  # Optional: set GONDOLIN_UV_SHARED_CACHE=1 to use host-shared ~/.cache/gondolin-uv",
+  );
 }
 
-function toGuestWorkspacePath(workspaceHostPath: string, hostPath: string): string | null {
+function toGuestWorkspacePath(
+  workspaceHostPath: string,
+  hostPath: string,
+): string | null {
   const rel = path.relative(workspaceHostPath, hostPath);
   if (rel === "") return GUEST_WORKSPACE;
   if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
-  return path.posix.join(GUEST_WORKSPACE, rel.split(path.sep).join(path.posix.sep));
+  return path.posix.join(
+    GUEST_WORKSPACE,
+    rel.split(path.sep).join(path.posix.sep),
+  );
 }
 
 function looksLikePathArg(arg: string): boolean {
@@ -68,11 +91,16 @@ function looksLikePathArg(arg: string): boolean {
   return arg.endsWith(".py");
 }
 
-function rewritePathArgsForGuest(args: string[], workspaceHostPath: string): string[] {
+function rewritePathArgsForGuest(
+  args: string[],
+  workspaceHostPath: string,
+): string[] {
   return args.map((arg) => {
     if (!looksLikePathArg(arg)) return arg;
 
-    const hostPath = path.isAbsolute(arg) ? arg : path.resolve(workspaceHostPath, arg);
+    const hostPath = path.isAbsolute(arg)
+      ? arg
+      : path.resolve(workspaceHostPath, arg);
     if (!fs.existsSync(hostPath)) return arg;
 
     const guestPath = toGuestWorkspacePath(workspaceHostPath, hostPath);
@@ -82,12 +110,20 @@ function rewritePathArgsForGuest(args: string[], workspaceHostPath: string): str
 
 async function main(): Promise<number> {
   const forceDebug = parseBoolEnv(process.env.GONDOLIN_UV_DEBUG);
-  const forceGondolinDebug = parseBoolEnv(process.env.GONDOLIN_UV_DEBUG_GONDOLIN);
-  const debugEnabled = forceDebug || forceGondolinDebug || Boolean(process.env.GONDOLIN_DEBUG);
+  const forceGondolinDebug = parseBoolEnv(
+    process.env.GONDOLIN_UV_DEBUG_GONDOLIN,
+  );
+  const debugEnabled =
+    forceDebug || forceGondolinDebug || Boolean(process.env.GONDOLIN_DEBUG);
   const debug = createDebugLogger(debugEnabled);
 
-  const heartbeatMsRaw = Number(process.env.GONDOLIN_UV_HEARTBEAT_MS ?? "10000");
-  const heartbeatMs = Number.isFinite(heartbeatMsRaw) && heartbeatMsRaw > 0 ? heartbeatMsRaw : 10000;
+  const heartbeatMsRaw = Number(
+    process.env.GONDOLIN_UV_HEARTBEAT_MS ?? "10000",
+  );
+  const heartbeatMs =
+    Number.isFinite(heartbeatMsRaw) && heartbeatMsRaw > 0
+      ? heartbeatMsRaw
+      : 10000;
   const serialMode = parseBoolEnv(process.env.GONDOLIN_UV_SERIAL);
   const useSharedCache =
     process.env.GONDOLIN_UV_SHARED_CACHE === undefined
@@ -130,9 +166,12 @@ async function main(): Promise<number> {
     debug(`uv shared cache: ${useSharedCache ? "enabled" : "disabled"}`);
   }
 
-  const shouldForceGondolinDebug = forceGondolinDebug && !process.env.GONDOLIN_DEBUG;
+  const shouldForceGondolinDebug =
+    forceGondolinDebug && !process.env.GONDOLIN_DEBUG;
   if (debugEnabled) {
-    const effectiveDebug = process.env.GONDOLIN_DEBUG ?? (shouldForceGondolinDebug ? "all" : "(disabled)");
+    const effectiveDebug =
+      process.env.GONDOLIN_DEBUG ??
+      (shouldForceGondolinDebug ? "all" : "(disabled)");
     debug(`gondolin debug: ${effectiveDebug}`);
   }
 
@@ -190,7 +229,9 @@ async function main(): Promise<number> {
     });
 
     const result = await proc;
-    debug(`uv finished with exitCode=${result.exitCode}${result.signal === undefined ? "" : ` signal=${result.signal}`}`);
+    debug(
+      `uv finished with exitCode=${result.exitCode}${result.signal === undefined ? "" : ` signal=${result.signal}`}`,
+    );
 
     if (result.signal !== undefined) {
       process.stderr.write(`uv exited via signal ${result.signal}\n`);

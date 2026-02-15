@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GondolinListeners, createGondolinEtcHooks } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs/node";
 
 test("createGondolinEtcHooks: enforces /etc/gondolin/listeners size cap on write", () => {
   const provider = new MemoryProvider();
@@ -19,7 +19,7 @@ test("createGondolinEtcHooks: enforces /etc/gondolin/listeners size cap on write
         offset: 0,
         length: MAX + 1,
       } as any),
-    /too large/
+    /too large/,
   );
 
   assert.throws(
@@ -30,7 +30,7 @@ test("createGondolinEtcHooks: enforces /etc/gondolin/listeners size cap on write
         offset: MAX - 1,
         length: 2,
       } as any),
-    /too large/
+    /too large/,
   );
 });
 
@@ -66,6 +66,6 @@ test("createGondolinEtcHooks: append writes enforce cap and do not mis-error", (
         path: "/etc/gondolin/listeners",
         length: 2,
       } as any),
-    /too large/
+    /too large/,
   );
 });

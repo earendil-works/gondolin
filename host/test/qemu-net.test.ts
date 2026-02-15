@@ -10,7 +10,15 @@ import dns from "node:dns";
 
 import forge from "node-forge";
 
-import { HttpRequestBlockedError, QemuNetworkBackend } from "../src/qemu-net";
+import { QemuNetworkBackend } from "../src/qemu-net";
+import {
+  HttpRequestBlockedError,
+  closeSharedDispatchers,
+  createLookupGuard,
+  getCheckedDispatcher,
+  stripHopByHopHeaders,
+  stripHopByHopHeadersForWebSocket,
+} from "../src/http-utils";
 import * as qemuHttp from "../src/qemu-http";
 import { EventEmitter } from "node:events";
 
@@ -439,7 +447,7 @@ test("qemu-net: parseHttpRequest rejects oversized headers without terminator (f
 
 test("qemu-net: stripHopByHopHeaders removes headers nominated by Connection", () => {
   const backend = makeBackend();
-  const stripped = qemuHttp.stripHopByHopHeaders({
+  const stripped = stripHopByHopHeaders({
     host: "example.com",
     connection: "x-foo, keep-alive",
     "keep-alive": "timeout=5",
@@ -456,7 +464,7 @@ test("qemu-net: stripHopByHopHeaders removes headers nominated by Connection", (
 test("qemu-net: stripHopByHopHeadersForWebSocket strips connection-nominated headers", () => {
   const backend = makeBackend();
 
-  const stripped = qemuHttp.stripHopByHopHeadersForWebSocket({
+  const stripped = stripHopByHopHeadersForWebSocket({
     host: "example.com",
     connection: "Upgrade, x-foo, sec-websocket-key",
     upgrade: "websocket",
@@ -1561,7 +1569,7 @@ test("qemu-net: createLookupGuard filters DNS results via isIpAllowed", async ()
   };
 
   const isIpAllowed = async (info: any) => info.ip !== "127.0.0.1";
-  const guarded = qemuHttp.createLookupGuard(
+  const guarded = createLookupGuard(
     { hostname: "example.com", port: 443, protocol: "https" },
     isIpAllowed,
     lookupMock as any,
@@ -2564,12 +2572,12 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
     },
   });
 
-  const one = qemuHttp.getCheckedDispatcher(backend, {
+  const one = getCheckedDispatcher(backend, {
     hostname: "example.com",
     port: 443,
     protocol: "https",
   });
-  const two = qemuHttp.getCheckedDispatcher(backend, {
+  const two = getCheckedDispatcher(backend, {
     hostname: "example.com",
     port: 443,
     protocol: "https",
@@ -2578,7 +2586,7 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
   assert.ok(one);
   assert.equal(one, two);
 
-  const three = qemuHttp.getCheckedDispatcher(backend, {
+  const three = getCheckedDispatcher(backend, {
     hostname: "example.org",
     port: 443,
     protocol: "https",
@@ -2588,7 +2596,7 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
   assert.notEqual(one, three);
   assert.equal(backend.http.sharedDispatchers.size, 2);
 
-  qemuHttp.closeSharedDispatchers(backend);
+  closeSharedDispatchers(backend);
   assert.equal(backend.http.sharedDispatchers.size, 0);
 });
 
@@ -2601,7 +2609,7 @@ test("qemu-net: createLookupGuard invokes ip policy callback", async () => {
     cb: (err: any, address: any, family?: number) => void,
   ) => cb(null, "93.184.216.34", 4);
 
-  const guarded = qemuHttp.createLookupGuard(
+  const guarded = createLookupGuard(
     {
       hostname: "example.com",
       port: 443,

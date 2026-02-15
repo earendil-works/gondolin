@@ -1,7 +1,8 @@
 import crypto from "crypto";
 import net from "net";
 
-import { HttpHookRequest, HttpHooks, HttpRequestBlockedError } from "./qemu-net";
+import type { HttpHookRequest, HttpHooks } from "./qemu-net";
+import { HttpRequestBlockedError } from "./http-utils";
 
 export type SecretDefinition = {
   /** host patterns this secret may be sent to */
@@ -49,7 +50,9 @@ type SecretEntry = {
   hosts: string[];
 };
 
-export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHttpHooksResult {
+export function createHttpHooks(
+  options: CreateHttpHooksOptions = {},
+): CreateHttpHooksResult {
   const env: Record<string, string> = {};
   const secretEntries: SecretEntry[] = [];
   const blockInternalRanges = options.blockInternalRanges ?? true;
@@ -80,15 +83,19 @@ export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHtt
       request,
       hostname,
       secretEntries,
-      options.replaceSecretsInQuery ?? false
+      options.replaceSecretsInQuery ?? false,
     );
 
-    const headers = replaceSecretPlaceholdersInHeaders(request, hostname, secretEntries);
+    const headers = replaceSecretPlaceholdersInHeaders(
+      request,
+      hostname,
+      secretEntries,
+    );
     const url = replaceSecretPlaceholdersInUrlParameters(
       request.url,
       hostname,
       secretEntries,
-      options.replaceSecretsInQuery ?? false
+      options.replaceSecretsInQuery ?? false,
     );
 
     return { ...request, url, headers };
@@ -107,7 +114,10 @@ export function createHttpHooks(options: CreateHttpHooksOptions = {}): CreateHtt
       }
 
       // We only use the hostname for allowlist checks.
-      if (allowedHosts.length > 0 && !matchesAnyHost(info.hostname, allowedHosts)) {
+      if (
+        allowedHosts.length > 0 &&
+        !matchesAnyHost(info.hostname, allowedHosts)
+      ) {
         return false;
       }
       if (options.isIpAllowed) {
@@ -187,7 +197,7 @@ function assertSecretValuesAllowedForHost(
   request: HttpHookRequest,
   hostname: string,
   entries: SecretEntry[],
-  checkQuery: boolean
+  checkQuery: boolean,
 ) {
   if (entries.length === 0) return;
 
@@ -198,19 +208,22 @@ function assertSecretValuesAllowedForHost(
 
     if (requestContainsSecretValueInHeaders(request.headers, entry)) {
       throw new HttpRequestBlockedError(
-        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
+        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
       );
     }
 
     if (checkQuery && requestContainsSecretValueInQuery(request.url, entry)) {
       throw new HttpRequestBlockedError(
-        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
+        `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
       );
     }
   }
 }
 
-function requestContainsSecretValueInHeaders(headers: Record<string, string>, entry: SecretEntry): boolean {
+function requestContainsSecretValueInHeaders(
+  headers: Record<string, string>,
+  entry: SecretEntry,
+): boolean {
   if (!entry.value) return false;
 
   for (const [headerName, headerValue] of Object.entries(headers)) {
@@ -245,7 +258,10 @@ function decodeBasicAuth(value: string): string | null {
   }
 }
 
-function requestContainsSecretValueInQuery(url: string, entry: SecretEntry): boolean {
+function requestContainsSecretValueInQuery(
+  url: string,
+  entry: SecretEntry,
+): boolean {
   if (!entry.value) return false;
 
   let parsed: URL;
@@ -269,7 +285,7 @@ function requestContainsSecretValueInQuery(url: string, entry: SecretEntry): boo
 function replaceSecretPlaceholdersInHeaders(
   request: HttpHookRequest,
   hostname: string,
-  entries: SecretEntry[]
+  entries: SecretEntry[],
 ): Record<string, string> {
   if (entries.length === 0) return request.headers;
 
@@ -283,7 +299,12 @@ function replaceSecretPlaceholdersInHeaders(
 
     // Basic auth uses base64 encoding of `username:password`, so placeholders
     // won't appear in the header value directly.
-    updated = replaceBasicAuthSecretPlaceholders(headerName, updated, hostname, entries);
+    updated = replaceBasicAuthSecretPlaceholders(
+      headerName,
+      updated,
+      hostname,
+      entries,
+    );
 
     headers[headerName] = updated;
   }
@@ -295,7 +316,7 @@ function replaceSecretPlaceholdersInUrlParameters(
   url: string,
   hostname: string,
   entries: SecretEntry[],
-  enabled: boolean
+  enabled: boolean,
 ): string {
   if (!enabled || entries.length === 0) return url;
 
@@ -312,8 +333,16 @@ function replaceSecretPlaceholdersInUrlParameters(
   let changed = false;
 
   for (const [name, value] of parsed.searchParams.entries()) {
-    const updatedName = replaceSecretPlaceholdersInString(name, hostname, entries);
-    const updatedValue = replaceSecretPlaceholdersInString(value, hostname, entries);
+    const updatedName = replaceSecretPlaceholdersInString(
+      name,
+      hostname,
+      entries,
+    );
+    const updatedValue = replaceSecretPlaceholdersInString(
+      value,
+      hostname,
+      entries,
+    );
     if (updatedName !== name || updatedValue !== value) changed = true;
     updatedParams.append(updatedName, updatedValue);
   }
@@ -329,7 +358,7 @@ function replaceBasicAuthSecretPlaceholders(
   headerName: string,
   headerValue: string,
   hostname: string,
-  entries: SecretEntry[]
+  entries: SecretEntry[],
 ): string {
   // Only touch request headers that are expected to carry credentials.
   if (!/^(authorization|proxy-authorization)$/i.test(headerName)) {
@@ -351,7 +380,11 @@ function replaceBasicAuthSecretPlaceholders(
     return headerValue;
   }
 
-  const updatedDecoded = replaceSecretPlaceholdersInString(decoded, hostname, entries);
+  const updatedDecoded = replaceSecretPlaceholdersInString(
+    decoded,
+    hostname,
+    entries,
+  );
   if (updatedDecoded === decoded) return headerValue;
 
   const updatedToken = Buffer.from(updatedDecoded, "utf8").toString("base64");
@@ -361,7 +394,7 @@ function replaceBasicAuthSecretPlaceholders(
 function replaceSecretPlaceholdersInString(
   value: string,
   hostname: string,
-  entries: SecretEntry[]
+  entries: SecretEntry[],
 ): string {
   let updated = value;
 
@@ -374,10 +407,13 @@ function replaceSecretPlaceholdersInString(
   return updated;
 }
 
-function assertSecretAllowedForHost(entry: SecretEntry, hostname: string): void {
+function assertSecretAllowedForHost(
+  entry: SecretEntry,
+  hostname: string,
+): void {
   if (matchesAnyHost(hostname, entry.hosts)) return;
   throw new HttpRequestBlockedError(
-    `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`
+    `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
   );
 }
 
@@ -432,7 +468,8 @@ function isPrivateIPv6(ip: string): boolean {
   if (!hextets) return false;
 
   const isAllZero = hextets.every((value) => value === 0);
-  const isLoopback = hextets.slice(0, 7).every((value) => value === 0) && hextets[7] === 1;
+  const isLoopback =
+    hextets.slice(0, 7).every((value) => value === 0) && hextets[7] === 1;
   if (isAllZero || isLoopback) return true;
 
   if ((hextets[0] & 0xfe00) === 0xfc00) return true;
@@ -525,7 +562,11 @@ function uniqueHosts(hosts: string[]): string[] {
   return result;
 }
 
-function replaceAll(value: string, search: string, replacement: string): string {
+function replaceAll(
+  value: string,
+  search: string,
+  replacement: string,
+): string {
   if (!search) return value;
   return value.split(search).join(replacement);
 }

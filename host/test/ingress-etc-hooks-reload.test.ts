@@ -7,7 +7,8 @@ import {
   createGondolinEtcHooks,
   createGondolinEtcMount,
 } from "../src/ingress";
-import { MemoryProvider, SandboxVfsProvider, type VirtualProvider } from "../src/vfs";
+import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
+import { SandboxVfsProvider } from "../src/vfs/provider";
 import { MountRouterProvider, normalizeMountMap } from "../src/vfs/mounts";
 
 function writeListenersLikeGuest(root: VirtualProvider, text: string) {
@@ -29,7 +30,10 @@ async function waitForChanged(listeners: GondolinListeners, timeoutMs = 1000) {
     await Promise.race([
       once(listeners, "changed"),
       new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("timed out waiting for listeners changed")), timeoutMs);
+        timeout = setTimeout(
+          () => reject(new Error("timed out waiting for listeners changed")),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
@@ -54,10 +58,14 @@ test("/etc/gondolin/listeners: guest writes can update routes repeatedly", async
   // first update
   writeListenersLikeGuest(root, "/ :8000\n");
   await waitForChanged(listeners);
-  assert.deepEqual(listeners.getRoutes(), [{ prefix: "/", port: 8000, stripPrefix: true }]);
+  assert.deepEqual(listeners.getRoutes(), [
+    { prefix: "/", port: 8000, stripPrefix: true },
+  ]);
 
   // second update
   writeListenersLikeGuest(root, "/ :8001\n");
   await waitForChanged(listeners);
-  assert.deepEqual(listeners.getRoutes(), [{ prefix: "/", port: 8001, stripPrefix: true }]);
+  assert.deepEqual(listeners.getRoutes(), [
+    { prefix: "/", port: 8001, stripPrefix: true },
+  ]);
 });
