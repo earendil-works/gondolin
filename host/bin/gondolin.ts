@@ -47,6 +47,14 @@ type ExecArgs = {
   common: CommonOptions;
 };
 
+function getDefaultInteractiveShellCommand(): string[] {
+  return [
+    "/bin/sh",
+    "-lc",
+    "if command -v bash >/dev/null 2>&1; then exec bash -i; else exec /bin/sh -i; fi",
+  ];
+}
+
 function renderCliError(err: unknown) {
   const code = (err as any)?.code;
   const binary = (err as any)?.path;
@@ -78,7 +86,9 @@ function usage() {
   console.log(
     "  exec         Run a command via the virtio socket or in-process VM",
   );
-  console.log("  bash         Start an interactive bash session in the VM");
+  console.log(
+    "  bash         Start an interactive shell session in the VM (bash -> sh fallback)",
+  );
   console.log("  list         List running VM sessions");
   console.log("  attach       Attach to a running VM session");
   console.log(
@@ -91,7 +101,9 @@ function usage() {
 function bashUsage() {
   console.log("Usage: gondolin bash [options] [-- COMMAND [ARGS...]]");
   console.log();
-  console.log("Start an interactive bash session in the sandbox.");
+  console.log(
+    "Start an interactive shell session in the sandbox (bash -> sh fallback).",
+  );
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("Command Options:");
@@ -210,7 +222,7 @@ function attachUsage() {
   console.log("  --env KEY=VALUE Set environment variable (repeatable)");
   console.log("  --help, -h      Show this help");
   console.log();
-  console.log("Default command: /bin/bash -i");
+  console.log("Default command: bash -i (fallback: /bin/sh -i)");
 }
 
 function execUsage() {
@@ -1096,7 +1108,7 @@ type BashArgs = CommonOptions & {
   listenHost?: string;
   /** host port to bind ingress gateway (0 = ephemeral) */
   listenPort?: number;
-  /** custom command with arguments to run instead of bash */
+  /** custom command with arguments to run instead of the default shell */
   command?: string[];
   /** working directory for the command */
   cwd?: string;
@@ -1369,7 +1381,7 @@ async function runBash(argv: string[]) {
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command: args.command,
+      command: args.command ?? getDefaultInteractiveShellCommand(),
       env: args.env && args.env.length > 0 ? args.env : undefined,
     });
 
@@ -1641,7 +1653,7 @@ async function runAttach(argv: string[]) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
-  const command = args.command ?? ["/bin/bash", "-i"];
+  const command = args.command ?? getDefaultInteractiveShellCommand();
   if (command.length === 0) {
     throw new Error("attach command must not be empty");
   }

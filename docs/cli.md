@@ -273,7 +273,7 @@ Attach to an already running VM session and spawn an interactive command:
 gondolin attach <SESSION_ID> [options] [-- COMMAND [ARGS...]]
 ```
 
-- Default command is `/bin/bash -i`
+- Default command is `bash -i` (falls back to `/bin/sh -i` if bash is unavailable)
 - `SESSION_ID` may be a full UUID or an unambiguous UUID prefix
 - `Ctrl-]` detaches locally (same behavior as `gondolin bash`)
 - `--cwd PATH` sets working directory
