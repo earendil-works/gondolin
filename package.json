@@ -6,6 +6,9 @@
     "gondolin": "pnpm --filter @earendil-works/gondolin gondolin",
     "bash": "pnpm --filter @earendil-works/gondolin bash"
   },
+  "dependencies": {
+    "@earendil-works/gondolin": "workspace:*"
+  },
   "devDependencies": {
     "prettier": "^3.8.1",
     "typescript": "^5.7.3"
