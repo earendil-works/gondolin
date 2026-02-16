@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Add VM registry and `gondolin attach`/`gondolin list` CLI commands to manage and connect to running VMs
+
 ## 0.3.0
 
 - Added `httpHooks.onRequestHead` and streamed `Content-Length` request bodies to avoid buffering
