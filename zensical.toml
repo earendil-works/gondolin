@@ -43,9 +43,9 @@ nav = [
 
     {"SDK" = [
         {"Overview" = "sdk.md"},
-        {"VM Lifecycle & Command Execution" = "sdk-vm.md"},
-        {"Networking, Ingress, and SSH" = "sdk-network.md"},
-        {"Filesystem, Guest Assets, and Snapshots" = "sdk-storage.md"},
+        {"VM Control" = "sdk-vm.md"},
+        {"Network Access" = "sdk-network.md"},
+        {"Storage Snapshots" = "sdk-storage.md"},
     ]},
 
     {"Images & Filesystem" = [

@@ -1,4 +1,4 @@
-# SDK: VM Lifecycle & Command Execution
+# SDK: VM Control
 
 See also: [SDK Overview](./sdk.md), [Networking, Ingress, and SSH](./sdk-network.md)
 

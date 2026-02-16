@@ -1,4 +1,4 @@
-# SDK: Networking, Ingress, and SSH
+# SDK: Network Access
 
 See also: [SDK Overview](./sdk.md), [Network Stack](./network.md), [Ingress](./ingress.md), [SSH](./ssh.md)
 

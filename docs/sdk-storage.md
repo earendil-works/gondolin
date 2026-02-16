@@ -1,4 +1,4 @@
-# SDK: Filesystem, Guest Assets, and Snapshots
+# SDK: Storage Snapshots
 
 See also: [SDK Overview](./sdk.md), [VFS Providers](./vfs.md), [Custom Images](./custom-images.md), [Snapshots](./snapshots.md)
 
