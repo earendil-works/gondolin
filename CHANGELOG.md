@@ -6,6 +6,8 @@ All notable changes to Gondolin are documented here.
 
 - Add bash fallback to `/bin/sh` for `gondolin bash` and `gondolin attach` when bash is unavailable
 - Add VM registry and `gondolin attach`/`gondolin list` CLI commands to manage and connect to running VMs
+- Fix `gondolin build` post-build `chroot` commands that require `/proc` by mounting procfs during hook execution
+- Add `rmdir` support in `sandboxfs` fs-rpc so removing directories on VFS mounts no longer returns `ENOSYS`
 
 ## 0.3.0
 
