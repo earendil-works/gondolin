@@ -64,6 +64,16 @@ server it won't be able to get it quite as easily.
 npx @earendil-works/gondolin bash
 ```
 
+You can also discover and re-attach to running VMs from another terminal:
+
+```bash
+# List running sessions
+npx @earendil-works/gondolin list
+
+# Attach a second shell to a running VM by UUID/prefix
+npx @earendil-works/gondolin attach <session-id>
+```
+
 Guest images (~200MB) are downloaded automatically on first run. You'll need
 QEMU and Node installed:
 

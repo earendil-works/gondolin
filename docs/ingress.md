@@ -154,4 +154,4 @@ GONDOLIN_DEBUG=protocol gondolin bash --listen
 
 ## SDK Usage
 
-You can also enable ingress via the TypeScript SDK. See: [TypeScript SDK](./sdk.md).
+You can also enable ingress via the TypeScript SDK. See: [SDK Networking, Ingress, and SSH](./sdk-network.md).

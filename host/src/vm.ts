@@ -2,6 +2,7 @@ import fs from "fs";
 import net from "net";
 import os from "os";
 import path from "path";
+import { randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 import { Duplex, Readable } from "stream";
 
@@ -33,6 +34,12 @@ import {
   type SandboxConnection,
 } from "./sandbox-server";
 import type { SandboxState } from "./sandbox-controller";
+import {
+  SessionIpcServer,
+  gcSessions,
+  registerSession,
+  unregisterSession,
+} from "./session-registry";
 import type { DnsOptions, HttpFetch, HttpHooks } from "./qemu-net";
 import type { SshOptions } from "./qemu-ssh";
 import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs";
@@ -149,6 +156,8 @@ export type VMOptions = {
   memory?: string;
   /** vm cpu count (default: 2) */
   cpus?: number;
+  /** session label for `gondolin list` */
+  sessionLabel?: string;
 
   /**
    * Debug log callback.
@@ -283,7 +292,10 @@ export class VM {
   setDebugLog(callback: DebugLogFn | null) {
     this.debugLog = callback;
   }
+  /** vm session identifier */
+  readonly id: string;
   private readonly autoStart: boolean;
+  private readonly sessionLabel: string | undefined;
   private server: SandboxServer | null;
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
   private rootDisk: RootDiskState | null = null;
@@ -319,6 +331,7 @@ export class VM {
   private sshAccess: SshAccess | null = null;
   private gondolinEtc: ReturnType<typeof createGondolinEtcMount> | null = null;
   private ingressAccess: IngressAccess | null = null;
+  private sessionIpc: SessionIpcServer | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -394,8 +407,10 @@ export class VM {
     options: VMOptions = {},
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
   ) {
+    this.id = randomUUID();
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
+    this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
     const mitmMounts = resolveMitmMounts(
       options.vfs,
       options.sandbox?.mitmCertDir,
@@ -1569,9 +1584,52 @@ fi
     await this.ensureRunning();
     // If VFS is configured, also wait for mounts to be ready.
     await this.ensureVfsReady();
+    await this.ensureSessionIpc();
+  }
+
+  private async ensureSessionIpc() {
+    if (this.sessionIpc) return;
+
+    await gcSessions().catch(() => {
+      // ignore gc failures
+    });
+
+    const { socketPath } = registerSession({
+      id: this.id,
+      label: this.sessionLabel,
+    });
+
+    try {
+      this.sessionIpc = new SessionIpcServer(
+        socketPath,
+        (onMessage, onClose) => {
+          const server = this.server;
+          if (!server) {
+            throw new Error("sandbox server is not available");
+          }
+          return server.connect(onMessage, onClose);
+        },
+      );
+      this.sessionIpc.start();
+    } catch (err) {
+      unregisterSession(this.id);
+      throw err;
+    }
   }
 
   private async closeInternal() {
+    if (this.sessionIpc) {
+      try {
+        await this.sessionIpc.close();
+      } catch {
+        // ignore
+      } finally {
+        this.sessionIpc = null;
+      }
+    }
+
+    unregisterSession(this.id);
+
     if (this.ingressAccess) {
       try {
         await this.ingressAccess.close();

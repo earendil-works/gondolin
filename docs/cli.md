@@ -3,6 +3,8 @@
 Gondolin ships with a small command line interface (CLI) that lets you:
 
 - start an interactive shell inside a micro-VM (`bash`)
+- list running VM sessions (`list`)
+- attach a new interactive command to an existing VM (`attach`)
 - run one or more commands non-interactively (`exec`)
 - build and verify custom guest assets (`build`)
 
@@ -27,8 +29,12 @@ gondolin bash
 - Node.js >= 18
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are downloaded automatically on
-first use and cached in `~/.cache/gondolin/`.  Alternative you can [build and
+first use and cached in `~/.cache/gondolin/`. Alternative you can [build and
 ship your own](./custom-images.md).
+
+Running VMs are also registered in the cache under
+`~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
+CLI processes can discover and attach to them.
 
 ## Common Options (VFS + Network)
 
@@ -237,6 +243,57 @@ gondolin bash -- claude --cwd /workspace
 # Start an ingress gateway to forward traffic into the VM
 gondolin bash --listen 127.0.0.1:3000
 ```
+
+### `gondolin list`
+
+List registered VM sessions:
+
+```bash
+gondolin list [--all]
+```
+
+By default, only live sessions are shown. `--all` includes non-live entries
+that still remain after cleanup.
+`gondolin list` runs a best-effort garbage collection pass first, removing
+entries whose owning PID is gone or whose socket is no longer connectable.
+
+Output columns:
+
+- `ID` - session UUID
+- `PID` - host process id that owns the VM
+- `AGE` - time since registration
+- `ALIVE` - whether the session is reachable
+- `LABEL` - session label (typically the launching command line)
+
+### `gondolin attach`
+
+Attach to an already running VM session and spawn an interactive command:
+
+```bash
+gondolin attach <SESSION_ID> [options] [-- COMMAND [ARGS...]]
+```
+
+- Default command is `bash -i` (falls back to `/bin/sh -i` if bash is unavailable)
+- `SESSION_ID` may be a full UUID or an unambiguous UUID prefix
+- `Ctrl-]` detaches locally (same behavior as `gondolin bash`)
+- `--cwd PATH` sets working directory
+- `--env KEY=VALUE` sets environment variables (repeatable)
+
+Examples:
+
+```bash
+# Find sessions
+gondolin list
+
+# Attach another bash to a running VM by UUID prefix
+gondolin attach 9e3a2e2d
+
+# Attach and run a custom command
+gondolin attach 9e3a2e2d -- /bin/sh -lc 'id && pwd'
+```
+
+Each attached client gets an independent command channel; concurrent attaches do
+not share request IDs or cross-talk between exec streams.
 
 ### `gondolin exec`
 

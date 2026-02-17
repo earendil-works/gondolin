@@ -1056,7 +1056,6 @@ export class SandboxServer extends EventEmitter {
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
-  private activeClient: SandboxClient | null = null;
 
   /** @internal resolved qemu binary path */
   getQemuPath(): string {
@@ -2211,13 +2210,13 @@ export class SandboxServer extends EventEmitter {
     const trimmed = message.trim();
     const detail = trimmed.length > 0 ? trimmed : "vfs not ready";
     this.emit("error", new Error(`[vfs] ${detail}`));
-    if (this.activeClient) {
-      sendError(this.activeClient, {
+    for (const client of Array.from(this.clients)) {
+      sendError(client, {
         type: "error",
         code,
         message: detail,
       });
-      this.closeClient(this.activeClient);
+      this.closeClient(client);
     }
   }
 
@@ -2276,12 +2275,7 @@ export class SandboxServer extends EventEmitter {
   }
 
   private attachClient(client: SandboxClient) {
-    if (this.activeClient && this.activeClient !== client) {
-      this.closeClient(this.activeClient);
-    }
-
     this.clients.add(client);
-    this.activeClient = client;
     sendJson(client, { type: "status", state: this.status });
   }
 
@@ -2436,10 +2430,6 @@ export class SandboxServer extends EventEmitter {
   }
 
   private disconnectClient(client: SandboxClient) {
-    if (this.activeClient === client) {
-      this.activeClient = null;
-    }
-
     this.clients.delete(client);
 
     for (const [id, entry] of this.inflight.entries()) {

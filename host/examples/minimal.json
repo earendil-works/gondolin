@@ -1,0 +1,15 @@
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": ["linux-virt"],
+    "initramfsPackages": []
+  },
+  "rootfs": {
+    "label": "gondolin-root",
+    "sizeMb": 40
+  }
+}

@@ -2,6 +2,7 @@
 import fs from "fs";
 import net from "net";
 import path from "path";
+import { PassThrough } from "stream";
 
 import { VM } from "../src/vm";
 import type { VirtualProvider } from "../src/vfs/node";
@@ -24,6 +25,13 @@ import {
 } from "../src/build-config";
 import { buildAssets, verifyAssets } from "../src/builder";
 import { loadAssetManifest } from "../src/assets";
+import {
+  connectToSession,
+  findSession,
+  gcSessions,
+  listSessions,
+} from "../src/session-registry";
+import { decodeOutputFrame, type ServerMessage } from "../src/control-protocol";
 
 type Command = {
   cmd: string;
@@ -38,6 +46,14 @@ type ExecArgs = {
   commands: Command[];
   common: CommonOptions;
 };
+
+function getDefaultInteractiveShellCommand(): string[] {
+  return [
+    "/bin/sh",
+    "-lc",
+    "if command -v bash >/dev/null 2>&1; then exec bash -i; else exec /bin/sh -i; fi",
+  ];
+}
 
 function renderCliError(err: unknown) {
   const code = (err as any)?.code;
@@ -70,7 +86,11 @@ function usage() {
   console.log(
     "  exec         Run a command via the virtio socket or in-process VM",
   );
-  console.log("  bash         Start an interactive bash session in the VM");
+  console.log(
+    "  bash         Start an interactive shell session in the VM (bash -> sh fallback)",
+  );
+  console.log("  list         List running VM sessions");
+  console.log("  attach       Attach to a running VM session");
   console.log(
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
@@ -81,7 +101,9 @@ function usage() {
 function bashUsage() {
   console.log("Usage: gondolin bash [options] [-- COMMAND [ARGS...]]");
   console.log();
-  console.log("Start an interactive bash session in the sandbox.");
+  console.log(
+    "Start an interactive shell session in the sandbox (bash -> sh fallback).",
+  );
   console.log("Press Ctrl-] to detach and force-close the session locally.");
   console.log();
   console.log("Command Options:");
@@ -173,6 +195,34 @@ function bashUsage() {
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --ssh");
+}
+
+function listUsage() {
+  console.log("Usage: gondolin list [options]");
+  console.log();
+  console.log("List active VM sessions registered in the local cache.");
+  console.log();
+  console.log("Options:");
+  console.log("  --all        Show stale/dead sessions too");
+  console.log("  --help, -h   Show this help");
+}
+
+function attachUsage() {
+  console.log(
+    "Usage: gondolin attach <SESSION_ID> [options] [-- COMMAND [ARGS...]]",
+  );
+  console.log();
+  console.log(
+    "Attach to an already-running VM and run an interactive command.",
+  );
+  console.log("Press Ctrl-] to detach locally.");
+  console.log();
+  console.log("Options:");
+  console.log("  --cwd PATH      Working directory for the command");
+  console.log("  --env KEY=VALUE Set environment variable (repeatable)");
+  console.log("  --help, -h      Show this help");
+  console.log();
+  console.log("Default command: bash -i (fallback: /bin/sh -i)");
 }
 
 function execUsage() {
@@ -1058,7 +1108,7 @@ type BashArgs = CommonOptions & {
   listenHost?: string;
   /** host port to bind ingress gateway (0 = ephemeral) */
   listenPort?: number;
-  /** custom command with arguments to run instead of bash */
+  /** custom command with arguments to run instead of the default shell */
   command?: string[];
   /** working directory for the command */
   cwd?: string;
@@ -1331,7 +1381,7 @@ async function runBash(argv: string[]) {
     const proc = vm.shell({
       attach: false,
       cwd: args.cwd,
-      command: args.command,
+      command: args.command ?? getDefaultInteractiveShellCommand(),
       env: args.env && args.env.length > 0 ? args.env : undefined,
     });
 
@@ -1425,6 +1475,337 @@ async function runBash(argv: string[]) {
         // ignore close errors
       }
     }
+  }
+
+  process.exit(exitCode);
+}
+
+type ListArgs = {
+  all: boolean;
+};
+
+function parseListArgs(argv: string[]): ListArgs {
+  const args: ListArgs = { all: false };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--all") {
+      args.all = true;
+      continue;
+    }
+    if (arg === "--help" || arg === "-h") {
+      listUsage();
+      process.exit(0);
+    }
+
+    console.error(`Unknown argument: ${arg}`);
+    listUsage();
+    process.exit(1);
+  }
+
+  return args;
+}
+
+function formatAge(createdAt: string): string {
+  const ts = new Date(createdAt).getTime();
+  if (!Number.isFinite(ts)) return "?";
+
+  const diffMs = Math.max(0, Date.now() - ts);
+  const s = Math.floor(diffMs / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
+}
+
+async function runList(argv: string[]) {
+  const args = parseListArgs(argv);
+
+  // Best-effort cleanup first.
+  await gcSessions().catch(() => {
+    // ignore
+  });
+
+  const sessions = await listSessions();
+  const visible = args.all ? sessions : sessions.filter((s) => s.alive);
+
+  if (visible.length === 0) {
+    console.log("No running sessions.");
+    return;
+  }
+
+  const rows = visible.map((entry) => ({
+    id: entry.id,
+    pid: String(entry.pid),
+    age: formatAge(entry.createdAt),
+    alive: entry.alive ? "yes" : "no",
+    label: entry.label ?? "",
+  }));
+
+  const width = {
+    id: Math.max("ID".length, ...rows.map((row) => row.id.length)),
+    pid: Math.max("PID".length, ...rows.map((row) => row.pid.length)),
+    age: Math.max("AGE".length, ...rows.map((row) => row.age.length)),
+    alive: Math.max("ALIVE".length, ...rows.map((row) => row.alive.length)),
+  };
+
+  const pad = (value: string, len: number) => value.padEnd(len, " ");
+
+  console.log(
+    `${pad("ID", width.id)}  ${pad("PID", width.pid)}  ${pad("AGE", width.age)}  ${pad("ALIVE", width.alive)}  LABEL`,
+  );
+
+  for (const row of rows) {
+    console.log(
+      `${pad(row.id, width.id)}  ${pad(row.pid, width.pid)}  ${pad(row.age, width.age)}  ${pad(row.alive, width.alive)}  ${row.label}`,
+    );
+  }
+}
+
+type AttachArgs = {
+  sessionId: string;
+  command?: string[];
+  cwd?: string;
+  env: string[];
+};
+
+function parseAttachArgs(argv: string[]): AttachArgs {
+  if (argv.length === 0) {
+    attachUsage();
+    process.exit(1);
+  }
+
+  const args: AttachArgs = {
+    sessionId: "",
+    env: [],
+  };
+
+  let i = 0;
+  while (i < argv.length) {
+    const arg = argv[i]!;
+
+    if (arg === "--") {
+      if (i + 1 < argv.length) {
+        args.command = argv.slice(i + 1);
+      }
+      break;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      attachUsage();
+      process.exit(0);
+    }
+
+    if (!args.sessionId && !arg.startsWith("-")) {
+      args.sessionId = arg;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--cwd") {
+      const value = argv[i + 1];
+      if (!value) {
+        console.error("--cwd requires an argument");
+        process.exit(1);
+      }
+      args.cwd = value;
+      i += 2;
+      continue;
+    }
+
+    if (arg === "--env") {
+      const value = argv[i + 1];
+      if (!value) {
+        console.error("--env requires an argument");
+        process.exit(1);
+      }
+      args.env.push(value);
+      i += 2;
+      continue;
+    }
+
+    console.error(`Unknown argument: ${arg}`);
+    attachUsage();
+    process.exit(1);
+  }
+
+  if (!args.sessionId) {
+    console.error("attach requires a session id");
+    attachUsage();
+    process.exit(1);
+  }
+
+  return args;
+}
+
+async function runAttach(argv: string[]) {
+  const args = parseAttachArgs(argv);
+
+  await gcSessions().catch(() => {
+    // ignore
+  });
+
+  const session = await findSession(args.sessionId);
+  if (!session || !session.alive) {
+    throw new Error(`session not found or not running: ${args.sessionId}`);
+  }
+
+  const command = args.command ?? getDefaultInteractiveShellCommand();
+  if (command.length === 0) {
+    throw new Error("attach command must not be empty");
+  }
+
+  let done = false;
+  let exitCode = 1;
+  const requestId = 1;
+
+  const stdoutPipe = new PassThrough();
+  const stderrPipe = new PassThrough();
+
+  let resolveDone!: (result: { exitCode: number; signal?: number }) => void;
+  let rejectDone!: (error: Error) => void;
+  const donePromise = new Promise<{ exitCode: number; signal?: number }>(
+    (resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    },
+  );
+
+  const client = connectToSession(session.socketPath, {
+    onJson(message: ServerMessage) {
+      if (message.type === "status") {
+        return;
+      }
+
+      if (message.type === "exec_response") {
+        if (message.id !== requestId) return;
+        done = true;
+        resolveDone({
+          exitCode: message.exit_code,
+          signal: message.signal,
+        });
+        return;
+      }
+
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== requestId) return;
+        if (
+          message.id === requestId &&
+          (message.code === "stdin_backpressure" ||
+            message.code === "stdin_chunk_too_large")
+        ) {
+          return;
+        }
+        done = true;
+        rejectDone(new Error(`error ${message.code}: ${message.message}`));
+      }
+    },
+    onBinary(frame: Buffer) {
+      const decoded = decodeOutputFrame(frame);
+      if (decoded.id !== requestId) return;
+
+      if (decoded.stream === "stdout") {
+        stdoutPipe.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: requestId,
+          stdout: decoded.data.length,
+        });
+      } else {
+        stderrPipe.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: requestId,
+          stderr: decoded.data.length,
+        });
+      }
+    },
+    onClose(error?: Error) {
+      if (done) return;
+      done = true;
+      rejectDone(error ?? new Error("session connection closed"));
+    },
+  });
+
+  client.send({
+    type: "exec",
+    id: requestId,
+    cmd: command[0]!,
+    argv: command.slice(1),
+    env: args.env.length > 0 ? args.env : undefined,
+    cwd: args.cwd,
+    stdin: true,
+    pty: true,
+    stdout_window: 1024 * 1024,
+    stderr_window: 1024 * 1024,
+  });
+
+  const procEscapePromise = new Promise<void>((resolve) => {
+    const { cleanup } = attachTty(
+      process.stdin as NodeJS.ReadStream,
+      process.stdout as NodeJS.WriteStream,
+      process.stderr as NodeJS.WriteStream,
+      stdoutPipe,
+      stderrPipe,
+      {
+        write: (chunk) => {
+          client.send({
+            type: "stdin",
+            id: requestId,
+            data: chunk.toString("base64"),
+          });
+        },
+        end: () => {
+          client.send({
+            type: "stdin",
+            id: requestId,
+            eof: true,
+          });
+        },
+        resize: (rows, cols) => {
+          client.send({
+            type: "pty_resize",
+            id: requestId,
+            rows,
+            cols,
+          });
+        },
+        escape: {
+          byte: 0x1d,
+          onEscape: () => {
+            done = true;
+            resolve();
+          },
+        },
+      },
+    );
+
+    void donePromise.finally(() => cleanup());
+  });
+
+  try {
+    const raced = await Promise.race([
+      donePromise.then((result) => ({ type: "done" as const, result })),
+      procEscapePromise.then(() => ({ type: "escape" as const })),
+    ]);
+
+    if (raced.type === "escape") {
+      exitCode = 130;
+    } else {
+      if (raced.result.signal !== undefined) {
+        process.stderr.write(
+          `process exited due to signal ${raced.result.signal}\n`,
+        );
+      }
+      exitCode = raced.result.exitCode;
+    }
+  } finally {
+    stdoutPipe.end();
+    stderrPipe.end();
+    client.close();
   }
 
   process.exit(exitCode);
@@ -1668,6 +2049,12 @@ async function main() {
       return;
     case "bash":
       await runBash(args);
+      return;
+    case "list":
+      await runList(args);
+      return;
+    case "attach":
+      await runAttach(args);
       return;
     case "build":
       await runBuild(args);

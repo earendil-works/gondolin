@@ -35,11 +35,17 @@ nav = [
     {"Using Gondolin" = [
         {"Workloads" = "workloads.md"},
         {"CLI" = "cli.md"},
-        {"SDK" = "sdk.md"},
-        {"Listening" = "ingress.md"},
         {"Secrets Handling" = "secrets.md"},
+        {"Ingress" = "ingress.md"},
         {"SSH" = "ssh.md"},
         {"Debug Logging" = "debug.md"},
+    ]},
+
+    {"SDK" = [
+        {"Overview" = "sdk.md"},
+        {"VM Control" = "sdk-vm.md"},
+        {"Network Access" = "sdk-network.md"},
+        {"Storage Snapshots" = "sdk-storage.md"},
     ]},
 
     {"Images & Filesystem" = [

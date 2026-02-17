@@ -31,6 +31,16 @@ npm install @earendil-works/gondolin
 npx @earendil-works/gondolin bash
 ```
 
+You can also discover and re-attach to running VMs from another terminal:
+
+```bash
+# List running sessions
+npx @earendil-works/gondolin list
+
+# Attach a second shell to a running VM by UUID/prefix
+npx @earendil-works/gondolin attach <session-id>
+```
+
 Guest images (~200MB) are automatically downloaded on first run and cached in
 `~/.cache/gondolin/`.
 

@@ -4,7 +4,7 @@ This page documents how Gondolin handles API keys/tokens so the guest can use
 secrets without directly reading them.
 
 See also:
-- [TypeScript SDK](./sdk.md)
+- [SDK Networking, Ingress, and SSH](./sdk-network.md)
 - [Network Stack](./network.md)
 - [Security Design](./security.md)
 

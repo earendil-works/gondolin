@@ -139,6 +139,20 @@ export {
   type IngressHookResponsePatch,
 } from "./ingress";
 
+// Session registry
+export {
+  registerSession,
+  unregisterSession,
+  listSessions,
+  findSession,
+  gcSessions,
+  SessionIpcServer,
+  connectToSession,
+  type SessionInfo,
+  type SessionEntry,
+  type IpcClientCallbacks,
+} from "./session-registry";
+
 // Asset management
 export {
   ensureGuestAssets,
