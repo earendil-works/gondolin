@@ -554,9 +554,15 @@ node /work/run-build.js
   // Ensure output directory exists
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const containerArgs = [
-    "run",
-    "--rm",
+  const containerArgs = ["run", "--rm"];
+
+  if (hasPostBuildCommands(config)) {
+    // postBuild commands run in a chroot and mount procfs inside the image.
+    // This needs mount capabilities inside the build container.
+    containerArgs.push("--privileged");
+  }
+
+  containerArgs.push(
     "-v",
     `${guestDir}:/guest`,
     "-v",
@@ -568,7 +574,7 @@ node /work/run-build.js
     image,
     "/bin/sh",
     "/work/build-in-container.sh",
-  ];
+  );
 
   await runCommand(runtime, containerArgs, {}, log);
 

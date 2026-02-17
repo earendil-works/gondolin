@@ -631,7 +631,7 @@ async function installPackages(
   }
 }
 
-function runPostBuildCommands(
+export function runPostBuildCommands(
   rootfsDir: string,
   commands: string[],
   targetArch: Architecture,
@@ -665,7 +665,11 @@ function runPostBuildCommands(
   }
 
   const cleanupResolvConf = ensureResolvConf(root);
+  let cleanupProc = () => {};
+
   try {
+    cleanupProc = ensureProcMounted(root);
+
     for (let i = 0; i < commands.length; i += 1) {
       const command = commands[i];
       if (!command.trim()) {
@@ -703,6 +707,7 @@ function runPostBuildCommands(
       }
     }
   } finally {
+    cleanupProc();
     cleanupResolvConf();
   }
 }
@@ -735,6 +740,43 @@ function ensureResolvConf(rootfsDir: string): () => void {
 
   return () => {
     fs.rmSync(rootfsResolv, { force: true });
+  };
+}
+
+function ensureProcMounted(rootfsDir: string): () => void {
+  const rootfsProc = path.join(rootfsDir, "proc");
+  fs.mkdirSync(rootfsProc, { recursive: true });
+
+  try {
+    execFileSync("mount", ["-t", "proc", "proc", rootfsProc], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const e = err as {
+      stderr?: unknown;
+      stdout?: unknown;
+      status?: unknown;
+    };
+    const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
+    const stdout = typeof e.stdout === "string" ? e.stdout.trim() : "";
+    const detail = stderr || stdout;
+
+    throw new Error(
+      `postBuild.commands requires mounting procfs in the chroot, but mounting '${rootfsProc}' failed` +
+        ` (exit ${String(e.status ?? "?")})` +
+        (detail ? `: ${detail}` : "") +
+        ". Ensure the build runs as root with mount permissions (native Linux root or privileged container).",
+    );
+  }
+
+  return () => {
+    try {
+      execFileSync("umount", [rootfsProc], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      // Best effort cleanup.
+    }
   };
 }
 
