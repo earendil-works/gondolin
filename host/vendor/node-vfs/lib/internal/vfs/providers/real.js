@@ -193,8 +193,9 @@ class RealFSProvider extends VirtualProvider {
     return true;
   }
 
-  // _resolvePathLexical: lexical containment only (lstat, readlink, unlink, etc.)
-  // _resolvePathFollow:  lexical + realpath verification (open, stat, readdir, etc.)
+  // _resolvePathLexical: lexical containment only
+  // _resolvePathFollow: lexical + realpath verification
+  // _resolvePathNoFollowFinal: validates ancestors via follow checks, but treats final path segment lexically
   _resolvePathLexical(vfsPath) {
     let normalized = vfsPath;
     if (normalized.startsWith('/')) {
@@ -313,6 +314,18 @@ class RealFSProvider extends VirtualProvider {
     return realPath;
   }
 
+  _resolvePathNoFollowFinal(vfsPath) {
+    const realPath = this._resolvePathLexical(vfsPath);
+    let normalized = vfsPath;
+    if (!normalized.startsWith('/')) {
+      normalized = '/' + normalized;
+    }
+    normalized = path.posix.normalize(normalized);
+    const parentVfsPath = path.posix.dirname(normalized);
+    this._resolvePathFollow(parentVfsPath);
+    return realPath;
+  }
+
   openSync(vfsPath, flags, mode) {
     const realPath = this._resolvePathFollow(vfsPath);
     const fd = fs.openSync(realPath, flags, mode);
@@ -380,12 +393,12 @@ class RealFSProvider extends VirtualProvider {
   }
 
   unlinkSync(vfsPath) {
-    const realPath = this._resolvePathLexical(vfsPath);
+    const realPath = this._resolvePathNoFollowFinal(vfsPath);
     fs.unlinkSync(realPath);
   }
 
   async unlink(vfsPath) {
-    const realPath = this._resolvePathLexical(vfsPath);
+    const realPath = this._resolvePathNoFollowFinal(vfsPath);
     return fs.promises.unlink(realPath);
   }
 
@@ -403,13 +416,13 @@ class RealFSProvider extends VirtualProvider {
 
   linkSync(existingVfsPath, newVfsPath) {
     const existingRealPath = this._resolvePathFollow(existingVfsPath);
-    const newRealPath = this._resolvePathLexical(newVfsPath);
+    const newRealPath = this._resolvePathNoFollowFinal(newVfsPath);
     fs.linkSync(existingRealPath, newRealPath);
   }
 
   async link(existingVfsPath, newVfsPath) {
     const existingRealPath = this._resolvePathFollow(existingVfsPath);
-    const newRealPath = this._resolvePathLexical(newVfsPath);
+    const newRealPath = this._resolvePathNoFollowFinal(newVfsPath);
     return fs.promises.link(existingRealPath, newRealPath);
   }
 

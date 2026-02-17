@@ -184,11 +184,27 @@ test("RealFSProvider allows lstat/readlink/unlink on escaping symlink inside roo
   assert.equal(target, outsideFile);
 
   provider.unlinkSync("/escape-link");
-  assert.throws(
-    () => fs.lstatSync(path.join(root, "escape-link")),
-    { code: "ENOENT" },
-  );
+  assert.throws(() => fs.lstatSync(path.join(root, "escape-link")), {
+    code: "ENOENT",
+  });
   assert.equal(fs.readFileSync(outsideFile, "utf8"), "data");
+});
+
+test("RealFSProvider blocks unlink through escaping intermediate symlink", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink semantics require elevated permissions on Windows");
+  }
+
+  const root = makeTempDir(t);
+  const provider = new RealFSProvider(root);
+  const outsideDir = makeTempDir(t, "gondolin-outside-");
+  const outsideFile = path.join(outsideDir, "victim.txt");
+  fs.writeFileSync(outsideFile, "data");
+  fs.symlinkSync(outsideDir, path.join(root, "evil"));
+
+  assert.throws(() => provider.unlinkSync("/evil/victim.txt"), isENOENT);
+  await assert.rejects(() => provider.unlink("/evil/victim.txt"), isENOENT);
+  assert.equal(fs.existsSync(outsideFile), true);
 });
 
 test("RealFSProvider allows in-root relative symlink", (t) => {
@@ -242,16 +258,16 @@ test("RealFSProvider blocks dangling escaping symlink on write", (t) => {
 
   const root = makeTempDir(t);
   const provider = new RealFSProvider(root);
-  const outsideTarget = path.join(os.tmpdir(), "gondolin-dangling-" + Date.now());
+  const outsideTarget = path.join(
+    os.tmpdir(),
+    "gondolin-dangling-" + Date.now(),
+  );
   t.after(() => {
     fs.rmSync(outsideTarget, { force: true });
   });
   fs.symlinkSync(outsideTarget, path.join(root, "dangling-escape"));
 
-  assert.throws(
-    () => provider.openSync("/dangling-escape", "w"),
-    isENOENT,
-  );
+  assert.throws(() => provider.openSync("/dangling-escape", "w"), isENOENT);
   assert.equal(fs.existsSync(outsideTarget), false);
 });
 
@@ -286,10 +302,29 @@ test("RealFSProvider blocks hard-link to escaping symlink target", (t) => {
   fs.writeFileSync(outsideFile, "secret");
   fs.symlinkSync(outsideFile, path.join(root, "escape-link"));
 
+  assert.throws(() => provider.linkSync("/escape-link", "/copy"), isENOENT);
+});
+
+test("RealFSProvider blocks hard-link destination through escaping intermediate symlink", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink semantics require elevated permissions on Windows");
+  }
+
+  const root = makeTempDir(t);
+  const provider = new RealFSProvider(root);
+  const outsideDir = makeTempDir(t, "gondolin-outside-");
+  fs.writeFileSync(path.join(root, "source.txt"), "source");
+  fs.symlinkSync(outsideDir, path.join(root, "evil"));
+
   assert.throws(
-    () => provider.linkSync("/escape-link", "/copy"),
+    () => provider.linkSync("/source.txt", "/evil/linked.txt"),
     isENOENT,
   );
+  await assert.rejects(
+    () => provider.link("/source.txt", "/evil/linked.txt"),
+    isENOENT,
+  );
+  assert.equal(fs.readdirSync(outsideDir).length, 0);
 });
 
 test("RealFSProvider blocks chained dangling symlink escape", (t) => {
@@ -307,10 +342,7 @@ test("RealFSProvider blocks chained dangling symlink escape", (t) => {
   fs.symlinkSync(outsideTarget, path.join(root, "level1"));
   fs.symlinkSync("level1", path.join(root, "level2"));
 
-  assert.throws(
-    () => provider.openSync("/level2", "w"),
-    isENOENT,
-  );
+  assert.throws(() => provider.openSync("/level2", "w"), isENOENT);
   assert.equal(fs.existsSync(outsideTarget), false);
 });
 
