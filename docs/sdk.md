@@ -41,26 +41,4 @@ await vm.close();
 - [VFS Providers](./vfs.md)
 - [Snapshots](./snapshots.md)
 
-## VM Lifecycle & Command Execution
 
-Moved to [SDK: VM Lifecycle & Command Execution](./sdk-vm.md).
-
-## Network Policy
-
-Moved to [SDK: Networking, Ingress, and SSH](./sdk-network.md).
-
-## VFS Providers
-
-Moved to [SDK: Filesystem, Guest Assets, and Snapshots](./sdk-storage.md).
-
-## Image Management
-
-Moved to [SDK: Filesystem, Guest Assets, and Snapshots](./sdk-storage.md).
-
-## Disk checkpoints (qcow2)
-
-Moved to [SDK: Filesystem, Guest Assets, and Snapshots](./sdk-storage.md).
-
-## Debug Logging
-
-See [Debug Logging](./debug.md).
