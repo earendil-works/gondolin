@@ -373,6 +373,62 @@ test("RealFSProvider blocks rename through escaping intermediate symlink", (t) =
   assert.ok(fs.existsSync(path.join(root, "file.txt")));
 });
 
+test("RealFSProvider rmdir does not follow final symlink", (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink semantics require elevated permissions on Windows");
+  }
+
+  const root = makeTempDir(t);
+  const provider = new RealFSProvider(root);
+  fs.mkdirSync(path.join(root, "real-dir"));
+  fs.symlinkSync("real-dir", path.join(root, "dir-link"));
+
+  assert.throws(() => provider.rmdirSync("/dir-link"), {
+    code: "ENOTDIR",
+  });
+  assert.equal(fs.existsSync(path.join(root, "real-dir")), true);
+  assert.equal(
+    fs.lstatSync(path.join(root, "dir-link")).isSymbolicLink(),
+    true,
+  );
+});
+
+test("RealFSProvider rename does not follow final symlink components", (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink semantics require elevated permissions on Windows");
+  }
+
+  const root = makeTempDir(t);
+  const provider = new RealFSProvider(root);
+
+  fs.writeFileSync(path.join(root, "target.txt"), "target");
+  fs.symlinkSync("target.txt", path.join(root, "src-link"));
+  provider.renameSync("/src-link", "/renamed-link");
+
+  assert.equal(
+    fs.lstatSync(path.join(root, "renamed-link")).isSymbolicLink(),
+    true,
+  );
+  assert.equal(fs.readlinkSync(path.join(root, "renamed-link")), "target.txt");
+  assert.equal(
+    fs.readFileSync(path.join(root, "target.txt"), "utf8"),
+    "target",
+  );
+
+  fs.writeFileSync(path.join(root, "source.txt"), "new");
+  fs.writeFileSync(path.join(root, "dest-target.txt"), "old");
+  fs.symlinkSync("dest-target.txt", path.join(root, "dest-link"));
+
+  provider.renameSync("/source.txt", "/dest-link");
+
+  assert.equal(fs.lstatSync(path.join(root, "dest-link")).isFile(), true);
+  assert.equal(fs.readFileSync(path.join(root, "dest-link"), "utf8"), "new");
+  assert.equal(
+    fs.readFileSync(path.join(root, "dest-target.txt"), "utf8"),
+    "old",
+  );
+});
+
 test("RealFSProvider statfs reports host filesystem stats", async (t) => {
   const root = makeTempDir(t);
   const provider = new RealFSProvider(root);

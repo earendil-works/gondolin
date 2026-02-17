@@ -352,12 +352,12 @@ class RealFSProvider extends VirtualProvider {
   }
 
   rmdirSync(vfsPath) {
-    const realPath = this._resolvePathFollow(vfsPath);
+    const realPath = this._resolvePathNoFollowFinal(vfsPath);
     fs.rmdirSync(realPath);
   }
 
   async rmdir(vfsPath) {
-    const realPath = this._resolvePathFollow(vfsPath);
+    const realPath = this._resolvePathNoFollowFinal(vfsPath);
     return fs.promises.rmdir(realPath);
   }
 
@@ -372,14 +372,14 @@ class RealFSProvider extends VirtualProvider {
   }
 
   renameSync(oldVfsPath, newVfsPath) {
-    const oldRealPath = this._resolvePathFollow(oldVfsPath);
-    const newRealPath = this._resolvePathFollow(newVfsPath);
+    const oldRealPath = this._resolvePathNoFollowFinal(oldVfsPath);
+    const newRealPath = this._resolvePathNoFollowFinal(newVfsPath);
     fs.renameSync(oldRealPath, newRealPath);
   }
 
   async rename(oldVfsPath, newVfsPath) {
-    const oldRealPath = this._resolvePathFollow(oldVfsPath);
-    const newRealPath = this._resolvePathFollow(newVfsPath);
+    const oldRealPath = this._resolvePathNoFollowFinal(oldVfsPath);
+    const newRealPath = this._resolvePathNoFollowFinal(newVfsPath);
     return fs.promises.rename(oldRealPath, newRealPath);
   }
 
