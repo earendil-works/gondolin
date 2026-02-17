@@ -253,60 +253,29 @@ class RealFSProvider extends VirtualProvider {
     const realPath = this._resolvePathLexical(vfsPath);
     const { createENOENT } = require('internal/vfs/errors');
 
-    let resolved = null;
-    let realpathError = null;
     try {
-      resolved = fs.realpathSync(realPath);
-    } catch (error) {
-      realpathError = error;
-    }
-
-    if (resolved !== null) {
+      const resolved = fs.realpathSync(realPath);
       if (!this._isInsideRoot(resolved)) {
         throw createENOENT('open', vfsPath);
       }
       return realPath;
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') {
+        throw error;
+      }
     }
 
-    if (!realpathError || realpathError.code !== 'ENOENT') {
-      throw realpathError;
-    }
-
-    // Check if the path is a dangling symlink.
-    let isSymlink = false;
+    // Strict mode: if the final entry is a dangling symlink, reject it.
+    let lst = null;
     try {
-      const lst = fs.lstatSync(realPath);
-      isSymlink = lst.isSymbolicLink();
-    } catch (lstatErr) {
-      if (lstatErr && lstatErr.code !== 'ENOENT') {
-        throw lstatErr;
+      lst = fs.lstatSync(realPath);
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') {
+        throw error;
       }
     }
-
-    if (isSymlink) {
-      let current = realPath;
-      const seen = new Set();
-      while (true) {
-        if (seen.has(current)) {
-          throw createENOENT('open', vfsPath);
-        }
-        seen.add(current);
-        let lst;
-        try {
-          lst = fs.lstatSync(current);
-        } catch (e) {
-          if (e && e.code === 'ENOENT') break;
-          throw e;
-        }
-        if (!lst.isSymbolicLink()) break;
-        const target = fs.readlinkSync(current);
-        current = path.resolve(path.dirname(current), target);
-        if (!this._isInsideRoot(current)) {
-          throw createENOENT('open', vfsPath);
-        }
-      }
-      this._assertAncestorWithinRoot(current, vfsPath);
-      return realPath;
+    if (lst && lst.isSymbolicLink()) {
+      throw createENOENT('open', vfsPath);
     }
 
     this._assertAncestorWithinRoot(realPath, vfsPath);

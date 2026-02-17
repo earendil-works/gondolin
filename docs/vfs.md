@@ -89,7 +89,9 @@ Common pattern:
 `RealFSProvider(hostPath)` exposes a directory from the host filesystem.
 
 - Reads and writes affect the host directory
-- Symlinks inside the exposed directory that resolve outside it are blocked for operations that follow symlinks (open, stat, readdir, etc.).  Operations that act on the symlink entry itself (lstat, readlink, unlink) are allowed.
+- Symlinks that escape the exposed directory are blocked for operations that follow symlinks (open, stat, readdir, etc.)
+- Dangling symlinks are also blocked for follow-style operations (strict fail-closed behavior)
+- Operations that act on the symlink entry itself (lstat, readlink, unlink) are allowed
 - Use this for persistence (outputs, caches) or for sharing a source tree
 
 Example:

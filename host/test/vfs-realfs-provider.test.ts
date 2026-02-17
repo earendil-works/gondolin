@@ -271,7 +271,7 @@ test("RealFSProvider blocks dangling escaping symlink on write", (t) => {
   assert.equal(fs.existsSync(outsideTarget), false);
 });
 
-test("RealFSProvider allows write via dangling symlink inside root", (t) => {
+test("RealFSProvider blocks write via dangling symlink inside root", (t) => {
   if (process.platform === "win32") {
     t.skip("symlink semantics require elevated permissions on Windows");
   }
@@ -280,14 +280,8 @@ test("RealFSProvider allows write via dangling symlink inside root", (t) => {
   const provider = new RealFSProvider(root);
   fs.symlinkSync("target.txt", path.join(root, "safe-dangling"));
 
-  const fh = provider.openSync("/safe-dangling", "w");
-  fh.writeFileSync("created-via-symlink");
-  fh.closeSync();
-
-  assert.equal(
-    fs.readFileSync(path.join(root, "target.txt"), "utf8"),
-    "created-via-symlink",
-  );
+  assert.throws(() => provider.openSync("/safe-dangling", "w"), isENOENT);
+  assert.equal(fs.existsSync(path.join(root, "target.txt")), false);
 });
 
 test("RealFSProvider blocks hard-link to escaping symlink target", (t) => {
