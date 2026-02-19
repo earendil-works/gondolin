@@ -155,14 +155,14 @@ async function installNestedCommand(outerVm: VM) {
     "mkdir -p /usr/bin /usr/local/bin /usr/local/lib/gondolin",
   ]);
 
-  await outerVm.writeFile(
+  await outerVm.fs.writeFile(
     "/usr/local/lib/gondolin/run-inner-bash.js",
     buildInnerRunnerScript(),
   );
 
   // Alpine's /bin/bash default PATH typically omits /usr/local/bin, so install
   // the command into /usr/bin and keep /usr/local/bin as a convenience symlink.
-  await outerVm.writeFile(
+  await outerVm.fs.writeFile(
     "/usr/bin/gondolin-bash",
     '#!/bin/sh\nexec node /usr/local/lib/gondolin/run-inner-bash.js "$@"\n',
   );

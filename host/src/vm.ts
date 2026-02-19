@@ -208,7 +208,34 @@ export type SshAccess = {
   close(): Promise<void>;
 };
 
-export type VmReadFileBufferOptions = {
+export type VmFsAccessOptions = {
+  /** access mode bitmask from `fs.constants` */
+  mode?: number;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the access request */
+  signal?: AbortSignal;
+};
+
+export type VmFsMkdirOptions = {
+  /** recursive directory creation */
+  recursive?: boolean;
+  /** directory mode bits */
+  mode?: number;
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the mkdir request */
+  signal?: AbortSignal;
+};
+
+export type VmFsListDirOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the list request */
+  signal?: AbortSignal;
+};
+
+export type VmFsReadFileBufferOptions = {
   /** decoded output disabled (returns Buffer) */
   encoding?: null;
   /** working directory for relative paths */
@@ -219,7 +246,7 @@ export type VmReadFileBufferOptions = {
   signal?: AbortSignal;
 };
 
-export type VmReadFileTextOptions = {
+export type VmFsReadFileTextOptions = {
   /** text encoding for returned data */
   encoding: BufferEncoding;
   /** working directory for relative paths */
@@ -230,7 +257,7 @@ export type VmReadFileTextOptions = {
   signal?: AbortSignal;
 };
 
-export type VmReadFileStreamOptions = {
+export type VmFsReadFileStreamOptions = {
   /** working directory for relative paths */
   cwd?: string;
   /** preferred chunk size in `bytes` */
@@ -241,16 +268,18 @@ export type VmReadFileStreamOptions = {
   signal?: AbortSignal;
 };
 
-export type VmReadFileOptions = VmReadFileBufferOptions | VmReadFileTextOptions;
+export type VmFsReadFileOptions =
+  | VmFsReadFileBufferOptions
+  | VmFsReadFileTextOptions;
 
-export type VmWriteFileInput =
+export type VmFsWriteFileInput =
   | string
   | Buffer
   | Uint8Array
   | Readable
   | AsyncIterable<Buffer | Uint8Array>;
 
-export type VmWriteFileOptions = {
+export type VmFsWriteFileOptions = {
   /** string encoding for top-level text input */
   encoding?: BufferEncoding;
   /** working directory for relative paths */
@@ -259,7 +288,7 @@ export type VmWriteFileOptions = {
   signal?: AbortSignal;
 };
 
-export type VmDeleteFileOptions = {
+export type VmFsDeleteOptions = {
   /** ignore missing path errors */
   force?: boolean;
   /** allow recursive directory deletion */
@@ -268,6 +297,35 @@ export type VmDeleteFileOptions = {
   cwd?: string;
   /** abort signal for the delete command */
   signal?: AbortSignal;
+};
+
+export type VmFs = {
+  /** check whether a guest path is accessible */
+  access(filePath: string, options?: VmFsAccessOptions): Promise<void>;
+  /** create a guest directory */
+  mkdir(dirPath: string, options?: VmFsMkdirOptions): Promise<void>;
+  /** list direct child names in a guest directory */
+  listDir(dirPath: string, options?: VmFsListDirOptions): Promise<string[]>;
+  /** create a readable stream for a guest file */
+  readFileStream(
+    filePath: string,
+    options?: VmFsReadFileStreamOptions,
+  ): Promise<Readable>;
+  /** read a guest file as text */
+  readFile(filePath: string, options: VmFsReadFileTextOptions): Promise<string>;
+  /** read a guest file as bytes */
+  readFile(
+    filePath: string,
+    options?: VmFsReadFileBufferOptions,
+  ): Promise<Buffer>;
+  /** write file content inside the guest */
+  writeFile(
+    filePath: string,
+    data: VmFsWriteFileInput,
+    options?: VmFsWriteFileOptions,
+  ): Promise<void>;
+  /** delete a file or directory inside the guest */
+  deleteFile(filePath: string, options?: VmFsDeleteOptions): Promise<void>;
 };
 
 export type VMState = SandboxState | "unknown";
@@ -294,6 +352,8 @@ export class VM {
   }
   /** vm session identifier */
   readonly id: string;
+  /** guest filesystem operations */
+  readonly fs: VmFs;
   private readonly autoStart: boolean;
   private readonly sessionLabel: string | undefined;
   private server: SandboxServer | null;
@@ -408,6 +468,25 @@ export class VM {
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
   ) {
     this.id = randomUUID();
+    this.fs = {
+      access: (filePath, fsOptions) =>
+        this.accessGuestPath(filePath, fsOptions),
+      mkdir: (dirPath, fsOptions) => this.mkdirGuestPath(dirPath, fsOptions),
+      listDir: (dirPath, fsOptions) => this.listGuestDir(dirPath, fsOptions),
+      readFileStream: (filePath, fsOptions) =>
+        this.readGuestFileStream(filePath, fsOptions),
+      readFile: ((filePath: string, fsOptions?: VmFsReadFileOptions) =>
+        (
+          this.readGuestFile as (
+            filePath: string,
+            options: VmFsReadFileOptions,
+          ) => Promise<string | Buffer>
+        )(filePath, fsOptions ?? {})) as VmFs["readFile"],
+      writeFile: (filePath, data, fsOptions) =>
+        this.writeGuestFile(filePath, data, fsOptions),
+      deleteFile: (filePath, fsOptions) =>
+        this.deleteGuestPath(filePath, fsOptions),
+    };
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
@@ -658,12 +737,194 @@ export class VM {
     return proc;
   }
 
-  /**
-   * Create a readable stream for a guest file.
-   */
-  async readFileStream(
+  private async accessGuestPath(
     filePath: string,
-    options: VmReadFileStreamOptions = {},
+    options: VmFsAccessOptions = {},
+  ): Promise<void> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    const mode = normalizeAccessMode(options.mode);
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
+    if (vfsPath) {
+      const vfs = this.vfs;
+      if (!vfs) {
+        throw new Error("vfs provider is not available");
+      }
+
+      try {
+        assertNotAborted(options.signal, "file access aborted");
+        await vfs.access(vfsPath, mode);
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to access guest file '${filePath}': ${detail}`);
+      }
+    }
+
+    const shouldCheckRead = (mode & fs.constants.R_OK) !== 0;
+    const shouldCheckWrite = (mode & fs.constants.W_OK) !== 0;
+    const shouldCheckExec = (mode & fs.constants.X_OK) !== 0;
+
+    const script = [
+      "set -eu",
+      'entry="$1"',
+      '[ -e "$entry" ]',
+      'if [ "$2" = "1" ]; then [ -r "$entry" ]; fi',
+      'if [ "$3" = "1" ]; then [ -w "$entry" ]; fi',
+      'if [ "$4" = "1" ]; then [ -x "$entry" ]; fi',
+    ].join("\n");
+
+    const result = await this.exec(
+      [
+        "/bin/sh",
+        "-c",
+        script,
+        "sh",
+        filePath,
+        shouldCheckRead ? "1" : "0",
+        shouldCheckWrite ? "1" : "0",
+        shouldCheckExec ? "1" : "0",
+      ],
+      {
+        cwd: options.cwd,
+        signal: options.signal,
+      },
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to access guest file '${filePath}': ${formatExecFailure(result)}`,
+      );
+    }
+  }
+
+  private async mkdirGuestPath(
+    dirPath: string,
+    options: VmFsMkdirOptions = {},
+  ): Promise<void> {
+    if (typeof dirPath !== "string" || dirPath.length === 0) {
+      throw new Error("dirPath must be a non-empty string");
+    }
+
+    const normalizedMode = normalizeMkdirMode(options.mode);
+    const vfsPath = this.resolveVfsShortcutPath(dirPath, options.cwd);
+    if (vfsPath) {
+      const vfs = this.vfs;
+      if (!vfs) {
+        throw new Error("vfs provider is not available");
+      }
+
+      try {
+        assertNotAborted(options.signal, "mkdir aborted");
+        const mkdirOptions =
+          options.recursive || normalizedMode !== undefined
+            ? {
+                recursive: options.recursive,
+                mode: normalizedMode,
+              }
+            : undefined;
+        await vfs.mkdir(vfsPath, mkdirOptions);
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `failed to create guest directory '${dirPath}': ${detail}`,
+        );
+      }
+    }
+
+    const modeText =
+      normalizedMode === undefined ? "" : normalizedMode.toString(8);
+    const script = [
+      "set -eu",
+      'entry="$1"',
+      'mode="$2"',
+      'recursive="$3"',
+      'if [ "$recursive" = "1" ]; then',
+      '  if [ -n "$mode" ]; then mkdir -p -m "$mode" "$entry"; else mkdir -p "$entry"; fi',
+      "else",
+      '  if [ -n "$mode" ]; then mkdir -m "$mode" "$entry"; else mkdir "$entry"; fi',
+      "fi",
+    ].join("\n");
+
+    const result = await this.exec(
+      [
+        "/bin/sh",
+        "-c",
+        script,
+        "sh",
+        dirPath,
+        modeText,
+        options.recursive ? "1" : "0",
+      ],
+      {
+        cwd: options.cwd,
+        signal: options.signal,
+      },
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to create guest directory '${dirPath}': ${formatExecFailure(result)}`,
+      );
+    }
+  }
+
+  private async listGuestDir(
+    dirPath: string,
+    options: VmFsListDirOptions = {},
+  ): Promise<string[]> {
+    if (typeof dirPath !== "string" || dirPath.length === 0) {
+      throw new Error("dirPath must be a non-empty string");
+    }
+
+    const vfsPath = this.resolveVfsShortcutPath(dirPath, options.cwd);
+    if (vfsPath) {
+      const vfs = this.vfs;
+      if (!vfs) {
+        throw new Error("vfs provider is not available");
+      }
+
+      try {
+        assertNotAborted(options.signal, "list directory aborted");
+        const entries = await vfs.readdir(vfsPath, { withFileTypes: true });
+        return entries.map((entry) =>
+          typeof entry === "string" ? entry : entry.name,
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `failed to list guest directory '${dirPath}': ${detail}`,
+        );
+      }
+    }
+
+    const script = [
+      "set -eu",
+      'entry="$1"',
+      '[ -d "$entry" ]',
+      'exec /bin/ls -1A -- "$entry"',
+    ].join("\n");
+
+    const result = await this.exec(["/bin/sh", "-c", script, "sh", dirPath], {
+      cwd: options.cwd,
+      signal: options.signal,
+    });
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to list guest directory '${dirPath}': ${formatExecFailure(result)}`,
+      );
+    }
+
+    return splitOutputLines(result.stdout);
+  }
+
+  private async readGuestFileStream(
+    filePath: string,
+    options: VmFsReadFileStreamOptions = {},
   ): Promise<Readable> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
@@ -699,17 +960,17 @@ export class VM {
     }
   }
 
-  /**
-   * Read a file from inside the running guest.
-   */
-  readFile(filePath: string, options: VmReadFileTextOptions): Promise<string>;
-  readFile(
+  private readGuestFile(
     filePath: string,
-    options?: VmReadFileBufferOptions,
+    options: VmFsReadFileTextOptions,
+  ): Promise<string>;
+  private readGuestFile(
+    filePath: string,
+    options?: VmFsReadFileBufferOptions,
   ): Promise<Buffer>;
-  async readFile(
+  private async readGuestFile(
     filePath: string,
-    options: VmReadFileOptions = {},
+    options: VmFsReadFileOptions = {},
   ): Promise<string | Buffer> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
@@ -754,15 +1015,10 @@ export class VM {
     return data;
   }
 
-  /**
-   * Write file content inside the running guest.
-   *
-   * Existing files are truncated.
-   */
-  async writeFile(
+  private async writeGuestFile(
     filePath: string,
-    data: VmWriteFileInput,
-    options: VmWriteFileOptions = {},
+    data: VmFsWriteFileInput,
+    options: VmFsWriteFileOptions = {},
   ): Promise<void> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
@@ -802,12 +1058,9 @@ export class VM {
     }
   }
 
-  /**
-   * Delete a file or directory inside the running guest.
-   */
-  async deleteFile(
+  private async deleteGuestPath(
     filePath: string,
-    options: VmDeleteFileOptions = {},
+    options: VmFsDeleteOptions = {},
   ): Promise<void> {
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("filePath must be a non-empty string");
@@ -872,7 +1125,7 @@ export class VM {
 
   private readFileStreamFromVfs(
     filePath: string,
-    options: VmReadFileStreamOptions,
+    options: VmFsReadFileStreamOptions,
   ): Readable {
     assertNotAborted(options.signal, "file read aborted");
     const chunkSize =
@@ -947,7 +1200,7 @@ export class VM {
 
   private async writeFileToVfs(
     filePath: string,
-    input: VmWriteFileInput,
+    input: VmFsWriteFileInput,
     signal?: AbortSignal,
   ): Promise<void> {
     const vfs = this.vfs;
@@ -2253,6 +2506,62 @@ function assertNotAborted(
   if (signal?.aborted) {
     throw new Error(message);
   }
+}
+
+function normalizeAccessMode(mode: number | undefined): number {
+  if (mode === undefined) {
+    return fs.constants.F_OK;
+  }
+
+  if (!Number.isInteger(mode) || mode < 0) {
+    throw new Error("mode must be a non-negative integer");
+  }
+
+  const allowed = fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK;
+  if ((mode & ~allowed) !== 0) {
+    throw new Error("mode can only contain fs.constants.R_OK, W_OK, and X_OK");
+  }
+
+  return mode;
+}
+
+function normalizeMkdirMode(mode: number | undefined): number | undefined {
+  if (mode === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isInteger(mode) || mode < 0) {
+    throw new Error("mode must be a non-negative integer");
+  }
+
+  if (mode > 0o7777) {
+    throw new Error("mode must fit in permission bits (max 0o7777)");
+  }
+
+  return mode;
+}
+
+function formatExecFailure(result: ExecResult): string {
+  const stderr = result.stderr.trim();
+  if (stderr.length > 0) {
+    return stderr;
+  }
+  if (typeof result.signal === "number") {
+    return `signal ${result.signal}`;
+  }
+  return `exit ${result.exitCode}`;
+}
+
+function splitOutputLines(value: string): string[] {
+  if (value.length === 0) {
+    return [];
+  }
+
+  const lines = value.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
 }
 
 type ResolvedVfs = {

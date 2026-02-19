@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { constants as fsConstants } from "node:fs";
 import { Readable } from "node:stream";
 import test from "node:test";
 
@@ -59,7 +60,7 @@ test(
   async () => {
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
-      const osRelease = await vm.readFile("/etc/os-release", {
+      const osRelease = await vm.fs.readFile("/etc/os-release", {
         encoding: "utf-8",
       });
       assert.match(osRelease, /^NAME=/m);
@@ -73,7 +74,7 @@ test(
   async () => {
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
-      const data = await vm.readFile("/bin/sh");
+      const data = await vm.fs.readFile("/bin/sh");
       assert.ok(Buffer.isBuffer(data));
       assert.ok(data.length > 0);
     });
@@ -87,9 +88,73 @@ test(
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
       await assert.rejects(
-        () => vm.readFile("/definitely-not-a-real-file"),
+        () => vm.fs.readFile("/definitely-not-a-real-file"),
         /failed to read guest file/,
       );
+    });
+  },
+);
+
+test(
+  "fs.access checks mode bits",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await vm.exec([
+        "/bin/sh",
+        "-c",
+        "echo ok > /tmp/gondolin-access.txt && chmod 600 /tmp/gondolin-access.txt",
+      ]);
+
+      await vm.fs.access("/tmp/gondolin-access.txt");
+      await vm.fs.access("/tmp/gondolin-access.txt", {
+        mode: fsConstants.R_OK,
+      });
+
+      await assert.rejects(
+        () =>
+          vm.fs.access("/tmp/gondolin-access.txt", {
+            mode: fsConstants.X_OK,
+          }),
+        /failed to access guest file/,
+      );
+    });
+  },
+);
+
+test(
+  "fs.mkdir creates nested directories",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await vm.fs.mkdir("/tmp/gondolin-mkdir/sub/child", { recursive: true });
+
+      const check = await vm.exec([
+        "/bin/sh",
+        "-c",
+        "test -d /tmp/gondolin-mkdir/sub/child && echo ok",
+      ]);
+      assert.equal(check.stdout.trim(), "ok");
+    });
+  },
+);
+
+test(
+  "fs.listDir lists directory children",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await vm.exec([
+        "/bin/sh",
+        "-c",
+        "mkdir -p /tmp/gondolin-listdir && touch /tmp/gondolin-listdir/a /tmp/gondolin-listdir/b /tmp/gondolin-listdir/.hidden",
+      ]);
+
+      const entries = await vm.fs.listDir("/tmp/gondolin-listdir");
+      assert.deepEqual(entries.sort(), [".hidden", "a", "b"].sort());
     });
   },
 );
@@ -100,8 +165,8 @@ test(
   async () => {
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
-      await vm.writeFile("/tmp/gondolin-write-text.txt", "hello-write\n");
-      const text = await vm.readFile("/tmp/gondolin-write-text.txt", {
+      await vm.fs.writeFile("/tmp/gondolin-write-text.txt", "hello-write\n");
+      const text = await vm.fs.readFile("/tmp/gondolin-write-text.txt", {
         encoding: "utf-8",
       });
       assert.equal(text, "hello-write\n");
@@ -116,8 +181,8 @@ test(
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
       const payload = Buffer.from([0x00, 0x01, 0x02, 0xff]);
-      await vm.writeFile("/tmp/gondolin-write-bin.bin", payload);
-      const stored = await vm.readFile("/tmp/gondolin-write-bin.bin");
+      await vm.fs.writeFile("/tmp/gondolin-write-bin.bin", payload);
+      const stored = await vm.fs.readFile("/tmp/gondolin-write-bin.bin");
       assert.deepEqual(stored, payload);
     });
   },
@@ -129,10 +194,10 @@ test(
   async () => {
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
-      await vm.writeFile("/tmp/gondolin-delete.txt", "gone");
-      await vm.deleteFile("/tmp/gondolin-delete.txt");
+      await vm.fs.writeFile("/tmp/gondolin-delete.txt", "gone");
+      await vm.fs.deleteFile("/tmp/gondolin-delete.txt");
       await assert.rejects(
-        () => vm.readFile("/tmp/gondolin-delete.txt"),
+        () => vm.fs.readFile("/tmp/gondolin-delete.txt"),
         /failed to read guest file/,
       );
     });
@@ -145,7 +210,7 @@ test(
   async () => {
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
-      await vm.deleteFile("/tmp/gondolin-does-not-exist", { force: true });
+      await vm.fs.deleteFile("/tmp/gondolin-does-not-exist", { force: true });
     });
   },
 );
@@ -161,7 +226,7 @@ test(
         "-c",
         "mkdir -p /tmp/gondolin-dir/sub && echo ok > /tmp/gondolin-dir/sub/file.txt",
       ]);
-      await vm.deleteFile("/tmp/gondolin-dir", { recursive: true });
+      await vm.fs.deleteFile("/tmp/gondolin-dir", { recursive: true });
       const check = await vm.exec(
         ["/bin/sh", "-c", "test ! -e /tmp/gondolin-dir; echo $?"],
         { stdout: "buffer" },
@@ -181,8 +246,8 @@ test(
         Buffer.from("hello"),
         Buffer.from("-stream"),
       ]);
-      await vm.writeFile("/tmp/gondolin-write-stream.txt", stream);
-      const text = await vm.readFile("/tmp/gondolin-write-stream.txt", {
+      await vm.fs.writeFile("/tmp/gondolin-write-stream.txt", stream);
+      const text = await vm.fs.readFile("/tmp/gondolin-write-stream.txt", {
         encoding: "utf-8",
       });
       assert.equal(text, "hello-stream");
@@ -197,9 +262,9 @@ test(
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
       const payload = Buffer.alloc(512 * 1024, 0x61);
-      await vm.writeFile("/tmp/gondolin-stream.bin", payload);
+      await vm.fs.writeFile("/tmp/gondolin-stream.bin", payload);
 
-      const stream = await vm.readFileStream("/tmp/gondolin-stream.bin", {
+      const stream = await vm.fs.readFileStream("/tmp/gondolin-stream.bin", {
         chunkSize: 32 * 1024,
       });
       let total = 0;
