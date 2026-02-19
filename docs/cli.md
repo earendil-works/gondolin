@@ -5,6 +5,7 @@ Gondolin ships with a small command line interface (CLI) that lets you:
 - start an interactive shell inside a micro-VM (`bash`)
 - list running VM sessions (`list`)
 - attach a new interactive command to an existing VM (`attach`)
+- snapshot a running VM session (`snapshot`)
 - run one or more commands non-interactively (`exec`)
 - build and verify custom guest assets (`build`)
 
@@ -217,6 +218,7 @@ If `-- COMMAND` is provided, the given command is run instead of the default
 
 - `--cwd PATH` -- set the working directory for the shell / command
 - `--env KEY=VALUE` -- set an environment variable (repeatable)
+- `--resume ID_OR_PATH` -- resume from a snapshot id (from cache) or `.qcow2` path
 - `--listen [HOST:PORT]` -- start a host ingress gateway (default: `127.0.0.1:0`)
 
 #### Debugging Options (bash only)
@@ -242,6 +244,9 @@ gondolin bash -- claude --cwd /workspace
 
 # Start an ingress gateway to forward traffic into the VM
 gondolin bash --listen 127.0.0.1:3000
+
+# Resume from a snapshot id created by `gondolin snapshot`
+gondolin bash --resume 4a8f2b0c
 ```
 
 ### `gondolin list`
@@ -294,6 +299,32 @@ gondolin attach 9e3a2e2d -- /bin/sh -lc 'id && pwd'
 
 Each attached client gets an independent command channel; concurrent attaches do
 not share request IDs or cross-talk between exec streams.
+
+### `gondolin snapshot`
+
+Create a disk snapshot from a running VM session and stop that session:
+
+```bash
+gondolin snapshot <SESSION_ID> [--output PATH] [--name NAME]
+```
+
+- `SESSION_ID` may be a full UUID or an unambiguous UUID prefix
+- default output path is `~/.cache/gondolin/checkpoints/<uuid>.qcow2`
+- `--name` customizes the default filename stem
+- `--output` sets an explicit output path (`.qcow2` recommended)
+
+On success, Gondolin prints the snapshot id/path and a matching resume command.
+
+Examples:
+
+```bash
+# Snapshot a running session into the default checkpoint cache
+# (session is stopped as part of snapshot creation)
+gondolin snapshot 9e3a2e2d
+
+# Snapshot to an explicit path
+gondolin snapshot 9e3a2e2d --output ./my-snapshot.qcow2
+```
 
 ### `gondolin exec`
 

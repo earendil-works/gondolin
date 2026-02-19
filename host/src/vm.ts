@@ -1245,6 +1245,21 @@ fi
           }
           return server.connect(onMessage, onClose);
         },
+        {
+          onSnapshot: async (message) => {
+            const checkpoint = await this.checkpointInternal(message.path, {
+              keepSessionIpc: true,
+            });
+
+            return {
+              path: checkpoint.path,
+              name: checkpoint.name,
+              onResponseQueued: async () => {
+                await this.close();
+              },
+            };
+          },
+        },
       );
       this.sessionIpc.start();
     } catch (err) {
@@ -1253,8 +1268,16 @@ fi
     }
   }
 
-  private async closeInternal() {
-    if (this.sessionIpc) {
+  private async closeInternal(options?: {
+    /** keep session attach IPC server open */
+    keepSessionIpc?: boolean;
+    /** keep session registry metadata on disk */
+    keepSessionRegistration?: boolean;
+  }) {
+    const keepSessionIpc = options?.keepSessionIpc ?? false;
+    const keepSessionRegistration = options?.keepSessionRegistration ?? false;
+
+    if (!keepSessionIpc && this.sessionIpc) {
       try {
         await this.sessionIpc.close();
       } catch {
@@ -1264,7 +1287,9 @@ fi
       }
     }
 
-    unregisterSession(this.id);
+    if (!keepSessionRegistration) {
+      unregisterSession(this.id);
+    }
 
     if (this.ingressAccess) {
       try {
@@ -1755,6 +1780,18 @@ fi
    * file so the checkpoint is a single file.
    */
   async checkpoint(checkpointPath: string): Promise<VmCheckpoint> {
+    return await this.checkpointInternal(checkpointPath, {
+      keepSessionIpc: false,
+    });
+  }
+
+  private async checkpointInternal(
+    checkpointPath: string,
+    options: {
+      /** keep session attach IPC open until caller performs post-checkpoint cleanup */
+      keepSessionIpc: boolean;
+    },
+  ): Promise<VmCheckpoint> {
     if (!checkpointPath) {
       throw new Error("checkpointPath is required");
     }
@@ -1792,7 +1829,16 @@ fi
       }
     }
 
-    await this.close();
+    if (options.keepSessionIpc) {
+      await this.closeSingleflight.run(() =>
+        this.closeInternal({
+          keepSessionIpc: true,
+          keepSessionRegistration: true,
+        }),
+      );
+    } else {
+      await this.close();
+    }
 
     const resolvedCheckpointPath = path.resolve(checkpointPath);
     fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });

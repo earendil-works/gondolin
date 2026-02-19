@@ -10,11 +10,13 @@
  * - stdin { type: "stdin", id, data?: base64 string, eof? }
  * - pty_resize { type: "pty_resize", id, rows, cols }
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
+ * - snapshot { type: "snapshot", id, path }
  * - boot { type: "boot", fuseMount?, fuseBinds? }
  *
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
  * - exec_response { type: "exec_response", id, exit_code, signal? }
+ * - snapshot_response { type: "snapshot_response", id, path, name }
  * - error { type: "error", id?, code, message }
  *
  * Binary output frame:
@@ -72,6 +74,14 @@ export type LifecycleCommandMessage = {
   action: "restart" | "shutdown";
 };
 
+export type SnapshotCommandMessage = {
+  type: "snapshot";
+  /** request id */
+  id: number;
+  /** absolute output path for the checkpoint `.qcow2` file */
+  path: string;
+};
+
 export type BootCommandMessage = {
   type: "boot";
   /** guest mountpoint for fuse (defaults to server config) */
@@ -96,7 +106,8 @@ export type ClientMessage =
   | StdinCommandMessage
   | PtyResizeCommandMessage
   | ExecWindowCommandMessage
-  | LifecycleCommandMessage;
+  | LifecycleCommandMessage
+  | SnapshotCommandMessage;
 
 export type ExecResponseMessage = {
   type: "exec_response";
@@ -118,13 +129,27 @@ export type ErrorMessage = {
   message: string;
 };
 
+export type SnapshotResponseMessage = {
+  type: "snapshot_response";
+  /** request id */
+  id: number;
+  /** absolute path to the checkpoint `.qcow2` file */
+  path: string;
+  /** snapshot name */
+  name: string;
+};
+
 export type StatusMessage = {
   type: "status";
   /** sandbox state */
   state: "starting" | "running" | "stopped";
 };
 
-export type ServerMessage = ExecResponseMessage | ErrorMessage | StatusMessage;
+export type ServerMessage =
+  | ExecResponseMessage
+  | ErrorMessage
+  | SnapshotResponseMessage
+  | StatusMessage;
 
 export type OutputStream = "stdout" | "stderr";
 

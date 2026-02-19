@@ -14,6 +14,8 @@ import {
   type ExecWindowCommandMessage,
   type PtyResizeCommandMessage,
   type ServerMessage,
+  type SnapshotCommandMessage,
+  type SnapshotResponseMessage,
   type StdinCommandMessage,
 } from "./control-protocol";
 
@@ -251,7 +253,12 @@ function isNonTerminalExecErrorCode(code: string): boolean {
   return code === "stdin_backpressure" || code === "stdin_chunk_too_large";
 }
 
-function sendFramed(socket: net.Socket, type: 0 | 1, payload: Buffer): boolean {
+function sendFramed(
+  socket: net.Socket,
+  type: 0 | 1,
+  payload: Buffer,
+  onFlushed?: () => void,
+): boolean {
   if (socket.destroyed || !socket.writable) return false;
 
   const header = Buffer.alloc(5);
@@ -259,15 +266,21 @@ function sendFramed(socket: net.Socket, type: 0 | 1, payload: Buffer): boolean {
   header.writeUInt32BE(payload.length, 1);
 
   try {
-    socket.write(Buffer.concat([header, payload]));
+    socket.write(Buffer.concat([header, payload]), () => {
+      onFlushed?.();
+    });
     return true;
   } catch {
     return false;
   }
 }
 
-function sendJson(socket: net.Socket, message: ServerMessage): boolean {
-  return sendFramed(socket, 0, Buffer.from(JSON.stringify(message)));
+function sendJson(
+  socket: net.Socket,
+  message: ServerMessage,
+  onFlushed?: () => void,
+): boolean {
+  return sendFramed(socket, 0, Buffer.from(JSON.stringify(message)), onFlushed);
 }
 
 function sendError(
@@ -285,6 +298,22 @@ function sendError(
   return sendJson(socket, payload);
 }
 
+type SessionSnapshotResult = {
+  /** absolute path to the checkpoint `.qcow2` file */
+  path: string;
+  /** snapshot name */
+  name: string;
+  /** callback invoked after the response frame has been queued */
+  onResponseQueued?: () => void | Promise<void>;
+};
+
+type SessionIpcServerHandlers = {
+  /** create a VM checkpoint for a running session */
+  onSnapshot?: (
+    message: SnapshotCommandMessage,
+  ) => Promise<SessionSnapshotResult>;
+};
+
 export class SessionIpcServer {
   private server: net.Server | null = null;
   private clients = new Set<net.Socket>();
@@ -297,6 +326,7 @@ export class SessionIpcServer {
       onMessage: (data: Buffer | string, isBinary: boolean) => void,
       onClose?: () => void,
     ) => SandboxConnection,
+    private readonly handlers: SessionIpcServerHandlers = {},
   ) {}
 
   start(): void {
@@ -379,89 +409,97 @@ export class SessionIpcServer {
 
     let connection: SandboxConnection | null = null;
 
-    try {
-      connection = this.connectToSandbox(
-        (data, isBinary) => {
-          if (isBinary) {
-            try {
-              const frame = Buffer.isBuffer(data) ? data : Buffer.from(data);
-              const decoded = decodeOutputFrame(frame);
-              const externalId = internalToExternal.get(decoded.id);
-              if (externalId === undefined) {
-                return;
+    const ensureConnection = (): SandboxConnection | null => {
+      if (connection) {
+        return connection;
+      }
+
+      try {
+        connection = this.connectToSandbox(
+          (data, isBinary) => {
+            if (isBinary) {
+              try {
+                const frame = Buffer.isBuffer(data) ? data : Buffer.from(data);
+                const decoded = decodeOutputFrame(frame);
+                const externalId = internalToExternal.get(decoded.id);
+                if (externalId === undefined) {
+                  return;
+                }
+
+                const remapped = encodeOutputFrame(
+                  externalId,
+                  decoded.stream,
+                  decoded.data,
+                );
+                sendFramed(socket, 1, remapped);
+              } catch {
+                // ignore malformed frames
               }
-
-              const remapped = encodeOutputFrame(
-                externalId,
-                decoded.stream,
-                decoded.data,
-              );
-              sendFramed(socket, 1, remapped);
-            } catch {
-              // ignore malformed frames
+              return;
             }
-            return;
-          }
 
-          let message: ServerMessage;
-          try {
-            message = JSON.parse(
-              typeof data === "string" ? data : data.toString(),
-            ) as ServerMessage;
-          } catch {
-            return;
-          }
+            let message: ServerMessage;
+            try {
+              message = JSON.parse(
+                typeof data === "string" ? data : data.toString(),
+              ) as ServerMessage;
+            } catch {
+              return;
+            }
 
-          if (message.type === "exec_response") {
-            const externalId = internalToExternal.get(message.id);
-            if (externalId === undefined) return;
+            if (message.type === "exec_response") {
+              const externalId = internalToExternal.get(message.id);
+              if (externalId === undefined) return;
 
-            const remapped: ExecResponseMessage = {
-              ...message,
-              id: externalId,
-            };
+              const remapped: ExecResponseMessage = {
+                ...message,
+                id: externalId,
+              };
 
-            sendJson(socket, remapped);
+              sendJson(socket, remapped);
 
-            const internalId = message.id;
-            internalToExternal.delete(internalId);
-            externalToInternal.delete(externalId);
-            this.releaseInternalId(internalId);
-            return;
-          }
-
-          if (message.type === "error" && message.id !== undefined) {
-            const externalId = internalToExternal.get(message.id);
-            if (externalId === undefined) return;
-
-            const remapped: ErrorMessage = {
-              ...message,
-              id: externalId,
-            };
-
-            sendJson(socket, remapped);
-
-            if (!isNonTerminalExecErrorCode(message.code)) {
               const internalId = message.id;
               internalToExternal.delete(internalId);
               externalToInternal.delete(externalId);
               this.releaseInternalId(internalId);
+              return;
             }
-            return;
-          }
 
-          sendJson(socket, message);
-        },
-        () => {
-          socket.destroy();
-        },
-      );
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      sendError(socket, "ipc_unavailable", detail);
-      socket.destroy();
-      return;
-    }
+            if (message.type === "error" && message.id !== undefined) {
+              const externalId = internalToExternal.get(message.id);
+              if (externalId === undefined) return;
+
+              const remapped: ErrorMessage = {
+                ...message,
+                id: externalId,
+              };
+
+              sendJson(socket, remapped);
+
+              if (!isNonTerminalExecErrorCode(message.code)) {
+                const internalId = message.id;
+                internalToExternal.delete(internalId);
+                externalToInternal.delete(externalId);
+                this.releaseInternalId(internalId);
+              }
+              return;
+            }
+
+            sendJson(socket, message);
+          },
+          () => {
+            socket.destroy();
+          },
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        sendError(socket, "ipc_unavailable", detail);
+        socket.destroy();
+        return null;
+      }
+
+      return connection;
+    };
 
     let readBuffer = Buffer.alloc(0);
     let expectedLength: number | null = null;
@@ -494,8 +532,16 @@ export class SessionIpcServer {
       externalToInternal.set(message.id, internalId);
       internalToExternal.set(internalId, message.id);
 
+      const conn = ensureConnection();
+      if (!conn) {
+        externalToInternal.delete(message.id);
+        internalToExternal.delete(internalId);
+        this.releaseInternalId(internalId);
+        return;
+      }
+
       try {
-        connection?.send({ ...message, id: internalId });
+        conn.send({ ...message, id: internalId });
       } catch (err) {
         externalToInternal.delete(message.id);
         internalToExternal.delete(internalId);
@@ -517,12 +563,72 @@ export class SessionIpcServer {
         return;
       }
 
+      const conn = ensureConnection();
+      if (!conn) return;
+
       try {
-        connection?.send({ ...message, id: internalId } as ClientMessage);
+        conn.send({ ...message, id: internalId } as ClientMessage);
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         sendError(socket, "ipc_error", detail, message.id);
       }
+    };
+
+    const handleSnapshot = (message: SnapshotCommandMessage): void => {
+      if (!Number.isInteger(message.id) || message.id < 0) {
+        sendError(socket, "invalid_request", "snapshot requires a uint32 id");
+        return;
+      }
+
+      if (!message.path || typeof message.path !== "string") {
+        sendError(
+          socket,
+          "invalid_request",
+          "snapshot requires a non-empty output path",
+          message.id,
+        );
+        return;
+      }
+
+      if (!this.handlers.onSnapshot) {
+        sendError(
+          socket,
+          "unsupported",
+          "snapshot actions are not supported for this session",
+          message.id,
+        );
+        return;
+      }
+
+      void this.handlers
+        .onSnapshot(message)
+        .then((result) => {
+          const response: SnapshotResponseMessage = {
+            type: "snapshot_response",
+            id: message.id,
+            path: result.path,
+            name: result.name,
+          };
+
+          const onResponseQueued = result.onResponseQueued;
+          const sent = sendJson(socket, response, () => {
+            if (!onResponseQueued) return;
+            void Promise.resolve(onResponseQueued()).catch(() => {
+              // ignore post-response cleanup errors
+            });
+          });
+
+          if (!sent && onResponseQueued) {
+            // If client socket is already gone, still run cleanup.
+            void Promise.resolve(onResponseQueued()).catch(() => {
+              // ignore post-response cleanup errors
+            });
+          }
+        })
+        .catch((err) => {
+          const detail = err instanceof Error ? err.message : String(err);
+          sendError(socket, "snapshot_failed", detail, message.id);
+        });
     };
 
     const handleMessage = (message: ClientMessage): void => {
@@ -548,6 +654,11 @@ export class SessionIpcServer {
 
       if (message.type === "exec_window") {
         forwardMappedIdMessage(message);
+        return;
+      }
+
+      if (message.type === "snapshot") {
+        handleSnapshot(message);
         return;
       }
 

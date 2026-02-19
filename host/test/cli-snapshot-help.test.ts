@@ -3,12 +3,12 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 
-test("cli: gondolin bash --help documents --listen and --resume", () => {
+test("cli: gondolin snapshot --help renders usage", () => {
   const hostDir = path.join(__dirname, "..");
 
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "bin/gondolin.ts", "bash", "--help"],
+    ["--import", "tsx", "bin/gondolin.ts", "snapshot", "--help"],
     {
       cwd: hostDir,
       env: process.env,
@@ -18,6 +18,5 @@ test("cli: gondolin bash --help documents --listen and --resume", () => {
   );
 
   assert.equal(result.status, 0);
-  assert.match(result.stdout ?? "", /--listen/);
-  assert.match(result.stdout ?? "", /--resume/);
+  assert.match(result.stdout ?? "", /Usage: gondolin snapshot/);
 });

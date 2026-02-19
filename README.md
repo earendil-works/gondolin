@@ -72,6 +72,12 @@ npx @earendil-works/gondolin list
 
 # Attach a second shell to a running VM by UUID/prefix
 npx @earendil-works/gondolin attach <session-id>
+
+# Snapshot a running VM session (stops that session)
+npx @earendil-works/gondolin snapshot <session-id>
+
+# Resume from snapshot id/path
+npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
 Guest images (~200MB) are downloaded automatically on first run. You'll need

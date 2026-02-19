@@ -8,6 +8,21 @@ QEMU's internal snapshot mode.
 A snapshot is stored as a single `.qcow2` file. The checkpoint metadata is
 stored as a JSON trailer appended to the end of the qcow2 file.
 
+## CLI Workflow
+
+The CLI exposes snapshots for running sessions:
+
+```bash
+# Snapshot a running session (stops the session)
+gondolin snapshot <session-id>
+
+# Resume a shell from snapshot id (from default checkpoint cache)
+gondolin bash --resume <snapshot-id>
+
+# Or resume directly from a qcow2 path
+gondolin bash --resume /path/to/snapshot.qcow2
+```
+
 ## Creating a Snapshot
 
 Creating a snapshot stops the VM and consumes it. After calling

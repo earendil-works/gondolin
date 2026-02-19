@@ -1,9 +1,12 @@
 #!/usr/bin/env node
+import { randomUUID } from "crypto";
 import fs from "fs";
 import net from "net";
+import os from "os";
 import path from "path";
 import { PassThrough } from "stream";
 
+import { VmCheckpoint } from "../src/checkpoint";
 import { VM } from "../src/vm";
 import type { VirtualProvider } from "../src/vfs/node";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
@@ -31,7 +34,11 @@ import {
   gcSessions,
   listSessions,
 } from "../src/session-registry";
-import { decodeOutputFrame, type ServerMessage } from "../src/control-protocol";
+import {
+  decodeOutputFrame,
+  type ServerMessage,
+  type SnapshotResponseMessage,
+} from "../src/control-protocol";
 
 type Command = {
   cmd: string;
@@ -53,6 +60,109 @@ function getDefaultInteractiveShellCommand(): string[] {
     "-lc",
     "if command -v bash >/dev/null 2>&1; then exec bash -i; else exec /bin/sh -i; fi",
   ];
+}
+
+function checkpointBaseDir(): string {
+  const cacheBase =
+    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+  return (
+    process.env.GONDOLIN_CHECKPOINT_DIR ??
+    path.join(cacheBase, "gondolin", "checkpoints")
+  );
+}
+
+function sanitizeCheckpointName(name: string): string {
+  const trimmed = name.trim();
+  const safe = trimmed
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return safe.length > 0 ? safe : "snapshot";
+}
+
+function resolveSnapshotPath(args: { output?: string; name?: string }): string {
+  if (args.output) {
+    return path.resolve(args.output);
+  }
+
+  const checkpointDir = checkpointBaseDir();
+  const stem = args.name ? sanitizeCheckpointName(args.name) : randomUUID();
+  return path.resolve(checkpointDir, `${stem}.qcow2`);
+}
+
+async function waitForCheckpointReady(
+  checkpointPath: string,
+  timeoutMs = 2000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      if (fs.existsSync(checkpointPath)) {
+        VmCheckpoint.load(checkpointPath);
+        return true;
+      }
+    } catch {
+      // keep polling
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+
+  try {
+    if (fs.existsSync(checkpointPath)) {
+      VmCheckpoint.load(checkpointPath);
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  return false;
+}
+
+function resolveResumeCheckpoint(resume: string): string {
+  const value = resume.trim();
+  if (!value) {
+    throw new Error("--resume requires a non-empty checkpoint id or path");
+  }
+
+  const resolvedPath = path.resolve(value);
+  if (fs.existsSync(resolvedPath)) {
+    return resolvedPath;
+  }
+
+  if (value.includes(path.sep) || value.includes("/") || value.includes("\\")) {
+    throw new Error(`checkpoint not found: ${value}`);
+  }
+
+  const dir = checkpointBaseDir();
+  if (!fs.existsSync(dir)) {
+    throw new Error(`checkpoint not found: ${value}`);
+  }
+
+  const normalized = value.endsWith(".qcow2") ? value.slice(0, -6) : value;
+  const entries = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".qcow2"))
+    .map((entry) => entry.name);
+
+  const matches = entries.filter((file) => {
+    const stem = file.slice(0, -6);
+    return stem === normalized || stem.startsWith(normalized);
+  });
+
+  if (matches.length === 0) {
+    throw new Error(`checkpoint not found: ${value}`);
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `ambiguous checkpoint id '${value}' matches ${matches.length} snapshots:\n` +
+        matches.map((file) => `  ${file.slice(0, -6)}`).join("\n"),
+    );
+  }
+
+  return path.join(dir, matches[0]!);
 }
 
 function renderCliError(err: unknown) {
@@ -91,6 +201,7 @@ function usage() {
   );
   console.log("  list         List running VM sessions");
   console.log("  attach       Attach to a running VM session");
+  console.log("  snapshot     Snapshot a running VM session");
   console.log(
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
@@ -115,6 +226,9 @@ function bashUsage() {
   );
   console.log(
     "  --env KEY=VALUE                 Set environment variable (can repeat)",
+  );
+  console.log(
+    "  --resume ID_OR_PATH             Resume from a snapshot ID or .qcow2 path",
   );
   console.log();
   console.log("VFS Options:");
@@ -194,6 +308,8 @@ function bashUsage() {
   console.log("  gondolin bash --cmd claude --cwd /workspace");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
+  console.log("  gondolin bash --resume 4a8f2b0c");
+  console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
   console.log("  gondolin bash --ssh");
 }
 
@@ -223,6 +339,19 @@ function attachUsage() {
   console.log("  --help, -h      Show this help");
   console.log();
   console.log("Default command: bash -i (fallback: /bin/sh -i)");
+}
+
+function snapshotUsage() {
+  console.log("Usage: gondolin snapshot <SESSION_ID> [options]");
+  console.log();
+  console.log("Create a disk snapshot of a running VM session and stop it.");
+  console.log();
+  console.log("Options:");
+  console.log(
+    "  --output PATH   Absolute or relative path for the snapshot .qcow2 file",
+  );
+  console.log("  --name NAME     Snapshot name (default output path only)");
+  console.log("  --help, -h      Show this help");
 }
 
 function execUsage() {
@@ -1114,6 +1243,8 @@ type BashArgs = CommonOptions & {
   cwd?: string;
   /** environment variables */
   env?: string[];
+  /** snapshot id or checkpoint path to resume */
+  resume?: string;
 };
 
 function parseBashArgs(argv: string[]): BashArgs {
@@ -1328,6 +1459,15 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.env!.push(env);
         break;
       }
+      case "--resume": {
+        const resume = argv[++i];
+        if (!resume) {
+          console.error("--resume requires an argument");
+          process.exit(1);
+        }
+        args.resume = resume;
+        break;
+      }
       case "--help":
       case "-h":
         bashUsage();
@@ -1350,10 +1490,16 @@ async function runBash(argv: string[]) {
   let exitCode = 1;
 
   try {
-    // Use VM.create() to ensure guest assets are available
-    vm = await VM.create({
-      ...vmOptions,
-    });
+    if (args.resume) {
+      const checkpointPath = resolveResumeCheckpoint(args.resume);
+      const checkpoint = VmCheckpoint.load(checkpointPath);
+      vm = await checkpoint.resume(vmOptions);
+    } else {
+      // Use VM.create() to ensure guest assets are available
+      vm = await VM.create({
+        ...vmOptions,
+      });
+    }
 
     if (args.ssh) {
       const access = await vm.enableSsh({
@@ -1811,6 +1957,173 @@ async function runAttach(argv: string[]) {
   process.exit(exitCode);
 }
 
+type SnapshotArgs = {
+  sessionId: string;
+  output?: string;
+  name?: string;
+};
+
+function parseSnapshotArgs(argv: string[]): SnapshotArgs {
+  if (argv.length === 0) {
+    snapshotUsage();
+    process.exit(1);
+  }
+
+  const args: SnapshotArgs = {
+    sessionId: "",
+  };
+
+  let i = 0;
+  while (i < argv.length) {
+    const arg = argv[i]!;
+
+    if (arg === "--help" || arg === "-h") {
+      snapshotUsage();
+      process.exit(0);
+    }
+
+    if (!args.sessionId && !arg.startsWith("-")) {
+      args.sessionId = arg;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--output") {
+      const value = argv[i + 1];
+      if (!value) {
+        console.error("--output requires an argument");
+        process.exit(1);
+      }
+      args.output = value;
+      i += 2;
+      continue;
+    }
+
+    if (arg === "--name") {
+      const value = argv[i + 1];
+      if (!value) {
+        console.error("--name requires an argument");
+        process.exit(1);
+      }
+      args.name = value;
+      i += 2;
+      continue;
+    }
+
+    console.error(`Unknown argument: ${arg}`);
+    snapshotUsage();
+    process.exit(1);
+  }
+
+  if (!args.sessionId) {
+    console.error("snapshot requires a session id");
+    snapshotUsage();
+    process.exit(1);
+  }
+
+  if (args.output && args.name) {
+    console.error("--name cannot be combined with --output");
+    process.exit(1);
+  }
+
+  return args;
+}
+
+async function runSnapshot(argv: string[]) {
+  const args = parseSnapshotArgs(argv);
+
+  await gcSessions().catch(() => {
+    // ignore
+  });
+
+  const session = await findSession(args.sessionId);
+  if (!session || !session.alive) {
+    throw new Error(`session not found or not running: ${args.sessionId}`);
+  }
+
+  const snapshotPath = resolveSnapshotPath(args);
+  const requestId = 1;
+
+  let done = false;
+  let resolveDone!: (message: SnapshotResponseMessage) => void;
+  let rejectDone!: (error: Error) => void;
+  const donePromise = new Promise<SnapshotResponseMessage>(
+    (resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    },
+  );
+
+  const client = connectToSession(session.socketPath, {
+    onJson(message: ServerMessage) {
+      if (message.type === "status") {
+        return;
+      }
+
+      if (message.type === "snapshot_response") {
+        if (message.id !== requestId) return;
+        done = true;
+        resolveDone(message);
+        return;
+      }
+
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== requestId) return;
+        done = true;
+        rejectDone(new Error(`error ${message.code}: ${message.message}`));
+      }
+    },
+    onBinary() {
+      // snapshot command does not stream binary data
+    },
+    onClose(error?: Error) {
+      if (done) return;
+
+      void (async () => {
+        const ready = await waitForCheckpointReady(snapshotPath);
+        if (done) return;
+
+        if (ready) {
+          done = true;
+          resolveDone({
+            type: "snapshot_response",
+            id: requestId,
+            path: snapshotPath,
+            name: path.basename(snapshotPath, path.extname(snapshotPath)),
+          });
+          return;
+        }
+
+        done = true;
+        rejectDone(error ?? new Error("session connection closed"));
+      })();
+    },
+  });
+
+  client.send({
+    type: "snapshot",
+    id: requestId,
+    path: snapshotPath,
+  });
+
+  try {
+    const result = await donePromise;
+
+    const snapshotId = path.basename(result.path, path.extname(result.path));
+    const defaultDir = path.resolve(checkpointBaseDir());
+    const snapshotDir = path.dirname(result.path);
+    const resumeArg = snapshotDir === defaultDir ? snapshotId : result.path;
+
+    console.log("Snapshot created:");
+    console.log(`  ID: ${snapshotId}`);
+    console.log(`  PATH: ${result.path}`);
+    console.log("Resume with:");
+    console.log(`  gondolin bash --resume ${resumeArg}`);
+  } finally {
+    client.close();
+  }
+}
+
 // ============================================================================
 // Build command
 // ============================================================================
@@ -2055,6 +2368,9 @@ async function main() {
       return;
     case "attach":
       await runAttach(args);
+      return;
+    case "snapshot":
+      await runSnapshot(args);
       return;
     case "build":
       await runBuild(args);
