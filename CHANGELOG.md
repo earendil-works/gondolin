@@ -2,6 +2,12 @@
 
 All notable changes to Gondolin are documented here.
 
+## 0.5.0
+
+- Add richer host-side `vm.fs` APIs (`access`, `mkdir`, `listDir`, `stat`, `rename`, streaming reads, and recursive deletes) for interacting with guest filesystems. #48
+- Add configurable VM rootfs modes (`readonly`, `memory`, `cow`) and support asset-level default rootfs mode via `manifest.json`
+- Add `gondolin snapshot` plus `gondolin bash --resume` to snapshot active sessions and restart from saved checkpoints
+
 ## 0.4.0
 
 - Add bash fallback to `/bin/sh` for `gondolin bash` and `gondolin attach` when bash is unavailable
