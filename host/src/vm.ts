@@ -16,6 +16,7 @@ import {
 } from "./qemu-img";
 import { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 import { loadAssetManifest } from "./assets";
+import { isRootfsMode, type RootfsMode } from "./rootfs-mode";
 
 import {
   ErrorMessage,
@@ -140,9 +141,16 @@ export type VmVfsOptions = {
   fuseMount?: string;
 };
 
+export type VmRootfsOptions = {
+  /** rootfs write mode */
+  mode?: RootfsMode;
+};
+
 export type VMOptions = {
   /** sandbox controller options */
   sandbox?: SandboxServerOptions;
+  /** rootfs mode override */
+  rootfs?: VmRootfsOptions;
   /** whether to boot the vm immediately (default: true) */
   autoStart?: boolean;
   /** http fetch implementation for asset downloads */
@@ -229,6 +237,8 @@ type RootDiskState = {
   format: "raw" | "qcow2";
   /** qemu snapshot mode (discard writes) */
   snapshot: boolean;
+  /** qemu readonly mode for the root disk */
+  readOnly: boolean;
   /** delete the disk file on vm.close() */
   deleteOnClose: boolean;
 };
@@ -488,28 +498,82 @@ export class VM {
       (resolved as any).vfsProvider = this.vfs;
     }
 
+    const hasUserRootDiskConfig =
+      sandboxOptions.rootDiskPath !== undefined ||
+      sandboxOptions.rootDiskFormat !== undefined ||
+      sandboxOptions.rootDiskSnapshot !== undefined ||
+      sandboxOptions.rootDiskReadOnly !== undefined ||
+      sandboxOptions.rootDiskDeleteOnClose !== undefined;
+
+    const manifestRootfsMode = resolveManifestRootfsMode(resolved);
+    const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
+
     // Prepare root disk:
-    // - If the caller provided sandbox.rootDiskPath, use it as-is.
-    // - Otherwise create an ephemeral qcow2 overlay backed by the base rootfs.
-    const userRootDiskPath = sandboxOptions.rootDiskPath;
-    if (userRootDiskPath) {
+    // - Explicit sandbox.rootDisk* options win.
+    // - Otherwise, use rootfs mode from VM options/manifest/default.
+    if (hasUserRootDiskConfig) {
+      const rootDiskPath = sandboxOptions.rootDiskPath ?? resolved.rootDiskPath;
       const format =
         sandboxOptions.rootDiskFormat ??
         resolved.rootDiskFormat ??
-        inferDiskFormatFromPath(userRootDiskPath);
+        inferDiskFormatFromPath(rootDiskPath);
       const snapshot =
         sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
+      const readOnly =
+        sandboxOptions.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false;
       const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
 
-      resolved.rootDiskPath = userRootDiskPath;
+      if (
+        deleteOnClose &&
+        sandboxOptions.rootDiskPath === undefined &&
+        rootDiskPath === resolved.rootfsPath
+      ) {
+        throw new Error(
+          "sandbox.rootDiskDeleteOnClose requires sandbox.rootDiskPath (refusing to delete base rootfs)",
+        );
+      }
+
+      resolved.rootDiskPath = rootDiskPath;
       resolved.rootDiskFormat = format;
       resolved.rootDiskSnapshot = snapshot;
+      resolved.rootDiskReadOnly = readOnly;
 
       this.rootDisk = {
-        path: userRootDiskPath,
+        path: rootDiskPath,
         format,
         snapshot,
+        readOnly,
         deleteOnClose,
+      };
+    } else if (rootfsMode === "readonly") {
+      const format = inferDiskFormatFromPath(resolved.rootfsPath);
+
+      resolved.rootDiskPath = resolved.rootfsPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskSnapshot = false;
+      resolved.rootDiskReadOnly = true;
+
+      this.rootDisk = {
+        path: resolved.rootfsPath,
+        format,
+        snapshot: false,
+        readOnly: true,
+        deleteOnClose: false,
+      };
+    } else if (rootfsMode === "memory") {
+      const format = inferDiskFormatFromPath(resolved.rootfsPath);
+
+      resolved.rootDiskPath = resolved.rootfsPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskSnapshot = true;
+      resolved.rootDiskReadOnly = false;
+
+      this.rootDisk = {
+        path: resolved.rootfsPath,
+        format,
+        snapshot: true,
+        readOnly: false,
+        deleteOnClose: false,
       };
     } else {
       ensureQemuImgAvailable();
@@ -522,11 +586,13 @@ export class VM {
       resolved.rootDiskPath = overlayPath;
       resolved.rootDiskFormat = "qcow2";
       resolved.rootDiskSnapshot = false;
+      resolved.rootDiskReadOnly = false;
 
       this.rootDisk = {
         path: overlayPath,
         format: "qcow2",
         snapshot: false,
+        readOnly: false,
         deleteOnClose: true,
       };
     }
@@ -1791,6 +1857,21 @@ fi
     }
     this.connection.send(message);
   }
+}
+
+function resolveManifestRootfsMode(
+  resolved: ResolvedSandboxServerOptions,
+): RootfsMode | undefined {
+  const kernelDir = path.dirname(resolved.kernelPath);
+  const initrdDir = path.dirname(resolved.initrdPath);
+  const rootfsDir = path.dirname(resolved.rootfsPath);
+  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) {
+    return undefined;
+  }
+
+  const manifest = loadAssetManifest(kernelDir);
+  const mode = manifest?.runtimeDefaults?.rootfsMode;
+  return isRootfsMode(mode) ? mode : undefined;
 }
 
 type ResolvedVfs = {

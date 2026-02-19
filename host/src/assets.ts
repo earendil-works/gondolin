@@ -5,6 +5,7 @@ import { createWriteStream } from "fs";
 import * as child_process from "child_process";
 import { createHash } from "crypto";
 import type { BuildConfig } from "./build-config";
+import type { RootfsMode } from "./rootfs-mode";
 
 const GITHUB_ORG = "earendil-works";
 const GITHUB_REPO = "gondolin";
@@ -182,6 +183,12 @@ export interface AssetManifest {
 
   /** build configuration */
   config: BuildConfig;
+
+  /** runtime defaults used by vm creation */
+  runtimeDefaults?: {
+    /** default rootfs write mode */
+    rootfsMode?: RootfsMode;
+  };
 
   /** build timestamp (iso 8601) */
   buildTime: string;

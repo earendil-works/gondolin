@@ -52,6 +52,8 @@ export type SandboxConfig = {
   rootDiskFormat?: "raw" | "qcow2";
   /** qemu snapshot mode for the root disk (discard writes) */
   rootDiskSnapshot?: boolean;
+  /** qemu readonly mode for the root disk */
+  rootDiskReadOnly?: boolean;
 
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
@@ -314,10 +316,11 @@ function buildQemuArgs(config: SandboxConfig) {
   if (config.rootDiskPath) {
     const format = config.rootDiskFormat ?? "raw";
     const snapshot = config.rootDiskSnapshot ?? false;
+    const readOnly = config.rootDiskReadOnly ?? false;
 
     args.push(
       "-drive",
-      `file=${config.rootDiskPath},format=${format},if=none,id=drive0${snapshot ? ",snapshot=on" : ""}`,
+      `file=${config.rootDiskPath},format=${format},if=none,id=drive0${snapshot ? ",snapshot=on" : ""}${readOnly ? ",readonly=on" : ""}`,
     );
     // microvm has no PCI bus; use virtio-blk-device (MMIO) instead
     const blkDevice =

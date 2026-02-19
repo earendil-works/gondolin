@@ -156,6 +156,22 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `initramfsInit` | string | Path to custom initramfs init script |
 | `rootfsInitExtra` | string | Path to a shell script appended to the rootfs init before sandboxd starts |
 
+### Runtime Defaults
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rootfsMode` | `"readonly" \| "memory" \| "cow"` | Default VM rootfs mode baked into `manifest.json` |
+
+Example:
+
+```json
+{
+  "runtimeDefaults": {
+    "rootfsMode": "readonly"
+  }
+}
+```
+
 ### Post-Build Configuration
 
 Run shell commands inside the built rootfs after APK packages are extracted.

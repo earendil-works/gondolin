@@ -131,6 +131,9 @@ export type SandboxServerOptions = {
   /** qemu snapshot mode for the root disk (discard writes) */
   rootDiskSnapshot?: boolean;
 
+  /** qemu readonly mode for the root disk */
+  rootDiskReadOnly?: boolean;
+
   /**
    * Delete the root disk image on VM close
    *
@@ -212,6 +215,8 @@ export type ResolvedSandboxServerOptions = {
   rootDiskFormat: "raw" | "qcow2";
   /** qemu snapshot mode for the root disk (discard writes) */
   rootDiskSnapshot: boolean;
+  /** qemu readonly mode for the root disk */
+  rootDiskReadOnly: boolean;
 
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
@@ -461,6 +466,7 @@ export function resolveSandboxServerOptions(
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
   const rootDiskSnapshot =
     options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
+  const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -480,6 +486,7 @@ export function resolveSandboxServerOptions(
     rootDiskPath,
     rootDiskFormat,
     rootDiskSnapshot,
+    rootDiskReadOnly,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
@@ -1132,6 +1139,7 @@ export class SandboxServer extends EventEmitter {
       rootDiskPath: this.options.rootDiskPath,
       rootDiskFormat: this.options.rootDiskFormat,
       rootDiskSnapshot: this.options.rootDiskSnapshot,
+      rootDiskReadOnly: this.options.rootDiskReadOnly,
       memory: this.options.memory,
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,

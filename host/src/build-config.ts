@@ -5,6 +5,10 @@
  * edit it, and then build with `gondolin build --config <file> --output <dir>`.
  */
 
+import { isRootfsMode, type RootfsMode } from "./rootfs-mode";
+
+export type { RootfsMode };
+
 export type Architecture = "aarch64" | "x86_64";
 
 export type Distro = "alpine" | "nixos";
@@ -86,6 +90,11 @@ export interface PostBuildConfig {
   commands?: string[];
 }
 
+export interface RuntimeDefaultsConfig {
+  /** default rootfs write mode for vm startup */
+  rootfsMode?: RootfsMode;
+}
+
 /**
  * Build configuration for generating custom VM assets.
  */
@@ -116,6 +125,9 @@ export interface BuildConfig {
 
   /** commands executed in rootfs after package installation */
   postBuild?: PostBuildConfig;
+
+  /** runtime defaults baked into the asset manifest */
+  runtimeDefaults?: RuntimeDefaultsConfig;
 
   /** custom sandboxd binary path (built-in when undefined) */
   sandboxdPath?: string;
@@ -281,6 +293,19 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
     }
     const postBuild = cfg.postBuild as Record<string, unknown>;
     if (!isOptionalStringArray(postBuild.commands)) {
+      return false;
+    }
+  }
+
+  if (cfg.runtimeDefaults !== undefined) {
+    if (!isRecord(cfg.runtimeDefaults)) {
+      return false;
+    }
+    const runtimeDefaults = cfg.runtimeDefaults as Record<string, unknown>;
+    if (
+      runtimeDefaults.rootfsMode !== undefined &&
+      !isRootfsMode(runtimeDefaults.rootfsMode)
+    ) {
       return false;
     }
   }

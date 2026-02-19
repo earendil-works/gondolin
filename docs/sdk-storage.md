@@ -76,6 +76,23 @@ console.log("stderr:\n", result.stderr);
 await vm.close();
 ```
 
+## Rootfs Modes
+
+You can control rootfs write behavior per VM:
+
+- `readonly`: rootfs is read-only (`EROFS` on writes)
+- `memory`: writes are ephemeral (`qemu` snapshot mode)
+- `cow`: writable qcow2 copy-on-write overlay (default)
+
+```ts
+const vm = await VM.create({
+  rootfs: { mode: "readonly" },
+});
+```
+
+If the guest asset `manifest.json` contains `runtimeDefaults.rootfsMode`, that
+value is used as the default when `rootfs.mode` is not provided.
+
 ## Disk Checkpoints (qcow2)
 
 Gondolin supports **disk-only checkpoints** of the VM root filesystem.

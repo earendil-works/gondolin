@@ -374,6 +374,10 @@ async function buildNative(
     checksums,
   };
 
+  if (config.runtimeDefaults) {
+    manifest.runtimeDefaults = { ...config.runtimeDefaults };
+  }
+
   const manifestPath = path.join(outputDir, MANIFEST_FILENAME);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 

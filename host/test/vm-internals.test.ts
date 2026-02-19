@@ -7,6 +7,7 @@ import test from "node:test";
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
 import { createExecSession } from "../src/exec";
 import { VM, __test, type VMOptions } from "../src/vm";
+import type { RootfsMode } from "../src/rootfs-mode";
 
 function makeTempResolvedServerOptions() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-vm-test-"));
@@ -49,6 +50,36 @@ function makeTempResolvedServerOptions() {
   };
 }
 
+function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
+  fs.writeFileSync(
+    path.join(dir, "manifest.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        config: {
+          arch: "aarch64",
+          distro: "alpine",
+          alpine: { version: "3.23.0" },
+        },
+        runtimeDefaults: rootfsMode ? { rootfsMode } : undefined,
+        buildTime: new Date().toISOString(),
+        assets: {
+          kernel: "vmlinuz",
+          initramfs: "initrd",
+          rootfs: "rootfs",
+        },
+        checksums: {
+          kernel: "",
+          initramfs: "",
+          rootfs: "",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 function makeVm(options: VMOptions = {}) {
   const { dir, resolved } = makeTempResolvedServerOptions();
   const vm = new VM(options, resolved as any);
@@ -57,6 +88,67 @@ function makeVm(options: VMOptions = {}) {
     cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
   };
 }
+
+test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "readonly" },
+  });
+
+  try {
+    const resolved = (vm as any).resolvedSandboxOptions;
+    assert.equal(resolved.rootDiskPath, resolved.rootfsPath);
+    assert.equal(resolved.rootDiskSnapshot, false);
+    assert.equal(resolved.rootDiskReadOnly, true);
+
+    const rootDisk = (vm as any).rootDisk;
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.readOnly, true);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: manifest runtimeDefaults.rootfsMode is used by default", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  writeAssetManifest(dir, "readonly");
+
+  const vm = new VM({ autoStart: false, vfs: null }, resolved as any);
+
+  try {
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    assert.equal(resolvedOptions.rootDiskSnapshot, false);
+    assert.equal(resolvedOptions.rootDiskReadOnly, true);
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: rootfs option overrides manifest default", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  writeAssetManifest(dir, "readonly");
+
+  const vm = new VM(
+    {
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode: "memory" },
+    },
+    resolved as any,
+  );
+
+  try {
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    assert.equal(resolvedOptions.rootDiskSnapshot, true);
+    assert.equal(resolvedOptions.rootDiskReadOnly, false);
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("vm internals: resolveFuseConfig normalizes fuseMount and binds", () => {
   const mounts: Record<string, VirtualProvider> = {
