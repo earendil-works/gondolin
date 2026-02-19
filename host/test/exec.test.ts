@@ -160,6 +160,46 @@ test(
 );
 
 test(
+  "fs.stat returns Node-style Stats",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await vm.fs.writeFile("/tmp/gondolin-stat.txt", "hello");
+
+      const stats = await vm.fs.stat("/tmp/gondolin-stat.txt");
+      assert.equal(stats.isFile(), true);
+      assert.equal(stats.isDirectory(), false);
+      assert.equal(stats.size, 5);
+    });
+  },
+);
+
+test(
+  "fs.rename moves files",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await vm.fs.writeFile("/tmp/gondolin-rename-src.txt", "renamed");
+      await vm.fs.rename(
+        "/tmp/gondolin-rename-src.txt",
+        "/tmp/gondolin-rename-dst.txt",
+      );
+
+      const content = await vm.fs.readFile("/tmp/gondolin-rename-dst.txt", {
+        encoding: "utf-8",
+      });
+      assert.equal(content, "renamed");
+      await assert.rejects(
+        () => vm.fs.readFile("/tmp/gondolin-rename-src.txt"),
+        /failed to read guest file/,
+      );
+    });
+  },
+);
+
+test(
   "writeFile writes text content",
   { skip: skipVmTests, timeout: timeoutMs },
   async () => {

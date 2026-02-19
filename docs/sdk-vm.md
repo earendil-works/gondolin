@@ -215,8 +215,8 @@ sessions (PTY + stdin enabled), optionally attaching to the current terminal.
 ## `vm.fs`
 
 Filesystem operations are exposed under `vm.fs`. This includes both the
-existing file helpers and the additional `access()`/`mkdir()`/`listDir()`
-operations.
+existing file helpers and additional operations like `access()`, `mkdir()`,
+`listDir()`, `stat()`, and `rename()`.
 
 ```ts
 import { constants } from "node:fs";
@@ -231,6 +231,13 @@ await vm.fs.mkdir("/tmp/workspace/nested", { recursive: true });
 // List direct children
 const entries = await vm.fs.listDir("/tmp/workspace");
 console.log(entries);
+
+// Stat (same object shape as node:fs Stats / VFS Stats)
+const st = await vm.fs.stat("/tmp/workspace");
+console.log(st.isDirectory(), st.mode, st.size);
+
+// Rename / move
+await vm.fs.rename("/tmp/old-name.txt", "/tmp/new-name.txt");
 
 // Read text
 const osRelease = await vm.fs.readFile("/etc/os-release", {
@@ -262,6 +269,8 @@ await vm.fs.deleteFile("/tmp/some-dir", { recursive: true, force: true });
 Notes:
 
 - `vm.fs.listDir()` returns direct child names for a directory
+- `vm.fs.stat()` returns a Node-compatible `fs.Stats` object (same shape used by VFS providers)
+- `vm.fs.rename()` renames/moves a path
 - `vm.fs.readFile()` reads any path visible in the **running guest filesystem** (including rootfs paths under `/`)
 - `vm.fs.readFile()` returns a `Buffer` by default; pass `encoding` to get a `string`
 - `vm.fs.readFileStream()` streams file bytes as a Node readable stream

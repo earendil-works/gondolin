@@ -1,4 +1,5 @@
 import fs from "fs";
+import type { Stats } from "node:fs";
 import path from "path";
 import { Readable } from "stream";
 
@@ -48,6 +49,20 @@ export type VmFsListDirOptions = {
   /** working directory for relative paths */
   cwd?: string;
   /** abort signal for the list request */
+  signal?: AbortSignal;
+};
+
+export type VmFsStatOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the stat request */
+  signal?: AbortSignal;
+};
+
+export type VmFsRenameOptions = {
+  /** working directory for relative paths */
+  cwd?: string;
+  /** abort signal for the rename request */
   signal?: AbortSignal;
 };
 
@@ -115,6 +130,8 @@ export type VmFsDeleteOptions = {
   signal?: AbortSignal;
 };
 
+export type VmFsStat = Stats;
+
 export type VmFs = {
   /** check whether a guest path is accessible */
   access(filePath: string, options?: VmFsAccessOptions): Promise<void>;
@@ -122,6 +139,14 @@ export type VmFs = {
   mkdir(dirPath: string, options?: VmFsMkdirOptions): Promise<void>;
   /** list direct child names in a guest directory */
   listDir(dirPath: string, options?: VmFsListDirOptions): Promise<string[]>;
+  /** read filesystem metadata for a guest path */
+  stat(filePath: string, options?: VmFsStatOptions): Promise<VmFsStat>;
+  /** rename or move a guest path */
+  rename(
+    oldPath: string,
+    newPath: string,
+    options?: VmFsRenameOptions,
+  ): Promise<void>;
   /** create a readable stream for a guest file */
   readFileStream(
     filePath: string,
@@ -348,6 +373,112 @@ export class VmFsController implements VmFs {
     }
 
     return splitOutputLines(result.stdout);
+  }
+
+  async stat(
+    filePath: string,
+    options: VmFsStatOptions = {},
+  ): Promise<VmFsStat> {
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new Error("filePath must be a non-empty string");
+    }
+
+    const vfsPath = this.resolveVfsShortcutPath(filePath, options.cwd);
+    if (vfsPath) {
+      const vfs = this.options.vfs;
+      if (!vfs) {
+        throw new Error("vfs provider is not available");
+      }
+
+      try {
+        assertNotAborted(options.signal, "file stat aborted");
+        return await vfs.stat(vfsPath);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to stat guest file '${filePath}': ${detail}`);
+      }
+    }
+
+    const script = [
+      "set -eu",
+      'entry="$1"',
+      'exec stat -Lc "%f|%d|%i|%h|%u|%g|%r|%s|%B|%b|%X|%Y|%Z" -- "$entry"',
+    ].join("\n");
+
+    const result = await this.options.exec(
+      ["/bin/sh", "-c", script, "sh", filePath],
+      {
+        cwd: options.cwd,
+        signal: options.signal,
+      },
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to stat guest file '${filePath}': ${formatExecFailure(result)}`,
+      );
+    }
+
+    try {
+      return parseGuestStatOutput(result.stdout);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to stat guest file '${filePath}': ${detail}`);
+    }
+  }
+
+  async rename(
+    oldPath: string,
+    newPath: string,
+    options: VmFsRenameOptions = {},
+  ): Promise<void> {
+    if (typeof oldPath !== "string" || oldPath.length === 0) {
+      throw new Error("oldPath must be a non-empty string");
+    }
+    if (typeof newPath !== "string" || newPath.length === 0) {
+      throw new Error("newPath must be a non-empty string");
+    }
+
+    const oldVfsPath = this.resolveVfsShortcutPath(oldPath, options.cwd);
+    const newVfsPath = this.resolveVfsShortcutPath(newPath, options.cwd);
+    if (oldVfsPath && newVfsPath) {
+      const vfs = this.options.vfs;
+      if (!vfs) {
+        throw new Error("vfs provider is not available");
+      }
+
+      try {
+        assertNotAborted(options.signal, "rename aborted");
+        await vfs.rename(oldVfsPath, newVfsPath);
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `failed to rename guest path '${oldPath}' to '${newPath}': ${detail}`,
+        );
+      }
+    }
+
+    const script = [
+      "set -eu",
+      'src="$1"',
+      'dst="$2"',
+      'exec mv -- "$src" "$dst"',
+    ].join("\n");
+
+    const result = await this.options.exec(
+      ["/bin/sh", "-c", script, "sh", oldPath, newPath],
+      {
+        cwd: options.cwd,
+        signal: options.signal,
+      },
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to rename guest path '${oldPath}' to '${newPath}': ${formatExecFailure(result)}`,
+      );
+    }
   }
 
   async readFileStream(
@@ -790,6 +921,76 @@ function normalizeMkdirMode(mode: number | undefined): number | undefined {
   }
 
   return mode;
+}
+
+function parseGuestStatOutput(stdout: string): VmFsStat {
+  const line = stdout.trim();
+  const parts = line.split("|");
+  if (parts.length !== 13) {
+    throw new Error(`invalid stat output: ${JSON.stringify(line)}`);
+  }
+
+  const mode = parseInteger(parts[0], 16, "mode");
+  const dev = parseInteger(parts[1], 10, "dev");
+  const ino = parseInteger(parts[2], 10, "ino");
+  const nlink = parseInteger(parts[3], 10, "nlink");
+  const uid = parseInteger(parts[4], 10, "uid");
+  const gid = parseInteger(parts[5], 10, "gid");
+  const rdev = parseInteger(parts[6], 10, "rdev", 0);
+  const size = parseInteger(parts[7], 10, "size");
+  const blksize = parseInteger(parts[8], 10, "blksize", 4096);
+  const blocks = parseInteger(
+    parts[9],
+    10,
+    "blocks",
+    Math.max(1, Math.ceil(size / Math.max(blksize, 1))),
+  );
+  const atimeMs = parseInteger(parts[10], 10, "atime") * 1000;
+  const mtimeMs = parseInteger(parts[11], 10, "mtime") * 1000;
+  const ctimeMs = parseInteger(parts[12], 10, "ctime") * 1000;
+  const birthtimeMs = ctimeMs;
+
+  const stats = Object.create(fs.Stats.prototype) as VmFsStat;
+  Object.assign(stats, {
+    dev,
+    mode,
+    nlink,
+    uid,
+    gid,
+    rdev,
+    blksize,
+    ino,
+    size,
+    blocks,
+    atimeMs,
+    mtimeMs,
+    ctimeMs,
+    birthtimeMs,
+    atime: new Date(atimeMs),
+    mtime: new Date(mtimeMs),
+    ctime: new Date(ctimeMs),
+    birthtime: new Date(birthtimeMs),
+  });
+
+  return stats;
+}
+
+function parseInteger(
+  value: string,
+  radix: number,
+  field: string,
+  fallback?: number,
+): number {
+  const parsed = parseInt(value, radix);
+  if (!Number.isFinite(parsed)) {
+    if (fallback !== undefined) {
+      return fallback;
+    }
+    throw new Error(
+      `invalid ${field} in stat output: ${JSON.stringify(value)}`,
+    );
+  }
+  return parsed;
 }
 
 function formatExecFailure(result: ExecResult): string {
