@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
@@ -31,6 +32,7 @@ function makeTempResolvedServerOptions() {
       virtioFsSocketPath: path.join(dir, "virtiofs.sock"),
       virtioSshSocketPath: path.join(dir, "virtio-ssh.sock"),
       virtioIngressSocketPath: path.join(dir, "virtio-ingress.sock"),
+      virtioAppSocketPath: path.join(dir, "virtio-app.sock"),
       netSocketPath: path.join(dir, "net.sock"),
       netMac: "02:00:00:00:00:01",
       netEnabled: false,
@@ -499,6 +501,36 @@ test("vm internals: handleDisconnect rejects pending state waiters and sessions"
     await assert.rejects(waiter, /bye/);
     await assert.rejects(session1.resultPromise, /bye/);
     await assert.rejects(session2.resultPromise, /bye/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: openAppChannel recreates channel after stream is destroyed", async () => {
+  const { vm, cleanup } = makeVm({ vfs: null });
+  try {
+    let openCount = 0;
+    const newStream = () => {
+      const stream = new PassThrough() as PassThrough & { isConnected: () => boolean };
+      stream.isConnected = () => true;
+      return stream;
+    };
+
+    (vm as any).start = async () => {};
+    (vm as any).server = {
+      openAppStream: () => {
+        openCount += 1;
+        return newStream();
+      },
+    };
+
+    const first = await vm.openAppChannel();
+    first.stream.destroy();
+
+    const second = await vm.openAppChannel();
+
+    assert.notEqual(first, second);
+    assert.equal(openCount, 2);
   } finally {
     cleanup();
   }

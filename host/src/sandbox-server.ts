@@ -109,6 +109,8 @@ export type SandboxServerOptions = {
 
   /** virtio-serial ingress socket path */
   virtioIngressSocketPath?: string;
+  /** virtio-serial application socket path */
+  virtioAppSocketPath?: string;
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
@@ -231,6 +233,8 @@ export type ResolvedSandboxServerOptions = {
 
   /** virtio-serial ingress socket path */
   virtioIngressSocketPath: string;
+  /** virtio-serial application socket path */
+  virtioAppSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
   /** guest mac address */
@@ -414,6 +418,10 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
   );
+  const defaultVirtioApp = path.resolve(
+    tmpDir,
+    `gondolin-virtio-app-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetSock = path.resolve(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
@@ -492,8 +500,8 @@ export function resolveSandboxServerOptions(
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
     virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
-    virtioIngressSocketPath:
-      options.virtioIngressSocketPath ?? defaultVirtioIngress,
+    virtioIngressSocketPath: options.virtioIngressSocketPath ?? defaultVirtioIngress,
+    virtioAppSocketPath: options.virtioAppSocketPath ?? defaultVirtioApp,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
@@ -639,8 +647,14 @@ class VirtioBridge {
     return queued;
   }
 
+  isConnected(): boolean {
+    return this.socket !== null;
+  }
+
   onMessage?: (message: IncomingMessage) => void;
   onError?: (error: unknown) => void;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
 
   /** Called when the bridge may be able to accept more queued messages */
   onWritable?: () => void;
@@ -691,6 +705,7 @@ class VirtioBridge {
     }
     this.socket = socket;
     this.waitingDrain = false;
+    this.onConnected?.();
 
     socket.on("data", (chunk) => {
       try {
@@ -727,11 +742,15 @@ class VirtioBridge {
   }
 
   private handleDisconnect() {
+    const hadSocket = this.socket !== null;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
     }
     this.waitingDrain = false;
+    if (hadSocket) {
+      this.onDisconnected?.();
+    }
   }
 
   private scheduleReconnect() {
@@ -827,6 +846,68 @@ class TcpForwardStream extends Duplex {
   openFailed(message: string): void {
     this.closedByRemote = true;
     this.destroy(new Error(message));
+  }
+}
+
+export class AppStream extends Duplex {
+  private connected = false;
+
+  constructor(
+    private readonly sendFrame: (message: object) => boolean,
+    private readonly onDispose: () => void
+  ) {
+    super();
+    this.on("close", () => {
+      this.onDispose();
+    });
+  }
+
+  _read(_size: number): void {
+    // no-op; data is pushed from virtio handler
+  }
+
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const ok = this.sendFrame({
+      v: 1,
+      t: "app_data",
+      id: 1,
+      p: { data: chunk },
+    });
+
+    if (!ok) {
+      callback(new Error("virtio app queue exceeded"));
+      return;
+    }
+
+    callback();
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    callback();
+  }
+
+  _destroy(_error: Error | null, callback: (error?: Error | null) => void): void {
+    callback();
+  }
+
+  pushRemote(data: Buffer): void {
+    this.push(data);
+  }
+
+  markConnected(): void {
+    if (this.connected) return;
+    this.connected = true;
+    this.emit("connected");
+  }
+
+  markDisconnected(): void {
+    if (!this.connected) return;
+    this.connected = false;
+    this.emit("disconnected");
+  }
+
+  isConnected(): boolean {
+    return this.connected;
   }
 }
 
@@ -999,6 +1080,7 @@ export class SandboxServer extends EventEmitter {
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
+  private readonly appBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
@@ -1014,6 +1096,7 @@ export class SandboxServer extends EventEmitter {
     { resolve: () => void; reject: (err: Error) => void }
   >();
   private nextIngressTcpStreamId = 1;
+  private appStream: AppStream | null = null;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -1146,9 +1229,8 @@ export class SandboxServer extends EventEmitter {
       virtioFsSocketPath: this.options.virtioFsSocketPath,
       virtioSshSocketPath: this.options.virtioSshSocketPath,
       virtioIngressSocketPath: this.options.virtioIngressSocketPath,
-      netSocketPath: this.options.netEnabled
-        ? this.options.netSocketPath
-        : undefined,
+      virtioAppSocketPath: this.options.virtioAppSocketPath,
+      netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
       append: this.baseAppend,
       machineType: this.options.machineType,
@@ -1187,6 +1269,11 @@ export class SandboxServer extends EventEmitter {
     // Ingress proxy streams can also be long-lived and high-throughput.
     this.ingressBridge = new VirtioBridge(
       this.options.virtioIngressSocketPath,
+      Math.max(maxPendingBytes, 64 * 1024 * 1024),
+    );
+    // App channel is long-lived and carries all guest daemon protocol traffic.
+    this.appBridge = new VirtioBridge(
+      this.options.virtioAppSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
     this.fsService = this.vfsProvider
@@ -1231,6 +1318,7 @@ export class SandboxServer extends EventEmitter {
         this.fsBridge.connect();
         this.sshBridge.connect();
         this.ingressBridge.connect();
+        this.appBridge.connect();
       }
       if (state === "stopped") {
         // The controller emits state="stopped" before emitting "exit".
@@ -1723,6 +1811,38 @@ export class SandboxServer extends EventEmitter {
       this.ingressTcpStreams.clear();
     };
 
+    this.appBridge.onMessage = (message: any) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "app_data"
+            ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : "";
+        this.emitDebug("protocol", `virtioapp rx t=${message.t} id=${id}${extra}`);
+      }
+
+      if (!isValidRequestId(message.id)) return;
+      if (message.t !== "app_data") return;
+      const data = (message as any).p?.data;
+      if (!Buffer.isBuffer(data)) return;
+      this.appStream?.pushRemote(data);
+    };
+
+    this.appBridge.onConnected = () => {
+      this.appStream?.markConnected();
+    };
+
+    this.appBridge.onDisconnected = () => {
+      this.appStream?.markDisconnected();
+    };
+
+    this.appBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[app] virtio bridge error: ${message}`));
+      this.appStream?.destroy(new Error(`app virtio bridge error: ${message}`));
+      this.appStream = null;
+    };
+
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
       this.emit("error", new Error(`[virtio] bridge error: ${message}`));
@@ -2180,6 +2300,32 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
+  /**
+   * Open the dedicated application channel stream used by Salici guest daemons.
+   */
+  openAppStream(): AppStream {
+    const existing = this.appStream;
+    if (existing && !existing.destroyed) {
+      return existing;
+    }
+
+    const stream = new AppStream(
+      (m) => this.appBridge.send(m),
+      () => {
+        if (this.appStream === stream) {
+          this.appStream = null;
+        }
+      },
+    );
+    this.appStream = stream;
+
+    if (this.appBridge.isConnected()) {
+      stream.markConnected();
+    }
+
+    return stream;
+  }
+
   private broadcastStatus(state: SandboxState) {
     for (const client of this.clients) {
       sendJson(client, { type: "status", state });
@@ -2245,6 +2391,7 @@ export class SandboxServer extends EventEmitter {
     this.fsBridge.connect();
     this.sshBridge.connect();
     this.ingressBridge.connect();
+    this.appBridge.connect();
   }
 
   private async closeInternal() {
@@ -2258,6 +2405,7 @@ export class SandboxServer extends EventEmitter {
       this.fsBridge.disconnect(),
       this.sshBridge.disconnect(),
       this.ingressBridge.disconnect(),
+      this.appBridge.disconnect(),
     ]);
 
     // Tear down host-side network + streams promptly. QEMU may still be running
@@ -2275,6 +2423,8 @@ export class SandboxServer extends EventEmitter {
     }
     this.ingressTcpStreams.clear();
     this.ingressTcpOpenWaiters.clear();
+    this.appStream?.destroy();
+    this.appStream = null;
 
     await this.controller.close();
     await this.fsService?.close();

@@ -12,6 +12,8 @@ export {
   type VMState,
   type EnableSshOptions,
   type SshAccess,
+  type AppChannel,
+  type AppChannelEvent,
   type VmFs,
   type VmRootfsOptions,
   type VmFsAccessOptions,

@@ -25,6 +25,8 @@ function makeResolvedOptions(
     virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
     virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
     virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
+    virtioIngressSocketPath: "/tmp/gondolin-test-virtioingress.sock",
+    virtioAppSocketPath: "/tmp/gondolin-test-virtioapp.sock",
     netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
