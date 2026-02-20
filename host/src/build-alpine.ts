@@ -9,6 +9,8 @@
  *   - mke2fs (e2fsprogs) — for creating ext4 rootfs images
  *   - cpio — for creating initramfs archives
  *   - lz4 — for compressing initramfs
+ *   - tar (optional) — for fast OCI rootfs extraction
+ *   - docker/podman (optional) — for OCI rootfs export
  */
 
 import fs from "fs";
@@ -17,12 +19,27 @@ import { createGunzip } from "zlib";
 import { pipeline } from "stream/promises";
 import { execFileSync } from "child_process";
 
-import type { Architecture } from "./build-config";
+import type {
+  Architecture,
+  ContainerRuntime,
+  OciPullPolicy,
+} from "./build-config";
 import { parseEnvEntry } from "./env-utils";
 
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
+
+export interface OciRootfsOptions {
+  /** OCI image reference (`repo/name[:tag]` or `repo/name@sha256:...`) */
+  image: string;
+  /** runtime used to pull/create/export OCI images (auto-detect when undefined) */
+  runtime?: ContainerRuntime;
+  /** image platform override (default: derived from `arch`) */
+  platform?: string;
+  /** pull behavior before export (default: "if-not-present") */
+  pullPolicy?: OciPullPolicy;
+}
 
 export interface AlpineBuildOptions {
   /** target architecture */
@@ -33,6 +50,8 @@ export interface AlpineBuildOptions {
   alpineBranch: string;
   /** full url to the alpine minirootfs tarball (overrides mirror) */
   alpineUrl?: string;
+  /** OCI source used for rootfs extraction (Alpine minirootfs when undefined) */
+  ociRootfs?: OciRootfsOptions;
   /** packages to install in the rootfs */
   rootfsPackages: string[];
   /** packages to install in the initramfs */
@@ -127,9 +146,27 @@ export async function buildAlpineImages(
   fs.mkdirSync(rootfsDir, { recursive: true });
   fs.mkdirSync(initramfsDir, { recursive: true });
 
-  log("Extracting Alpine minirootfs...");
-  await extractTarGz(tarballPath, rootfsDir);
+  if (opts.ociRootfs) {
+    const runtimeLabel = opts.ociRootfs.runtime ?? "auto-detect";
+    log(
+      `Extracting OCI rootfs from ${opts.ociRootfs.image} (${runtimeLabel})...`,
+    );
+    exportOciRootfs({
+      arch,
+      workDir,
+      targetDir: rootfsDir,
+      log,
+      ...opts.ociRootfs,
+    });
+  } else {
+    log("Extracting Alpine minirootfs for rootfs...");
+    await extractTarGz(tarballPath, rootfsDir);
+  }
+
+  log("Extracting Alpine minirootfs for initramfs...");
   await extractTarGz(tarballPath, initramfsDir);
+
+  ensureRootfsShell(rootfsDir, opts.ociRootfs?.image);
 
   // Step 3 — install APK packages
   if (rootfsPackages.length > 0) {
@@ -198,18 +235,8 @@ export async function buildAlpineImages(
     }
   }
 
-  // Step 5 — copy kernel modules for initramfs
-  const modulesBase = path.join(rootfsDir, "lib/modules");
-  if (fs.existsSync(modulesBase)) {
-    const versions = fs.readdirSync(modulesBase);
-    if (versions.length > 0) {
-      const kernelVersion = versions[0];
-      const srcModules = path.join(modulesBase, kernelVersion);
-      const dstModules = path.join(initramfsDir, "lib/modules", kernelVersion);
-      log(`Copying kernel modules for ${kernelVersion}`);
-      copyInitramfsModules(srcModules, dstModules);
-    }
-  }
+  // Step 5 — copy kernel modules for initramfs/rootfs
+  syncKernelModules(rootfsDir, initramfsDir, log);
 
   // Remove /boot from rootfs (kernel lives separately)
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
@@ -474,6 +501,203 @@ function prepareTarget(target: string, isDir: boolean): void {
   }
 }
 
+function ensureRootfsShell(rootfsDir: string, ociImage?: string): void {
+  const shellPath = path.join(rootfsDir, "bin/sh");
+  if (fs.existsSync(shellPath)) {
+    return;
+  }
+
+  if (ociImage) {
+    throw new Error(
+      `OCI rootfs image '${ociImage}' does not contain /bin/sh. ` +
+        "Provide an image with a POSIX shell or set init.rootfsInit to a custom init script.",
+    );
+  }
+
+  throw new Error(`Rootfs is missing required shell at ${shellPath}`);
+}
+
+interface OciExportOptions extends OciRootfsOptions {
+  /** target architecture */
+  arch: Architecture;
+  /** working directory for temporary export files */
+  workDir: string;
+  /** rootfs extraction target directory */
+  targetDir: string;
+  /** log sink */
+  log: (msg: string) => void;
+}
+
+function exportOciRootfs(opts: OciExportOptions): void {
+  const runtime = detectOciRuntime(opts.runtime);
+  const platform = opts.platform ?? getOciPlatform(opts.arch);
+  const pullPolicy = opts.pullPolicy ?? "if-not-present";
+
+  if (pullPolicy === "always") {
+    pullOciImage(runtime, opts.image, platform, opts.log);
+  } else {
+    const hasImage = hasLocalOciImage(runtime, opts.image);
+    if (!hasImage && pullPolicy === "never") {
+      throw new Error(
+        `OCI image '${opts.image}' is not available locally and pullPolicy is 'never'`,
+      );
+    }
+    if (!hasImage) {
+      pullOciImage(runtime, opts.image, platform, opts.log);
+    }
+  }
+
+  const containerId = createOciExportContainer(
+    runtime,
+    opts.image,
+    platform,
+    opts.log,
+  );
+  const exportTar = path.join(opts.workDir, "oci-rootfs.tar");
+
+  try {
+    runContainerCommand(runtime, ["export", containerId, "-o", exportTar]);
+    extractTarFile(exportTar, opts.targetDir);
+  } finally {
+    try {
+      runContainerCommand(runtime, ["rm", "-f", containerId]);
+    } catch {
+      // Best effort cleanup.
+    }
+    fs.rmSync(exportTar, { force: true });
+  }
+}
+
+function getOciPlatform(arch: Architecture): string {
+  return arch === "x86_64" ? "linux/amd64" : "linux/arm64";
+}
+
+function detectOciRuntime(preferred?: ContainerRuntime): ContainerRuntime {
+  if (preferred) {
+    if (!hasContainerRuntime(preferred)) {
+      throw new Error(
+        `Container runtime '${preferred}' is required for OCI rootfs builds but was not found on PATH`,
+      );
+    }
+    return preferred;
+  }
+
+  for (const runtime of ["docker", "podman"] as const) {
+    if (hasContainerRuntime(runtime)) {
+      return runtime;
+    }
+  }
+
+  throw new Error(
+    "OCI rootfs builds require Docker or Podman to pull and export the image",
+  );
+}
+
+function hasContainerRuntime(runtime: ContainerRuntime): boolean {
+  try {
+    execFileSync(runtime, ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasLocalOciImage(runtime: ContainerRuntime, image: string): boolean {
+  try {
+    runContainerCommand(runtime, ["image", "inspect", image]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pullOciImage(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+  log: (msg: string) => void,
+): void {
+  log(`Pulling OCI image ${image} (${platform}) with ${runtime}`);
+  runContainerCommand(runtime, ["pull", "--platform", platform, image]);
+}
+
+function createOciExportContainer(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+  log: (msg: string) => void,
+): string {
+  log(`Creating OCI export container from ${image}`);
+  const output = runContainerCommand(runtime, [
+    "create",
+    "--platform",
+    platform,
+    image,
+  ]);
+  const id = output.trim().split(/\s+/)[0];
+  if (!id) {
+    throw new Error(`Failed to create OCI export container for '${image}'`);
+  }
+  return id;
+}
+
+function runContainerCommand(
+  runtime: ContainerRuntime,
+  args: string[],
+): string {
+  try {
+    return execFileSync(runtime, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+  } catch (err) {
+    const e = err as {
+      status?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+
+    throw new Error(
+      `Container command failed: ${runtime} ${args.join(" ")}\n` +
+        `exit: ${String(e.status ?? "?")}\n` +
+        (stdout || stderr ? `${stdout}${stderr}` : ""),
+    );
+  }
+}
+
+function extractTarFile(tarPath: string, destDir: string): void {
+  try {
+    execFileSync("tar", ["-xf", tarPath, "-C", destDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return;
+  } catch (err) {
+    const e = err as {
+      code?: unknown;
+      status?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+
+    if (e.code !== "ENOENT") {
+      const stdout = typeof e.stdout === "string" ? e.stdout : "";
+      const stderr = typeof e.stderr === "string" ? e.stderr : "";
+      throw new Error(
+        `Failed to extract OCI rootfs tar with tar (exit ${String(e.status ?? "?")}): ` +
+          `${tarPath}\n` +
+          (stdout || stderr ? `${stdout}${stderr}` : ""),
+      );
+    }
+  }
+
+  // Fallback to in-process extraction when tar is unavailable.
+  const raw = fs.readFileSync(tarPath);
+  const entries = parseTar(raw);
+  extractEntries(entries, destDir);
+}
+
 // ---------------------------------------------------------------------------
 // APK package resolution and installation
 // ---------------------------------------------------------------------------
@@ -530,6 +754,12 @@ async function installPackages(
 ): Promise<void> {
   // Read repository URLs from the extracted rootfs
   const reposFile = path.join(targetDir, "etc/apk/repositories");
+  if (!fs.existsSync(reposFile)) {
+    throw new Error(
+      `Cannot install APK packages into ${targetDir}: missing ${reposFile}`,
+    );
+  }
+
   const repos = fs
     .readFileSync(reposFile, "utf8")
     .split("\n")
@@ -804,6 +1034,52 @@ export async function downloadFile(url: string, dest: string): Promise<void> {
 
 const MODULE_FILE_SUFFIXES = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"] as const;
 const REQUIRED_INITRAMFS_MODULES = ["virtio_blk", "ext4"] as const;
+
+function syncKernelModules(
+  rootfsDir: string,
+  initramfsDir: string,
+  log: (msg: string) => void,
+): void {
+  const rootfsModulesBase = path.join(rootfsDir, "lib/modules");
+  const initramfsModulesBase = path.join(initramfsDir, "lib/modules");
+
+  const rootfsVersions = listKernelModuleVersions(rootfsModulesBase);
+  const initramfsVersions = listKernelModuleVersions(initramfsModulesBase);
+
+  for (const kernelVersion of rootfsVersions) {
+    const srcModules = path.join(rootfsModulesBase, kernelVersion);
+    const dstModules = path.join(initramfsModulesBase, kernelVersion);
+    log(`Copying kernel modules for ${kernelVersion} into initramfs`);
+    copyInitramfsModules(srcModules, dstModules);
+  }
+
+  const knownRootfsVersions = new Set(rootfsVersions);
+  for (const kernelVersion of initramfsVersions) {
+    if (knownRootfsVersions.has(kernelVersion)) {
+      continue;
+    }
+
+    const srcModules = path.join(initramfsModulesBase, kernelVersion);
+    const dstModules = path.join(rootfsModulesBase, kernelVersion);
+    log(`Copying kernel modules for ${kernelVersion} into rootfs`);
+    copyInitramfsModules(srcModules, dstModules);
+  }
+}
+
+function listKernelModuleVersions(modulesBase: string): string[] {
+  if (!fs.existsSync(modulesBase)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(modulesBase)
+    .filter((entry) =>
+      fs.statSync(path.join(modulesBase, entry), {
+        throwIfNoEntry: false,
+      })?.isDirectory(),
+    )
+    .sort();
+}
 
 function copyInitramfsModules(srcDir: string, dstDir: string): void {
   if (!fs.existsSync(srcDir)) return;

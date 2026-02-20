@@ -177,10 +177,13 @@ export {
 export {
   type Architecture,
   type Distro,
+  type ContainerRuntime,
+  type OciPullPolicy,
   type BuildConfig,
   type AlpineConfig,
   type NixOSConfig,
   type ContainerConfig,
+  type OciRootfsConfig,
   type RootfsConfig,
   type InitConfig,
   type RuntimeDefaultsConfig,

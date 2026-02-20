@@ -1,0 +1,11 @@
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "oci": {
+    "image": "docker.io/library/debian:bookworm-slim",
+    "pullPolicy": "if-not-present"
+  },
+  "rootfs": {
+    "label": "gondolin-root"
+  }
+}

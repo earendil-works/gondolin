@@ -29,6 +29,22 @@ gondolin build --config host/examples/llm.json --output ./llm-assets
 GONDOLIN_GUEST_DIR=./llm-assets gondolin exec -- llm --help
 ```
 
+Use an OCI image (Docker Hub/GHCR/private registry) as the rootfs base:
+
+```json
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "oci": {
+    "image": "docker.io/library/debian:bookworm-slim"
+  }
+}
+```
+
+```bash
+gondolin build --config host/examples/oci-debian.json --output ./oci-assets
+```
+
 ## Build Requirements
 
 Building custom images requires the following tools:
@@ -39,6 +55,7 @@ Building custom images requires the following tools:
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating ext4 rootfs images (mke2fs) |
+| **Docker or Podman** *(optional)* | Pull/export OCI rootfs images (`oci.image`) |
 
 ### macOS
 
@@ -111,6 +128,7 @@ The file has the following structure:
 | `distro` | `"alpine"` | Distribution (only Alpine is currently supported) |
 | `env` | object \| string[] | Default environment variables baked into the guest image |
 | `alpine` | object | Alpine-specific configuration |
+| `oci` | object | OCI rootfs source (uses exported container filesystem as rootfs base) |
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
 | `postBuild` | object | Post-package commands executed in the rootfs |
@@ -140,6 +158,25 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `kernelImage` | string | `"vmlinuz-virt"` | Kernel image filename |
 | `rootfsPackages` | string[] | see below | Packages for the root filesystem |
 | `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
+
+### OCI Rootfs Configuration
+
+When `oci` is set, Gondolin exports the OCI image filesystem and uses it as the rootfs base.
+The Alpine minirootfs is still used for initramfs generation and kernel packaging.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image` | string | required | OCI image reference (`repo/name[:tag]` or `repo/name@sha256:...`) |
+| `runtime` | `"docker" \| "podman"` | auto-detect | Runtime used for pull/create/export |
+| `platform` | string | derived from `arch` | Platform passed to runtime (e.g. `linux/arm64`) |
+| `pullPolicy` | `"if-not-present" \| "always" \| "never"` | `"if-not-present"` | Pull behavior before export |
+
+Notes:
+
+- `alpine.rootfsPackages` is ignored when `oci` is set
+- `alpine.initramfsPackages` automatically includes the configured kernel package when `oci` is set
+- The exported rootfs must contain `/bin/sh`, or provide a custom `init.rootfsInit`
+- `container.force=true` is currently not supported together with `oci`
 
 ### Rootfs Configuration
 
@@ -191,7 +228,8 @@ Notes:
 
 ### Container Configuration
 
-Used for cross-platform builds (e.g., building Linux images on macOS):
+Used for the *build environment* (e.g., building Linux images on macOS).
+This is separate from `oci`, which controls the guest rootfs source.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
