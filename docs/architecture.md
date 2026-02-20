@@ -58,6 +58,7 @@ Guest daemons/components:
 - `sandboxfs`: a FUSE daemon that forwards filesystem operations to the host via RPC
 - `sandboxssh`: a dedicated host-to-guest TCP forwarder for SSH access (loopback-only inside the guest)
 - `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
+- guest application daemons can use `/dev/virtio-ports/virtio-app` for dedicated host <-> guest control traffic
 - `/init`: mounts tmpfs, brings up networking, starts services
 
 ### QEMU
@@ -84,6 +85,7 @@ See [QEMU](./qemu.md) for details.
 |  |  [virtio-serial]  fs RPC      <---------------->  VFS RPC service       | |
 |  |  [virtio-serial]  ssh fwd     <---------------->  loopback-only proxy   | |
 |  |  [virtio-serial]  ingress fwd <---------------->  ingress gateway       | |
+|  |  [virtio-serial]  app channel <---------------->  host app bridge       | |
 |  +-------------------------------------------------------------------------+ |
 |                                                                              |
 +------------------------------------------------------------------------------+
@@ -100,6 +102,7 @@ It's useful to think of Gondolin as two planes:
 
   - command execution (`vm.exec`)
   - filesystem RPC for the programmable mounts
+  - app-daemon host <-> guest traffic (`vm.openAppChannel()`)
   - a small set of host <-> guest utility channels
 
 - **Data plane:** guest-visible "normal" Linux interfaces

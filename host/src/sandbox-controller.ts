@@ -68,6 +68,8 @@ export type SandboxConfig = {
 
   /** virtio-serial ingress socket path */
   virtioIngressSocketPath: string;
+  /** virtio-serial application socket path */
+  virtioAppSocketPath: string;
   /** kernel cmdline append string */
   append: string;
   /** qemu machine type */
@@ -381,6 +383,10 @@ function buildQemuArgs(config: SandboxConfig) {
     "-chardev",
     `socket,id=virtioingress0,path=${config.virtioIngressSocketPath},server=off`,
   );
+  args.push(
+    "-chardev",
+    `socket,id=virtioapp0,path=${config.virtioAppSocketPath},server=off`
+  );
 
   args.push("-device", `${serialDev},id=virtio-serial0`);
   args.push(
@@ -398,6 +404,10 @@ function buildQemuArgs(config: SandboxConfig) {
   args.push(
     "-device",
     "virtserialport,chardev=virtioingress0,name=virtio-ingress,bus=virtio-serial0.0",
+  );
+  args.push(
+    "-device",
+    "virtserialport,chardev=virtioapp0,name=virtio-app,bus=virtio-serial0.0"
   );
 
   if (config.netSocketPath) {

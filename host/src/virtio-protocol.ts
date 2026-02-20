@@ -193,6 +193,20 @@ export type FileReadData = {
   };
 };
 
+export type AppData = {
+  /** protocol version */
+  v: number;
+  /** message type */
+  t: "app_data";
+  /** stream id */
+  id: number;
+  /** payload */
+  p: {
+    /** raw app channel bytes */
+    data: Buffer;
+  };
+};
+
 export type FileReadDone = {
   /** protocol version */
   v: number;
@@ -254,6 +268,7 @@ export type IncomingMessage =
   | TcpData
   | TcpEof
   | TcpClose
+  | AppData
   | FileReadData
   | FileReadDone
   | FileWriteDone

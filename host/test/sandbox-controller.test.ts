@@ -38,6 +38,7 @@ function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
     virtioFsSocketPath: "/tmp/virtiofs.sock",
     virtioSshSocketPath: "/tmp/virtio-ssh.sock",
     virtioIngressSocketPath: "/tmp/virtio-ingress.sock",
+    virtioAppSocketPath: "/tmp/virtio-app.sock",
     append: "console=ttyS0",
     machineType: "virt",
     accel: "tcg",
@@ -237,6 +238,8 @@ test("sandbox-controller: buildQemuArgs does not select -cpu host when using tcg
     virtioSocketPath: "/tmp/virtio.sock",
     virtioFsSocketPath: "/tmp/virtiofs.sock",
     virtioSshSocketPath: "/tmp/virtiossh.sock",
+    virtioIngressSocketPath: "/tmp/virtioingress.sock",
+    virtioAppSocketPath: "/tmp/virtioapp.sock",
     append: "console=ttyS0",
     machineType: "q35",
     accel: "tcg",
@@ -248,6 +251,9 @@ test("sandbox-controller: buildQemuArgs does not select -cpu host when using tcg
   const cpuIndex = args.indexOf("-cpu");
   assert.notEqual(cpuIndex, -1);
   assert.equal(args[cpuIndex + 1], "max");
+  assert.ok(args.includes("socket,id=virtioapp0,path=/tmp/virtioapp.sock,server=off"));
+  assert.ok(args.includes(`${"virtio-serial-pci"},id=virtio-serial0`));
+  assert.ok(args.includes("virtserialport,chardev=virtioapp0,name=virtio-app,bus=virtio-serial0.0"));
 });
 
 test("sandbox-controller: selectCpu only uses host with matching hw accel", () => {
