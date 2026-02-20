@@ -212,6 +212,51 @@ that the guest process is terminated.
 `vm.shell()` is a convenience wrapper around `vm.exec()` for interactive
 sessions (PTY + stdin enabled), optionally attaching to the current terminal.
 
+## `vm.openAppChannel()`
+
+`vm.openAppChannel()` opens a dedicated host <-> guest byte stream for
+long-running guest daemons.
+
+Unlike guest egress networking, this channel is a direct virtio-serial control
+path and does not go through HTTP/TLS policy hooks.
+
+```ts
+const vm = await VM.create();
+const app = await vm.openAppChannel();
+
+app.on("disconnect", () => {
+  console.warn("app channel disconnected");
+});
+
+app.on("reconnect", () => {
+  console.info("app channel reconnected");
+});
+
+app.stream.on("data", (chunk) => {
+  // raw bytes from the guest daemon
+  console.log("rx bytes:", chunk.length);
+});
+
+// send raw bytes to the guest daemon
+app.stream.write(Buffer.from("ping\n", "utf8"));
+
+// ...
+await app.close();
+await vm.close();
+```
+
+Notes:
+
+- The stream is raw bytes; framing and request/response semantics are your
+  protocol's responsibility
+- Calling `vm.openAppChannel()` again reuses the active channel until it closes
+- A `disconnect` event is emitted only after the channel was connected at least
+  once
+- A `reconnect` event is emitted when connectivity returns after a disconnect
+- If the host-side virtio queue is full, writes fail with an error and should
+  be retried at your protocol layer
+- Guest daemons can access this port at `/dev/virtio-ports/virtio-app`
+
 ## `vm.fs`
 
 Filesystem operations are exposed under `vm.fs`. This includes both the

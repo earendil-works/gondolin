@@ -48,6 +48,7 @@ import {
   resolveSandboxServerOptionsAsync,
 } from "./server-options.ts";
 import {
+  AppStream,
   MAX_REQUEST_ID,
   TcpForwardStream,
   VirtioBridge,
@@ -163,6 +164,7 @@ export class SandboxServer extends EventEmitter {
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
+  private readonly appBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
@@ -178,6 +180,7 @@ export class SandboxServer extends EventEmitter {
     { resolve: () => void; reject: (err: Error) => void }
   >();
   private nextIngressTcpStreamId = 1;
+  private appStream: AppStream | null = null;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -310,6 +313,7 @@ export class SandboxServer extends EventEmitter {
       virtioFsSocketPath: this.options.virtioFsSocketPath,
       virtioSshSocketPath: this.options.virtioSshSocketPath,
       virtioIngressSocketPath: this.options.virtioIngressSocketPath,
+      virtioAppSocketPath: this.options.virtioAppSocketPath,
       netSocketPath: this.options.netEnabled
         ? this.options.netSocketPath
         : undefined,
@@ -351,6 +355,11 @@ export class SandboxServer extends EventEmitter {
     // Ingress proxy streams can also be long-lived and high-throughput.
     this.ingressBridge = new VirtioBridge(
       this.options.virtioIngressSocketPath,
+      Math.max(maxPendingBytes, 64 * 1024 * 1024),
+    );
+    // App channel is long-lived and carries guest daemon protocol traffic.
+    this.appBridge = new VirtioBridge(
+      this.options.virtioAppSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
     this.fsService = this.vfsProvider
@@ -396,6 +405,7 @@ export class SandboxServer extends EventEmitter {
         this.fsBridge.connect();
         this.sshBridge.connect();
         this.ingressBridge.connect();
+        this.appBridge.connect();
       }
       if (state === "stopped") {
         // The controller emits state="stopped" before emitting "exit".
@@ -886,6 +896,41 @@ export class SandboxServer extends EventEmitter {
         stream.destroy(new Error("ingress virtio bridge error"));
       }
       this.ingressTcpStreams.clear();
+    };
+
+    this.appBridge.onMessage = (message: any) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "app_data"
+            ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : "";
+        this.emitDebug(
+          "protocol",
+          `virtioapp rx t=${message.t} id=${id}${extra}`,
+        );
+      }
+
+      if (!isValidRequestId(message.id)) return;
+      if (message.t !== "app_data") return;
+      const data = (message as any).p?.data;
+      if (!Buffer.isBuffer(data)) return;
+      this.appStream?.pushRemote(data);
+    };
+
+    this.appBridge.onConnected = () => {
+      this.appStream?.markConnected();
+    };
+
+    this.appBridge.onDisconnected = () => {
+      this.appStream?.markDisconnected();
+    };
+
+    this.appBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[app] virtio bridge error: ${message}`));
+      this.appStream?.destroy(new Error(`app virtio bridge error: ${message}`));
+      this.appStream = null;
     };
 
     this.bridge.onError = (err) => {
