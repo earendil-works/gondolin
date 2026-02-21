@@ -166,8 +166,6 @@ export async function buildAlpineImages(
   log("Extracting Alpine minirootfs for initramfs...");
   await extractTarGz(tarballPath, initramfsDir);
 
-  ensureRootfsShell(rootfsDir, opts.ociRootfs?.image);
-
   // Step 3 — install APK packages
   if (rootfsPackages.length > 0) {
     log(`Installing rootfs packages: ${rootfsPackages.join(" ")}`);
@@ -176,6 +174,10 @@ export async function buildAlpineImages(
   if (initramfsPackages.length > 0) {
     log(`Installing initramfs packages: ${initramfsPackages.join(" ")}`);
     await installPackages(initramfsDir, initramfsPackages, arch, cacheDir, log);
+  }
+
+  if (opts.ociRootfs && (postBuildCommands.length > 0 || !opts.rootfsInit)) {
+    ensureRootfsShell(rootfsDir, opts.ociRootfs.image);
   }
 
   if (postBuildCommands.length > 0) {
