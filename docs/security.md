@@ -350,14 +350,15 @@ These are rules to not compromise the security guarantees of the system:
 2. **Use `ReadonlyProvider(RealFSProvider(...))` for host directories you must expose**
 3. **Avoid mounting your whole home directory**
 4. **Be careful with mounting `/`**
-    - If you mount a custom provider at `/`, you might hide `/etc/ssl/certs`.
-    - Gondolin automatically injects a read-only CA cert mount at `/etc/ssl/certs` unless you already mounted that path.
+    - If you mount a custom provider at `/`, you might hide distro CA bundles.
+    - Gondolin injects a read-only MITM cert at `/etc/gondolin/mitm/ca.crt`.
 
 ### TLS MITM CA Handling
 
 - Gondolin generates a local CA under `~/.cache/gondolin/ssl` (or `XDG_CACHE_HOME`).
-- The CA cert is injected into the guest at `/etc/ssl/certs/ca-certificates.crt`
-  unless you override that mount.
+- The CA cert is injected into the guest at `/etc/gondolin/mitm/ca.crt`.
+- Guest init scripts try to install it via `update-ca-certificates` when writable,
+  and always publish a merged runtime bundle at `/run/gondolin/ca-certificates.crt`.
 
 Operational guidance:
 - Treat the CA private key as sensitive (it can sign certs trusted by the guest).

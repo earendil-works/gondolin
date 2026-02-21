@@ -159,7 +159,7 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `rootfsPackages` | string[] | see below | Packages for the root filesystem |
 | `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
 
-### OCI Rootfs Configuration
+### OCI Support
 
 When `oci` is set, Gondolin exports the OCI image filesystem and uses it as the rootfs base.
 The Alpine minirootfs is still used for initramfs generation and kernel packaging.
@@ -177,6 +177,21 @@ Notes:
 - `alpine.initramfsPackages` automatically includes the configured kernel package when `oci` is set
 - The exported rootfs must contain `/bin/sh`, or provide a custom `init.rootfsInit`
 - `container.force=true` is currently not supported together with `oci`
+
+OCI support swaps the **root filesystem contents**, not the whole image build pipeline.
+Gondolin still assembles boot artifacts from Alpine components, and then layers the
+exported OCI filesystem on top as `rootfs.ext4`.
+
+In practice, the build is split into two parts:
+
+- **Boot layer (still Alpine-based):** kernel package selection, kernel image, and initramfs generation
+- **Rootfs layer (from OCI):** userspace filesystem exported from `oci.image` (Debian, Ubuntu, etc.)
+
+That is why OCI examples still use:
+
+- `"distro": "alpine"`
+- `alpine.kernelPackage` / `alpine.kernelImage`
+- `alpine.initramfsPackages`
 
 ### Rootfs Configuration
 
