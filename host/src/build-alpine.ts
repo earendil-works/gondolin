@@ -1063,8 +1063,8 @@ function syncKernelModules(
 
     const srcModules = path.join(initramfsModulesBase, kernelVersion);
     const dstModules = path.join(rootfsModulesBase, kernelVersion);
-    log(`Copying kernel modules for ${kernelVersion} into rootfs`);
-    copyInitramfsModules(srcModules, dstModules);
+    log(`Copying all kernel modules for ${kernelVersion} into rootfs`);
+    copyAllKernelModules(srcModules, dstModules);
   }
 }
 
@@ -1081,6 +1081,14 @@ function listKernelModuleVersions(modulesBase: string): string[] {
       })?.isDirectory(),
     )
     .sort();
+}
+
+function copyAllKernelModules(srcDir: string, dstDir: string): void {
+  if (!fs.existsSync(srcDir)) return;
+
+  fs.rmSync(dstDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(dstDir), { recursive: true });
+  fs.cpSync(srcDir, dstDir, { recursive: true, dereference: false });
 }
 
 function copyInitramfsModules(srcDir: string, dstDir: string): void {
@@ -1584,6 +1592,66 @@ log_cmd() {
   fi
 }
 
+setup_virtio_ports() {
+  if [ ! -d /sys/class/virtio-ports ]; then
+    return
+  fi
+
+  mkdir -p /dev/virtio-ports
+
+  for port_path in /sys/class/virtio-ports/vport*; do
+    if [ ! -e "\${port_path}" ]; then
+      continue
+    fi
+
+    port_device="$(basename "\${port_path}")"
+    dev_node="/dev/\${port_device}"
+
+    if [ ! -c "\${dev_node}" ] && [ -r "\${port_path}/dev" ]; then
+      dev_nums="$(cat "\${port_path}/dev" 2>/dev/null || true)"
+      major="\${dev_nums%%:*}"
+      minor="\${dev_nums##*:}"
+      if [ -n "\${major}" ] && [ -n "\${minor}" ]; then
+        mknod "\${dev_node}" c "\${major}" "\${minor}" 2>/dev/null || true
+        chmod 600 "\${dev_node}" 2>/dev/null || true
+      fi
+    fi
+
+    if [ -r "\${port_path}/name" ]; then
+      port_name="$(cat "\${port_path}/name" 2>/dev/null || true)"
+      port_name="$(printf "%s" "\${port_name}" | tr -d '\\r\\n')"
+      if [ -n "\${port_name}" ]; then
+        ln -sf "../\${port_device}" "/dev/virtio-ports/\${port_name}" 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+resolve_virtio_port_path() {
+  expected="$1"
+
+  if [ -c "/dev/virtio-ports/\${expected}" ]; then
+    printf "%s\n" "/dev/virtio-ports/\${expected}"
+    return
+  fi
+
+  for port_path in /sys/class/virtio-ports/vport*; do
+    if [ ! -e "\${port_path}" ] || [ ! -r "\${port_path}/name" ]; then
+      continue
+    fi
+
+    port_name="$(cat "\${port_path}/name" 2>/dev/null || true)"
+    port_name="$(printf "%s" "\${port_name}" | tr -d '\\r\\n')"
+    if [ "\${port_name}" = "\${expected}" ]; then
+      port_device="$(basename "\${port_path}")"
+      printf "%s\n" "/dev/\${port_device}"
+      return
+    fi
+  done
+
+  printf "%s\n" "/dev/virtio-ports/\${expected}"
+}
+
 mount -t proc proc /proc || log "[init] mount proc failed"
 mount -t sysfs sysfs /sys || log "[init] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[init] mount devtmpfs failed"
@@ -1631,6 +1699,7 @@ fi
 if modprobe virtio_console > /dev/null 2>&1; then
   log "[init] loaded virtio_console"
 fi
+setup_virtio_ports
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
@@ -1700,13 +1769,17 @@ mkdir -p "\${sandboxfs_mount}"
 sandboxfs_ready=0
 sandboxfs_error="sandboxfs mount not ready"
 
+setup_virtio_ports
+
 if [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at \${sandboxfs_mount}"
   SANDBOXFS_LOG="\${CONSOLE:-/dev/null}"
   if [ -z "\${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path /dev/virtio-ports/virtio-fs > "\${SANDBOXFS_LOG}" 2>&1 &
+  sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
+  log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
+  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" > "\${SANDBOXFS_LOG}" 2>&1 &
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1
@@ -1811,6 +1884,10 @@ fi
 
 modprobe virtio_blk > /dev/null 2>&1 || true
 modprobe ext4 > /dev/null 2>&1 || true
+modprobe virtio_console > /dev/null 2>&1 || true
+modprobe virtio_rng > /dev/null 2>&1 || true
+modprobe virtio_net > /dev/null 2>&1 || true
+modprobe fuse > /dev/null 2>&1 || true
 
 wait_for_block() {
   dev="$1"
