@@ -1717,9 +1717,11 @@ fi
 if command -v ip > /dev/null 2>&1; then
   ip link set lo up || true
   ip link set eth0 up || true
-else
+elif command -v ifconfig > /dev/null 2>&1; then
   ifconfig lo up || true
   ifconfig eth0 up || true
+else
+  log "[init] no network link tool (ip/ifconfig)"
 fi
 
 if command -v udhcpc > /dev/null 2>&1; then
@@ -1889,6 +1891,26 @@ modprobe virtio_rng > /dev/null 2>&1 || true
 modprobe virtio_net > /dev/null 2>&1 || true
 modprobe fuse > /dev/null 2>&1 || true
 
+if command -v ip > /dev/null 2>&1; then
+  ip link set lo up || true
+  ip link set eth0 up || true
+elif command -v ifconfig > /dev/null 2>&1; then
+  ifconfig lo up || true
+  ifconfig eth0 up || true
+fi
+
+if command -v udhcpc > /dev/null 2>&1; then
+  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
+  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
+    UDHCPC_SCRIPT="/sbin/udhcpc.script"
+  fi
+  if [ -x "\${UDHCPC_SCRIPT}" ]; then
+    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
+  else
+    udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
+  fi
+fi
+
 wait_for_block() {
   dev="$1"
   for i in \$(seq 1 50); do
@@ -1912,6 +1934,11 @@ if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
+
+if [ -s /etc/resolv.conf ]; then
+  mkdir -p /newroot/etc
+  cp /etc/resolv.conf /newroot/etc/resolv.conf 2>/dev/null || true
+fi
 
 exec switch_root /newroot /init
 `;
