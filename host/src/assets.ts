@@ -204,9 +204,9 @@ export interface AssetManifest {
     platform: string;
     /** OCI pull policy used for export */
     pullPolicy: OciPullPolicy;
-    /** resolved OCI digest (`sha256:...`) when available */
+    /** resolved OCI digest (`sha256:...`) */
     digest?: string;
-    /** resolved OCI image reference (`repo@sha256:...`) when available */
+    /** resolved OCI image reference (`repo@sha256:...`) */
     reference?: string;
   };
 

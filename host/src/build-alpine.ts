@@ -9,7 +9,7 @@
  *   - mke2fs (e2fsprogs) — for creating ext4 rootfs images
  *   - cpio — for creating initramfs archives
  *   - lz4 — for compressing initramfs
- *   - tar (optional) — for fast OCI rootfs extraction
+ *   - tar (required for OCI rootfs extraction)
  *   - docker/podman (optional) — for OCI rootfs export
  */
 
@@ -96,9 +96,9 @@ export interface OciResolvedSource {
   platform: string;
   /** OCI pull policy used for export */
   pullPolicy: OciPullPolicy;
-  /** resolved OCI digest (`sha256:...`) when available */
+  /** resolved OCI digest (`sha256:...`) */
   digest?: string;
-  /** resolved OCI image reference (`repo@sha256:...`) when available */
+  /** resolved OCI image reference (`repo@sha256:...`) */
   reference?: string;
 }
 
@@ -864,9 +864,7 @@ function exportOciRootfs(opts: OciExportOptions): OciResolvedSource {
   }
 
   const resolvedDigest = resolveLocalOciImageDigest(runtime, opts.image);
-  if (resolvedDigest) {
-    opts.log(`Resolved OCI image ${opts.image} -> ${resolvedDigest.reference}`);
-  }
+  opts.log(`Resolved OCI image ${opts.image} -> ${resolvedDigest.reference}`);
 
   const containerId = createOciExportContainer(
     runtime,
@@ -894,8 +892,8 @@ function exportOciRootfs(opts: OciExportOptions): OciResolvedSource {
     runtime,
     platform,
     pullPolicy,
-    digest: resolvedDigest?.digest,
-    reference: resolvedDigest?.reference,
+    digest: resolvedDigest.digest,
+    reference: resolvedDigest.reference,
   };
 }
 
@@ -1017,7 +1015,7 @@ function parseContainerId(output: string): string | null {
 function resolveLocalOciImageDigest(
   runtime: ContainerRuntime,
   image: string,
-): OciResolvedDigest | null {
+): OciResolvedDigest {
   const digestFromRef = extractDigestFromImageReference(image);
   if (digestFromRef) {
     return {
@@ -1035,30 +1033,30 @@ function resolveLocalOciImageDigest(
       "--format",
       "{{json .RepoDigests}}",
     ]);
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(
+      `Failed to resolve OCI digest metadata for '${image}': ${String(err)}`,
+    );
   }
 
   const digests = parseRepoDigestsOutput(output);
-  if (digests.length > 0) {
-    const preferredDigest = pickRepoDigestReference(image, digests) ?? digests[0];
-    const digest = extractDigestFromImageReference(preferredDigest);
-    if (digest) {
-      return {
-        reference: preferredDigest,
-        digest,
-      };
-    }
+  if (digests.length === 0) {
+    throw new Error(
+      `Failed to resolve OCI digest metadata for '${image}': runtime did not report RepoDigests`,
+    );
   }
 
-  const imageId = resolveLocalOciImageId(runtime, image);
-  if (!imageId) {
-    return null;
+  const preferredDigest = pickRepoDigestReference(image, digests) ?? digests[0];
+  const digest = extractDigestFromImageReference(preferredDigest);
+  if (!digest) {
+    throw new Error(
+      `Failed to resolve OCI digest metadata for '${image}': invalid RepoDigest '${preferredDigest}'`,
+    );
   }
 
   return {
-    reference: `${normalizeImageRepository(image)}@${imageId}`,
-    digest: imageId,
+    reference: preferredDigest,
+    digest,
   };
 }
 
@@ -1075,31 +1073,6 @@ function parseRepoDigestsOutput(output: string): string[] {
   } catch {
     return [];
   }
-}
-
-function resolveLocalOciImageId(
-  runtime: ContainerRuntime,
-  image: string,
-): string | null {
-  let output: string;
-  try {
-    output = runContainerCommand(runtime, [
-      "image",
-      "inspect",
-      image,
-      "--format",
-      "{{.Id}}",
-    ]);
-  } catch {
-    return null;
-  }
-
-  const candidate = output.trim().toLowerCase();
-  if (/^sha256:[a-f0-9]{64}$/.test(candidate)) {
-    return candidate;
-  }
-
-  return null;
 }
 
 function pickRepoDigestReference(
@@ -1264,21 +1237,20 @@ function extractTarFile(tarPath: string, destDir: string): void {
       stderr?: unknown;
     };
 
-    if (e.code !== "ENOENT") {
-      const stdout = commandOutputToString(e.stdout);
-      const stderr = commandOutputToString(e.stderr);
+    if (e.code === "ENOENT") {
       throw new Error(
-        `Failed to extract OCI rootfs tar with tar (exit ${String(e.status ?? "?")}): ` +
-          `${tarPath}\n` +
-          (stdout || stderr ? `${stdout}${stderr}` : ""),
+        "OCI rootfs extraction requires the 'tar' binary, but it was not found on PATH",
       );
     }
-  }
 
-  // Fallback to in-process extraction when tar is unavailable.
-  const raw = fs.readFileSync(tarPath);
-  const entries = parseTar(raw);
-  extractEntries(entries, destDir);
+    const stdout = commandOutputToString(e.stdout);
+    const stderr = commandOutputToString(e.stderr);
+    throw new Error(
+      `Failed to extract OCI rootfs tar with tar (exit ${String(e.status ?? "?")}): ` +
+        `${tarPath}\n` +
+        (stdout || stderr ? `${stdout}${stderr}` : ""),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

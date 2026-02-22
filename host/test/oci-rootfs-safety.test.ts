@@ -80,6 +80,18 @@ if [ "$cmd" = "export" ]; then
   exit 0
 fi
 
+if [ "$cmd" = "image" ]; then
+  sub="\${2:-}"
+  if [ "$sub" = "inspect" ]; then
+    if [ -n "\${FAKE_REPO_DIGEST:-}" ]; then
+      printf "[\\\"%s\\\"]\\n" "$FAKE_REPO_DIGEST"
+    else
+      printf "[]\\n"
+    fi
+    exit 0
+  fi
+fi
+
 if [ "$cmd" = "rm" ]; then
   exit 0
 fi
@@ -117,9 +129,12 @@ test("oci rootfs: pullPolicy always tolerates large pull output", () => {
   writeLargePullRuntime(binDir);
 
   const oldPath = process.env.PATH;
+  const oldRepoDigest = process.env.FAKE_REPO_DIGEST;
 
   try {
     process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+    process.env.FAKE_REPO_DIGEST =
+      "docker.io/library/debian@sha256:4444444444444444444444444444444444444444444444444444444444444444";
 
     (buildAlpineTest as any).exportOciRootfs({
       arch: "x86_64",
@@ -135,6 +150,11 @@ test("oci rootfs: pullPolicy always tolerates large pull output", () => {
     assert.equal(fs.existsSync(path.join(rootfsDir, "bin", "sh")), true);
   } finally {
     process.env.PATH = oldPath;
+    if (oldRepoDigest === undefined) {
+      delete process.env.FAKE_REPO_DIGEST;
+    } else {
+      process.env.FAKE_REPO_DIGEST = oldRepoDigest;
+    }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

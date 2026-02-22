@@ -191,11 +191,14 @@ test("oci pullPolicy if-not-present: pulls when requested platform is not local"
   const oldPath = process.env.PATH;
   const oldLog = process.env.FAKE_DOCKER_LOG;
   const oldLocalPlatform = process.env.LOCAL_PLATFORM;
+  const oldRepoDigest = process.env.FAKE_REPO_DIGEST;
 
   try {
     process.env.PATH = `${binDir}:${oldPath ?? ""}`;
     process.env.FAKE_DOCKER_LOG = logPath;
     process.env.LOCAL_PLATFORM = "linux/arm64";
+    process.env.FAKE_REPO_DIGEST =
+      "docker.io/library/debian@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
     (buildAlpineTest as any).exportOciRootfs({
       arch: "x86_64",
@@ -229,6 +232,7 @@ test("oci pullPolicy if-not-present: pulls when requested platform is not local"
     restoreEnv("PATH", oldPath);
     restoreEnv("FAKE_DOCKER_LOG", oldLog);
     restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
+    restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -246,11 +250,14 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
   const oldPath = process.env.PATH;
   const oldLog = process.env.FAKE_DOCKER_LOG;
   const oldLocalPlatform = process.env.LOCAL_PLATFORM;
+  const oldRepoDigest = process.env.FAKE_REPO_DIGEST;
 
   try {
     process.env.PATH = `${binDir}:${oldPath ?? ""}`;
     process.env.FAKE_DOCKER_LOG = logPath;
     process.env.LOCAL_PLATFORM = "linux/amd64";
+    process.env.FAKE_REPO_DIGEST =
+      "docker.io/library/debian@sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
     (buildAlpineTest as any).exportOciRootfs({
       arch: "x86_64",
@@ -278,6 +285,7 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
     restoreEnv("PATH", oldPath);
     restoreEnv("FAKE_DOCKER_LOG", oldLog);
     restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
+    restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -319,6 +327,46 @@ test("oci export: returns resolved image digest metadata", () => {
     assert.equal(
       metadata.digest,
       "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+  } finally {
+    restoreEnv("PATH", oldPath);
+    restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
+    restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("oci export: fails when runtime does not report RepoDigests", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-digest-missing-"));
+  const binDir = path.join(tmp, "bin");
+  const rootfsDir = path.join(tmp, "rootfs");
+
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(rootfsDir, { recursive: true });
+  writeFakeDockerRuntime(binDir);
+
+  const oldPath = process.env.PATH;
+  const oldLocalPlatform = process.env.LOCAL_PLATFORM;
+  const oldRepoDigest = process.env.FAKE_REPO_DIGEST;
+
+  try {
+    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+    process.env.LOCAL_PLATFORM = "linux/amd64";
+    delete process.env.FAKE_REPO_DIGEST;
+
+    assert.throws(
+      () =>
+        (buildAlpineTest as any).exportOciRootfs({
+          arch: "x86_64",
+          image: "docker.io/library/debian:bookworm-slim",
+          runtime: "docker",
+          platform: "linux/amd64",
+          pullPolicy: "if-not-present",
+          workDir: tmp,
+          targetDir: rootfsDir,
+          log: () => {},
+        }),
+      /did not report RepoDigests/,
     );
   } finally {
     restoreEnv("PATH", oldPath);
