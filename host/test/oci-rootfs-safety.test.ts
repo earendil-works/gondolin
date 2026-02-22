@@ -120,7 +120,9 @@ test("oci rootfs: buildOciCreateArgs includes dummy command", () => {
 });
 
 test("oci rootfs: pullPolicy always tolerates large pull output", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-large-pull-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-large-pull-"),
+  );
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
 
@@ -160,7 +162,9 @@ test("oci rootfs: pullPolicy always tolerates large pull output", () => {
 });
 
 test("oci rootfs: pullPolicy never propagates non-missing runtime errors", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-runtime-fail-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-runtime-fail-"),
+  );
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
 
@@ -256,9 +260,14 @@ test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
   fs.writeFileSync(path.join(initModuleDir, "virtio_blk.ko"), "module");
 
   try {
-    (buildAlpineTest as any).syncKernelModules(rootfsDir, initramfsDir, () => {}, {
-      copyRootfsToInitramfs: false,
-    });
+    (buildAlpineTest as any).syncKernelModules(
+      rootfsDir,
+      initramfsDir,
+      () => {},
+      {
+        copyRootfsToInitramfs: false,
+      },
+    );
 
     assert.equal(
       fs.existsSync(

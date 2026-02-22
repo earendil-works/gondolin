@@ -128,7 +128,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 test("oci pullPolicy never: fails when requested platform is not local", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-pull-never-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
+  );
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
   const logPath = path.join(tmp, "docker.log");
@@ -169,7 +171,10 @@ test("oci pullPolicy never: fails when requested platform is not local", () => {
           "create --platform linux/amd64 --pull=never docker.io/library/debian:bookworm-slim true",
       ),
     );
-    assert.equal(lines.some((line) => line.startsWith("pull ")), false);
+    assert.equal(
+      lines.some((line) => line.startsWith("pull ")),
+      false,
+    );
   } finally {
     restoreEnv("PATH", oldPath);
     restoreEnv("FAKE_DOCKER_LOG", oldLog);
@@ -238,7 +243,9 @@ test("oci pullPolicy if-not-present: pulls when requested platform is not local"
 });
 
 test("oci pullPolicy never: export create uses --pull=never", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-pull-never-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
+  );
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
   const logPath = path.join(tmp, "docker.log");
@@ -280,7 +287,10 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
       assert.ok(line.includes("--pull=never"));
       assert.ok(line.endsWith(" docker.io/library/debian:bookworm-slim true"));
     }
-    assert.equal(lines.some((line) => line.startsWith("pull ")), false);
+    assert.equal(
+      lines.some((line) => line.startsWith("pull ")),
+      false,
+    );
   } finally {
     restoreEnv("PATH", oldPath);
     restoreEnv("FAKE_DOCKER_LOG", oldLog);
@@ -320,10 +330,7 @@ test("oci export: returns resolved image digest metadata", () => {
       log: () => {},
     });
 
-    assert.equal(
-      metadata.reference,
-      process.env.FAKE_REPO_DIGEST,
-    );
+    assert.equal(metadata.reference, process.env.FAKE_REPO_DIGEST);
     assert.equal(
       metadata.digest,
       "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -337,7 +344,9 @@ test("oci export: returns resolved image digest metadata", () => {
 });
 
 test("oci export: fails when runtime does not report RepoDigests", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-digest-missing-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-digest-missing-"),
+  );
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
 

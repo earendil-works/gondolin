@@ -205,9 +205,21 @@ export async function buildAlpineImages(
   }
 
   // Step 4 — install sandboxd, sandboxfs, sandboxssh, init scripts
-  copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"), rootfsDir);
-  copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"), rootfsDir);
-  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"), rootfsDir);
+  copyExecutable(
+    sandboxdBin,
+    path.join(rootfsDir, "usr/bin/sandboxd"),
+    rootfsDir,
+  );
+  copyExecutable(
+    sandboxfsBin,
+    path.join(rootfsDir, "usr/bin/sandboxfs"),
+    rootfsDir,
+  );
+  copyExecutable(
+    sandboxsshBin,
+    path.join(rootfsDir, "usr/bin/sandboxssh"),
+    rootfsDir,
+  );
   copyExecutable(
     sandboxingressBin,
     path.join(rootfsDir, "usr/bin/sandboxingress"),
@@ -526,7 +538,9 @@ function resolveWritePath(target: string, root: string): string {
       const linkTarget = fs.readlinkSync(next);
       const resolved = path.resolve(path.dirname(next), linkTarget);
       if (!isPathInsideRoot(resolved, absRoot)) {
-        throw new Error(`Refusing to write through symlinked path: ${absTarget}`);
+        throw new Error(
+          `Refusing to write through symlinked path: ${absTarget}`,
+        );
       }
       current = resolved;
     } catch (err: any) {
@@ -583,9 +597,16 @@ function hardenExtractedRootfs(rootfsDir: string): void {
   }
 }
 
-function hardenExtractedRootfsSymlink(linkPath: string, rootfsDir: string): void {
+function hardenExtractedRootfsSymlink(
+  linkPath: string,
+  rootfsDir: string,
+): void {
   const rawTarget = fs.readlinkSync(linkPath);
-  const resolvedTarget = resolveRootfsSymlinkTarget(linkPath, rawTarget, rootfsDir);
+  const resolvedTarget = resolveRootfsSymlinkTarget(
+    linkPath,
+    rawTarget,
+    rootfsDir,
+  );
 
   if (!isPathInsideRoot(resolvedTarget, rootfsDir)) {
     throw new Error(
@@ -594,7 +615,10 @@ function hardenExtractedRootfsSymlink(linkPath: string, rootfsDir: string): void
   }
 
   if (path.isAbsolute(rawTarget)) {
-    const normalizedTarget = path.relative(path.dirname(linkPath), resolvedTarget);
+    const normalizedTarget = path.relative(
+      path.dirname(linkPath),
+      resolvedTarget,
+    );
     fs.unlinkSync(linkPath);
     fs.symlinkSync(normalizedTarget || ".", linkPath);
   }
@@ -694,7 +718,10 @@ function bootstrapBusyboxShell(
 
   copyMuslRuntimeFromInitramfs(rootfsDir, initramfsDir);
 
-  const busyboxDest = resolveWritePath(path.join(rootfsDir, "bin/busybox"), rootfsDir);
+  const busyboxDest = resolveWritePath(
+    path.join(rootfsDir, "bin/busybox"),
+    rootfsDir,
+  );
   fs.mkdirSync(path.dirname(busyboxDest), { recursive: true });
   fs.copyFileSync(busyboxSource, busyboxDest);
   fs.chmodSync(busyboxDest, 0o755);
@@ -716,7 +743,11 @@ function bootstrapBusyboxShell(
         continue;
       }
 
-      ensureBusyboxApplet(rootfsDir, path.join(relDir, entry.name), busyboxDest);
+      ensureBusyboxApplet(
+        rootfsDir,
+        path.join(relDir, entry.name),
+        busyboxDest,
+      );
     }
   }
 
@@ -762,7 +793,10 @@ function copyMuslRuntimeFromInitramfs(
     }
 
     const srcPath = path.join(initramfsLibDir, name);
-    const destPath = resolveWritePath(path.join(rootfsDir, "lib", name), rootfsDir);
+    const destPath = resolveWritePath(
+      path.join(rootfsDir, "lib", name),
+      rootfsDir,
+    );
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
 
     const stat = fs.lstatSync(srcPath);
@@ -809,7 +843,10 @@ function ensureBusyboxApplet(
   ensureBusyboxAppletSymlink(destPath, linkTarget);
 }
 
-function ensureBusyboxAppletSymlink(destPath: string, linkTarget: string): void {
+function ensureBusyboxAppletSymlink(
+  destPath: string,
+  linkTarget: string,
+): void {
   try {
     const stat = fs.lstatSync(destPath);
     if (stat.isSymbolicLink()) {
@@ -1172,9 +1209,7 @@ function runContainerCommand(
   }
 }
 
-function isMissingLocalOciImageError(
-  err: unknown,
-): boolean {
+function isMissingLocalOciImageError(err: unknown): boolean {
   if (!(err instanceof ContainerCommandError)) {
     return false;
   }
@@ -1589,7 +1624,10 @@ function syncKernelModules(
 ): void {
   const copyRootfsToInitramfs = options.copyRootfsToInitramfs ?? true;
 
-  const rootfsModulesBase = resolveWritePath(path.join(rootfsDir, "lib/modules"), rootfsDir);
+  const rootfsModulesBase = resolveWritePath(
+    path.join(rootfsDir, "lib/modules"),
+    rootfsDir,
+  );
   const initramfsModulesBase = path.join(initramfsDir, "lib/modules");
 
   const rootfsVersions = listKernelModuleVersions(rootfsModulesBase);
@@ -1626,9 +1664,11 @@ function listKernelModuleVersions(modulesBase: string): string[] {
   return fs
     .readdirSync(modulesBase)
     .filter((entry) =>
-      fs.statSync(path.join(modulesBase, entry), {
-        throwIfNoEntry: false,
-      })?.isDirectory(),
+      fs
+        .statSync(path.join(modulesBase, entry), {
+          throwIfNoEntry: false,
+        })
+        ?.isDirectory(),
     )
     .sort();
 }

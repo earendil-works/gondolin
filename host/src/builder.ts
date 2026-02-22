@@ -315,7 +315,10 @@ async function buildNative(
   log("Building guest images...");
 
   const alpineConfig = resolveAlpineConfig(config);
-  if (hasOciRootfs(config) && (config.alpine?.rootfsPackages?.length ?? 0) > 0) {
+  if (
+    hasOciRootfs(config) &&
+    (config.alpine?.rootfsPackages?.length ?? 0) > 0
+  ) {
     log("Ignoring alpine.rootfsPackages because oci rootfs source is enabled");
   }
 

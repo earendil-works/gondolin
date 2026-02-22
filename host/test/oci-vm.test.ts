@@ -6,7 +6,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { buildAssets } from "../src/builder";
-import { getDefaultArch, type BuildConfig, type ContainerRuntime } from "../src/build-config";
+import {
+  getDefaultArch,
+  type BuildConfig,
+  type ContainerRuntime,
+} from "../src/build-config";
 import { VM } from "../src/vm";
 import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture";
 
@@ -75,19 +79,30 @@ test(
   "oci vm: debian rootfs boots and records resolved digest",
   { skip: vmSkipReason, timeout: timeoutMs },
   async (t) => {
-    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-debian-vm-"));
+    const outputDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-oci-debian-vm-"),
+    );
     t.after(() => {
       fs.rmSync(outputDir, { recursive: true, force: true });
     });
 
-    const result = await buildAssets(makeOciConfig("docker.io/library/debian:bookworm-slim"), {
-      outputDir,
-      verbose: false,
-      skipBinaries: true,
-    });
+    const result = await buildAssets(
+      makeOciConfig("docker.io/library/debian:bookworm-slim"),
+      {
+        outputDir,
+        verbose: false,
+        skipBinaries: true,
+      },
+    );
 
-    assert.ok(result.manifest.ociSource, "expected oci source metadata in manifest");
-    assert.match(result.manifest.ociSource?.digest ?? "", /^sha256:[a-f0-9]{64}$/);
+    assert.ok(
+      result.manifest.ociSource,
+      "expected oci source metadata in manifest",
+    );
+    assert.match(
+      result.manifest.ociSource?.digest ?? "",
+      /^sha256:[a-f0-9]{64}$/,
+    );
 
     const vm = await VM.create({
       sandbox: {
@@ -110,7 +125,9 @@ test(
   "oci vm: distroless rootfs boots via busybox shell bootstrap",
   { skip: vmSkipReason, timeout: timeoutMs },
   async (t) => {
-    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-distroless-vm-"));
+    const outputDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-oci-distroless-vm-"),
+    );
     t.after(() => {
       fs.rmSync(outputDir, { recursive: true, force: true });
     });
@@ -124,8 +141,14 @@ test(
       },
     );
 
-    assert.ok(result.manifest.ociSource, "expected oci source metadata in manifest");
-    assert.match(result.manifest.ociSource?.digest ?? "", /^sha256:[a-f0-9]{64}$/);
+    assert.ok(
+      result.manifest.ociSource,
+      "expected oci source metadata in manifest",
+    );
+    assert.match(
+      result.manifest.ociSource?.digest ?? "",
+      /^sha256:[a-f0-9]{64}$/,
+    );
 
     const vm = await VM.create({
       sandbox: {
@@ -138,7 +161,9 @@ test(
       await vm.close();
     });
 
-    const shellSmoke = await vm.exec("test -x /bin/sh && /bin/sh -lc 'echo shell-bootstrap-ok'");
+    const shellSmoke = await vm.exec(
+      "test -x /bin/sh && /bin/sh -lc 'echo shell-bootstrap-ok'",
+    );
     assert.equal(shellSmoke.exitCode, 0);
     assert.match(shellSmoke.stdout, /shell-bootstrap-ok/);
 
