@@ -7,7 +7,7 @@ import test from "node:test";
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
 import { createExecSession } from "../src/exec";
 import { VM, __test, type VMOptions } from "../src/vm/core";
-import { resolveEnvNumber } from "../src/env-utils";
+import { resolveEnvNumber } from "../src/utils/env";
 import type { RootfsMode } from "../src/rootfs-mode";
 
 function makeTempResolvedServerOptions() {

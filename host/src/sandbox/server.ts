@@ -3,7 +3,7 @@ import { EventEmitter } from "events";
 import { Duplex, PassThrough, Readable } from "stream";
 
 import { getHostNodeArchCached } from "../host/arch";
-import { AsyncSingleflight } from "../async-utils";
+import { AsyncSingleflight } from "../utils/async";
 import { toBufferIterable } from "../buffer-iter";
 import {
   buildExecRequest,

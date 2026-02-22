@@ -5,7 +5,7 @@ import path from "path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildAssets } from "../src/builder";
+import { buildAssets } from "../src/build";
 import type { BuildConfig } from "../src/build/config";
 
 test("builder: oci rootfs rejects container.force", async () => {

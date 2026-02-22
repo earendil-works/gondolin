@@ -26,8 +26,8 @@ import {
 } from "../dns";
 import { Agent, fetch as undiciFetch } from "undici";
 
-import { AsyncSemaphore } from "../async-utils";
-import { SyntheticDnsHostMap, normalizeIpv4Servers } from "../dns-utils";
+import { AsyncSemaphore } from "../utils/async";
+import { SyntheticDnsHostMap, normalizeIpv4Servers } from "../utils/dns";
 import {
   assertSshDnsConfig,
   cleanupSshTcpSession,

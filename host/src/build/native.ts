@@ -2,8 +2,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { buildAlpineImages } from "../build/alpine";
-import type { BuildConfig, Architecture } from "../build/config";
+import { buildAlpineImages } from "./alpine";
+import type { BuildConfig, Architecture } from "./config";
 import { parseApkIndex } from "../alpine/packages";
 import { decompressTarGz, parseTar } from "../alpine/tar";
 import { downloadFile } from "../alpine/utils";

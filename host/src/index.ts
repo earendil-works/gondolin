@@ -186,4 +186,4 @@ export {
   verifyAssets,
   type BuildOptions,
   type BuildResult,
-} from "./builder";
+} from "./build";

@@ -6,18 +6,14 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { loadAssetManifest } from "./assets";
-import type { BuildConfig } from "./build/config";
-import { detectHostArchitectureSync } from "./host/arch";
-import { buildInContainer } from "./builder/container";
-import {
-  computeFileHash,
-  type BuildOptions,
-  type BuildResult,
-} from "./builder/shared";
-import { buildNative } from "./builder/native";
+import { loadAssetManifest } from "../assets";
+import type { BuildConfig } from "./config";
+import { detectHostArchitectureSync } from "../host/arch";
+import { buildInContainer } from "./container";
+import { computeFileHash, type BuildOptions, type BuildResult } from "./shared";
+import { buildNative } from "./native";
 
-export type { BuildOptions, BuildResult } from "./builder/shared";
+export type { BuildOptions, BuildResult } from "./shared";
 
 function hasPostBuildCommands(config: BuildConfig): boolean {
   return (config.postBuild?.commands?.length ?? 0) > 0;

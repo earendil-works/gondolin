@@ -1,4 +1,4 @@
-import { parseIPv4Bytes, parseIPv6Bytes } from "./ip-utils";
+import { parseIPv4Bytes, parseIPv6Bytes } from "./utils/ip";
 
 /** DNS record type A */
 export const DNS_TYPE_A = 1;

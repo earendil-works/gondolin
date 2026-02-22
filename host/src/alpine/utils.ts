@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 
-import { parseEnvEntry } from "../env-utils";
+import { parseEnvEntry } from "../utils/env";
 import { assertSafeWritePath } from "./rootfs";
 
 /** Download helper using Node's built-in fetch */

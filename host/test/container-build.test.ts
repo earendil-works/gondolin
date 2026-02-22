@@ -5,7 +5,7 @@ import path from "path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildAssets } from "../src/builder";
+import { buildAssets } from "../src/build";
 import type { BuildConfig } from "../src/build/config";
 
 test("builder: container build path does not use guest/image/build.sh", async () => {

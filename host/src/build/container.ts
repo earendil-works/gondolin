@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 
 import { MANIFEST_FILENAME, loadAssetManifest } from "../assets";
-import type { BuildConfig } from "../build/config";
+import type { BuildConfig } from "./config";
 import {
   detectContainerRuntime,
   runCommand,
@@ -42,7 +42,7 @@ export async function buildInContainer(
   ensureHostDistBuilt(hostPkgRoot, log);
 
   const hostDistSrcDir = path.join(hostPkgRoot, "dist", "src");
-  const hostDistBuilder = path.join(hostDistSrcDir, "builder.js");
+  const hostDistBuilder = path.join(hostDistSrcDir, "build", "index.js");
   if (!fs.existsSync(hostDistBuilder)) {
     throw new Error(
       `Host dist build not found at ${hostDistBuilder}. ` +
@@ -127,7 +127,7 @@ export async function buildInContainer(
   const runner = `"use strict";
 const fs = require("fs");
 
-const { buildAssets } = require("/host-dist-src/builder.js");
+const { buildAssets } = require("/host-dist-src/build/index.js");
 
 async function main() {
   const cfg = JSON.parse(fs.readFileSync("/work/build-config.json", "utf8"));

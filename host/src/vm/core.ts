@@ -6,7 +6,7 @@ import { randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 import { Duplex, Readable } from "stream";
 
-import { AsyncSingleflight } from "../async-utils";
+import { AsyncSingleflight } from "../utils/async";
 
 import {
   createTempQcow2Overlay,
@@ -50,7 +50,7 @@ import {
   mergeEnvInputs,
   parseEnvEntry,
   resolveEnvNumber,
-} from "../env-utils";
+} from "../utils/env";
 import {
   defaultDebugLog,
   resolveDebugFlags,

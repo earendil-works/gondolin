@@ -26,7 +26,7 @@ import {
   parseBuildConfig,
   type BuildConfig,
 } from "../src/build/config";
-import { buildAssets, verifyAssets } from "../src/builder";
+import { buildAssets, verifyAssets } from "../src/build";
 import { loadAssetManifest } from "../src/assets";
 import {
   connectToSession,

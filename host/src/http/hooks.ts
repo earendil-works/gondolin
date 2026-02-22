@@ -3,7 +3,7 @@ import net from "net";
 
 import type { HttpHooks } from "../qemu/net";
 import { HttpRequestBlockedError } from "./utils";
-import { extractIPv4Mapped, parseIPv6Hextets } from "../ip-utils";
+import { extractIPv4Mapped, parseIPv6Hextets } from "../utils/ip";
 import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns";
 
 export type SecretDefinition = {

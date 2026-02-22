@@ -8,7 +8,7 @@ import {
   computeAssetBuildId,
   type AssetManifest,
 } from "../assets";
-import type { BuildConfig, Architecture } from "../build/config";
+import type { BuildConfig, Architecture } from "./config";
 
 /** Fixed output filenames for assets */
 export const KERNEL_FILENAME = "vmlinuz-virt";
@@ -138,24 +138,33 @@ export function resolveConfigPath(value: string, configDir?: string): string {
 
 /** Find the guest directory relative to this package */
 export function findGuestDir(): string | null {
-  const candidates = [
-    path.resolve(__dirname, "..", "..", "guest"),
-    path.resolve(__dirname, "..", "..", "..", "guest"),
-  ];
-
-  for (const candidate of candidates) {
-    if (
-      fs.existsSync(candidate) &&
-      fs.existsSync(path.join(candidate, "build.zig"))
-    ) {
-      return candidate;
-    }
-  }
-
   if (process.env.GONDOLIN_GUEST_SRC) {
     const envPath = process.env.GONDOLIN_GUEST_SRC;
     if (fs.existsSync(path.join(envPath, "build.zig"))) {
       return envPath;
+    }
+  }
+
+  const starts = [__dirname, process.cwd()];
+  const visited = new Set<string>();
+
+  for (const start of starts) {
+    let dir = path.resolve(start);
+
+    for (let i = 0; i < 12; i++) {
+      const candidate = path.join(dir, "guest");
+      if (!visited.has(candidate)) {
+        visited.add(candidate);
+        if (fs.existsSync(path.join(candidate, "build.zig"))) {
+          return candidate;
+        }
+      }
+
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
     }
   }
 
@@ -187,7 +196,13 @@ export function ensureHostDistBuilt(
   hostPkgRoot: string,
   log: (msg: string) => void,
 ): void {
-  const distBuilder = path.join(hostPkgRoot, "dist", "src", "builder.js");
+  const distBuilder = path.join(
+    hostPkgRoot,
+    "dist",
+    "src",
+    "build",
+    "index.js",
+  );
 
   const runningFromDist =
     path.basename(__dirname) === "src" &&

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildAssets } from "../src/builder";
+import { buildAssets } from "../src/build";
 import {
   getDefaultArch,
   type BuildConfig,
