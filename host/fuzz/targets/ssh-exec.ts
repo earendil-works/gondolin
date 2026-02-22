@@ -1,4 +1,4 @@
-import { getInfoFromSshExecRequest } from "../../src/ssh-exec";
+import { getInfoFromSshExecRequest } from "../../src/ssh/exec";
 import { XorShift32 } from "../rng";
 import type { FuzzTarget } from "./types";
 

@@ -11,8 +11,8 @@ import dns from "node:dns";
 import forge from "node-forge";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 
-import { QemuNetworkBackend } from "../src/qemu-net";
-import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu-ssh";
+import { QemuNetworkBackend } from "../src/qemu/net";
+import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu/ssh";
 import {
   HttpRequestBlockedError,
   closeSharedDispatchers,
@@ -20,9 +20,9 @@ import {
   getCheckedDispatcher,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
-} from "../src/http-utils";
-import * as qemuHttp from "../src/qemu-http";
-import * as qemuWs from "../src/qemu-ws";
+} from "../src/http/utils";
+import * as qemuHttp from "../src/qemu/http";
+import * as qemuWs from "../src/qemu/ws";
 import { EventEmitter } from "node:events";
 
 function makeBackend(

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildAssets } from "../src/builder";
-import type { BuildConfig } from "../src/build-config";
+import type { BuildConfig } from "../src/build/config";
 
 test("builder: oci rootfs rejects container.force", async () => {
   const outputDir = fs.mkdtempSync(

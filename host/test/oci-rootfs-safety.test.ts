@@ -5,13 +5,13 @@ import path from "path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildOciCreateArgs, exportOciRootfs } from "../src/alpine-oci";
+import { buildOciCreateArgs, exportOciRootfs } from "../src/alpine/oci";
 import {
   assertSafeWritePath,
   ensureRootfsShell,
   hardenExtractedRootfs,
-} from "../src/alpine-rootfs";
-import { syncKernelModules } from "../src/alpine-kernel-modules";
+} from "../src/alpine/rootfs";
+import { syncKernelModules } from "../src/alpine/kernel-modules";
 
 function writeCreateFailRuntime(binDir: string): void {
   const runtimePath = path.join(binDir, "docker");
@@ -266,14 +266,9 @@ test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
   fs.writeFileSync(path.join(initModuleDir, "virtio_blk.ko"), "module");
 
   try {
-    syncKernelModules(
-      rootfsDir,
-      initramfsDir,
-      () => {},
-      {
-        copyRootfsToInitramfs: false,
-      },
-    );
+    syncKernelModules(rootfsDir, initramfsDir, () => {}, {
+      copyRootfsToInitramfs: false,
+    });
 
     assert.equal(
       fs.existsSync(

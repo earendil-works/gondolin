@@ -25,7 +25,7 @@ cd host && pnpm test              # All host tests
 cd host && pnpm exec tsx --test test/specific.test.ts  # Single test
 ```
 
-Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build-alpine.ts`).
+Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build/alpine.ts`).
 
 ## Key Conventions
 

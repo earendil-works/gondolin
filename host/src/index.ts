@@ -27,12 +27,12 @@ export {
   type VmFsWriteFileInput,
   type VmFsWriteFileOptions,
   type VmFsDeleteOptions,
-} from "./vm";
+} from "./vm/core";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec";
 
 // Server for running the sandbox
-export { SandboxServer } from "./sandbox-server";
+export { SandboxServer } from "./sandbox/server";
 
 // VFS (Virtual File System) providers
 export {
@@ -81,7 +81,7 @@ export {
   type CreateHttpHooksOptions,
   type CreateHttpHooksResult,
   type SecretDefinition,
-} from "./http-hooks";
+} from "./http/hooks";
 
 // Network types
 export type {
@@ -91,18 +91,18 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
-} from "./qemu-net";
+} from "./qemu/net";
 export type {
   SshOptions,
   SshCredential,
   SshExecRequest,
   SshExecDecision,
   SshExecPolicy,
-} from "./qemu-ssh";
-export { HttpRequestBlockedError } from "./http-utils";
+} from "./qemu/ssh";
+export { HttpRequestBlockedError } from "./http/utils";
 
 // SSH helpers
-export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh-exec";
+export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec";
 
 // Debug helpers
 export {
@@ -179,7 +179,7 @@ export {
   validateBuildConfig,
   parseBuildConfig,
   serializeBuildConfig,
-} from "./build-config";
+} from "./build/config";
 
 export {
   buildAssets,

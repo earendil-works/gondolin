@@ -8,7 +8,7 @@ import type {
   BuildConfig,
   ContainerRuntime,
   OciPullPolicy,
-} from "./build-config";
+} from "./build/config";
 import type { RootfsMode } from "./rootfs-mode";
 
 const GITHUB_ORG = "earendil-works";

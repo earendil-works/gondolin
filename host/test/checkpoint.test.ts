@@ -6,8 +6,8 @@ import test from "node:test";
 
 import { ensureGuestAssets, loadAssetManifest } from "../src/assets";
 import { VmCheckpoint } from "../src/checkpoint";
-import { getQcow2BackingFilename } from "../src/qemu-img";
-import { VM } from "../src/vm";
+import { getQcow2BackingFilename } from "../src/qemu/img";
+import { VM } from "../src/vm/core";
 import { shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture";
 
 const skipVmTests = shouldSkipVmTests();

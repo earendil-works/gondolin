@@ -1,4 +1,4 @@
-import { parseTar } from "../../src/build-alpine";
+import { parseTar } from "../../src/build/alpine";
 import { XorShift32 } from "../rng";
 import type { FuzzTarget } from "./types";
 

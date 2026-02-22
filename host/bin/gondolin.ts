@@ -7,11 +7,11 @@ import path from "path";
 import { PassThrough } from "stream";
 
 import { VmCheckpoint } from "../src/checkpoint";
-import { VM } from "../src/vm";
+import { VM } from "../src/vm/core";
 import type { VirtualProvider } from "../src/vfs/node";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
 import { ReadonlyProvider } from "../src/vfs/readonly";
-import { createHttpHooks } from "../src/http-hooks";
+import { createHttpHooks } from "../src/http/hooks";
 import {
   FrameReader,
   buildExecRequest,
@@ -25,7 +25,7 @@ import {
   serializeBuildConfig,
   parseBuildConfig,
   type BuildConfig,
-} from "../src/build-config";
+} from "../src/build/config";
 import { buildAssets, verifyAssets } from "../src/builder";
 import { loadAssetManifest } from "../src/assets";
 import {

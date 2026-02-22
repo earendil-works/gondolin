@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-import { VM } from "../src/vm";
+import { VM } from "../src/vm/core";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 

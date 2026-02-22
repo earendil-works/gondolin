@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SandboxServer } from "../src/sandbox-server";
-import type { ResolvedSandboxServerOptions } from "../src/sandbox-server-options";
+import { SandboxServer } from "../src/sandbox/server";
+import type { ResolvedSandboxServerOptions } from "../src/sandbox/server-options";
 
 function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},

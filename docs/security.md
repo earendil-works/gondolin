@@ -112,7 +112,7 @@ This is what Gondolin actually enforces.
 > "guest code does not directly run on the host OS"
 
 - Guest code runs inside a QEMU VM.
-- The QEMU invocation is intentionally minimal (see `host/src/sandbox-controller.ts`):
+- The QEMU invocation is intentionally minimal (see `host/src/sandbox/controller.ts`):
 
   - `-nodefaults` (avoid unexpected devices)
   - `-no-reboot`, `-nographic`
@@ -130,7 +130,7 @@ Gondolin does *not* provide the guest with a raw NAT to the host network.
 
 Instead, the host implements its own network stack (`host/src/network-stack.ts`)
 and a backend that attaches to QEMU's `-netdev stream` Unix socket
-(`host/src/qemu-net.ts`).
+(`host/src/qemu/net.ts`).
 
 Key enforcement points:
 
@@ -164,7 +164,7 @@ Key enforcement points:
 
 4. **Host allowlist and internal-range blocking**
 
-    - `createHttpHooks()` (see `host/src/http-hooks.ts`) produces separate policy hooks:
+    - `createHttpHooks()` (see `host/src/http/hooks.ts`) produces separate policy hooks:
         - `httpHooks.isRequestAllowed(request)` for request-content policy
         - `httpHooks.isIpAllowed({ hostname, ip, family, port, protocol })` for destination IP policy
     - By default, `isIpAllowed` blocks internal ranges (`blockInternalRanges: true`), including:

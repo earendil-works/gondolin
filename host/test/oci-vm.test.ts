@@ -10,8 +10,8 @@ import {
   getDefaultArch,
   type BuildConfig,
   type ContainerRuntime,
-} from "../src/build-config";
-import { VM } from "../src/vm";
+} from "../src/build/config";
+import { VM } from "../src/vm/core";
 import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture";
 
 function detectOciRuntime(): ContainerRuntime | null {

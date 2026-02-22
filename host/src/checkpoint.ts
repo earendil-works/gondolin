@@ -7,7 +7,7 @@ import {
   ensureQemuImgAvailable,
   getQcow2BackingFilename,
   rebaseQcow2InPlace,
-} from "./qemu-img";
+} from "./qemu/img";
 
 import {
   getAssetDirectory,
@@ -15,7 +15,7 @@ import {
   loadGuestAssets,
   type GuestAssets,
 } from "./assets";
-import type { VMOptions } from "./vm";
+import type { VMOptions } from "./vm/core";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
@@ -401,10 +401,10 @@ export class VmCheckpoint {
    * The resumed VM is implemented as a fresh qcow2 overlay backed by this
    * checkpoint's qcow2 disk image.
    */
-  async resume(options: VMOptions = {}): Promise<import("./vm").VM> {
+  async resume(options: VMOptions = {}): Promise<import("./vm/core").VM> {
     // Dynamic require to avoid import cycles.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { VM } = require("./vm") as typeof import("./vm");
+    const { VM } = require("./vm/core") as typeof import("./vm/core");
 
     ensureQemuImgAvailable();
 
@@ -443,7 +443,7 @@ export class VmCheckpoint {
   }
 
   /** @deprecated Use {@link resume} */
-  async clone(options: VMOptions = {}): Promise<import("./vm").VM> {
+  async clone(options: VMOptions = {}): Promise<import("./vm/core").VM> {
     return await this.resume(options);
   }
 

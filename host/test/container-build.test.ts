@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildAssets } from "../src/builder";
-import type { BuildConfig } from "../src/build-config";
+import type { BuildConfig } from "../src/build/config";
 
 test("builder: container build path does not use guest/image/build.sh", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));

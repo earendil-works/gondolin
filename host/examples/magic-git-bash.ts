@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createHttpHooks } from "../src/http-hooks";
+import { createHttpHooks } from "../src/http/hooks";
 import {
   RealFSProvider,
   type VirtualFileHandle,
@@ -32,7 +32,7 @@ import {
   normalizeVfsPath,
 } from "../src/vfs/utils";
 import { createErrnoError } from "../src/vfs/errors";
-import { VM } from "../src/vm";
+import { VM } from "../src/vm/core";
 
 const ALLOWED_HOSTS = [
   "registry.npmjs.org",

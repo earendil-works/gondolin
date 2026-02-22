@@ -4,7 +4,7 @@
  * Run with: npx tsx examples/basic-usage.ts
  */
 
-import { VM } from "../src/vm";
+import { VM } from "../src/vm/core";
 
 function printResult(
   label: string,

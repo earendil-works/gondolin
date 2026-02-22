@@ -11,7 +11,7 @@ GONDOLIN_BUILD_EXTRA_ARGS ?=
 
 ZIG_SOURCES := $(shell find src fuzz -name '*.zig') build.zig
 ZIG_BUILD_DEPS := $(ZIG_SOURCES) build.zig.zon
-# NOTE: guest image builds are driven by the host TypeScript builder (host/src/build-alpine.ts).
+# NOTE: guest image builds are driven by the host TypeScript builder (host/src/build/alpine.ts).
 HOST_BUILD_DEPS := $(shell find ../host/src ../host/bin -name '*.ts') ../host/package.json ../host/tsconfig.json
 GONDOLIN_CONFIG_DEP := $(if $(strip $(GONDOLIN_BUILD_CONFIG)),$(GONDOLIN_BUILD_CONFIG))
 BUILD_DEPS := $(ZIG_BUILD_DEPS) $(HOST_BUILD_DEPS) $(GONDOLIN_CONFIG_DEP)

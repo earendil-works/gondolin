@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { RealFSProvider } from "../src/vfs/node";
-import { VM } from "../src/vm";
+import { VM } from "../src/vm/core";
 
 const GUEST_WORKSPACE = "/workspace";
 
