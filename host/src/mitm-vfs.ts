@@ -5,10 +5,10 @@ import { listMountPaths } from "./vfs/mounts";
 import { MemoryProvider, type VirtualProvider } from "./vfs/node";
 
 /** guest mount path for host-provided MITM trust material */
-export const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";
+const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";
 
 /** cert filename inside the MITM mount */
-export const MITM_CA_FILENAME = "ca.crt";
+const MITM_CA_FILENAME = "ca.crt";
 
 export function resolveMitmMounts(
   options?: VmVfsOptions | null,

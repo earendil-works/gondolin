@@ -38,7 +38,7 @@ export function generateSshHostKey(): string {
   return privateKey;
 }
 
-export function parseSshTargetPattern(raw: string): SshAllowedTarget | null {
+function parseSshTargetPattern(raw: string): SshAllowedTarget | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
 
@@ -159,9 +159,7 @@ export function normalizeSshKnownHostsFiles(
   return unique;
 }
 
-export function parseOpenSshKnownHosts(
-  content: string,
-): OpenSshKnownHostsEntry[] {
+function parseOpenSshKnownHosts(content: string): OpenSshKnownHostsEntry[] {
   const entries: OpenSshKnownHostsEntry[] = [];
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -202,10 +200,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function matchOpenSshHostPattern(
-  hostname: string,
-  pattern: string,
-): boolean {
+function matchOpenSshHostPattern(hostname: string, pattern: string): boolean {
   const hn = hostname.toLowerCase();
   const pat = pattern.startsWith("|1|") ? pattern : pattern.toLowerCase();
 

@@ -16,7 +16,7 @@ export function parseIPv4Bytes(ip: string): Buffer | null {
 }
 
 /** Parse an IPv4 address into the two hextets used for embedded IPv4-in-IPv6 */
-export function parseIPv4ToHextets(ip: string): [number, number] | null {
+function parseIPv4ToHextets(ip: string): [number, number] | null {
   const buf = parseIPv4Bytes(ip);
   if (!buf) return null;
   return [buf.readUInt16BE(0), buf.readUInt16BE(2)];
@@ -76,7 +76,7 @@ function expandIpv6Parts(parts: string[]): number[] | null {
   return expanded;
 }
 
-export function ipv6HextetsToBytes(hextets: number[]): Buffer | null {
+function ipv6HextetsToBytes(hextets: number[]): Buffer | null {
   if (hextets.length !== 8) return null;
   const buf = Buffer.alloc(16);
   for (let i = 0; i < 8; i++) {

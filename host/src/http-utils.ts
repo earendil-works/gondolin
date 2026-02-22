@@ -101,7 +101,7 @@ export const MAX_HTTP_HEADER_BYTES = 64 * 1024;
 
 export type HttpWireVersion = "HTTP/1.0" | "HTTP/1.1";
 
-export function renderHttpResponseHead(
+function renderHttpResponseHead(
   response: {
     status: number;
     statusText: string;
@@ -397,7 +397,7 @@ export function normalizeLookupEntries(
   return [{ address, family: resolvedFamily }];
 }
 
-export function normalizeLookupOptions(
+function normalizeLookupOptions(
   options: dns.LookupOneOptions | dns.LookupAllOptions | number,
 ): dns.LookupOneOptions | dns.LookupAllOptions {
   if (typeof options === "number") {
@@ -406,7 +406,7 @@ export function normalizeLookupOptions(
   return options;
 }
 
-export function normalizeLookupFailure(
+function normalizeLookupFailure(
   options: dns.LookupOneOptions | dns.LookupAllOptions,
 ): LookupResult {
   return options.all ? [] : "";

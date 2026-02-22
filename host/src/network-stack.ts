@@ -37,7 +37,6 @@ const DHCP_ACK = 5;
 const DHCP_OPT_SUBNET_MASK = 1;
 const DHCP_OPT_ROUTER = 3;
 const DHCP_OPT_DNS = 6;
-const DHCP_OPT_REQUESTED_IP = 50;
 const DHCP_OPT_LEASE_TIME = 51;
 const DHCP_OPT_MSG_TYPE = 53;
 const DHCP_OPT_SERVER_ID = 54;
@@ -1032,8 +1031,6 @@ export class NetworkStack extends EventEmitter {
 
       if (opt === DHCP_OPT_MSG_TYPE && len >= 1) {
         msgType = optData[0];
-      } else if (opt === DHCP_OPT_REQUESTED_IP) {
-        // ignored
       }
 
       i += 2 + len;

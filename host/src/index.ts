@@ -47,7 +47,6 @@ export {
 
 // VFS (Virtual File System) providers
 export {
-  create as createVfs,
   VirtualFileSystem,
   VirtualProvider,
   MemoryProvider,

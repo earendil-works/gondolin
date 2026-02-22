@@ -14,9 +14,7 @@ export function getHostNodeArchCached(): NodeJS.Architecture {
   return cachedHostNodeArch;
 }
 
-export function nodeArchToArchitecture(
-  arch: NodeJS.Architecture,
-): Architecture {
+function nodeArchToArchitecture(arch: NodeJS.Architecture): Architecture {
   if (arch === "arm64") return "aarch64";
   return "x86_64";
 }
@@ -26,7 +24,7 @@ export function nodeArchToArchitecture(
  *
  * On macOS x64 under Rosetta, this runs a sysctl probe and may return "arm64".
  */
-export function detectHostNodeArchSync(): NodeJS.Architecture {
+function detectHostNodeArchSync(): NodeJS.Architecture {
   let arch: NodeJS.Architecture = process.arch;
 
   if (process.platform === "darwin" && process.arch === "x64") {
@@ -51,7 +49,7 @@ export function detectHostNodeArchSync(): NodeJS.Architecture {
  *
  * On macOS x64 under Rosetta, this runs a sysctl probe and may return "arm64".
  */
-export async function detectHostNodeArchAsync(): Promise<NodeJS.Architecture> {
+async function detectHostNodeArchAsync(): Promise<NodeJS.Architecture> {
   if (process.arch === "arm64") return "arm64";
 
   if (process.platform === "darwin" && process.arch === "x64") {

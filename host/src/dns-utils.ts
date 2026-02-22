@@ -1,8 +1,8 @@
 import net from "net";
 import dns from "dns";
 
-export const SYNTHETIC_DNS_HOSTMAP_PREFIX_A = 198;
-export const SYNTHETIC_DNS_HOSTMAP_PREFIX_B = 19;
+const SYNTHETIC_DNS_HOSTMAP_PREFIX_A = 198;
+const SYNTHETIC_DNS_HOSTMAP_PREFIX_B = 19;
 
 export function normalizeIpv4Servers(servers?: string[]): string[] {
   const candidates = (

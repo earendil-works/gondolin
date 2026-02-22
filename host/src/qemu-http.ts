@@ -45,19 +45,19 @@ import {
   responseHeadersToRecord,
 } from "./internal-http-conversion";
 
-export const MAX_HTTP_REDIRECTS = 10;
+const MAX_HTTP_REDIRECTS = 10;
 export { MAX_HTTP_HEADER_BYTES };
 export const MAX_HTTP_PIPELINE_BYTES = 64 * 1024;
 
 // When streaming request bodies (Content-Length, no buffering), keep the internal
 // ReadableStream queue bounded and apply coarse-grained backpressure to QEMU.
-export const HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES = 64 * 1024;
-export const HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES = 512 * 1024;
-export const HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES = 256 * 1024;
+const HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES = 64 * 1024;
+const HTTP_STREAMING_RX_PAUSE_HIGH_WATER_BYTES = 512 * 1024;
+const HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES = 256 * 1024;
 
 // Chunked framing (chunk-size lines + trailers) can add overhead on top of the decoded body.
 // Keep this bounded separately from maxHttpBodyBytes.
-export const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
+const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
 
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
