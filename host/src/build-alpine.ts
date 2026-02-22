@@ -479,6 +479,48 @@ function isPathInsideRoot(target: string, root: string): boolean {
   return absTarget === absRoot || absTarget.startsWith(absRoot + path.sep);
 }
 
+function resolveWritePath(target: string, root: string): string {
+  const absTarget = path.resolve(target);
+  const absRoot = path.resolve(root);
+
+  if (!isPathInsideRoot(absTarget, absRoot)) {
+    throw new Error(`Refusing to write outside rootfs: ${absTarget}`);
+  }
+
+  const rel = path.relative(absRoot, absTarget);
+  if (!rel || rel === ".") {
+    return absRoot;
+  }
+
+  const parts = rel.split(path.sep);
+  let current = absRoot;
+
+  for (let idx = 0; idx < parts.length; idx++) {
+    const next = path.join(current, parts[idx]);
+    try {
+      const stat = fs.lstatSync(next);
+      if (!stat.isSymbolicLink()) {
+        current = next;
+        continue;
+      }
+
+      const linkTarget = fs.readlinkSync(next);
+      const resolved = path.resolve(path.dirname(next), linkTarget);
+      if (!isPathInsideRoot(resolved, absRoot)) {
+        throw new Error(`Refusing to write through symlinked path: ${absTarget}`);
+      }
+      current = resolved;
+    } catch (err: any) {
+      if (err?.code === "ENOENT") {
+        return path.join(current, ...parts.slice(idx));
+      }
+      throw err;
+    }
+  }
+
+  return current;
+}
+
 function assertSafeWritePath(target: string, root: string): void {
   const absTarget = path.resolve(target);
   const absRoot = path.resolve(root);
@@ -1256,7 +1298,7 @@ function syncKernelModules(
 ): void {
   const copyRootfsToInitramfs = options.copyRootfsToInitramfs ?? true;
 
-  const rootfsModulesBase = path.join(rootfsDir, "lib/modules");
+  const rootfsModulesBase = resolveWritePath(path.join(rootfsDir, "lib/modules"), rootfsDir);
   const initramfsModulesBase = path.join(initramfsDir, "lib/modules");
 
   const rootfsVersions = listKernelModuleVersions(rootfsModulesBase);
@@ -2227,4 +2269,6 @@ export const __test = {
   buildOciCreateArgs,
   hardenExtractedRootfs,
   assertSafeWritePath,
+  resolveWritePath,
+  syncKernelModules,
 };

@@ -213,3 +213,50 @@ test("oci rootfs: hardenExtractedRootfs rewrites absolute symlinks", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-modules-"));
+  const rootfsDir = path.join(tmp, "rootfs");
+  const initramfsDir = path.join(tmp, "initramfs");
+  const kernelVersion = "6.18.9-0-virt";
+
+  fs.mkdirSync(path.join(rootfsDir, "usr", "lib"), { recursive: true });
+  fs.symlinkSync("usr/lib", path.join(rootfsDir, "lib"));
+
+  const initModuleDir = path.join(
+    initramfsDir,
+    "lib",
+    "modules",
+    kernelVersion,
+    "kernel",
+    "drivers",
+    "block",
+  );
+  fs.mkdirSync(initModuleDir, { recursive: true });
+  fs.writeFileSync(path.join(initModuleDir, "virtio_blk.ko"), "module");
+
+  try {
+    (buildAlpineTest as any).syncKernelModules(rootfsDir, initramfsDir, () => {}, {
+      copyRootfsToInitramfs: false,
+    });
+
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          rootfsDir,
+          "usr",
+          "lib",
+          "modules",
+          kernelVersion,
+          "kernel",
+          "drivers",
+          "block",
+          "virtio_blk.ko",
+        ),
+      ),
+      true,
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
