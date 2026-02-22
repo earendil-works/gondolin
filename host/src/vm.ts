@@ -228,6 +228,16 @@ export type SshAccess = {
   close(): Promise<void>;
 };
 
+export type AppChannelEvent = "reconnect" | "disconnect";
+
+export type AppChannel = {
+  /** bidirectional byte stream to/from the guest app daemon */
+  stream: Duplex;
+  /** subscribe to channel lifecycle events */
+  on(event: AppChannelEvent, callback: () => void): () => void;
+  /** close this handle */
+  close(): Promise<void>;
+};
 export type VMState = SandboxState | "unknown";
 
 type RootDiskState = {
@@ -294,6 +304,7 @@ export class VM {
   private gondolinEtc: ReturnType<typeof createGondolinEtcMount> | null = null;
   private ingressAccess: IngressAccess | null = null;
   private sessionIpc: SessionIpcServer | null = null;
+  private appChannel: AppChannel | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -1087,6 +1098,95 @@ fi
     return access;
   }
 
+  /**
+   * Open the dedicated VM app channel.
+   */
+  async openAppChannel(): Promise<AppChannel> {
+    if (this.appChannel && !this.appChannel.stream.destroyed) {
+      return this.appChannel;
+    }
+    this.appChannel = null;
+
+    await this.start();
+
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    const stream = server.openAppStream();
+    const reconnectHandlers = new Set<() => void>();
+    const disconnectHandlers = new Set<() => void>();
+    let hasConnectedAtLeastOnce = false;
+
+    const onConnected = () => {
+      if (hasConnectedAtLeastOnce) {
+        for (const callback of reconnectHandlers) {
+          try {
+            callback();
+          } catch {
+            // ignore subscriber errors
+          }
+        }
+      } else {
+        hasConnectedAtLeastOnce = true;
+      }
+    };
+
+    const onDisconnected = () => {
+      if (!hasConnectedAtLeastOnce) {
+        return;
+      }
+      for (const callback of disconnectHandlers) {
+        try {
+          callback();
+        } catch {
+          // ignore subscriber errors
+        }
+      }
+    };
+
+    stream.on("connected", onConnected);
+    stream.on("disconnected", onDisconnected);
+
+    if (stream.isConnected()) {
+      hasConnectedAtLeastOnce = true;
+    }
+
+    const channel: AppChannel = {
+      stream,
+      on: (event, callback) => {
+        if (event === "reconnect") {
+          reconnectHandlers.add(callback);
+          return () => {
+            reconnectHandlers.delete(callback);
+          };
+        }
+        disconnectHandlers.add(callback);
+        return () => {
+          disconnectHandlers.delete(callback);
+        };
+      },
+      close: async () => {
+        stream.off("connected", onConnected);
+        stream.off("disconnected", onDisconnected);
+        reconnectHandlers.clear();
+        disconnectHandlers.clear();
+        this.appChannel = null;
+        stream.destroy();
+      },
+    };
+
+    stream.once("close", () => {
+      if (this.appChannel === channel) {
+        this.appChannel = null;
+      }
+    });
+
+    this.appChannel = channel;
+    return channel;
+  }
+
   private execInternal(command: ExecInput, options: ExecOptions): ExecProcess {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
@@ -1290,7 +1390,15 @@ fi
     if (!keepSessionRegistration) {
       unregisterSession(this.id);
     }
-
+    if (this.appChannel) {
+      try {
+        await this.appChannel.close();
+      } catch {
+        // ignore
+      } finally {
+        this.appChannel = null;
+      }
+    }
     if (this.ingressAccess) {
       try {
         await this.ingressAccess.close();

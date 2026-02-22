@@ -265,6 +265,20 @@ host <-> guest control feature.
 **Guarantee:** this API cannot be used to reach arbitrary guest network
 destinations; it only reaches services bound to guest loopback.
 
+`VM.openAppChannel()` opens a dedicated raw byte stream over a separate
+virtio-serial port (`virtio-app`) for long-running guest daemons.
+Guest daemons typically bind this via `/dev/virtio-ports/virtio-app`.
+
+This channel is also intentionally outside guest egress network policy because
+it is host <-> guest control traffic.
+
+**Guarantee:** this API does not give the guest arbitrary host network access.
+It is a direct control path between host code and a specific guest daemon.
+
+**Important:** the app channel provides transport only. Authentication,
+authorization, message framing, replay protection, and rate limiting are
+application-level responsibilities of the protocol you run on top.
+
 ## Why the Design Is Secure
 
 Secure here means secure within our design goals.
