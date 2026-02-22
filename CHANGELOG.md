@@ -2,6 +2,12 @@
 
 All notable changes to Gondolin are documented here.
 
+## Unreleased
+
+- Switched egress `httpHooks` to WHATWG `Request`/`Response` types and added support for returning synthetic responses from `onRequestHead`/`onRequest` to short-circuit upstream fetches
+- Added internal request/response conversion helpers and expanded HTTP hook/network test coverage (including undici compatibility and body-size guardrails)
+- Updated networking/secrets docs to reflect the new hook API and short-circuit behavior
+
 ## 0.5.0
 
 - Add richer host-side `vm.fs` APIs (`access`, `mkdir`, `listDir`, `stat`, `rename`, streaming reads, and recursive deletes) for interacting with guest filesystems. #48

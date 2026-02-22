@@ -9,6 +9,7 @@ import net from "node:net";
 import dns from "node:dns";
 
 import forge from "node-forge";
+import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 
 import { QemuNetworkBackend } from "../src/qemu-net";
 import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu-ssh";
@@ -65,6 +66,30 @@ function toHookRequest(
     url: `${scheme}://${host}${request.target}`,
     headers: request.headers,
     body: request.body.length > 0 ? request.body : null,
+  };
+}
+
+async function snapshotRequest(request: Request): Promise<{
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: Buffer | null;
+}> {
+  const bodyBytes =
+    request.body === null
+      ? null
+      : Buffer.from(await request.clone().arrayBuffer());
+
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+
+  return {
+    method: request.method,
+    url: request.url,
+    headers,
+    body: bodyBytes && bodyBytes.length > 0 ? bodyBytes : null,
   };
 }
 
@@ -206,7 +231,7 @@ test("qemu-net: parseHttpRequest parses content-length and preserves remaining",
     // Enable buffering path so we can assert on the fully-parsed request and remaining bytes
     httpHooks: {
       onRequest: async (req) => {
-        captured = req;
+        captured = await snapshotRequest(req);
         return req;
       },
     },
@@ -265,7 +290,7 @@ test("qemu-net: parseHttpRequest coalesces duplicate Cookie headers with semicol
       }),
     httpHooks: {
       onRequest: async (req) => {
-        captured = req;
+        captured = await snapshotRequest(req);
         return req;
       },
     },
@@ -308,7 +333,7 @@ test("qemu-net: parseHttpRequest decodes chunked body (and waits for completenes
       }),
     httpHooks: {
       onRequest: async (req) => {
-        captured = req;
+        captured = await snapshotRequest(req);
         return req;
       },
     },
@@ -367,7 +392,7 @@ test("qemu-net: parseHttpRequest consumes chunked trailers", async () => {
       }),
     httpHooks: {
       onRequest: async (req) => {
-        captured = req;
+        captured = await snapshotRequest(req);
         return req;
       },
     },
@@ -780,6 +805,307 @@ test("qemu-net: fetchAndRespond enforces request policy hook", async () => {
       err instanceof HttpRequestBlockedError && err.status === 403,
   );
   assert.equal(fetchCalls, 0);
+});
+
+test("qemu-net: onRequestHead can short-circuit with synthetic responses", async () => {
+  const writes: Buffer[] = [];
+  let fetchCalls = 0;
+  let responseHookCalls = 0;
+
+  const backend = makeBackend({
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response("upstream", {
+        status: 200,
+        headers: { "content-length": "8" },
+      });
+    },
+    httpHooks: {
+      isIpAllowed: () => true,
+      onRequestHead: () =>
+        new Response("synthetic", {
+          status: 201,
+          headers: { "x-source": "hook" },
+        }),
+      onResponse: () => {
+        responseHookCalls += 1;
+        return new Response("rewritten", {
+          status: 202,
+          headers: { "x-rewritten": "1" },
+        });
+      },
+    },
+  });
+
+  const request = {
+    method: "GET",
+    target: "/models",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+    },
+    body: Buffer.alloc(0),
+  };
+
+  await fetchHookAndRespond(backend, request, "http", (chunk: Buffer) => {
+    writes.push(Buffer.from(chunk));
+  });
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(responseHookCalls, 0);
+
+  const raw = Buffer.concat(writes).toString("utf8");
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  assert.notEqual(headerEnd, -1);
+  const head = raw.slice(0, headerEnd).toLowerCase();
+  const body = raw.slice(headerEnd + 4);
+
+  assert.match(head, /^http\/1\.1 201 /);
+  assert.ok(head.includes("x-source: hook"));
+  assert.equal(body, "synthetic");
+});
+
+test("qemu-net: onRequestHead accepts undici.Response", async () => {
+  const writes: Buffer[] = [];
+
+  const backend = makeBackend({
+    fetch: async () =>
+      new Response("upstream", {
+        status: 200,
+        headers: { "content-length": "8" },
+      }),
+    httpHooks: {
+      onRequestHead: () =>
+        new UndiciResponse("synthetic", {
+          status: 201,
+          headers: { "x-source": "undici" },
+        }),
+    },
+  });
+
+  const request = {
+    method: "GET",
+    target: "/models",
+    version: "HTTP/1.1",
+    headers: { host: "example.com" },
+    body: Buffer.alloc(0),
+  };
+
+  await fetchHookAndRespond(backend, request, "http", (chunk: Buffer) => {
+    writes.push(Buffer.from(chunk));
+  });
+
+  const raw = Buffer.concat(writes).toString("utf8");
+  assert.match(raw.toLowerCase(), /^http\/1\.1 201 /);
+  assert.match(raw.toLowerCase(), /x-source: undici/);
+  assert.ok(raw.endsWith("synthetic"));
+});
+
+test("qemu-net: onRequest accepts undici.Request", async () => {
+  const writes: Buffer[] = [];
+  let fetchCalls = 0;
+
+  const backend = makeBackend({
+    fetch: async (_url, init) => {
+      fetchCalls += 1;
+      assert.equal(
+        (init?.headers as Record<string, string>)?.["x-from-undici"],
+        "1",
+      );
+      return new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      });
+    },
+    httpHooks: {
+      onRequest: (request) => {
+        const headers = new Headers(request.headers);
+        headers.set("x-from-undici", "1");
+        return new UndiciRequest(request.url, {
+          method: request.method,
+          headers,
+          body: request.body,
+          duplex: "half",
+        } as RequestInit);
+      },
+    },
+  });
+
+  const request = {
+    method: "POST",
+    target: "/submit",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+      "content-length": "5",
+      "content-type": "text/plain",
+    },
+    body: Buffer.from("hello"),
+  };
+
+  await fetchHookAndRespond(backend, request, "http", (chunk: Buffer) => {
+    writes.push(Buffer.from(chunk));
+  });
+
+  assert.equal(fetchCalls, 1);
+  assert.match(Buffer.concat(writes).toString("utf8"), /^HTTP\/1\.1 200 /);
+});
+
+test("qemu-net: invalid onRequest result remains rejected", async () => {
+  const backend = makeBackend({
+    fetch: async () =>
+      new Response("upstream", {
+        status: 200,
+        headers: { "content-length": "8" },
+      }),
+    httpHooks: {
+      onRequest: () => ({}) as any,
+    },
+  });
+
+  const request = {
+    method: "POST",
+    target: "/submit",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+      "content-length": "5",
+      "content-type": "text/plain",
+    },
+    body: Buffer.from("hello"),
+  };
+
+  await assert.rejects(() =>
+    fetchHookAndRespond(backend, request, "http", () => {}),
+  );
+});
+
+test("qemu-net: onRequest rejects GET requests with bodies (fail fast)", async () => {
+  let fetchCalls = 0;
+
+  const backend = makeBackend({
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      });
+    },
+    httpHooks: {
+      onRequest: (request) => request,
+    },
+  });
+
+  const request = {
+    method: "GET",
+    target: "/with-body",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+      "content-length": "5",
+      "content-type": "text/plain",
+    },
+    body: Buffer.from("hello"),
+  };
+
+  await assert.rejects(
+    () => fetchHookAndRespond(backend, request, "http", () => {}),
+    (err) => err instanceof HttpRequestBlockedError && err.status === 400,
+  );
+
+  assert.equal(fetchCalls, 0);
+});
+
+test("qemu-net: onResponse rejects GET requests with bodies (fail fast)", async () => {
+  let fetchCalls = 0;
+
+  const backend = makeBackend({
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      });
+    },
+    httpHooks: {
+      onResponse: (response) => response,
+    },
+  });
+
+  const request = {
+    method: "GET",
+    target: "/with-body",
+    version: "HTTP/1.1",
+    headers: {
+      host: "example.com",
+      "content-length": "5",
+      "content-type": "text/plain",
+    },
+    body: Buffer.from("hello"),
+  };
+
+  await assert.rejects(
+    () => fetchHookAndRespond(backend, request, "http", () => {}),
+    (err) => err instanceof HttpRequestBlockedError && err.status === 400,
+  );
+
+  assert.equal(fetchCalls, 1);
+});
+
+test("qemu-net: onRequest can short-circuit buffered requests", async () => {
+  const writes: Buffer[] = [];
+  let fetchCalls = 0;
+
+  const backend = makeBackend({
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response("upstream", {
+        status: 200,
+        headers: { "content-length": "8" },
+      });
+    },
+    httpHooks: {
+      onRequest: async (request) => {
+        assert.equal(await request.clone().text(), "hello");
+        return new Response("handled", {
+          status: 209,
+          headers: { "x-body-hook": "1" },
+        });
+      },
+    },
+  });
+
+  const buf = Buffer.from(
+    "POST /submit HTTP/1.1\r\n" +
+      "Host: example.com\r\n" +
+      "Content-Length: 5\r\n" +
+      "\r\n" +
+      "hello",
+  );
+
+  const session: any = { http: undefined };
+  let finished = false;
+
+  await qemuHttp.handleHttpDataWithWriter(backend, "key", session, buf, {
+    scheme: "http",
+    write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+    finish: () => {
+      finished = true;
+    },
+  });
+
+  assert.equal(finished, true);
+  assert.equal(fetchCalls, 0);
+
+  const raw = Buffer.concat(writes).toString("utf8");
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  assert.notEqual(headerEnd, -1);
+  const head = raw.slice(0, headerEnd).toLowerCase();
+  const body = raw.slice(headerEnd + 4);
+
+  assert.match(head, /^http\/1\.1 209 /);
+  assert.ok(head.includes("x-body-hook: 1"));
+  assert.equal(body, "handled");
 });
 
 test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async () => {
@@ -1222,6 +1548,7 @@ test("qemu-net: fetchAndRespond suppresses body for HEAD responses", async () =>
 
 test("qemu-net: fetchAndRespond suppresses body for 204 (forces content-length: 0)", async () => {
   const writes: Buffer[] = [];
+  let sawResponseHook = false;
 
   const fetchMock = async () => {
     return new Response(null, {
@@ -1233,6 +1560,19 @@ test("qemu-net: fetchAndRespond suppresses body for 204 (forces content-length: 
     fetch: fetchMock as any,
     httpHooks: {
       isIpAllowed: () => true,
+      onResponse: (response) => {
+        sawResponseHook = true;
+        assert.equal(response.status, 204);
+
+        const headers = new Headers(response.headers);
+        headers.set("x-hook", "1");
+
+        return new Response(null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      },
     },
   });
   backend.options.dnsLookup = dnsLookupStub([
@@ -1252,7 +1592,9 @@ test("qemu-net: fetchAndRespond suppresses body for 204 (forces content-length: 
   });
 
   const raw = Buffer.concat(writes).toString("utf8");
+  assert.equal(sawResponseHook, true);
   assert.match(raw, /^HTTP\/1\.1 204 /);
+  assert.match(raw.toLowerCase(), /x-hook: 1/);
   assert.match(raw.toLowerCase(), /content-length: 0/);
   const headerEnd = raw.indexOf("\r\n\r\n");
   assert.notEqual(headerEnd, -1);
@@ -1380,8 +1722,17 @@ test("qemu-net: fetchAndRespond preserves multiple Set-Cookie headers", async ()
       isIpAllowed: () => true,
       onResponse: async (resp) => {
         sawHook = true;
-        assert.ok(Array.isArray(resp.headers["set-cookie"]));
-        assert.deepEqual(resp.headers["set-cookie"], ["a=1", "b=2"]);
+        const anyHeaders = resp.headers as unknown as {
+          getSetCookie?: () => string[];
+        };
+        const cookies =
+          typeof anyHeaders.getSetCookie === "function"
+            ? anyHeaders.getSetCookie()
+            : (() => {
+                const value = resp.headers.get("set-cookie");
+                return value ? [value] : [];
+              })();
+        assert.deepEqual(cookies, ["a=1", "b=2"]);
         return resp;
       },
     },
@@ -1411,7 +1762,10 @@ test("qemu-net: fetchAndRespond preserves multiple Set-Cookie headers", async ()
 
   // must be emitted as two separate header lines (not a single comma-joined value)
   assert.ok(head.includes("\r\nset-cookie: a=1\r\n"));
-  assert.ok(head.includes("\r\nset-cookie: b=2\r\n"));
+  assert.ok(
+    head.includes("\r\nset-cookie: b=2\r\n") ||
+      head.endsWith("\r\nset-cookie: b=2"),
+  );
 });
 
 test("qemu-net: fetchAndRespond handles HTTP/1.0 clients correctly (no chunked)", async () => {

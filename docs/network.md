@@ -268,6 +268,16 @@ The network layer exposes hooks so you can:
 - Rewrite requests (e.g. add/remove headers)
 - Observe responses for auditing
 
+Egress hooks use WHATWG `Request`/`Response` objects:
+
+- `onRequestHead(request)` sees request head only (no body)
+- `onRequest(request)` sees buffered request bodies
+- `onResponse(response, request)` can rewrite upstream responses
+
+`onRequestHead` and `onRequest` may also return a synthetic `Response` to
+short-circuit upstream fetch. In that short-circuit path, upstream DNS/IP policy
+checks and fetch are skipped, and `onResponse` is not called.
+
 A key design principle is that hooks run on the host **after** the traffic has
 been parsed into structured HTTP requests, not on raw packets.
 
@@ -302,7 +312,7 @@ The network stack is intentionally *not* a general-purpose internet connection.
 Common limitations include:
 
 - No HTTP/3 or HTTP/2 (HTTP/1.x only)
-- WebSocket upgrades are supported, but after the `101` response the connection becomes an opaque tunnel (only the handshake is mediated/hookable). Disable via `allowWebSockets: false` / `--disable-websockets`
+- WebSocket upgrades are supported, but after the `101` response the connection becomes an opaque tunnel (only the request handshake is mediated/hookable). Disable via `allowWebSockets: false` / `--disable-websockets`
 - No HTTP `CONNECT`
 - No generic UDP (DNS-only)
 - No arbitrary TCP protocols (SSH is only allowed when explicitly enabled + proxied)

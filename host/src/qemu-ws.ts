@@ -1,18 +1,12 @@
 import net from "net";
 import tls from "tls";
 
-import type {
-  HttpHookRequest,
-  HttpHookResponse,
-  HttpResponseHeaders,
-  QemuNetworkBackend,
-  TcpSession,
-} from "./qemu-net";
+import type { QemuNetworkBackend, TcpSession } from "./qemu-net";
+import type { InternalHttpRequest } from "./internal-http-types";
 
 import {
   MAX_HTTP_HEADER_BYTES,
   isWebSocketUpgradeRequestHeaders,
-  sendHttpResponse,
   sendHttpResponseHead,
 } from "./http-utils";
 import type { HttpRequestData } from "./http-utils";
@@ -114,7 +108,7 @@ export async function bridgeWebSocketUpgrade(
     port: number;
     method: string;
     parsedUrl: URL;
-    hookRequest: HttpHookRequest;
+    hookRequest: InternalHttpRequest;
   },
   options: {
     scheme: "http" | "https";
@@ -202,42 +196,19 @@ export async function bridgeWebSocketUpgrade(
   // Read handshake response head.
   const resp = await readUpstreamHttpResponseHead(backend, upstream);
 
-  let responseHeaders: HttpResponseHeaders = resp.headers;
-
-  let hookResponse: HttpHookResponse = {
+  const upstreamResponse = {
     status: resp.statusCode,
     statusText: resp.statusMessage || "OK",
-    headers: responseHeaders,
-    body: Buffer.alloc(0),
+    headers: resp.headers,
   };
 
-  if (backend.options.httpHooks?.onResponse) {
-    const updated = await backend.options.httpHooks.onResponse(
-      hookResponse,
-      hookRequest,
-    );
-    if (updated) hookResponse = updated;
-  }
-
-  // If the hook injected a body, send it as a normal HTTP response and do not upgrade.
-  if (hookResponse.body.length > 0) {
-    const headers = { ...hookResponse.headers };
-    delete headers["transfer-encoding"];
-    headers["content-length"] = String(hookResponse.body.length);
-    sendHttpResponse(guestWrite, { ...hookResponse, headers }, httpVersion);
-    finishOnce();
-    upstream.destroy();
-    session.ws = undefined;
-    return false;
-  }
-
-  sendHttpResponseHead(guestWrite, hookResponse, httpVersion);
+  sendHttpResponseHead(guestWrite, upstreamResponse, httpVersion);
 
   if (resp.rest.length > 0) {
     guestWrite(resp.rest);
   }
 
-  const upgraded = resp.statusCode === 101 && hookResponse.status === 101;
+  const upgraded = resp.statusCode === 101;
   if (!upgraded) {
     finishOnce();
     upstream.destroy();

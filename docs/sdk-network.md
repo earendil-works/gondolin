@@ -35,22 +35,41 @@ const { httpHooks, env } = createHttpHooks({
 });
 ```
 
+Egress hook behavior:
+
+- `onRequestHead(request)` receives a WHATWG `Request` with no body
+    - return `undefined` to keep it unchanged
+    - return a `Request` to continue with rewrites
+    - return a `Response` to short-circuit upstream fetch
+- `onRequest(request)` receives a WHATWG `Request` (buffered body path)
+    - return `undefined` to keep it unchanged
+    - return a `Request` to continue with rewrites, or a `Response` to short-circuit
+    - request bodies are one-shot streams; if you read the body and still forward, use `request.clone()` or return a new `Request`
+- `onResponse(response, request)` receives WHATWG `Response` + final `Request`
+    - return `undefined` to keep it unchanged
+    - return a `Response` to rewrite
+
+Important note: secrets maybe be expanded prior to `onRequestHead` and
+`onRequest` is invoked.  This means that if you use those functions for logging
+this may include secrets.
+
+Short-circuited responses skip upstream fetch (including DNS/IP policy checks) and do not call `onResponse`.
+
 Notable consequences:
 
 - Secret placeholders are substituted in request headers by default (including Basic auth token decoding/re-encoding)
-  - For full behavior, caveats, and best practices, see [Secrets Handling](./secrets.md)
+    - For full behavior, caveats, and best practices, see [Secrets Handling](./secrets.md)
 - ICMP echo requests in the guest "work", but are synthetic (you can ping any address)
 - HTTP redirects are resolved on the host and hidden from the guest (the guest only sees the final response), so redirects cannot escape the allowlist
-- WebSockets are supported via HTTP/1.1 Upgrade, but after the `101` response the connection becomes an opaque tunnel (only the handshake is hookable)
-  - Disable egress WebSockets via `VM.create({ allowWebSockets: false })` (or `sandbox.allowWebSockets: false`)
-  - Disable ingress WebSockets via `vm.enableIngress({ allowWebSockets: false })`
+- WebSockets are supported via HTTP/1.1 Upgrade, but after the `101` response the connection becomes an opaque tunnel (only the request handshake is hookable)
+    - Disable egress WebSockets via `VM.create({ allowWebSockets: false })` (or `sandbox.allowWebSockets: false`)
+    - Disable ingress WebSockets via `vm.enableIngress({ allowWebSockets: false })`
 - DNS is available in multiple modes:
-
     - `synthetic` (default): no upstream DNS, returns synthetic answers
-    - `trusted`: forwards queries only to trusted host resolvers (prevents using
-      UDP/53 as arbitrary UDP transport to arbitrary destination IPs)
+    - `trusted`: forwards queries only to trusted host resolvers
+      This prevents using UDP/53 as arbitrary UDP transport to arbitrary destination IPs
 
-      - Note: trusted upstream resolvers are currently **IPv4-only**; if none are configured/found, VM creation fails
+      Note: trusted upstream resolvers are currently **IPv4-only**; if none are configured/found, VM creation fails
 
     - `open`: forwards UDP/53 to the destination IP the guest targeted
 
@@ -120,9 +139,9 @@ This is useful for:
 Hooks are configured via `enableIngress({ hooks: ... })`:
 
 - `hooks.isAllowed(info) -> boolean`: return `false` to deny (default response: `403 forbidden`)
-  - for a custom deny response, throw `new IngressRequestBlockedError(...)`
+    - for a custom deny response, throw `new IngressRequestBlockedError(...)`
 - `hooks.onRequest(request) -> patch`: rewrite headers and/or upstream target
-  - can also enable per-request response buffering via `bufferResponseBody: true`
+    - can also enable per-request response buffering via `bufferResponseBody: true`
 - `hooks.onResponse(response, request) -> patch`: rewrite status/headers and optionally replace the body
 
 Streaming vs buffering:
@@ -150,7 +169,7 @@ await vm.enableIngress({
           `admin blocked for ${clientIp}`,
           403,
           "Forbidden",
-          "nope\n"
+          "nope\n",
         );
       }
       return true;
@@ -158,7 +177,9 @@ await vm.enableIngress({
 
     onRequest: (req) => ({
       // Rewrite /api/* -> /* inside the guest
-      backendTarget: req.backendTarget.startsWith("/api/") ? req.backendTarget.slice(4) : req.backendTarget,
+      backendTarget: req.backendTarget.startsWith("/api/")
+        ? req.backendTarget.slice(4)
+        : req.backendTarget,
       headers: { "x-added": "1", "x-remove": null },
 
       // Only buffer responses we plan to inspect/modify
@@ -168,7 +189,9 @@ await vm.enableIngress({
 
     onResponse: (res) => ({
       headers: { "x-ingress": "1" },
-      body: res.body ? Buffer.from(res.body.toString("utf8").toUpperCase()) : undefined,
+      body: res.body
+        ? Buffer.from(res.body.toString("utf8").toUpperCase())
+        : undefined,
     }),
   },
 });
@@ -196,7 +219,7 @@ await access.close();
 
 See also: [SSH access](./ssh.md).
 
-## SSH egress (optional)
+## SSH Egress
 
 You can optionally allow outbound SSH (default port `22`, with non-standard ports enabled by allowlisting `HOST:PORT`) from the guest to an allowlist.
 This is useful for git-over-SSH (e.g. cloning private repos) without granting the
@@ -240,4 +263,5 @@ Notes:
 
 - SSH egress is proxied by the host and intentionally limited to non-interactive
   `exec` usage (no shells, no subsystems like `sftp`)
+- SSH egress is not necessary to attach to a VM, that can also happen with `gondolin attach`.
 - See: [SSH](./ssh.md) and [Network stack](./network.md)
