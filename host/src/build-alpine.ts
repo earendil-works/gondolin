@@ -799,6 +799,8 @@ class ContainerCommandError extends Error {
   }
 }
 
+const CONTAINER_COMMAND_MAX_BUFFER = 64 * 1024 * 1024;
+
 function runContainerCommand(
   runtime: ContainerRuntime,
   args: string[],
@@ -807,6 +809,7 @@ function runContainerCommand(
     return execFileSync(runtime, args, {
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf8",
+      maxBuffer: CONTAINER_COMMAND_MAX_BUFFER,
     });
   } catch (err) {
     const e = err as {

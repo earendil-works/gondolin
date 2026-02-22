@@ -31,6 +31,65 @@ exit 0
   );
 }
 
+function writeLargePullRuntime(binDir: string): void {
+  const runtimePath = path.join(binDir, "docker");
+  fs.writeFileSync(
+    runtimePath,
+    `#!/bin/sh
+set -eu
+
+cmd="\${1:-}"
+if [ "$cmd" = "--version" ]; then
+  printf "Docker fake 1.0\\n"
+  exit 0
+fi
+
+if [ "$cmd" = "pull" ]; then
+  # Emit >1MB to stderr to verify maxBuffer handling
+  i=0
+  while [ "$i" -lt 20000 ]; do
+    printf "layer output line %05d: abcdefghijklmnopqrstuvwxyz0123456789\\n" "$i" >&2
+    i=$((i + 1))
+  done
+  exit 0
+fi
+
+if [ "$cmd" = "create" ]; then
+  printf "cid-large-pull\\n"
+  exit 0
+fi
+
+if [ "$cmd" = "export" ]; then
+  shift
+  out=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+      shift
+      out="\${1:-}"
+      break
+    fi
+    shift || true
+  done
+
+  tmpdir="$(mktemp -d)"
+  mkdir -p "$tmpdir/bin"
+  printf "#!/bin/sh\\n" > "$tmpdir/bin/sh"
+  chmod +x "$tmpdir/bin/sh"
+  tar -cf "$out" -C "$tmpdir" .
+  rm -rf "$tmpdir"
+  exit 0
+fi
+
+if [ "$cmd" = "rm" ]; then
+  exit 0
+fi
+
+exit 0
+`,
+    { mode: 0o755 },
+  );
+}
+
 test("oci rootfs: buildOciCreateArgs includes dummy command", () => {
   const args = (buildAlpineTest as any).buildOciCreateArgs(
     "docker.io/library/debian:bookworm-slim",
@@ -46,6 +105,38 @@ test("oci rootfs: buildOciCreateArgs includes dummy command", () => {
     "docker.io/library/debian:bookworm-slim",
     "true",
   ]);
+});
+
+test("oci rootfs: pullPolicy always tolerates large pull output", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-large-pull-"));
+  const binDir = path.join(tmp, "bin");
+  const rootfsDir = path.join(tmp, "rootfs");
+
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(rootfsDir, { recursive: true });
+  writeLargePullRuntime(binDir);
+
+  const oldPath = process.env.PATH;
+
+  try {
+    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+
+    (buildAlpineTest as any).exportOciRootfs({
+      arch: "x86_64",
+      image: "docker.io/library/debian:bookworm-slim",
+      runtime: "docker",
+      platform: "linux/amd64",
+      pullPolicy: "always",
+      workDir: tmp,
+      targetDir: rootfsDir,
+      log: () => {},
+    });
+
+    assert.equal(fs.existsSync(path.join(rootfsDir, "bin", "sh")), true);
+  } finally {
+    process.env.PATH = oldPath;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("oci rootfs: pullPolicy never propagates non-missing runtime errors", () => {
