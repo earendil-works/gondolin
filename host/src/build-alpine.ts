@@ -943,7 +943,7 @@ function hasLocalOciImage(
       buildOciCreateArgs(image, platform, "never"),
     );
   } catch (err) {
-    if (isMissingLocalOciImageError(runtime, err)) {
+    if (isMissingLocalOciImageError(err)) {
       return false;
     }
     throw err;
@@ -1173,7 +1173,6 @@ function runContainerCommand(
 }
 
 function isMissingLocalOciImageError(
-  runtime: ContainerRuntime,
   err: unknown,
 ): boolean {
   if (!(err instanceof ContainerCommandError)) {
@@ -1186,29 +1185,16 @@ function isMissingLocalOciImageError(
   }
 
   const detail = `${err.stderr}\n${err.stdout}`.toLowerCase();
-  const platformNotLocal =
-    detail.includes("does not match the specified platform") ||
-    detail.includes("does not match the expected platform") ||
-    detail.includes("requested platform not available locally");
-
-  if (runtime === "docker") {
-    return (
-      detail.includes("no such image") ||
-      detail.includes("manifest unknown") ||
-      detail.includes("pull access denied") ||
-      detail.includes("unable to find image") ||
-      detail.includes("not available locally") ||
-      platformNotLocal
-    );
-  }
-
+  // This is pretty brittle but there does not seem to be a better way
   return (
     detail.includes("image not known") ||
     detail.includes("no such image") ||
     detail.includes("manifest unknown") ||
     detail.includes("pull access denied") ||
     detail.includes("not available locally") ||
-    platformNotLocal
+    detail.includes("does not match the specified platform") ||
+    detail.includes("does not match the expected platform") ||
+    detail.includes("requested platform not available locally")
   );
 }
 
