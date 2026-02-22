@@ -359,7 +359,7 @@ async function buildNative(
     alpineUrl = `${alpineConfig.mirror}/${branch}/releases/${config.arch}/alpine-minirootfs-${alpineConfig.version}-${config.arch}.tar.gz`;
   }
 
-  await buildAlpineImages({
+  const alpineBuild = await buildAlpineImages({
     arch: config.arch,
     alpineVersion: alpineConfig.version,
     alpineBranch:
@@ -428,6 +428,10 @@ async function buildNative(
 
   if (config.runtimeDefaults) {
     manifest.runtimeDefaults = { ...config.runtimeDefaults };
+  }
+
+  if (alpineBuild.ociSource) {
+    manifest.ociSource = { ...alpineBuild.ociSource };
   }
 
   const manifestPath = path.join(outputDir, MANIFEST_FILENAME);

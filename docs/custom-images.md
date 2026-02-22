@@ -332,7 +332,8 @@ my-assets/
 
 The `manifest.json` contains the build configuration, timestamps, SHA-256
 checksums for verification, and a deterministic `buildId` derived from those
-checksums.
+checksums. When `oci.image` is used, it also records `ociSource` metadata
+including the resolved image digest used during export.
 
 That `buildId` is used by snapshots/checkpoints to locate the correct guest
 assets without embedding absolute host paths.

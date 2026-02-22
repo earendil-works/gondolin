@@ -85,7 +85,20 @@ if [ "$cmd" = "export" ]; then
   exit 0
 fi
 
-if [ "$cmd" = "rm" ] || [ "$cmd" = "pull" ] || [ "$cmd" = "image" ]; then
+if [ "$cmd" = "image" ]; then
+  sub="\${2:-}"
+  if [ "$sub" = "inspect" ]; then
+    if [ -n "\${FAKE_REPO_DIGEST:-}" ]; then
+      printf "[\\\"%s\\\"]\\n" "$FAKE_REPO_DIGEST"
+    else
+      printf "[]\\n"
+    fi
+    exit 0
+  fi
+  exit 0
+fi
+
+if [ "$cmd" = "rm" ] || [ "$cmd" = "pull" ]; then
   exit 0
 fi
 
@@ -104,6 +117,14 @@ function readFakeLog(logPath: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
 }
 
 test("oci pullPolicy never: fails when requested platform is not local", () => {
@@ -150,9 +171,9 @@ test("oci pullPolicy never: fails when requested platform is not local", () => {
     );
     assert.equal(lines.some((line) => line.startsWith("pull ")), false);
   } finally {
-    process.env.PATH = oldPath;
-    process.env.FAKE_DOCKER_LOG = oldLog;
-    process.env.LOCAL_PLATFORM = oldLocalPlatform;
+    restoreEnv("PATH", oldPath);
+    restoreEnv("FAKE_DOCKER_LOG", oldLog);
+    restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -205,9 +226,9 @@ test("oci pullPolicy if-not-present: pulls when requested platform is not local"
       ),
     );
   } finally {
-    process.env.PATH = oldPath;
-    process.env.FAKE_DOCKER_LOG = oldLog;
-    process.env.LOCAL_PLATFORM = oldLocalPlatform;
+    restoreEnv("PATH", oldPath);
+    restoreEnv("FAKE_DOCKER_LOG", oldLog);
+    restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -254,9 +275,55 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
     }
     assert.equal(lines.some((line) => line.startsWith("pull ")), false);
   } finally {
-    process.env.PATH = oldPath;
-    process.env.FAKE_DOCKER_LOG = oldLog;
-    process.env.LOCAL_PLATFORM = oldLocalPlatform;
+    restoreEnv("PATH", oldPath);
+    restoreEnv("FAKE_DOCKER_LOG", oldLog);
+    restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("oci export: returns resolved image digest metadata", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-digest-"));
+  const binDir = path.join(tmp, "bin");
+  const rootfsDir = path.join(tmp, "rootfs");
+
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(rootfsDir, { recursive: true });
+  writeFakeDockerRuntime(binDir);
+
+  const oldPath = process.env.PATH;
+  const oldLocalPlatform = process.env.LOCAL_PLATFORM;
+  const oldRepoDigest = process.env.FAKE_REPO_DIGEST;
+
+  try {
+    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+    process.env.LOCAL_PLATFORM = "linux/amd64";
+    process.env.FAKE_REPO_DIGEST =
+      "docker.io/library/debian@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    const metadata = (buildAlpineTest as any).exportOciRootfs({
+      arch: "x86_64",
+      image: "docker.io/library/debian:bookworm-slim",
+      runtime: "docker",
+      platform: "linux/amd64",
+      pullPolicy: "if-not-present",
+      workDir: tmp,
+      targetDir: rootfsDir,
+      log: () => {},
+    });
+
+    assert.equal(
+      metadata.reference,
+      process.env.FAKE_REPO_DIGEST,
+    );
+    assert.equal(
+      metadata.digest,
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+  } finally {
+    restoreEnv("PATH", oldPath);
+    restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
+    restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

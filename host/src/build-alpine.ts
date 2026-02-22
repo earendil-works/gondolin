@@ -87,11 +87,28 @@ export interface AlpineBuildOptions {
   log: (msg: string) => void;
 }
 
+export interface OciResolvedSource {
+  /** requested OCI image reference from build config */
+  image: string;
+  /** OCI runtime used for export */
+  runtime: ContainerRuntime;
+  /** OCI platform used for export */
+  platform: string;
+  /** OCI pull policy used for export */
+  pullPolicy: OciPullPolicy;
+  /** resolved OCI digest (`sha256:...`) when available */
+  digest?: string;
+  /** resolved OCI image reference (`repo@sha256:...`) when available */
+  reference?: string;
+}
+
 export interface AlpineBuildResult {
   /** rootfs ext4 image path */
   rootfsImage: string;
   /** compressed initramfs path */
   initramfs: string;
+  /** OCI source metadata captured during rootfs export */
+  ociSource?: OciResolvedSource;
 }
 
 /**
@@ -146,12 +163,14 @@ export async function buildAlpineImages(
   fs.mkdirSync(rootfsDir, { recursive: true });
   fs.mkdirSync(initramfsDir, { recursive: true });
 
+  let ociSource: OciResolvedSource | undefined;
+
   if (opts.ociRootfs) {
     const runtimeLabel = opts.ociRootfs.runtime ?? "auto-detect";
     log(
       `Extracting OCI rootfs from ${opts.ociRootfs.image} (${runtimeLabel})...`,
     );
-    exportOciRootfs({
+    ociSource = exportOciRootfs({
       arch,
       workDir,
       targetDir: rootfsDir,
@@ -262,7 +281,7 @@ export async function buildAlpineImages(
   log(`Rootfs image written to ${rootfsImage}`);
   log(`Initramfs written to ${initramfsOut}`);
 
-  return { rootfsImage, initramfs: initramfsOut };
+  return { rootfsImage, initramfs: initramfsOut, ociSource };
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +837,14 @@ interface OciExportOptions extends OciRootfsOptions {
   log: (msg: string) => void;
 }
 
-function exportOciRootfs(opts: OciExportOptions): void {
+interface OciResolvedDigest {
+  /** canonical image reference containing digest */
+  reference: string;
+  /** resolved OCI digest (`sha256:...`) */
+  digest: string;
+}
+
+function exportOciRootfs(opts: OciExportOptions): OciResolvedSource {
   const runtime = detectOciRuntime(opts.runtime);
   const platform = opts.platform ?? getOciPlatform(opts.arch);
   const pullPolicy = opts.pullPolicy ?? "if-not-present";
@@ -835,6 +861,11 @@ function exportOciRootfs(opts: OciExportOptions): void {
     if (!hasImage) {
       pullOciImage(runtime, opts.image, platform, opts.log);
     }
+  }
+
+  const resolvedDigest = resolveLocalOciImageDigest(runtime, opts.image);
+  if (resolvedDigest) {
+    opts.log(`Resolved OCI image ${opts.image} -> ${resolvedDigest.reference}`);
   }
 
   const containerId = createOciExportContainer(
@@ -857,6 +888,15 @@ function exportOciRootfs(opts: OciExportOptions): void {
     }
     fs.rmSync(exportTar, { force: true });
   }
+
+  return {
+    image: opts.image,
+    runtime,
+    platform,
+    pullPolicy,
+    digest: resolvedDigest?.digest,
+    reference: resolvedDigest?.reference,
+  };
 }
 
 function getOciPlatform(arch: Architecture): string {
@@ -972,6 +1012,138 @@ function buildOciCreateArgs(
 function parseContainerId(output: string): string | null {
   const id = output.trim().split(/\s+/)[0];
   return id || null;
+}
+
+function resolveLocalOciImageDigest(
+  runtime: ContainerRuntime,
+  image: string,
+): OciResolvedDigest | null {
+  const digestFromRef = extractDigestFromImageReference(image);
+  if (digestFromRef) {
+    return {
+      reference: image,
+      digest: digestFromRef,
+    };
+  }
+
+  let output: string;
+  try {
+    output = runContainerCommand(runtime, [
+      "image",
+      "inspect",
+      image,
+      "--format",
+      "{{json .RepoDigests}}",
+    ]);
+  } catch {
+    return null;
+  }
+
+  const digests = parseRepoDigestsOutput(output);
+  if (digests.length > 0) {
+    const preferredDigest = pickRepoDigestReference(image, digests) ?? digests[0];
+    const digest = extractDigestFromImageReference(preferredDigest);
+    if (digest) {
+      return {
+        reference: preferredDigest,
+        digest,
+      };
+    }
+  }
+
+  const imageId = resolveLocalOciImageId(runtime, image);
+  if (!imageId) {
+    return null;
+  }
+
+  return {
+    reference: `${normalizeImageRepository(image)}@${imageId}`,
+    digest: imageId,
+  };
+}
+
+function parseRepoDigestsOutput(output: string): string[] {
+  try {
+    const parsed = JSON.parse(output.trim()) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (entry): entry is string =>
+        typeof entry === "string" && entry.includes("@sha256:"),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function resolveLocalOciImageId(
+  runtime: ContainerRuntime,
+  image: string,
+): string | null {
+  let output: string;
+  try {
+    output = runContainerCommand(runtime, [
+      "image",
+      "inspect",
+      image,
+      "--format",
+      "{{.Id}}",
+    ]);
+  } catch {
+    return null;
+  }
+
+  const candidate = output.trim().toLowerCase();
+  if (/^sha256:[a-f0-9]{64}$/.test(candidate)) {
+    return candidate;
+  }
+
+  return null;
+}
+
+function pickRepoDigestReference(
+  requestedImage: string,
+  digests: string[],
+): string | null {
+  const requestedRepo = normalizeImageRepository(requestedImage);
+
+  for (const digestRef of digests) {
+    const digestRepo = normalizeImageRepository(digestRef);
+    if (digestRepo === requestedRepo) {
+      return digestRef;
+    }
+    if (digestRepo.endsWith(`/${requestedRepo}`)) {
+      return digestRef;
+    }
+  }
+
+  return null;
+}
+
+function normalizeImageRepository(image: string): string {
+  let value = image;
+
+  const at = value.indexOf("@");
+  if (at !== -1) {
+    value = value.slice(0, at);
+  }
+
+  const slash = value.lastIndexOf("/");
+  const colon = value.lastIndexOf(":");
+  if (colon > slash) {
+    value = value.slice(0, colon);
+  }
+
+  return value;
+}
+
+function extractDigestFromImageReference(imageRef: string): string | null {
+  const match = imageRef.match(/@?(sha256:[a-fA-F0-9]{64})$/);
+  if (!match) {
+    return null;
+  }
+  return match[1].toLowerCase();
 }
 
 class ContainerCommandError extends Error {
@@ -2473,6 +2645,7 @@ exec switch_root /newroot /init
 export const __test = {
   exportOciRootfs,
   hasLocalOciImage,
+  resolveLocalOciImageDigest,
   buildOciCreateArgs,
   hardenExtractedRootfs,
   assertSafeWritePath,

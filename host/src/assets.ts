@@ -4,7 +4,11 @@ import os from "os";
 import { createWriteStream } from "fs";
 import * as child_process from "child_process";
 import { createHash } from "crypto";
-import type { BuildConfig } from "./build-config";
+import type {
+  BuildConfig,
+  ContainerRuntime,
+  OciPullPolicy,
+} from "./build-config";
 import type { RootfsMode } from "./rootfs-mode";
 
 const GITHUB_ORG = "earendil-works";
@@ -188,6 +192,22 @@ export interface AssetManifest {
   runtimeDefaults?: {
     /** default rootfs write mode */
     rootfsMode?: RootfsMode;
+  };
+
+  /** resolved OCI source metadata captured during rootfs export */
+  ociSource?: {
+    /** requested OCI image reference from build config */
+    image: string;
+    /** OCI runtime used for export */
+    runtime: ContainerRuntime;
+    /** OCI platform used for export */
+    platform: string;
+    /** OCI pull policy used for export */
+    pullPolicy: OciPullPolicy;
+    /** resolved OCI digest (`sha256:...`) when available */
+    digest?: string;
+    /** resolved OCI image reference (`repo@sha256:...`) when available */
+    reference?: string;
   };
 
   /** build timestamp (iso 8601) */
