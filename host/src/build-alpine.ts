@@ -540,10 +540,10 @@ function exportOciRootfs(opts: OciExportOptions): void {
   if (pullPolicy === "always") {
     pullOciImage(runtime, opts.image, platform, opts.log);
   } else {
-    const hasImage = hasLocalOciImage(runtime, opts.image);
+    const hasImage = hasLocalOciImage(runtime, opts.image, platform);
     if (!hasImage && pullPolicy === "never") {
       throw new Error(
-        `OCI image '${opts.image}' is not available locally and pullPolicy is 'never'`,
+        `OCI image '${opts.image}' is not available locally for platform '${platform}' and pullPolicy is 'never'`,
       );
     }
     if (!hasImage) {
@@ -555,6 +555,7 @@ function exportOciRootfs(opts: OciExportOptions): void {
     runtime,
     opts.image,
     platform,
+    pullPolicy,
     opts.log,
   );
   const exportTar = path.join(opts.workDir, "oci-rootfs.tar");
@@ -606,13 +607,31 @@ function hasContainerRuntime(runtime: ContainerRuntime): boolean {
   }
 }
 
-function hasLocalOciImage(runtime: ContainerRuntime, image: string): boolean {
-  try {
-    runContainerCommand(runtime, ["image", "inspect", image]);
-    return true;
-  } catch {
+function hasLocalOciImage(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+): boolean {
+  const output = runContainerCommandOrNull(
+    runtime,
+    buildOciCreateArgs(image, platform, "never"),
+  );
+  if (!output) {
     return false;
   }
+
+  const containerId = parseContainerId(output);
+  if (!containerId) {
+    return false;
+  }
+
+  try {
+    runContainerCommand(runtime, ["rm", "-f", containerId]);
+  } catch {
+    // Best effort cleanup.
+  }
+
+  return true;
 }
 
 function pullOciImage(
@@ -629,20 +648,37 @@ function createOciExportContainer(
   runtime: ContainerRuntime,
   image: string,
   platform: string,
+  pullPolicy: OciPullPolicy,
   log: (msg: string) => void,
 ): string {
   log(`Creating OCI export container from ${image}`);
-  const output = runContainerCommand(runtime, [
-    "create",
-    "--platform",
-    platform,
-    image,
-  ]);
-  const id = output.trim().split(/\s+/)[0];
+  const output = runContainerCommand(
+    runtime,
+    buildOciCreateArgs(image, platform, pullPolicy),
+  );
+  const id = parseContainerId(output);
   if (!id) {
     throw new Error(`Failed to create OCI export container for '${image}'`);
   }
   return id;
+}
+
+function buildOciCreateArgs(
+  image: string,
+  platform: string,
+  pullPolicy: OciPullPolicy,
+): string[] {
+  const args = ["create", "--platform", platform];
+  if (pullPolicy === "never") {
+    args.push("--pull=never");
+  }
+  args.push(image);
+  return args;
+}
+
+function parseContainerId(output: string): string | null {
+  const id = output.trim().split(/\s+/)[0];
+  return id || null;
 }
 
 function runContainerCommand(
@@ -668,6 +704,17 @@ function runContainerCommand(
         `exit: ${String(e.status ?? "?")}\n` +
         (stdout || stderr ? `${stdout}${stderr}` : ""),
     );
+  }
+}
+
+function runContainerCommandOrNull(
+  runtime: ContainerRuntime,
+  args: string[],
+): string | null {
+  try {
+    return runContainerCommand(runtime, args);
+  } catch {
+    return null;
   }
 }
 
@@ -2015,3 +2062,10 @@ fi
 
 exec switch_root /newroot /init
 `;
+
+/** @internal */
+export const __test = {
+  exportOciRootfs,
+  hasLocalOciImage,
+  buildOciCreateArgs,
+};
