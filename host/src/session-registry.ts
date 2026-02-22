@@ -3,7 +3,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 
-import type { SandboxConnection } from "./sandbox-server";
+import type { SandboxConnection } from "./sandbox-client";
 import {
   decodeOutputFrame,
   encodeOutputFrame,

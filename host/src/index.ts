@@ -32,18 +32,7 @@ export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
 export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec";
 
 // Server for running the sandbox
-export {
-  SandboxServer,
-  resolveSandboxServerOptions,
-  resolveSandboxServerOptionsAsync,
-  type ImagePath,
-  type SandboxServerOptions,
-  type ResolvedSandboxServerOptions,
-  type SandboxConnection,
-  type GuestFileReadOptions,
-  type GuestFileWriteOptions,
-  type GuestFileDeleteOptions,
-} from "./sandbox-server";
+export { SandboxServer } from "./sandbox-server";
 
 // VFS (Virtual File System) providers
 export {

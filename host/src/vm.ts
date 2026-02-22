@@ -25,14 +25,14 @@ import {
   decodeOutputFrame,
   type ClientMessage,
 } from "./control-protocol";
+import { SandboxServer } from "./sandbox-server";
 import {
-  SandboxServer,
-  SandboxServerOptions,
+  type ResolvedSandboxServerOptions,
+  type SandboxServerOptions,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
-  type ResolvedSandboxServerOptions,
-  type SandboxConnection,
-} from "./sandbox-server";
+} from "./sandbox-server-options";
+import type { SandboxConnection } from "./sandbox-client";
 import type { SandboxState } from "./sandbox-controller";
 import {
   SessionIpcServer,

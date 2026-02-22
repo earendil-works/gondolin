@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveSandboxServerOptions } from "../src/sandbox-server";
+import { resolveSandboxServerOptions } from "../src/sandbox-server-options";
 
 function makeTempAssetsDir(arch: "aarch64" | "x86_64"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-arch-"));
