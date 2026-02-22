@@ -61,7 +61,7 @@ jobs:
         run: |
           cd guest/image/out
           tar -czvf ../../../gondolin-guest-x64.tar.gz \
-            vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
 
       - name: Upload x64 artifact
         uses: actions/upload-artifact@v4
@@ -120,7 +120,7 @@ jobs:
         run: |
           cd guest/image/out
           tar -czvf ../../../gondolin-guest-arm64.tar.gz \
-            vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
 
       - name: Upload arm64 artifact
         uses: actions/upload-artifact@v4
