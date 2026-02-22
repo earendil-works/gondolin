@@ -95,6 +95,31 @@ import {
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
+const DEFAULT_VM_START_TIMEOUT_MS = 120000;
+const VM_START_TIMEOUT_MS = resolveEnvNumber(
+  "GONDOLIN_START_TIMEOUT_MS",
+  DEFAULT_VM_START_TIMEOUT_MS,
+);
+
+function normalizeStartTimeoutMs(
+  value: number | undefined,
+  fallback = VM_START_TIMEOUT_MS,
+): number {
+  const normalizedFallback =
+    Number.isFinite(fallback) && fallback > 0
+      ? Math.max(1, Math.trunc(fallback))
+      : DEFAULT_VM_START_TIMEOUT_MS;
+
+  if (value === undefined) {
+    return normalizedFallback;
+  }
+
+  if (!Number.isFinite(value)) {
+    return normalizedFallback;
+  }
+
+  return Math.max(0, Math.trunc(value));
+}
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
@@ -176,6 +201,8 @@ export type VMOptions = {
   memory?: string;
   /** vm cpu count (default: 2) */
   cpus?: number;
+  /** startup timeout while waiting for guest readiness in `ms` (`<= 0` disables timeout) */
+  startTimeoutMs?: number;
   /** session label for `gondolin list` */
   sessionLabel?: string;
 
@@ -257,6 +284,7 @@ export class VM {
   /** guest filesystem operations */
   readonly fs: VmFs;
   private readonly autoStart: boolean;
+  private readonly startTimeoutMs: number;
   private readonly sessionLabel: string | undefined;
   private server: SandboxServer | null;
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
@@ -268,6 +296,7 @@ export class VM {
   private connectPromise: Promise<void> | null = null;
   private readonly startSingleflight = new AsyncSingleflight<void>();
   private readonly closeSingleflight = new AsyncSingleflight<void>();
+  private startupGeneration = 0;
   private statusPromise: Promise<SandboxState> | null = null;
   private statusResolve: ((state: SandboxState) => void) | null = null;
   private statusReject: ((error: Error) => void) | null = null;
@@ -372,6 +401,7 @@ export class VM {
     this.id = randomUUID();
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
+    this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
     this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
     const mitmMounts = resolveMitmMounts(
       options.vfs,
@@ -1203,6 +1233,31 @@ fi
     this.qemuChecked = true;
   }
 
+  private beginStartupGeneration() {
+    this.startupGeneration += 1;
+    return this.startupGeneration;
+  }
+
+  private invalidateStartupGeneration(expectedGeneration?: number) {
+    if (
+      expectedGeneration !== undefined &&
+      this.startupGeneration !== expectedGeneration
+    ) {
+      return null;
+    }
+    this.startupGeneration += 1;
+    return this.startupGeneration;
+  }
+
+  private ensureStartupGeneration(expectedGeneration: number) {
+    if (this.startupGeneration === expectedGeneration) return;
+    const error = new Error("vm startup was cancelled") as Error & {
+      code?: string;
+    };
+    error.code = "vm_start_cancelled";
+    throw error;
+  }
+
   private async startInternal() {
     if (this.checkpointed) {
       throw new Error(
@@ -1210,33 +1265,111 @@ fi
       );
     }
 
-    this.ensureQemuAvailable();
+    const startupGeneration = this.beginStartupGeneration();
 
-    if (this.server) {
-      await this.server.start();
-    }
+    await this.withStartTimeout(
+      async () => {
+        this.ensureStartupGeneration(startupGeneration);
+        this.ensureQemuAvailable();
 
-    await this.ensureConnection();
-    await this.ensureRunning();
-    // If VFS is configured, also wait for mounts to be ready.
-    await this.ensureVfsReady();
-    await this.ensureSessionIpc();
+        if (this.server) {
+          await this.server.start();
+        }
+
+        this.ensureStartupGeneration(startupGeneration);
+        await this.ensureConnection();
+
+        this.ensureStartupGeneration(startupGeneration);
+        await this.ensureRunning();
+
+        this.ensureStartupGeneration(startupGeneration);
+        // If VFS is configured, also wait for mounts to be ready.
+        await this.ensureVfsReady();
+
+        this.ensureStartupGeneration(startupGeneration);
+        await this.ensureSessionIpc(startupGeneration);
+
+        this.ensureStartupGeneration(startupGeneration);
+      },
+      "guest readiness",
+      () => {
+        const cleanupGeneration =
+          this.invalidateStartupGeneration(startupGeneration);
+        if (cleanupGeneration === null) {
+          return;
+        }
+        setTimeout(() => {
+          // A newer startup/close happened since this timeout fired.
+          // Do not let stale timeout cleanup tear down current state.
+          if (this.startupGeneration !== cleanupGeneration) {
+            return;
+          }
+          void this.close().catch(() => {
+            // ignore close errors after startup timeout
+          });
+        }, 0);
+      },
+    );
   }
 
-  private async ensureSessionIpc() {
+  private async withStartTimeout<T>(
+    taskFactory: () => Promise<T>,
+    stage: string,
+    onTimeout?: () => void,
+  ) {
+    const timeoutMs = normalizeStartTimeoutMs(this.startTimeoutMs);
+    if (timeoutMs <= 0) return taskFactory();
+
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        taskFactory(),
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => {
+            const timeoutError = new Error(
+              `vm startup timed out after ${timeoutMs}ms while waiting for ${stage}`,
+            ) as Error & { code?: string };
+            timeoutError.code = "vm_start_timeout";
+            reject(timeoutError);
+            if (onTimeout) {
+              queueMicrotask(() => {
+                try {
+                  onTimeout();
+                } catch {
+                  // ignore timeout callback failures
+                }
+              });
+            }
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async ensureSessionIpc(startupGeneration?: number) {
     if (this.sessionIpc) return;
+    if (startupGeneration !== undefined) {
+      this.ensureStartupGeneration(startupGeneration);
+    }
 
     await gcSessions().catch(() => {
       // ignore gc failures
     });
+
+    if (startupGeneration !== undefined) {
+      this.ensureStartupGeneration(startupGeneration);
+    }
 
     const { socketPath } = registerSession({
       id: this.id,
       label: this.sessionLabel,
     });
 
+    let sessionIpc: SessionIpcServer | null = null;
     try {
-      this.sessionIpc = new SessionIpcServer(
+      sessionIpc = new SessionIpcServer(
         socketPath,
         (onMessage, onClose) => {
           const server = this.server;
@@ -1261,8 +1394,26 @@ fi
           },
         },
       );
-      this.sessionIpc.start();
+
+      if (startupGeneration !== undefined) {
+        this.ensureStartupGeneration(startupGeneration);
+      }
+
+      sessionIpc.start();
+
+      if (startupGeneration !== undefined) {
+        this.ensureStartupGeneration(startupGeneration);
+      }
+
+      this.sessionIpc = sessionIpc;
     } catch (err) {
+      if (sessionIpc) {
+        try {
+          await sessionIpc.close();
+        } catch {
+          // ignore close errors
+        }
+      }
       unregisterSession(this.id);
       throw err;
     }
@@ -1276,6 +1427,8 @@ fi
   }) {
     const keepSessionIpc = options?.keepSessionIpc ?? false;
     const keepSessionRegistration = options?.keepSessionRegistration ?? false;
+
+    this.invalidateStartupGeneration();
 
     if (!keepSessionIpc && this.sessionIpc) {
       try {
@@ -1985,4 +2138,5 @@ export const __test = {
   envInputToEntries,
   parseEnvEntry,
   mapToEnvArray,
+  normalizeStartTimeoutMs,
 };

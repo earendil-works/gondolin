@@ -7,6 +7,7 @@ import test from "node:test";
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
 import { createExecSession } from "../src/exec";
 import { VM, __test, type VMOptions } from "../src/vm";
+import { resolveEnvNumber } from "../src/env-utils";
 import type { RootfsMode } from "../src/rootfs-mode";
 
 function makeTempResolvedServerOptions() {
@@ -147,6 +148,176 @@ test("vm internals: rootfs option overrides manifest default", async () => {
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: start timeout rejects stalled guest readiness", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => {};
+  (vm as any).ensureVfsReady = async () => new Promise<void>(() => {});
+  (vm as any).ensureSessionIpc = async () => {};
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: start timeout also applies when ensureRunning stalls", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => new Promise<void>(() => {});
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: timed out startup does not run late session setup", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  let ensureSessionIpcCalls = 0;
+
+  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => {};
+  (vm as any).ensureVfsReady = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  };
+  (vm as any).ensureSessionIpc = async () => {
+    ensureSessionIpcCalls += 1;
+  };
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(ensureSessionIpcCalls, 0);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: stale timeout cleanup does not close newer startup", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  let staleCloseCalls = 0;
+  const originalClose = vm.close.bind(vm);
+
+  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => new Promise<void>(() => {});
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+  (vm as any).close = async () => {
+    staleCloseCalls += 1;
+  };
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+
+    (vm as any).ensureRunning = async () => {};
+    await vm.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(staleCloseCalls, 0);
+  } finally {
+    (vm as any).close = originalClose;
+    await originalClose();
+    cleanup();
+  }
+});
+
+test("vm internals: normalizeStartTimeoutMs sanitizes NaN and Infinity", () => {
+  const normalizeStartTimeoutMs = (__test as any).normalizeStartTimeoutMs as (
+    value: number | undefined,
+    fallback?: number,
+  ) => number;
+
+  assert.equal(normalizeStartTimeoutMs(Number.NaN, 321), 321);
+  assert.equal(normalizeStartTimeoutMs(Number.POSITIVE_INFINITY, 321), 321);
+  assert.equal(normalizeStartTimeoutMs(Number.NEGATIVE_INFINITY, 321), 321);
+  assert.equal(normalizeStartTimeoutMs(-1, 321), 0);
+  assert.equal(normalizeStartTimeoutMs(12.8, 321), 12);
+});
+
+test("vm internals: withStartTimeout does not fast-timeout on non-finite values", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+  });
+
+  try {
+    (vm as any).startTimeoutMs = Number.NaN;
+    const resultNaN = await (vm as any).withStartTimeout(
+      async () => "ok",
+      "unit-test",
+    );
+    assert.equal(resultNaN, "ok");
+
+    (vm as any).startTimeoutMs = Number.POSITIVE_INFINITY;
+    const resultInfinity = await (vm as any).withStartTimeout(
+      async () => "ok",
+      "unit-test",
+    );
+    assert.equal(resultInfinity, "ok");
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: resolveEnvNumber falls back for invalid timeout env", () => {
+  const prev = process.env.GONDOLIN_START_TIMEOUT_MS;
+  try {
+    process.env.GONDOLIN_START_TIMEOUT_MS = "not-a-number";
+    assert.equal(resolveEnvNumber("GONDOLIN_START_TIMEOUT_MS", 1234), 1234);
+  } finally {
+    if (prev === undefined) {
+      delete process.env.GONDOLIN_START_TIMEOUT_MS;
+    } else {
+      process.env.GONDOLIN_START_TIMEOUT_MS = prev;
+    }
   }
 });
 

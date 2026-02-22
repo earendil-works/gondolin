@@ -267,6 +267,21 @@ test("sandbox-controller: selectCpu only uses host with matching hw accel", () =
   assert.equal((__test as any).selectCpu(otherArch, "kvm"), "max");
 });
 
+test("sandbox-controller: selectMachineType avoids microvm for x64 tcg", () => {
+  const selectMachineType = (__test as any).selectMachineType as (
+    targetArch: string,
+    accel?: string,
+  ) => string;
+
+  if (process.platform === "linux") {
+    assert.equal(selectMachineType("x64", "kvm"), "microvm");
+    assert.equal(selectMachineType("x64", "tcg"), "q35");
+    assert.equal(selectMachineType("x64", undefined), "q35");
+  }
+
+  assert.equal(selectMachineType("arm64", "tcg"), "virt");
+});
+
 test("sandbox-controller: killActiveChildren kills tracked processes", async () => {
   const child = new FakeChildProcess();
   mock.method(cp, "spawn", () => child as any);

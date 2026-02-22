@@ -311,7 +311,9 @@ function buildQemuArgs(config: SandboxConfig) {
   ];
 
   const targetArch = detectTargetArch(config);
-  const machineType = config.machineType ?? selectMachineType(targetArch);
+  const accel = config.accel ?? selectAccel(targetArch);
+  const machineType =
+    config.machineType ?? selectMachineType(targetArch, accel);
 
   if (config.rootDiskPath) {
     const format = config.rootDiskFormat ?? "raw";
@@ -341,7 +343,6 @@ function buildQemuArgs(config: SandboxConfig) {
     args.push("-machine", machineType);
   }
 
-  const accel = config.accel ?? selectAccel(targetArch);
   if (accel) args.push("-accel", accel);
 
   // Keep CPU selection consistent with the selected accelerator.
@@ -423,9 +424,12 @@ function detectTargetArch(config: SandboxConfig): string {
   return process.arch;
 }
 
-function selectMachineType(targetArch: string) {
+function selectMachineType(targetArch: string, accel?: string) {
   if (process.platform === "linux" && targetArch === "x64") {
-    return "microvm";
+    // `microvm` is optimized for Linux/KVM but can hang under pure TCG.
+    // Fall back to q35 when hardware acceleration is unavailable.
+    const accelName = (accel ?? "").split(",", 1)[0]!.trim().toLowerCase();
+    return accelName === "kvm" ? "microvm" : "q35";
   }
   if (targetArch === "arm64") {
     return "virt";
