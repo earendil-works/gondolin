@@ -50,7 +50,7 @@ if [ "$cmd" = "create" ]; then
   done
 
   if [ "$pull_mode" = "never" ] && [ "\${LOCAL_PLATFORM:-}" != "$platform" ]; then
-    printf "requested platform not available locally\\n" >&2
+    printf "Error response from daemon: image with reference debian:bookworm-slim was found but its platform (\${LOCAL_PLATFORM:-unknown}) does not match the specified platform ($platform)\\n" >&2
     exit 125
   fi
 
@@ -149,6 +149,61 @@ test("oci pullPolicy never: fails when requested platform is not local", () => {
       ),
     );
     assert.equal(lines.some((line) => line.startsWith("pull ")), false);
+  } finally {
+    process.env.PATH = oldPath;
+    process.env.FAKE_DOCKER_LOG = oldLog;
+    process.env.LOCAL_PLATFORM = oldLocalPlatform;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("oci pullPolicy if-not-present: pulls when requested platform is not local", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-pull-auto-"));
+  const binDir = path.join(tmp, "bin");
+  const rootfsDir = path.join(tmp, "rootfs");
+  const logPath = path.join(tmp, "docker.log");
+
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(rootfsDir, { recursive: true });
+  writeFakeDockerRuntime(binDir);
+
+  const oldPath = process.env.PATH;
+  const oldLog = process.env.FAKE_DOCKER_LOG;
+  const oldLocalPlatform = process.env.LOCAL_PLATFORM;
+
+  try {
+    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+    process.env.FAKE_DOCKER_LOG = logPath;
+    process.env.LOCAL_PLATFORM = "linux/arm64";
+
+    (buildAlpineTest as any).exportOciRootfs({
+      arch: "x86_64",
+      image: "docker.io/library/debian:bookworm-slim",
+      runtime: "docker",
+      platform: "linux/amd64",
+      pullPolicy: "if-not-present",
+      workDir: tmp,
+      targetDir: rootfsDir,
+      log: () => {},
+    });
+
+    assert.equal(fs.existsSync(path.join(rootfsDir, "bin", "sh")), true);
+
+    const lines = readFakeLog(logPath);
+    assert.ok(
+      lines.some(
+        (line) =>
+          line ===
+          "create --platform linux/amd64 --pull=never docker.io/library/debian:bookworm-slim true",
+      ),
+    );
+    assert.ok(
+      lines.some(
+        (line) =>
+          line ===
+          "pull --platform linux/amd64 docker.io/library/debian:bookworm-slim",
+      ),
+    );
   } finally {
     process.env.PATH = oldPath;
     process.env.FAKE_DOCKER_LOG = oldLog;

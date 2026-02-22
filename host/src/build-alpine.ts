@@ -838,13 +838,19 @@ function isMissingLocalOciImageError(
   }
 
   const detail = `${err.stderr}\n${err.stdout}`.toLowerCase();
+  const platformNotLocal =
+    detail.includes("does not match the specified platform") ||
+    detail.includes("does not match the expected platform") ||
+    detail.includes("requested platform not available locally");
+
   if (runtime === "docker") {
     return (
       detail.includes("no such image") ||
       detail.includes("manifest unknown") ||
       detail.includes("pull access denied") ||
       detail.includes("unable to find image") ||
-      detail.includes("not available locally")
+      detail.includes("not available locally") ||
+      platformNotLocal
     );
   }
 
@@ -853,7 +859,8 @@ function isMissingLocalOciImageError(
     detail.includes("no such image") ||
     detail.includes("manifest unknown") ||
     detail.includes("pull access denied") ||
-    detail.includes("not available locally")
+    detail.includes("not available locally") ||
+    platformNotLocal
   );
 }
 
