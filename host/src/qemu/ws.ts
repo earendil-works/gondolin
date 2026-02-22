@@ -1,7 +1,7 @@
 import net from "net";
 import tls from "tls";
 
-import type { QemuNetworkBackend, TcpSession } from "./net";
+import type { QemuNetworkBackend, TcpSession } from "./contracts";
 import type { InternalHttpRequest } from "../internal/http-types";
 
 import {

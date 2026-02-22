@@ -7,7 +7,7 @@ import type {
   HttpHooks,
   HttpIpAllowInfo,
   QemuNetworkBackend,
-} from "../qemu/net";
+} from "../qemu/contracts";
 import type {
   InternalHeaderValue,
   InternalHttpRequest,

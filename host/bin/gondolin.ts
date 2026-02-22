@@ -1493,7 +1493,7 @@ async function runBash(argv: string[]) {
     if (args.resume) {
       const checkpointPath = resolveResumeCheckpoint(args.resume);
       const checkpoint = VmCheckpoint.load(checkpointPath);
-      vm = await checkpoint.resume(vmOptions);
+      vm = (await checkpoint.resume(vmOptions)) as VM;
     } else {
       // Use VM.create() to ensure guest assets are available
       vm = await VM.create({

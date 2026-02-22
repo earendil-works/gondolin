@@ -3,7 +3,11 @@ import dns from "dns";
 import { fetch as undiciFetch } from "undici";
 import type { ReadableStream as WebReadableStream } from "stream/web";
 
-import type { HttpIpAllowInfo, QemuNetworkBackend, TcpSession } from "./net";
+import type {
+  HttpIpAllowInfo,
+  QemuNetworkBackend,
+  TcpSession,
+} from "./contracts";
 import type {
   InternalHttpRequest,
   InternalHttpResponse,

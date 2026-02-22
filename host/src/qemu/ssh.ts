@@ -19,13 +19,14 @@ import {
   type ResolvedSshCredential,
   type SshAllowedTarget,
 } from "../ssh/utils";
+import type { SshCredential } from "../ssh/types";
 
 import type {
   DnsMode,
   QemuNetworkBackend,
   SyntheticDnsHostMappingMode,
   TcpSession,
-} from "./net";
+} from "./contracts";
 
 const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION = 4;
 const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
@@ -33,14 +34,7 @@ const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
 
-export type SshCredential = {
-  /** upstream ssh username */
-  username?: string;
-  /** private key in OpenSSH/PEM format */
-  privateKey: string | Buffer;
-  /** private key passphrase */
-  passphrase?: string | Buffer;
-};
+export type { SshCredential } from "../ssh/types";
 
 export type SshExecRequest = {
   /** target hostname derived from synthetic dns mapping */
@@ -202,6 +196,8 @@ export type QemuSshInternals = {
   upstreams: Set<SshClient>;
 };
 
+type QemuSshBackend = QemuNetworkBackend<TcpSession, QemuSshInternals>;
+
 /** @internal */
 export function createQemuSshInternals(options?: SshOptions): QemuSshInternals {
   const allowedTargets = normalizeSshAllowedTargets(options?.allowedHosts);
@@ -355,7 +351,7 @@ function resolveSshCredential(
 
 /** @internal */
 export function isSshFlowAllowed(
-  backend: QemuNetworkBackend,
+  backend: QemuSshBackend,
   key: string,
   _dstIP: string,
   dstPort: number,
@@ -395,7 +391,7 @@ export function isSshFlowAllowed(
 }
 
 function closeSshProxySession(
-  backend: QemuNetworkBackend,
+  backend: QemuSshBackend,
   proxy?: SshProxySession,
 ) {
   if (!proxy) return;
@@ -431,7 +427,7 @@ function closeSshProxySession(
 
 /** @internal */
 export function cleanupSshTcpSession(
-  backend: QemuNetworkBackend,
+  backend: QemuSshBackend,
   session: TcpSession,
 ) {
   if (!session.ssh) return;
@@ -439,7 +435,7 @@ export function cleanupSshTcpSession(
   session.ssh = undefined;
 }
 
-function getOrCreateSshHostKey(backend: QemuNetworkBackend): string {
+function getOrCreateSshHostKey(backend: QemuSshBackend): string {
   if (backend.ssh.hostKey !== null) {
     return backend.ssh.hostKey;
   }
@@ -448,7 +444,7 @@ function getOrCreateSshHostKey(backend: QemuNetworkBackend): string {
 }
 
 function ensureSshProxySession(
-  backend: QemuNetworkBackend,
+  backend: QemuSshBackend,
   key: string,
   session: TcpSession,
 ): SshProxySession {
@@ -540,7 +536,7 @@ function ensureSshProxySession(
 }
 
 function attachSshSessionHandlers(options: {
-  backend: QemuNetworkBackend;
+  backend: QemuSshBackend;
   key: string;
   session: TcpSession;
   proxy: SshProxySession;
@@ -611,7 +607,7 @@ function attachSshSessionHandlers(options: {
 
 /** @internal */
 export async function bridgeSshExecChannel(options: {
-  backend: QemuNetworkBackend;
+  backend: QemuSshBackend;
   key: string;
   session: TcpSession;
   proxy: SshProxySession;
@@ -843,7 +839,7 @@ export async function bridgeSshExecChannel(options: {
 
 /** @internal */
 export function handleSshProxyData(
-  backend: QemuNetworkBackend,
+  backend: QemuSshBackend,
   key: string,
   session: TcpSession,
   data: Buffer,

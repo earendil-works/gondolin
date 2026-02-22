@@ -26,7 +26,9 @@
     "test": "tsx --test test/*.test.ts",
     "bash": "tsx bin/gondolin.ts bash",
     "gondolin": "tsx bin/gondolin.ts",
-    "fuzz": "tsx fuzz/cli.ts"
+    "fuzz": "tsx fuzz/cli.ts",
+    "dep:check": "pnpm dlx dependency-cruiser --config .dependency-cruiser.cjs src",
+    "dep:graph": "pnpm dlx dependency-cruiser --config .dependency-cruiser.cjs --output-type dot src > /tmp/gondolin-host-deps.dot"
   },
   "keywords": [
     "sandbox",

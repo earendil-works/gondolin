@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import type { SshCredential } from "../qemu/ssh";
+import type { SshCredential } from "./types";
 import { matchHostname, normalizeHostnamePattern } from "../host/patterns";
 
 export { matchHostname, normalizeHostnamePattern };

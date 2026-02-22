@@ -1,4 +1,4 @@
-import type { VmVfsOptions } from "./core";
+import type { VmVfsOptions } from "./types";
 
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "../mitm";
 import { listMountPaths } from "../vfs/mounts";

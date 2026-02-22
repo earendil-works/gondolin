@@ -24,7 +24,7 @@ import {
   isProbablyDnsPacket,
   parseDnsQuery,
 } from "./dns";
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent } from "undici";
 
 import { AsyncSemaphore } from "../utils/async";
 import { SyntheticDnsHostMap, normalizeIpv4Servers } from "../utils/dns";
@@ -52,6 +52,13 @@ import {
   type HttpSession,
 } from "./http";
 import type { WebSocketState } from "./ws";
+import type {
+  DnsMode,
+  DnsOptions,
+  HttpFetch,
+  HttpHooks,
+  SyntheticDnsHostMappingMode,
+} from "./contracts";
 import { QemuIcmpTracker, type IcmpTiming } from "./icmp";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
@@ -182,67 +189,14 @@ export type QemuHttpInternals = {
   qemuRxPausedForHttpStreaming: boolean;
 };
 
-export type HttpFetch = typeof undiciFetch;
-
-export type HttpIpAllowInfo = {
-  /** request hostname */
-  hostname: string;
-  /** resolved ip address */
-  ip: string;
-  /** ip family */
-  family: 4 | 6;
-  /** destination port */
-  port: number;
-  /** url protocol */
-  protocol: "http" | "https";
-};
-
-export type DnsMode = "open" | "trusted" | "synthetic";
-
-export type SyntheticDnsHostMappingMode = "single" | "per-host";
-
-export type DnsOptions = {
-  /** dns mode */
-  mode?: DnsMode;
-
-  /** trusted resolver ipv4 addresses (mode="trusted") */
-  trustedServers?: string[];
-
-  /** synthetic A response ipv4 address (mode="synthetic") */
-  syntheticIPv4?: string;
-
-  /** synthetic AAAA response ipv6 address (mode="synthetic") */
-  syntheticIPv6?: string;
-
-  /** synthetic response ttl in `seconds` (mode="synthetic") */
-  syntheticTtlSeconds?: number;
-
-  /** synthetic hostname mapping strategy (mode="synthetic") */
-  syntheticHostMapping?: SyntheticDnsHostMappingMode;
-};
-
-export type HttpHooks = {
-  /** allow/deny callback for request content (request body is always `null`) */
-  isRequestAllowed?: (request: Request) => Promise<boolean> | boolean;
-  /** allow/deny callback for resolved destination ip */
-  isIpAllowed?: (info: HttpIpAllowInfo) => Promise<boolean> | boolean;
-
-  /** request hook for request head (may rewrite request or short-circuit with response) */
-  onRequestHead?: (
-    request: Request,
-  ) => Promise<Request | Response | void> | Request | Response | void;
-
-  /** request hook for buffered requests (may rewrite request or short-circuit with response) */
-  onRequest?: (
-    request: Request,
-  ) => Promise<Request | Response | void> | Request | Response | void;
-
-  /** response rewrite hook */
-  onResponse?: (
-    response: Response,
-    request: Request,
-  ) => Promise<Response | void> | Response | void;
-};
+export type {
+  DnsMode,
+  DnsOptions,
+  HttpFetch,
+  HttpHooks,
+  HttpIpAllowInfo,
+  SyntheticDnsHostMappingMode,
+} from "./contracts";
 
 export type QemuNetworkOptions = {
   /** unix socket path for the qemu net backend */

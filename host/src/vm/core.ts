@@ -14,7 +14,11 @@ import {
   inferDiskFormatFromPath,
   moveFile,
 } from "../qemu/img";
-import { VmCheckpoint, type VmCheckpointData } from "../checkpoint";
+import {
+  VmCheckpoint,
+  registerVmCreate,
+  type VmCheckpointData,
+} from "../checkpoint";
 import { loadAssetManifest } from "../assets";
 import { isRootfsMode, type RootfsMode } from "../rootfs-mode";
 
@@ -40,9 +44,8 @@ import {
   registerSession,
   unregisterSession,
 } from "../session-registry";
-import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/net";
-import type { SshOptions } from "../qemu/ssh";
 import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs";
+import type { EnvInput, VMOptions, VmVfsOptions } from "./types";
 import {
   buildShellEnv,
   envInputToEntries,
@@ -136,8 +139,6 @@ const VFS_READY_ATTEMPTS = Math.max(
 
 type ExecInput = string | string[];
 
-type EnvInput = string[] | Record<string, string>;
-
 type ExecStdin = boolean | string | Buffer | Readable | AsyncIterable<Buffer>;
 
 export type {
@@ -156,67 +157,7 @@ export type {
   VmFsWriteFileOptions,
   VmFsDeleteOptions,
 } from "./fs";
-
-export type VmVfsOptions = {
-  /** mount map (guest path -> provider) */
-  mounts?: Record<string, VirtualProvider>;
-  /** vfs hook callbacks */
-  hooks?: VfsHooks;
-  /** guest path for the fuse mount (default: "/data") */
-  fuseMount?: string;
-};
-
-export type VmRootfsOptions = {
-  /** rootfs write mode */
-  mode?: RootfsMode;
-};
-
-export type VMOptions = {
-  /** sandbox controller options */
-  sandbox?: SandboxServerOptions;
-  /** rootfs mode override */
-  rootfs?: VmRootfsOptions;
-  /** whether to boot the vm immediately (default: true) */
-  autoStart?: boolean;
-  /** http fetch implementation for asset downloads */
-  fetch?: HttpFetch;
-  /** http interception hooks */
-  httpHooks?: HttpHooks;
-
-  /** dns configuration */
-  dns?: DnsOptions;
-  /** ssh egress configuration */
-  ssh?: SshOptions;
-  /** max intercepted http request body size in `bytes` */
-  maxHttpBodyBytes?: number;
-  /** max buffered upstream http response body size in `bytes` */
-  maxHttpResponseBodyBytes?: number;
-  /** whether to allow WebSocket upgrades for guest egress (default: true) */
-  allowWebSockets?: boolean;
-  /** vfs configuration (null disables vfs integration) */
-  vfs?: VmVfsOptions | null;
-  /** default environment variables */
-  env?: EnvInput;
-  /** vm memory size (qemu syntax, default: "1G") */
-  memory?: string;
-  /** vm cpu count (default: 2) */
-  cpus?: number;
-  /** startup timeout while waiting for guest readiness in `ms` (`<= 0` disables timeout) */
-  startTimeoutMs?: number;
-  /** session label for `gondolin list` */
-  sessionLabel?: string;
-
-  /**
-   * Debug log callback.
-   *
-   * If any debug mode is enabled (via `sandbox.debug` or `GONDOLIN_DEBUG`),
-   * debug messages are delivered here.
-   *
-   * - `undefined`: defaults to `console.log` with `[component]` prefix
-   * - `null`: disable debug output even if debug modes are enabled
-   */
-  debugLog?: DebugLogFn | null;
-};
+export type { VMOptions, VmRootfsOptions, VmVfsOptions } from "./types";
 
 export type ShellOptions = {
   /** command to run (default: /bin/bash) */
@@ -2057,6 +1998,8 @@ fi
     this.connection.send(message);
   }
 }
+
+registerVmCreate((options) => VM.create(options));
 
 function resolveManifestRootfsMode(
   resolved: ResolvedSandboxServerOptions,

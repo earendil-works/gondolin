@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import net from "net";
 
-import type { HttpHooks } from "../qemu/net";
+import type { HttpHooks } from "../qemu/contracts";
 import { HttpRequestBlockedError } from "./utils";
 import { extractIPv4Mapped, parseIPv6Hextets } from "../utils/ip";
 import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns";
