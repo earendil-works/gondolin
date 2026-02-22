@@ -260,3 +260,34 @@ test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("oci rootfs: ensureRootfsShell bootstraps busybox from initramfs", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-shell-"));
+  const rootfsDir = path.join(tmp, "rootfs");
+  const initramfsDir = path.join(tmp, "initramfs");
+
+  fs.mkdirSync(path.join(rootfsDir, "usr", "bin"), { recursive: true });
+  fs.symlinkSync("usr/bin", path.join(rootfsDir, "bin"));
+
+  fs.mkdirSync(path.join(initramfsDir, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(initramfsDir, "sbin"), { recursive: true });
+  fs.writeFileSync(path.join(initramfsDir, "bin", "busybox"), "busybox");
+  fs.symlinkSync("/bin/busybox", path.join(initramfsDir, "bin", "sh"));
+  fs.symlinkSync("/bin/busybox", path.join(initramfsDir, "bin", "grep"));
+  fs.symlinkSync("../bin/busybox", path.join(initramfsDir, "sbin", "modprobe"));
+
+  try {
+    (buildAlpineTest as any).ensureRootfsShell(
+      rootfsDir,
+      "gcr.io/distroless/nodejs24-debian12",
+      initramfsDir,
+      () => {},
+    );
+
+    assert.equal(fs.existsSync(path.join(rootfsDir, "bin", "sh")), true);
+    assert.equal(fs.existsSync(path.join(rootfsDir, "bin", "busybox")), true);
+    assert.equal(fs.existsSync(path.join(rootfsDir, "sbin", "modprobe")), true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

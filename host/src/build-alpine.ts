@@ -177,8 +177,8 @@ export async function buildAlpineImages(
     await installPackages(initramfsDir, initramfsPackages, arch, cacheDir, log);
   }
 
-  if (opts.ociRootfs && (postBuildCommands.length > 0 || !opts.rootfsInit)) {
-    ensureRootfsShell(rootfsDir, opts.ociRootfs.image);
+  if (opts.ociRootfs) {
+    ensureRootfsShell(rootfsDir, opts.ociRootfs.image, initramfsDir, log);
   }
 
   if (postBuildCommands.length > 0) {
@@ -630,20 +630,181 @@ function prepareTarget(target: string, isDir: boolean): void {
   }
 }
 
-function ensureRootfsShell(rootfsDir: string, ociImage?: string): void {
+function ensureRootfsShell(
+  rootfsDir: string,
+  ociImage?: string,
+  initramfsDir?: string,
+  log?: (msg: string) => void,
+): void {
   const shellPath = path.join(rootfsDir, "bin/sh");
   if (fs.existsSync(shellPath)) {
     return;
   }
 
+  if (initramfsDir && bootstrapBusyboxShell(rootfsDir, initramfsDir, log)) {
+    if (fs.existsSync(shellPath)) {
+      return;
+    }
+  }
+
   if (ociImage) {
     throw new Error(
-      `OCI rootfs image '${ociImage}' does not contain /bin/sh. ` +
-        "Provide an image with a POSIX shell or set init.rootfsInit to a custom init script.",
+      `OCI rootfs image '${ociImage}' does not contain /bin/sh and busybox bootstrapping failed. ` +
+        "Use an image with a POSIX shell or provide a rootfs that includes /bin/sh.",
     );
   }
 
   throw new Error(`Rootfs is missing required shell at ${shellPath}`);
+}
+
+function bootstrapBusyboxShell(
+  rootfsDir: string,
+  initramfsDir: string,
+  log?: (msg: string) => void,
+): boolean {
+  const busyboxSourceCandidates = [
+    path.join(initramfsDir, "bin/busybox"),
+    path.join(initramfsDir, "usr/bin/busybox"),
+  ];
+  const busyboxSource = busyboxSourceCandidates.find((candidate) =>
+    fs.existsSync(candidate),
+  );
+  if (!busyboxSource) {
+    return false;
+  }
+
+  copyMuslRuntimeFromInitramfs(rootfsDir, initramfsDir);
+
+  const busyboxDest = resolveWritePath(path.join(rootfsDir, "bin/busybox"), rootfsDir);
+  fs.mkdirSync(path.dirname(busyboxDest), { recursive: true });
+  fs.copyFileSync(busyboxSource, busyboxDest);
+  fs.chmodSync(busyboxDest, 0o755);
+
+  for (const relDir of ["bin", "sbin", "usr/bin", "usr/sbin"]) {
+    const sourceDir = path.join(initramfsDir, relDir);
+    if (!fs.existsSync(sourceDir)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isSymbolicLink()) {
+        continue;
+      }
+
+      const sourcePath = path.join(sourceDir, entry.name);
+      const linkTarget = fs.readlinkSync(sourcePath);
+      if (!isBusyboxAppletLink(linkTarget)) {
+        continue;
+      }
+
+      ensureBusyboxApplet(rootfsDir, path.join(relDir, entry.name), busyboxDest);
+    }
+  }
+
+  for (const relPath of [
+    "bin/sh",
+    "bin/grep",
+    "bin/seq",
+    "bin/sleep",
+    "bin/mkdir",
+    "bin/mount",
+    "bin/cat",
+    "bin/ln",
+    "bin/tr",
+    "bin/chmod",
+    "bin/cp",
+    "bin/ls",
+    "sbin/modprobe",
+    "sbin/udhcpc",
+    "bin/ip",
+  ]) {
+    ensureBusyboxApplet(rootfsDir, relPath, busyboxDest);
+  }
+
+  if (log) {
+    log("Bootstrapped busybox shell and core applets into OCI rootfs");
+  }
+
+  return true;
+}
+
+function copyMuslRuntimeFromInitramfs(
+  rootfsDir: string,
+  initramfsDir: string,
+): void {
+  const initramfsLibDir = path.join(initramfsDir, "lib");
+  if (!fs.existsSync(initramfsLibDir)) {
+    return;
+  }
+
+  for (const name of fs.readdirSync(initramfsLibDir)) {
+    if (!name.startsWith("ld-musl-") && !name.startsWith("libc.musl-")) {
+      continue;
+    }
+
+    const srcPath = path.join(initramfsLibDir, name);
+    const destPath = resolveWritePath(path.join(rootfsDir, "lib", name), rootfsDir);
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
+    const stat = fs.lstatSync(srcPath);
+    if (stat.isSymbolicLink()) {
+      try {
+        fs.lstatSync(destPath);
+        continue;
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          throw err;
+        }
+      }
+      fs.symlinkSync(fs.readlinkSync(srcPath), destPath);
+      continue;
+    }
+
+    fs.copyFileSync(srcPath, destPath);
+    fs.chmodSync(destPath, stat.mode & 0o7777);
+  }
+}
+
+function isBusyboxAppletLink(linkTarget: string): boolean {
+  const normalized = linkTarget.replace(/\\/g, "/");
+  return normalized === "busybox" || normalized.endsWith("/busybox");
+}
+
+function ensureBusyboxApplet(
+  rootfsDir: string,
+  relativePath: string,
+  busyboxDest: string,
+): void {
+  const logicalPath = path.join(rootfsDir, relativePath);
+  try {
+    fs.lstatSync(logicalPath);
+    return;
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  const destPath = resolveWritePath(logicalPath, rootfsDir);
+  const linkTarget = path.relative(path.dirname(destPath), busyboxDest) || ".";
+  ensureBusyboxAppletSymlink(destPath, linkTarget);
+}
+
+function ensureBusyboxAppletSymlink(destPath: string, linkTarget: string): void {
+  try {
+    const stat = fs.lstatSync(destPath);
+    if (stat.isSymbolicLink()) {
+      return;
+    }
+    return;
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  fs.symlinkSync(linkTarget, destPath);
 }
 
 interface OciExportOptions extends OciRootfsOptions {
@@ -2177,6 +2338,48 @@ log() {
   fi
 }
 
+setup_virtio_ports() {
+  mkdir -p /dev/virtio-ports
+
+  for port_path in /sys/class/virtio-ports/vport*; do
+    if [ ! -e "\${port_path}" ]; then
+      continue
+    fi
+
+    port_device="$(basename "\${port_path}")"
+    dev_node="/dev/\${port_device}"
+
+    if [ ! -c "\${dev_node}" ]; then
+      dev_nums="$(cat "\${port_path}/dev" 2>/dev/null || true)"
+      major="\${dev_nums%%:*}"
+      minor="\${dev_nums##*:}"
+      if [ -n "\${major}" ] && [ -n "\${minor}" ]; then
+        mknod "\${dev_node}" c "\${major}" "\${minor}" 2>/dev/null || true
+        chmod 600 "\${dev_node}" 2>/dev/null || true
+      fi
+    fi
+
+    if [ -r "\${port_path}/name" ]; then
+      port_name="$(cat "\${port_path}/name" 2>/dev/null || true)"
+      port_name="$(printf "%s" "\${port_name}" | tr -d '\\r\\n')"
+      if [ -n "\${port_name}" ]; then
+        ln -sf "../\${port_device}" "/dev/virtio-ports/\${port_name}" 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+wait_for_virtio_ports() {
+  for i in $(seq 1 300); do
+    setup_virtio_ports
+    if [ -c /dev/virtio-ports/virtio-port ] && [ -c /dev/virtio-ports/virtio-fs ]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 mount -t proc proc /proc || log "[initramfs] mount proc failed"
 mount -t sysfs sysfs /sys || log "[initramfs] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[initramfs] mount devtmpfs failed"
@@ -2209,6 +2412,10 @@ modprobe virtio_console > /dev/null 2>&1 || true
 modprobe virtio_rng > /dev/null 2>&1 || true
 modprobe virtio_net > /dev/null 2>&1 || true
 modprobe fuse > /dev/null 2>&1 || true
+
+if ! wait_for_virtio_ports; then
+  log "[initramfs] virtio ports not ready"
+fi
 
 if command -v ip > /dev/null 2>&1; then
   ip link set lo up || true
@@ -2271,4 +2478,5 @@ export const __test = {
   assertSafeWritePath,
   resolveWritePath,
   syncKernelModules,
+  ensureRootfsShell,
 };

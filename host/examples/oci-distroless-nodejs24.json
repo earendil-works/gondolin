@@ -1,0 +1,11 @@
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "oci": {
+    "image": "gcr.io/distroless/nodejs24-debian12",
+    "pullPolicy": "if-not-present"
+  },
+  "rootfs": {
+    "label": "gondolin-root"
+  }
+}
