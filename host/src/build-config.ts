@@ -13,6 +13,10 @@ export type Architecture = "aarch64" | "x86_64";
 
 export type Distro = "alpine" | "nixos";
 
+export type ContainerRuntime = "docker" | "podman";
+
+export type OciPullPolicy = "if-not-present" | "always" | "never";
+
 /** environment variables as `KEY=VALUE` or a mapping */
 export type EnvInput = string[] | Record<string, string>;
 
@@ -57,7 +61,21 @@ export interface ContainerConfig {
   /** container image to use (default: "alpine:3.23") */
   image?: string;
   /** container runtime (default: auto-detect) */
-  runtime?: "docker" | "podman";
+  runtime?: ContainerRuntime;
+}
+
+/**
+ * OCI rootfs source configuration.
+ */
+export interface OciRootfsConfig {
+  /** OCI image reference (`repo/name[:tag]` or `repo/name@sha256:...`) */
+  image: string;
+  /** container runtime used for pull/create/export (auto-detect when undefined) */
+  runtime?: ContainerRuntime;
+  /** image platform override (default: derived from `arch`) */
+  platform?: string;
+  /** pull behavior before export (default: "if-not-present") */
+  pullPolicy?: OciPullPolicy;
 }
 
 /**
@@ -116,6 +134,9 @@ export interface BuildConfig {
 
   /** container config for cross-platform builds */
   container?: ContainerConfig;
+
+  /** OCI image used as the rootfs base instead of Alpine minirootfs */
+  oci?: OciRootfsConfig;
 
   /** rootfs image config */
   rootfs?: RootfsConfig;
@@ -217,6 +238,18 @@ const isEnvInput = (value: unknown): value is EnvInput =>
 const isOptionalEnvInput = (value: unknown): boolean =>
   value === undefined || isEnvInput(value);
 
+const isContainerRuntime = (value: unknown): value is ContainerRuntime =>
+  value === "docker" || value === "podman";
+
+const isOptionalContainerRuntime = (value: unknown): boolean =>
+  value === undefined || isContainerRuntime(value);
+
+const isOciPullPolicy = (value: unknown): value is OciPullPolicy =>
+  value === "if-not-present" || value === "always" || value === "never";
+
+const isOptionalOciPullPolicy = (value: unknown): boolean =>
+  value === undefined || isOciPullPolicy(value);
+
 export function validateBuildConfig(config: unknown): config is BuildConfig {
   if (!isRecord(config)) {
     return false;
@@ -249,11 +282,26 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
     if (!isOptionalString(container.image)) {
       return false;
     }
-    if (
-      container.runtime !== undefined &&
-      container.runtime !== "docker" &&
-      container.runtime !== "podman"
-    ) {
+    if (!isOptionalContainerRuntime(container.runtime)) {
+      return false;
+    }
+  }
+
+  if (cfg.oci !== undefined) {
+    if (!isRecord(cfg.oci)) {
+      return false;
+    }
+    const oci = cfg.oci as Record<string, unknown>;
+    if (typeof oci.image !== "string" || oci.image.trim() === "") {
+      return false;
+    }
+    if (!isOptionalContainerRuntime(oci.runtime)) {
+      return false;
+    }
+    if (!isOptionalString(oci.platform)) {
+      return false;
+    }
+    if (!isOptionalOciPullPolicy(oci.pullPolicy)) {
       return false;
     }
   }

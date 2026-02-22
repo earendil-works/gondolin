@@ -103,9 +103,10 @@ By default, placeholders in URL query parameters are not substituted. You can
 opt in with `replaceSecretsInQuery: true`, but this increases reflection
 risk and should only be used when required.
 
-> **Note:** Avoid mounting a `MemoryProvider` at `/` unless you also provide CA
-> certificates; doing so hides `/etc/ssl/certs` and will cause TLS verification
-> failures (e.g. `curl: (60)`).
+> **Note:** Avoid mounting a `MemoryProvider` at `/` unless you also provide a
+> system CA bundle. Gondolin injects its MITM CA at `/etc/gondolin/mitm/ca.crt`,
+> but if your root mount hides distro CA files then public TLS verification can
+> still fail (e.g. `curl: (60)`).
 
 ## Outbound SSH host allowlist
 

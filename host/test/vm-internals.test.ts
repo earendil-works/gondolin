@@ -172,19 +172,26 @@ test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", 
   assert.ok(enabled.provider, "expected default vfs provider");
 });
 
-test("vm internals: resolveMitmMounts injects /etc/ssl/certs unless already mounted", () => {
+test("vm internals: resolveMitmMounts injects /etc/gondolin/mitm unless overridden", () => {
   const injected = __test.resolveMitmMounts(undefined, undefined, true);
   assert.ok(
-    injected["/etc/ssl/certs"],
-    "expected mitm mounts to include /etc/ssl/certs",
+    injected["/etc/gondolin/mitm"],
+    "expected mitm mounts to include /etc/gondolin/mitm",
   );
 
-  const custom = __test.resolveMitmMounts(
-    { mounts: { "/etc/ssl/certs": new MemoryProvider() } },
+  const customMitm = __test.resolveMitmMounts(
+    { mounts: { "/etc/gondolin/mitm": new MemoryProvider() } },
     undefined,
     true,
   );
-  assert.deepEqual(custom, {});
+  assert.deepEqual(customMitm, {});
+
+  const customEtc = __test.resolveMitmMounts(
+    { mounts: { "/etc/gondolin": new MemoryProvider() } },
+    undefined,
+    true,
+  );
+  assert.deepEqual(customEtc, {});
 
   const disabledNet = __test.resolveMitmMounts(undefined, undefined, false);
   assert.deepEqual(disabledNet, {});
@@ -193,13 +200,13 @@ test("vm internals: resolveMitmMounts injects /etc/ssl/certs unless already moun
   assert.deepEqual(disabledVfs, {});
 });
 
-test("vm internals: createMitmCaProvider creates readonly ca-certificates.crt", () => {
+test("vm internals: createMitmCaProvider creates readonly ca.crt", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-mitmca-test-"));
   try {
     const provider = __test.createMitmCaProvider(dir) as any;
     assert.equal(provider.readonly, true);
 
-    const handle = provider.openSync("/ca-certificates.crt", "r");
+    const handle = provider.openSync("/ca.crt", "r");
     try {
       const pem = handle.readFileSync({ encoding: "utf8" });
       assert.ok(typeof pem === "string");

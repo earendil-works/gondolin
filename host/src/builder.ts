@@ -63,9 +63,20 @@ type ResolvedAlpineConfig = {
 function resolveAlpineConfig(config: BuildConfig): ResolvedAlpineConfig {
   const alpine = config.alpine ?? { version: "3.23.0" };
   const kernelPackage = alpine.kernelPackage ?? "linux-virt";
-  const defaultRootfsPackages = DEFAULT_ROOTFS_PACKAGES.map((pkg) =>
-    pkg === "linux-virt" ? kernelPackage : pkg,
-  );
+  const useOciRootfs = hasOciRootfs(config);
+  const defaultRootfsPackages = useOciRootfs
+    ? []
+    : DEFAULT_ROOTFS_PACKAGES.map((pkg) =>
+        pkg === "linux-virt" ? kernelPackage : pkg,
+      );
+  const defaultInitramfsPackages = useOciRootfs ? [kernelPackage] : [];
+
+  const initramfsPackages = [
+    ...(alpine.initramfsPackages ?? defaultInitramfsPackages),
+  ];
+  if (useOciRootfs && !initramfsPackages.includes(kernelPackage)) {
+    initramfsPackages.unshift(kernelPackage);
+  }
 
   return {
     version: alpine.version,
@@ -73,8 +84,10 @@ function resolveAlpineConfig(config: BuildConfig): ResolvedAlpineConfig {
     mirror: alpine.mirror,
     kernelPackage: alpine.kernelPackage,
     kernelImage: alpine.kernelImage,
-    rootfsPackages: alpine.rootfsPackages ?? defaultRootfsPackages,
-    initramfsPackages: alpine.initramfsPackages ?? [],
+    rootfsPackages: useOciRootfs
+      ? []
+      : (alpine.rootfsPackages ?? defaultRootfsPackages),
+    initramfsPackages,
   };
 }
 
@@ -85,6 +98,10 @@ function resolveConfigPath(value: string, configDir?: string): string {
 
 function hasPostBuildCommands(config: BuildConfig): boolean {
   return (config.postBuild?.commands?.length ?? 0) > 0;
+}
+
+function hasOciRootfs(config: BuildConfig): boolean {
+  return config.oci !== undefined;
 }
 
 export interface BuildOptions {
@@ -129,13 +146,36 @@ export async function buildAssets(
     );
   }
 
+  if (hasOciRootfs(config) && config.container?.force) {
+    throw new Error(
+      "OCI rootfs builds currently do not support container.force=true. " +
+        "Run the build natively on the host and configure oci.runtime if needed.",
+    );
+  }
+
+  if (
+    hasOciRootfs(config) &&
+    hasPostBuildCommands(config) &&
+    process.platform !== "linux"
+  ) {
+    throw new Error(
+      "OCI rootfs builds with postBuild.commands require a native Linux host. " +
+        "Run the build on Linux or remove postBuild.commands.",
+    );
+  }
+
   // Resolve paths
   const outputDir = path.resolve(options.outputDir);
 
   // Ensure output directory exists
   fs.mkdirSync(outputDir, { recursive: true });
 
+  const rootfsSource = config.oci
+    ? `OCI image ${config.oci.image}`
+    : "Alpine minirootfs";
+
   log(`Building guest assets for ${config.arch} (${config.distro})`);
+  log(`Rootfs source: ${rootfsSource}`);
   log(`Output directory: ${outputDir}`);
 
   // Check if we need a container (macOS can't run Linux build tools natively)
@@ -161,6 +201,11 @@ function shouldUseContainer(config: BuildConfig): boolean {
   // Force container if explicitly configured
   if (config.container?.force) {
     return true;
+  }
+
+  // OCI rootfs extraction uses host container tooling directly.
+  if (hasOciRootfs(config)) {
+    return false;
   }
 
   // postBuild commands execute inside the target rootfs and therefore require
@@ -270,8 +315,14 @@ async function buildNative(
   log("Building guest images...");
 
   const alpineConfig = resolveAlpineConfig(config);
+  if (hasOciRootfs(config) && (config.alpine?.rootfsPackages?.length ?? 0) > 0) {
+    log("Ignoring alpine.rootfsPackages because oci rootfs source is enabled");
+  }
+
   const { kernelPackage } = resolveKernelConfig(alpineConfig);
-  warnOnKernelPackageMismatch(alpineConfig.rootfsPackages, kernelPackage);
+  if (!hasOciRootfs(config)) {
+    warnOnKernelPackageMismatch(alpineConfig.rootfsPackages, kernelPackage);
+  }
 
   // Determine cache directory
   const cacheDir = path.join(os.homedir(), ".cache", "gondolin", "build");
@@ -315,6 +366,7 @@ async function buildNative(
       alpineConfig.branch ??
       `v${alpineConfig.version.split(".").slice(0, 2).join(".")}`,
     alpineUrl,
+    ociRootfs: config.oci,
     rootfsPackages: alpineConfig.rootfsPackages,
     initramfsPackages: alpineConfig.initramfsPackages,
     sandboxdBin: sandboxdPath,

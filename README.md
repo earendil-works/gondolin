@@ -178,7 +178,8 @@ See the [SDK reference](https://earendil-works.github.io/gondolin/sdk/) for full
 
 ## Custom Images
 
-Build custom guest images with your own packages, kernel, and init scripts:
+Build custom guest images with your own packages, kernel, and init scripts.
+You can also base the rootfs on an OCI image (`oci.image`) from Docker Hub/GHCR/private registries:
 
 ```bash
 gondolin build --init-config > build-config.json

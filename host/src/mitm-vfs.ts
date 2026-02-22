@@ -1,8 +1,17 @@
 import type { VmVfsOptions } from "./vm";
 
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
-import { MemoryProvider, type VirtualProvider } from "./vfs/node";
 import { listMountPaths } from "./vfs/mounts";
+import { MemoryProvider, type VirtualProvider } from "./vfs/node";
+
+/** guest mount path for host-provided MITM trust material */
+export const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";
+
+/** cert filename inside the MITM mount */
+export const MITM_CA_FILENAME = "ca.crt";
+
+/** absolute guest path for the host-provided MITM certificate */
+export const MITM_CA_GUEST_PATH = `${MITM_CA_MOUNT_PATH}/${MITM_CA_FILENAME}`;
 
 export function resolveMitmMounts(
   options?: VmVfsOptions | null,
@@ -12,12 +21,15 @@ export function resolveMitmMounts(
   if (options === null || !netEnabled) return {};
 
   const mountPaths = listMountPaths(options?.mounts);
-  if (mountPaths.includes("/etc/ssl/certs")) {
+  if (
+    mountPaths.includes(MITM_CA_MOUNT_PATH) ||
+    mountPaths.includes("/etc/gondolin")
+  ) {
     return {};
   }
 
   return {
-    "/etc/ssl/certs": createMitmCaProvider(mitmCertDir),
+    [MITM_CA_MOUNT_PATH]: createMitmCaProvider(mitmCertDir),
   };
 }
 
@@ -26,7 +38,7 @@ export function createMitmCaProvider(mitmCertDir?: string): VirtualProvider {
   const ca = loadOrCreateMitmCaSync(resolvedDir);
   const provider = new MemoryProvider();
   const certPem = ca.certPem.endsWith("\n") ? ca.certPem : `${ca.certPem}\n`;
-  const handle = provider.openSync("/ca-certificates.crt", "w");
+  const handle = provider.openSync(`/${MITM_CA_FILENAME}`, "w");
   try {
     handle.writeFileSync(certPem);
   } finally {

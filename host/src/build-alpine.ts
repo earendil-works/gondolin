@@ -9,6 +9,8 @@
  *   - mke2fs (e2fsprogs) — for creating ext4 rootfs images
  *   - cpio — for creating initramfs archives
  *   - lz4 — for compressing initramfs
+ *   - tar (optional) — for fast OCI rootfs extraction
+ *   - docker/podman (optional) — for OCI rootfs export
  */
 
 import fs from "fs";
@@ -17,12 +19,27 @@ import { createGunzip } from "zlib";
 import { pipeline } from "stream/promises";
 import { execFileSync } from "child_process";
 
-import type { Architecture } from "./build-config";
+import type {
+  Architecture,
+  ContainerRuntime,
+  OciPullPolicy,
+} from "./build-config";
 import { parseEnvEntry } from "./env-utils";
 
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
+
+export interface OciRootfsOptions {
+  /** OCI image reference (`repo/name[:tag]` or `repo/name@sha256:...`) */
+  image: string;
+  /** runtime used to pull/create/export OCI images (auto-detect when undefined) */
+  runtime?: ContainerRuntime;
+  /** image platform override (default: derived from `arch`) */
+  platform?: string;
+  /** pull behavior before export (default: "if-not-present") */
+  pullPolicy?: OciPullPolicy;
+}
 
 export interface AlpineBuildOptions {
   /** target architecture */
@@ -33,6 +50,8 @@ export interface AlpineBuildOptions {
   alpineBranch: string;
   /** full url to the alpine minirootfs tarball (overrides mirror) */
   alpineUrl?: string;
+  /** OCI source used for rootfs extraction (Alpine minirootfs when undefined) */
+  ociRootfs?: OciRootfsOptions;
   /** packages to install in the rootfs */
   rootfsPackages: string[];
   /** packages to install in the initramfs */
@@ -127,8 +146,25 @@ export async function buildAlpineImages(
   fs.mkdirSync(rootfsDir, { recursive: true });
   fs.mkdirSync(initramfsDir, { recursive: true });
 
-  log("Extracting Alpine minirootfs...");
-  await extractTarGz(tarballPath, rootfsDir);
+  if (opts.ociRootfs) {
+    const runtimeLabel = opts.ociRootfs.runtime ?? "auto-detect";
+    log(
+      `Extracting OCI rootfs from ${opts.ociRootfs.image} (${runtimeLabel})...`,
+    );
+    exportOciRootfs({
+      arch,
+      workDir,
+      targetDir: rootfsDir,
+      log,
+      ...opts.ociRootfs,
+    });
+    hardenExtractedRootfs(rootfsDir);
+  } else {
+    log("Extracting Alpine minirootfs for rootfs...");
+    await extractTarGz(tarballPath, rootfsDir);
+  }
+
+  log("Extracting Alpine minirootfs for initramfs...");
   await extractTarGz(tarballPath, initramfsDir);
 
   // Step 3 — install APK packages
@@ -141,17 +177,22 @@ export async function buildAlpineImages(
     await installPackages(initramfsDir, initramfsPackages, arch, cacheDir, log);
   }
 
+  if (opts.ociRootfs && (postBuildCommands.length > 0 || !opts.rootfsInit)) {
+    ensureRootfsShell(rootfsDir, opts.ociRootfs.image);
+  }
+
   if (postBuildCommands.length > 0) {
     runPostBuildCommands(rootfsDir, postBuildCommands, arch, log);
   }
 
   // Step 4 — install sandboxd, sandboxfs, sandboxssh, init scripts
-  copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"));
-  copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"));
-  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"));
+  copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"), rootfsDir);
+  copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"), rootfsDir);
+  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"), rootfsDir);
   copyExecutable(
     sandboxingressBin,
     path.join(rootfsDir, "usr/bin/sandboxingress"),
+    rootfsDir,
   );
 
   let rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
@@ -161,6 +202,7 @@ export async function buildAlpineImages(
     : null;
   if (imageEnvScript) {
     const envPath = path.join(rootfsDir, "etc/profile.d/gondolin-image-env.sh");
+    assertSafeWritePath(envPath, rootfsDir);
     fs.mkdirSync(path.dirname(envPath), { recursive: true });
     fs.writeFileSync(envPath, imageEnvScript, { mode: 0o644 });
 
@@ -181,35 +223,30 @@ export async function buildAlpineImages(
   }
 
   const initramfsInitContent = opts.initramfsInit ?? INITRAMFS_INIT_SCRIPT;
-  writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent);
+  writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent, rootfsDir);
   writeExecutable(path.join(initramfsDir, "init"), initramfsInitContent);
 
   // Symlink python3 -> python if needed
   const python3 = path.join(rootfsDir, "usr/bin/python3");
   const python = path.join(rootfsDir, "usr/bin/python");
   if (fs.existsSync(python3) && !fs.existsSync(python)) {
+    assertSafeWritePath(python, rootfsDir);
     fs.symlinkSync("python3", python);
   }
 
   // Ensure standard directories exist
   for (const dir of [rootfsDir, initramfsDir]) {
     for (const sub of ["proc", "sys", "dev", "run"]) {
-      fs.mkdirSync(path.join(dir, sub), { recursive: true });
+      const targetDir = path.join(dir, sub);
+      assertSafeWritePath(targetDir, dir);
+      fs.mkdirSync(targetDir, { recursive: true });
     }
   }
 
-  // Step 5 — copy kernel modules for initramfs
-  const modulesBase = path.join(rootfsDir, "lib/modules");
-  if (fs.existsSync(modulesBase)) {
-    const versions = fs.readdirSync(modulesBase);
-    if (versions.length > 0) {
-      const kernelVersion = versions[0];
-      const srcModules = path.join(modulesBase, kernelVersion);
-      const dstModules = path.join(initramfsDir, "lib/modules", kernelVersion);
-      log(`Copying kernel modules for ${kernelVersion}`);
-      copyInitramfsModules(srcModules, dstModules);
-    }
-  }
+  // Step 5 — copy kernel modules for initramfs/rootfs
+  syncKernelModules(rootfsDir, initramfsDir, log, {
+    copyRootfsToInitramfs: !opts.ociRootfs,
+  });
 
   // Remove /boot from rootfs (kernel lives separately)
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
@@ -436,6 +473,83 @@ function hasSymlinkComponent(target: string, root: string): boolean {
   return false;
 }
 
+function isPathInsideRoot(target: string, root: string): boolean {
+  const absTarget = path.resolve(target);
+  const absRoot = path.resolve(root);
+  return absTarget === absRoot || absTarget.startsWith(absRoot + path.sep);
+}
+
+function assertSafeWritePath(target: string, root: string): void {
+  const absTarget = path.resolve(target);
+  const absRoot = path.resolve(root);
+
+  if (!isPathInsideRoot(absTarget, absRoot)) {
+    throw new Error(`Refusing to write outside rootfs: ${absTarget}`);
+  }
+
+  if (hasSymlinkComponent(absTarget, absRoot)) {
+    throw new Error(`Refusing to write through symlinked path: ${absTarget}`);
+  }
+
+  try {
+    const stat = fs.lstatSync(absTarget);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing to overwrite symlink path: ${absTarget}`);
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+}
+
+function hardenExtractedRootfs(rootfsDir: string): void {
+  const absRoot = path.resolve(rootfsDir);
+  const stack = [absRoot];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        hardenExtractedRootfsSymlink(entryPath, absRoot);
+      }
+    }
+  }
+}
+
+function hardenExtractedRootfsSymlink(linkPath: string, rootfsDir: string): void {
+  const rawTarget = fs.readlinkSync(linkPath);
+  const resolvedTarget = resolveRootfsSymlinkTarget(linkPath, rawTarget, rootfsDir);
+
+  if (!isPathInsideRoot(resolvedTarget, rootfsDir)) {
+    throw new Error(
+      `OCI rootfs contains symlink escaping the rootfs: ${linkPath} -> ${rawTarget}`,
+    );
+  }
+
+  if (path.isAbsolute(rawTarget)) {
+    const normalizedTarget = path.relative(path.dirname(linkPath), resolvedTarget);
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(normalizedTarget || ".", linkPath);
+  }
+}
+
+function resolveRootfsSymlinkTarget(
+  linkPath: string,
+  rawTarget: string,
+  rootfsDir: string,
+): string {
+  if (path.isAbsolute(rawTarget)) {
+    return path.resolve(rootfsDir, `.${rawTarget}`);
+  }
+  return path.resolve(path.dirname(linkPath), rawTarget);
+}
+
 /**
  * Prepare a target path for extraction: remove existing entries that conflict.
  */
@@ -472,6 +586,314 @@ function prepareTarget(target: string, isDir: boolean): void {
       // Last resort: ignore
     }
   }
+}
+
+function ensureRootfsShell(rootfsDir: string, ociImage?: string): void {
+  const shellPath = path.join(rootfsDir, "bin/sh");
+  if (fs.existsSync(shellPath)) {
+    return;
+  }
+
+  if (ociImage) {
+    throw new Error(
+      `OCI rootfs image '${ociImage}' does not contain /bin/sh. ` +
+        "Provide an image with a POSIX shell or set init.rootfsInit to a custom init script.",
+    );
+  }
+
+  throw new Error(`Rootfs is missing required shell at ${shellPath}`);
+}
+
+interface OciExportOptions extends OciRootfsOptions {
+  /** target architecture */
+  arch: Architecture;
+  /** working directory for temporary export files */
+  workDir: string;
+  /** rootfs extraction target directory */
+  targetDir: string;
+  /** log sink */
+  log: (msg: string) => void;
+}
+
+function exportOciRootfs(opts: OciExportOptions): void {
+  const runtime = detectOciRuntime(opts.runtime);
+  const platform = opts.platform ?? getOciPlatform(opts.arch);
+  const pullPolicy = opts.pullPolicy ?? "if-not-present";
+
+  if (pullPolicy === "always") {
+    pullOciImage(runtime, opts.image, platform, opts.log);
+  } else {
+    const hasImage = hasLocalOciImage(runtime, opts.image, platform);
+    if (!hasImage && pullPolicy === "never") {
+      throw new Error(
+        `OCI image '${opts.image}' is not available locally for platform '${platform}' and pullPolicy is 'never'`,
+      );
+    }
+    if (!hasImage) {
+      pullOciImage(runtime, opts.image, platform, opts.log);
+    }
+  }
+
+  const containerId = createOciExportContainer(
+    runtime,
+    opts.image,
+    platform,
+    pullPolicy,
+    opts.log,
+  );
+  const exportTar = path.join(opts.workDir, "oci-rootfs.tar");
+
+  try {
+    runContainerCommand(runtime, ["export", containerId, "-o", exportTar]);
+    extractTarFile(exportTar, opts.targetDir);
+  } finally {
+    try {
+      runContainerCommand(runtime, ["rm", "-f", containerId]);
+    } catch {
+      // Best effort cleanup.
+    }
+    fs.rmSync(exportTar, { force: true });
+  }
+}
+
+function getOciPlatform(arch: Architecture): string {
+  return arch === "x86_64" ? "linux/amd64" : "linux/arm64";
+}
+
+function detectOciRuntime(preferred?: ContainerRuntime): ContainerRuntime {
+  if (preferred) {
+    if (!hasContainerRuntime(preferred)) {
+      throw new Error(
+        `Container runtime '${preferred}' is required for OCI rootfs builds but was not found on PATH`,
+      );
+    }
+    return preferred;
+  }
+
+  for (const runtime of ["docker", "podman"] as const) {
+    if (hasContainerRuntime(runtime)) {
+      return runtime;
+    }
+  }
+
+  throw new Error(
+    "OCI rootfs builds require Docker or Podman to pull and export the image",
+  );
+}
+
+function hasContainerRuntime(runtime: ContainerRuntime): boolean {
+  try {
+    execFileSync(runtime, ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasLocalOciImage(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+): boolean {
+  let output: string;
+  try {
+    output = runContainerCommand(
+      runtime,
+      buildOciCreateArgs(image, platform, "never"),
+    );
+  } catch (err) {
+    if (isMissingLocalOciImageError(runtime, err)) {
+      return false;
+    }
+    throw err;
+  }
+
+  const containerId = parseContainerId(output);
+  if (!containerId) {
+    throw new Error(
+      `Failed to parse container id from ${runtime} create output for '${image}'`,
+    );
+  }
+
+  try {
+    runContainerCommand(runtime, ["rm", "-f", containerId]);
+  } catch {
+    // Best effort cleanup.
+  }
+
+  return true;
+}
+
+function pullOciImage(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+  log: (msg: string) => void,
+): void {
+  log(`Pulling OCI image ${image} (${platform}) with ${runtime}`);
+  runContainerCommand(runtime, ["pull", "--platform", platform, image]);
+}
+
+function createOciExportContainer(
+  runtime: ContainerRuntime,
+  image: string,
+  platform: string,
+  pullPolicy: OciPullPolicy,
+  log: (msg: string) => void,
+): string {
+  log(`Creating OCI export container from ${image}`);
+  const output = runContainerCommand(
+    runtime,
+    buildOciCreateArgs(image, platform, pullPolicy),
+  );
+  const id = parseContainerId(output);
+  if (!id) {
+    throw new Error(`Failed to create OCI export container for '${image}'`);
+  }
+  return id;
+}
+
+function buildOciCreateArgs(
+  image: string,
+  platform: string,
+  pullPolicy: OciPullPolicy,
+): string[] {
+  const args = ["create", "--platform", platform];
+  if (pullPolicy === "never") {
+    args.push("--pull=never");
+  }
+  args.push(image, "true");
+  return args;
+}
+
+function parseContainerId(output: string): string | null {
+  const id = output.trim().split(/\s+/)[0];
+  return id || null;
+}
+
+class ContainerCommandError extends Error {
+  readonly status: string;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly runtime: ContainerRuntime;
+  readonly args: string[];
+
+  constructor(
+    runtime: ContainerRuntime,
+    args: string[],
+    status: string,
+    stdout: string,
+    stderr: string,
+  ) {
+    super(
+      `Container command failed: ${runtime} ${args.join(" ")}\n` +
+        `exit: ${status}\n` +
+        (stdout || stderr ? `${stdout}${stderr}` : ""),
+    );
+    this.name = "ContainerCommandError";
+    this.status = status;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.runtime = runtime;
+    this.args = [...args];
+  }
+}
+
+function runContainerCommand(
+  runtime: ContainerRuntime,
+  args: string[],
+): string {
+  try {
+    return execFileSync(runtime, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+  } catch (err) {
+    const e = err as {
+      status?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+    const status = String(e.status ?? "?");
+    const stdout = commandOutputToString(e.stdout);
+    const stderr = commandOutputToString(e.stderr);
+    throw new ContainerCommandError(runtime, args, status, stdout, stderr);
+  }
+}
+
+function isMissingLocalOciImageError(
+  runtime: ContainerRuntime,
+  err: unknown,
+): boolean {
+  if (!(err instanceof ContainerCommandError)) {
+    return false;
+  }
+
+  // docker/podman commonly return status 125 for create-time failures.
+  if (err.status !== "125" && err.status !== "1") {
+    return false;
+  }
+
+  const detail = `${err.stderr}\n${err.stdout}`.toLowerCase();
+  if (runtime === "docker") {
+    return (
+      detail.includes("no such image") ||
+      detail.includes("manifest unknown") ||
+      detail.includes("pull access denied") ||
+      detail.includes("unable to find image") ||
+      detail.includes("not available locally")
+    );
+  }
+
+  return (
+    detail.includes("image not known") ||
+    detail.includes("no such image") ||
+    detail.includes("manifest unknown") ||
+    detail.includes("pull access denied") ||
+    detail.includes("not available locally")
+  );
+}
+
+function commandOutputToString(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
+}
+
+function extractTarFile(tarPath: string, destDir: string): void {
+  try {
+    execFileSync("tar", ["-xf", tarPath, "-C", destDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+    return;
+  } catch (err) {
+    const e = err as {
+      code?: unknown;
+      status?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+
+    if (e.code !== "ENOENT") {
+      const stdout = commandOutputToString(e.stdout);
+      const stderr = commandOutputToString(e.stderr);
+      throw new Error(
+        `Failed to extract OCI rootfs tar with tar (exit ${String(e.status ?? "?")}): ` +
+          `${tarPath}\n` +
+          (stdout || stderr ? `${stdout}${stderr}` : ""),
+      );
+    }
+  }
+
+  // Fallback to in-process extraction when tar is unavailable.
+  const raw = fs.readFileSync(tarPath);
+  const entries = parseTar(raw);
+  extractEntries(entries, destDir);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +952,12 @@ async function installPackages(
 ): Promise<void> {
   // Read repository URLs from the extracted rootfs
   const reposFile = path.join(targetDir, "etc/apk/repositories");
+  if (!fs.existsSync(reposFile)) {
+    throw new Error(
+      `Cannot install APK packages into ${targetDir}: missing ${reposFile}`,
+    );
+  }
+
   const repos = fs
     .readFileSync(reposFile, "utf8")
     .split("\n")
@@ -804,6 +1232,71 @@ export async function downloadFile(url: string, dest: string): Promise<void> {
 
 const MODULE_FILE_SUFFIXES = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"] as const;
 const REQUIRED_INITRAMFS_MODULES = ["virtio_blk", "ext4"] as const;
+
+interface KernelModuleSyncOptions {
+  /** copy rootfs module trees into initramfs */
+  copyRootfsToInitramfs?: boolean;
+}
+
+function syncKernelModules(
+  rootfsDir: string,
+  initramfsDir: string,
+  log: (msg: string) => void,
+  options: KernelModuleSyncOptions = {},
+): void {
+  const copyRootfsToInitramfs = options.copyRootfsToInitramfs ?? true;
+
+  const rootfsModulesBase = path.join(rootfsDir, "lib/modules");
+  const initramfsModulesBase = path.join(initramfsDir, "lib/modules");
+
+  const rootfsVersions = listKernelModuleVersions(rootfsModulesBase);
+  const initramfsVersions = listKernelModuleVersions(initramfsModulesBase);
+
+  if (copyRootfsToInitramfs) {
+    for (const kernelVersion of rootfsVersions) {
+      const srcModules = path.join(rootfsModulesBase, kernelVersion);
+      const dstModules = path.join(initramfsModulesBase, kernelVersion);
+      log(`Copying kernel modules for ${kernelVersion} into initramfs`);
+      copyInitramfsModules(srcModules, dstModules);
+    }
+  }
+
+  const knownRootfsVersions = new Set(rootfsVersions);
+  for (const kernelVersion of initramfsVersions) {
+    if (knownRootfsVersions.has(kernelVersion)) {
+      continue;
+    }
+
+    const srcModules = path.join(initramfsModulesBase, kernelVersion);
+    const dstModules = path.join(rootfsModulesBase, kernelVersion);
+    assertSafeWritePath(dstModules, rootfsDir);
+    log(`Copying all kernel modules for ${kernelVersion} into rootfs`);
+    copyAllKernelModules(srcModules, dstModules);
+  }
+}
+
+function listKernelModuleVersions(modulesBase: string): string[] {
+  if (!fs.existsSync(modulesBase)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(modulesBase)
+    .filter((entry) =>
+      fs.statSync(path.join(modulesBase, entry), {
+        throwIfNoEntry: false,
+      })?.isDirectory(),
+    )
+    .sort();
+}
+
+function copyAllKernelModules(srcDir: string, dstDir: string): void {
+  if (!fs.existsSync(srcDir)) return;
+
+  fs.rmSync(dstDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(dstDir), { recursive: true });
+  fs.cpSync(srcDir, dstDir, { recursive: true, dereference: false });
+}
 
 function copyInitramfsModules(srcDir: string, dstDir: string): void {
   if (!fs.existsSync(srcDir)) return;
@@ -1193,13 +1686,23 @@ function walkDirSize(dir: string): number {
 // File helpers
 // ---------------------------------------------------------------------------
 
-function copyExecutable(src: string, dest: string): void {
+function copyExecutable(src: string, dest: string, rootDir?: string): void {
+  if (rootDir) {
+    assertSafeWritePath(dest, rootDir);
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(src, dest);
   fs.chmodSync(dest, 0o755);
 }
 
-function writeExecutable(dest: string, content: string): void {
+function writeExecutable(
+  dest: string,
+  content: string,
+  rootDir?: string,
+): void {
+  if (rootDir) {
+    assertSafeWritePath(dest, rootDir);
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, content, { mode: 0o755 });
 }
@@ -1306,6 +1809,115 @@ log_cmd() {
   fi
 }
 
+setup_virtio_ports() {
+  if [ ! -d /sys/class/virtio-ports ]; then
+    return
+  fi
+
+  mkdir -p /dev/virtio-ports
+
+  for port_path in /sys/class/virtio-ports/vport*; do
+    if [ ! -e "\${port_path}" ]; then
+      continue
+    fi
+
+    port_device="$(basename "\${port_path}")"
+    dev_node="/dev/\${port_device}"
+
+    if [ ! -c "\${dev_node}" ] && [ -r "\${port_path}/dev" ]; then
+      dev_nums="$(cat "\${port_path}/dev" 2>/dev/null || true)"
+      major="\${dev_nums%%:*}"
+      minor="\${dev_nums##*:}"
+      if [ -n "\${major}" ] && [ -n "\${minor}" ]; then
+        mknod "\${dev_node}" c "\${major}" "\${minor}" 2>/dev/null || true
+        chmod 600 "\${dev_node}" 2>/dev/null || true
+      fi
+    fi
+
+    if [ -r "\${port_path}/name" ]; then
+      port_name="$(cat "\${port_path}/name" 2>/dev/null || true)"
+      port_name="$(printf "%s" "\${port_name}" | tr -d '\\r\\n')"
+      if [ -n "\${port_name}" ]; then
+        ln -sf "../\${port_device}" "/dev/virtio-ports/\${port_name}" 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+resolve_virtio_port_path() {
+  expected="$1"
+
+  if [ -c "/dev/virtio-ports/\${expected}" ]; then
+    printf "%s\n" "/dev/virtio-ports/\${expected}"
+    return
+  fi
+
+  for port_path in /sys/class/virtio-ports/vport*; do
+    if [ ! -e "\${port_path}" ] || [ ! -r "\${port_path}/name" ]; then
+      continue
+    fi
+
+    port_name="$(cat "\${port_path}/name" 2>/dev/null || true)"
+    port_name="$(printf "%s" "\${port_name}" | tr -d '\\r\\n')"
+    if [ "\${port_name}" = "\${expected}" ]; then
+      port_device="$(basename "\${port_path}")"
+      printf "%s\n" "/dev/\${port_device}"
+      return
+    fi
+  done
+
+  printf "%s\n" "/dev/virtio-ports/\${expected}"
+}
+
+setup_mitm_ca() {
+  system_ca_bundle=""
+  for candidate in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/pki/tls/certs/ca-bundle.crt; do
+    if [ -r "\${candidate}" ]; then
+      system_ca_bundle="\${candidate}"
+      break
+    fi
+  done
+
+  mitm_ca_cert="/etc/gondolin/mitm/ca.crt"
+  if [ ! -r "\${mitm_ca_cert}" ]; then
+    if [ -n "\${system_ca_bundle}" ]; then
+      export SSL_CERT_FILE="\${system_ca_bundle}"
+    fi
+    return
+  fi
+
+  mitm_ca_install="/usr/local/share/ca-certificates/gondolin-mitm-ca.crt"
+  if mkdir -p /usr/local/share/ca-certificates 2>/dev/null; then
+    if cp "\${mitm_ca_cert}" "\${mitm_ca_install}" 2>/dev/null; then
+      if command -v update-ca-certificates > /dev/null 2>&1; then
+        if update-ca-certificates > /dev/null 2>&1; then
+          if [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+            system_ca_bundle="/etc/ssl/certs/ca-certificates.crt"
+          fi
+        else
+          log "[init] update-ca-certificates failed"
+        fi
+      fi
+    fi
+  fi
+
+  runtime_ca_bundle="/run/gondolin/ca-certificates.crt"
+  mkdir -p /run/gondolin
+  : > "\${runtime_ca_bundle}"
+
+  if [ -n "\${system_ca_bundle}" ] && [ -r "\${system_ca_bundle}" ]; then
+    cat "\${system_ca_bundle}" >> "\${runtime_ca_bundle}" 2>/dev/null || true
+  fi
+
+  printf "\\n" >> "\${runtime_ca_bundle}"
+  cat "\${mitm_ca_cert}" >> "\${runtime_ca_bundle}" 2>/dev/null || true
+
+  export SSL_CERT_FILE="\${runtime_ca_bundle}"
+  export CURL_CA_BUNDLE="\${runtime_ca_bundle}"
+  export REQUESTS_CA_BUNDLE="\${runtime_ca_bundle}"
+  export NODE_EXTRA_CA_CERTS="\${mitm_ca_cert}"
+}
+
 mount -t proc proc /proc || log "[init] mount proc failed"
 mount -t sysfs sysfs /sys || log "[init] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[init] mount devtmpfs failed"
@@ -1332,7 +1944,6 @@ export XDG_CACHE_HOME=/tmp/.cache
 export XDG_CONFIG_HOME=/tmp/.config
 export XDG_DATA_HOME=/tmp/.local/share
 export UV_CACHE_DIR=/tmp/.cache/uv
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export UV_NATIVE_TLS=true
 
 log "[init] /dev entries:"
@@ -1353,6 +1964,7 @@ fi
 if modprobe virtio_console > /dev/null 2>&1; then
   log "[init] loaded virtio_console"
 fi
+setup_virtio_ports
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
@@ -1370,9 +1982,11 @@ fi
 if command -v ip > /dev/null 2>&1; then
   ip link set lo up || true
   ip link set eth0 up || true
-else
+elif command -v ifconfig > /dev/null 2>&1; then
   ifconfig lo up || true
   ifconfig eth0 up || true
+else
+  log "[init] no network link tool (ip/ifconfig)"
 fi
 
 if command -v udhcpc > /dev/null 2>&1; then
@@ -1422,13 +2036,17 @@ mkdir -p "\${sandboxfs_mount}"
 sandboxfs_ready=0
 sandboxfs_error="sandboxfs mount not ready"
 
+setup_virtio_ports
+
 if [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at \${sandboxfs_mount}"
   SANDBOXFS_LOG="\${CONSOLE:-/dev/null}"
   if [ -z "\${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path /dev/virtio-ports/virtio-fs > "\${SANDBOXFS_LOG}" 2>&1 &
+  sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
+  log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
+  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" > "\${SANDBOXFS_LOG}" 2>&1 &
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1
@@ -1463,6 +2081,8 @@ if [ "\${sandboxfs_ready}" -eq 1 ]; then
 else
   printf "%s\\n" "\${sandboxfs_error}" > /run/sandboxfs.failed
 fi
+
+setup_mitm_ca
 
 if [ -x /usr/bin/sandboxssh ]; then
   log "[init] starting sandboxssh"
@@ -1533,6 +2153,30 @@ fi
 
 modprobe virtio_blk > /dev/null 2>&1 || true
 modprobe ext4 > /dev/null 2>&1 || true
+modprobe virtio_console > /dev/null 2>&1 || true
+modprobe virtio_rng > /dev/null 2>&1 || true
+modprobe virtio_net > /dev/null 2>&1 || true
+modprobe fuse > /dev/null 2>&1 || true
+
+if command -v ip > /dev/null 2>&1; then
+  ip link set lo up || true
+  ip link set eth0 up || true
+elif command -v ifconfig > /dev/null 2>&1; then
+  ifconfig lo up || true
+  ifconfig eth0 up || true
+fi
+
+if command -v udhcpc > /dev/null 2>&1; then
+  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
+  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
+    UDHCPC_SCRIPT="/sbin/udhcpc.script"
+  fi
+  if [ -x "\${UDHCPC_SCRIPT}" ]; then
+    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
+  else
+    udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
+  fi
+fi
 
 wait_for_block() {
   dev="$1"
@@ -1558,5 +2202,19 @@ fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
 
+if [ -s /etc/resolv.conf ]; then
+  mkdir -p /newroot/etc
+  cp /etc/resolv.conf /newroot/etc/resolv.conf 2>/dev/null || true
+fi
+
 exec switch_root /newroot /init
 `;
+
+/** @internal */
+export const __test = {
+  exportOciRootfs,
+  hasLocalOciImage,
+  buildOciCreateArgs,
+  hardenExtractedRootfs,
+  assertSafeWritePath,
+};

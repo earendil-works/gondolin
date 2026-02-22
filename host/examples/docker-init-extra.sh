@@ -21,7 +21,7 @@ if [ -x /usr/bin/docker ]; then
 set -eu
 
 DOCKER_BIN="/usr/bin/docker"
-CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+CA_BUNDLE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 
 if [ "$#" -gt 0 ] && [ "$1" = "run" ] && [ -r "$CA_BUNDLE" ]; then
   shift

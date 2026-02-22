@@ -323,14 +323,14 @@ Recommended starting points:
 
 ### Do Not Hide CA Certificates By Accident
 
-Gondolin automatically injects a CA bundle into the guest at `/etc/ssl/certs`
-unless you explicitly mount your own provider at that path. This injection works
-even when you mount a `MemoryProvider` at `/`, because the mount router uses
-longest-prefix matching and the injected `/etc/ssl/certs` mount takes
-precedence.
+Gondolin injects its MITM CA certificate at `/etc/gondolin/mitm/ca.crt` unless
+you explicitly mount your own provider at `/etc/gondolin` or
+`/etc/gondolin/mitm`.
 
-If you do mount your own provider at `/etc/ssl/certs`, you must supply valid CA
-certificates yourself, otherwise TLS verification will fail.
+Guest init scripts use that cert to build a merged runtime trust bundle at
+`/run/gondolin/ca-certificates.crt`. If you mount a custom provider at `/` that
+hides distro CA bundles, public TLS verification may still fail unless you
+provide your own trust store.
 
 ### Disk Checkpoints Do Not Include VFS Data
 
