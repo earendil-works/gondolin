@@ -10,9 +10,6 @@ export const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";
 /** cert filename inside the MITM mount */
 export const MITM_CA_FILENAME = "ca.crt";
 
-/** absolute guest path for the host-provided MITM certificate */
-export const MITM_CA_GUEST_PATH = `${MITM_CA_MOUNT_PATH}/${MITM_CA_FILENAME}`;
-
 export function resolveMitmMounts(
   options?: VmVfsOptions | null,
   mitmCertDir?: string,

@@ -608,30 +608,6 @@ export function privateKeyMatchesLeafCert(
   }
 }
 
-export function headersToRecord(
-  this: any,
-  headers: Headers,
-): InternalHttpResponseHeaders {
-  const record: InternalHttpResponseHeaders = {};
-
-  headers.forEach((value, key) => {
-    record[key.toLowerCase()] = value;
-  });
-
-  // undici/Node fetch supports multiple Set-Cookie values via getSetCookie()
-  const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
-  if (typeof anyHeaders.getSetCookie === "function") {
-    const cookies = anyHeaders.getSetCookie();
-    if (cookies.length === 1) {
-      record["set-cookie"] = cookies[0]!;
-    } else if (cookies.length > 1) {
-      record["set-cookie"] = cookies;
-    }
-  }
-
-  return record;
-}
-
 export type HttpRequestData = {
   method: string;
   target: string;

@@ -1,6 +1,5 @@
 import { EventEmitter } from "events";
 import { performance } from "perf_hooks";
-import net from "net";
 
 import { normalizeIpv4Servers } from "./dns-utils";
 
