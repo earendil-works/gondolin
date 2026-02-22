@@ -238,7 +238,9 @@ export async function buildAlpineImages(
   }
 
   // Step 5 — copy kernel modules for initramfs/rootfs
-  syncKernelModules(rootfsDir, initramfsDir, log);
+  syncKernelModules(rootfsDir, initramfsDir, log, {
+    copyRootfsToInitramfs: !opts.ociRootfs,
+  });
 
   // Remove /boot from rootfs (kernel lives separately)
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
@@ -658,8 +660,8 @@ function runContainerCommand(
       stdout?: unknown;
       stderr?: unknown;
     };
-    const stdout = typeof e.stdout === "string" ? e.stdout : "";
-    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+    const stdout = commandOutputToString(e.stdout);
+    const stderr = commandOutputToString(e.stderr);
 
     throw new Error(
       `Container command failed: ${runtime} ${args.join(" ")}\n` +
@@ -669,10 +671,21 @@ function runContainerCommand(
   }
 }
 
+function commandOutputToString(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
+}
+
 function extractTarFile(tarPath: string, destDir: string): void {
   try {
     execFileSync("tar", ["-xf", tarPath, "-C", destDir], {
       stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
     });
     return;
   } catch (err) {
@@ -684,8 +697,8 @@ function extractTarFile(tarPath: string, destDir: string): void {
     };
 
     if (e.code !== "ENOENT") {
-      const stdout = typeof e.stdout === "string" ? e.stdout : "";
-      const stderr = typeof e.stderr === "string" ? e.stderr : "";
+      const stdout = commandOutputToString(e.stdout);
+      const stderr = commandOutputToString(e.stderr);
       throw new Error(
         `Failed to extract OCI rootfs tar with tar (exit ${String(e.status ?? "?")}): ` +
           `${tarPath}\n` +
@@ -1037,22 +1050,32 @@ export async function downloadFile(url: string, dest: string): Promise<void> {
 const MODULE_FILE_SUFFIXES = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"] as const;
 const REQUIRED_INITRAMFS_MODULES = ["virtio_blk", "ext4"] as const;
 
+interface KernelModuleSyncOptions {
+  /** copy rootfs module trees into initramfs */
+  copyRootfsToInitramfs?: boolean;
+}
+
 function syncKernelModules(
   rootfsDir: string,
   initramfsDir: string,
   log: (msg: string) => void,
+  options: KernelModuleSyncOptions = {},
 ): void {
+  const copyRootfsToInitramfs = options.copyRootfsToInitramfs ?? true;
+
   const rootfsModulesBase = path.join(rootfsDir, "lib/modules");
   const initramfsModulesBase = path.join(initramfsDir, "lib/modules");
 
   const rootfsVersions = listKernelModuleVersions(rootfsModulesBase);
   const initramfsVersions = listKernelModuleVersions(initramfsModulesBase);
 
-  for (const kernelVersion of rootfsVersions) {
-    const srcModules = path.join(rootfsModulesBase, kernelVersion);
-    const dstModules = path.join(initramfsModulesBase, kernelVersion);
-    log(`Copying kernel modules for ${kernelVersion} into initramfs`);
-    copyInitramfsModules(srcModules, dstModules);
+  if (copyRootfsToInitramfs) {
+    for (const kernelVersion of rootfsVersions) {
+      const srcModules = path.join(rootfsModulesBase, kernelVersion);
+      const dstModules = path.join(initramfsModulesBase, kernelVersion);
+      log(`Copying kernel modules for ${kernelVersion} into initramfs`);
+      copyInitramfsModules(srcModules, dstModules);
+    }
   }
 
   const knownRootfsVersions = new Set(rootfsVersions);
