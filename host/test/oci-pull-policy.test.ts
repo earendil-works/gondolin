@@ -145,7 +145,7 @@ test("oci pullPolicy never: fails when requested platform is not local", () => {
       lines.some(
         (line) =>
           line ===
-          "create --platform linux/amd64 --pull=never docker.io/library/debian:bookworm-slim",
+          "create --platform linux/amd64 --pull=never docker.io/library/debian:bookworm-slim true",
       ),
     );
     assert.equal(lines.some((line) => line.startsWith("pull ")), false);
@@ -195,6 +195,7 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
     for (const line of createLines) {
       assert.ok(line.includes("--platform linux/amd64"));
       assert.ok(line.includes("--pull=never"));
+      assert.ok(line.endsWith(" docker.io/library/debian:bookworm-slim true"));
     }
     assert.equal(lines.some((line) => line.startsWith("pull ")), false);
   } finally {

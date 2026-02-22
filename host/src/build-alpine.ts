@@ -158,6 +158,7 @@ export async function buildAlpineImages(
       log,
       ...opts.ociRootfs,
     });
+    hardenExtractedRootfs(rootfsDir);
   } else {
     log("Extracting Alpine minirootfs for rootfs...");
     await extractTarGz(tarballPath, rootfsDir);
@@ -185,12 +186,13 @@ export async function buildAlpineImages(
   }
 
   // Step 4 — install sandboxd, sandboxfs, sandboxssh, init scripts
-  copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"));
-  copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"));
-  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"));
+  copyExecutable(sandboxdBin, path.join(rootfsDir, "usr/bin/sandboxd"), rootfsDir);
+  copyExecutable(sandboxfsBin, path.join(rootfsDir, "usr/bin/sandboxfs"), rootfsDir);
+  copyExecutable(sandboxsshBin, path.join(rootfsDir, "usr/bin/sandboxssh"), rootfsDir);
   copyExecutable(
     sandboxingressBin,
     path.join(rootfsDir, "usr/bin/sandboxingress"),
+    rootfsDir,
   );
 
   let rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
@@ -200,6 +202,7 @@ export async function buildAlpineImages(
     : null;
   if (imageEnvScript) {
     const envPath = path.join(rootfsDir, "etc/profile.d/gondolin-image-env.sh");
+    assertSafeWritePath(envPath, rootfsDir);
     fs.mkdirSync(path.dirname(envPath), { recursive: true });
     fs.writeFileSync(envPath, imageEnvScript, { mode: 0o644 });
 
@@ -220,20 +223,23 @@ export async function buildAlpineImages(
   }
 
   const initramfsInitContent = opts.initramfsInit ?? INITRAMFS_INIT_SCRIPT;
-  writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent);
+  writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent, rootfsDir);
   writeExecutable(path.join(initramfsDir, "init"), initramfsInitContent);
 
   // Symlink python3 -> python if needed
   const python3 = path.join(rootfsDir, "usr/bin/python3");
   const python = path.join(rootfsDir, "usr/bin/python");
   if (fs.existsSync(python3) && !fs.existsSync(python)) {
+    assertSafeWritePath(python, rootfsDir);
     fs.symlinkSync("python3", python);
   }
 
   // Ensure standard directories exist
   for (const dir of [rootfsDir, initramfsDir]) {
     for (const sub of ["proc", "sys", "dev", "run"]) {
-      fs.mkdirSync(path.join(dir, sub), { recursive: true });
+      const targetDir = path.join(dir, sub);
+      assertSafeWritePath(targetDir, dir);
+      fs.mkdirSync(targetDir, { recursive: true });
     }
   }
 
@@ -467,6 +473,83 @@ function hasSymlinkComponent(target: string, root: string): boolean {
   return false;
 }
 
+function isPathInsideRoot(target: string, root: string): boolean {
+  const absTarget = path.resolve(target);
+  const absRoot = path.resolve(root);
+  return absTarget === absRoot || absTarget.startsWith(absRoot + path.sep);
+}
+
+function assertSafeWritePath(target: string, root: string): void {
+  const absTarget = path.resolve(target);
+  const absRoot = path.resolve(root);
+
+  if (!isPathInsideRoot(absTarget, absRoot)) {
+    throw new Error(`Refusing to write outside rootfs: ${absTarget}`);
+  }
+
+  if (hasSymlinkComponent(absTarget, absRoot)) {
+    throw new Error(`Refusing to write through symlinked path: ${absTarget}`);
+  }
+
+  try {
+    const stat = fs.lstatSync(absTarget);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing to overwrite symlink path: ${absTarget}`);
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+}
+
+function hardenExtractedRootfs(rootfsDir: string): void {
+  const absRoot = path.resolve(rootfsDir);
+  const stack = [absRoot];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        hardenExtractedRootfsSymlink(entryPath, absRoot);
+      }
+    }
+  }
+}
+
+function hardenExtractedRootfsSymlink(linkPath: string, rootfsDir: string): void {
+  const rawTarget = fs.readlinkSync(linkPath);
+  const resolvedTarget = resolveRootfsSymlinkTarget(linkPath, rawTarget, rootfsDir);
+
+  if (!isPathInsideRoot(resolvedTarget, rootfsDir)) {
+    throw new Error(
+      `OCI rootfs contains symlink escaping the rootfs: ${linkPath} -> ${rawTarget}`,
+    );
+  }
+
+  if (path.isAbsolute(rawTarget)) {
+    const normalizedTarget = path.relative(path.dirname(linkPath), resolvedTarget);
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(normalizedTarget || ".", linkPath);
+  }
+}
+
+function resolveRootfsSymlinkTarget(
+  linkPath: string,
+  rawTarget: string,
+  rootfsDir: string,
+): string {
+  if (path.isAbsolute(rawTarget)) {
+    return path.resolve(rootfsDir, `.${rawTarget}`);
+  }
+  return path.resolve(path.dirname(linkPath), rawTarget);
+}
+
 /**
  * Prepare a target path for extraction: remove existing entries that conflict.
  */
@@ -612,17 +695,24 @@ function hasLocalOciImage(
   image: string,
   platform: string,
 ): boolean {
-  const output = runContainerCommandOrNull(
-    runtime,
-    buildOciCreateArgs(image, platform, "never"),
-  );
-  if (!output) {
-    return false;
+  let output: string;
+  try {
+    output = runContainerCommand(
+      runtime,
+      buildOciCreateArgs(image, platform, "never"),
+    );
+  } catch (err) {
+    if (isMissingLocalOciImageError(runtime, err)) {
+      return false;
+    }
+    throw err;
   }
 
   const containerId = parseContainerId(output);
   if (!containerId) {
-    return false;
+    throw new Error(
+      `Failed to parse container id from ${runtime} create output for '${image}'`,
+    );
   }
 
   try {
@@ -672,13 +762,41 @@ function buildOciCreateArgs(
   if (pullPolicy === "never") {
     args.push("--pull=never");
   }
-  args.push(image);
+  args.push(image, "true");
   return args;
 }
 
 function parseContainerId(output: string): string | null {
   const id = output.trim().split(/\s+/)[0];
   return id || null;
+}
+
+class ContainerCommandError extends Error {
+  readonly status: string;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly runtime: ContainerRuntime;
+  readonly args: string[];
+
+  constructor(
+    runtime: ContainerRuntime,
+    args: string[],
+    status: string,
+    stdout: string,
+    stderr: string,
+  ) {
+    super(
+      `Container command failed: ${runtime} ${args.join(" ")}\n` +
+        `exit: ${status}\n` +
+        (stdout || stderr ? `${stdout}${stderr}` : ""),
+    );
+    this.name = "ContainerCommandError";
+    this.status = status;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.runtime = runtime;
+    this.args = [...args];
+  }
 }
 
 function runContainerCommand(
@@ -696,26 +814,44 @@ function runContainerCommand(
       stdout?: unknown;
       stderr?: unknown;
     };
+    const status = String(e.status ?? "?");
     const stdout = commandOutputToString(e.stdout);
     const stderr = commandOutputToString(e.stderr);
-
-    throw new Error(
-      `Container command failed: ${runtime} ${args.join(" ")}\n` +
-        `exit: ${String(e.status ?? "?")}\n` +
-        (stdout || stderr ? `${stdout}${stderr}` : ""),
-    );
+    throw new ContainerCommandError(runtime, args, status, stdout, stderr);
   }
 }
 
-function runContainerCommandOrNull(
+function isMissingLocalOciImageError(
   runtime: ContainerRuntime,
-  args: string[],
-): string | null {
-  try {
-    return runContainerCommand(runtime, args);
-  } catch {
-    return null;
+  err: unknown,
+): boolean {
+  if (!(err instanceof ContainerCommandError)) {
+    return false;
   }
+
+  // docker/podman commonly return status 125 for create-time failures.
+  if (err.status !== "125" && err.status !== "1") {
+    return false;
+  }
+
+  const detail = `${err.stderr}\n${err.stdout}`.toLowerCase();
+  if (runtime === "docker") {
+    return (
+      detail.includes("no such image") ||
+      detail.includes("manifest unknown") ||
+      detail.includes("pull access denied") ||
+      detail.includes("unable to find image") ||
+      detail.includes("not available locally")
+    );
+  }
+
+  return (
+    detail.includes("image not known") ||
+    detail.includes("no such image") ||
+    detail.includes("manifest unknown") ||
+    detail.includes("pull access denied") ||
+    detail.includes("not available locally")
+  );
 }
 
 function commandOutputToString(value: unknown): string {
@@ -1133,6 +1269,7 @@ function syncKernelModules(
 
     const srcModules = path.join(initramfsModulesBase, kernelVersion);
     const dstModules = path.join(rootfsModulesBase, kernelVersion);
+    assertSafeWritePath(dstModules, rootfsDir);
     log(`Copying all kernel modules for ${kernelVersion} into rootfs`);
     copyAllKernelModules(srcModules, dstModules);
   }
@@ -1549,13 +1686,23 @@ function walkDirSize(dir: string): number {
 // File helpers
 // ---------------------------------------------------------------------------
 
-function copyExecutable(src: string, dest: string): void {
+function copyExecutable(src: string, dest: string, rootDir?: string): void {
+  if (rootDir) {
+    assertSafeWritePath(dest, rootDir);
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(src, dest);
   fs.chmodSync(dest, 0o755);
 }
 
-function writeExecutable(dest: string, content: string): void {
+function writeExecutable(
+  dest: string,
+  content: string,
+  rootDir?: string,
+): void {
+  if (rootDir) {
+    assertSafeWritePath(dest, rootDir);
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, content, { mode: 0o755 });
 }
@@ -2068,4 +2215,6 @@ export const __test = {
   exportOciRootfs,
   hasLocalOciImage,
   buildOciCreateArgs,
+  hardenExtractedRootfs,
+  assertSafeWritePath,
 };
