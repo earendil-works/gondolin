@@ -7,6 +7,7 @@ All notable changes to Gondolin are documented here.
 - Switched egress `httpHooks` to WHATWG `Request`/`Response` types and added support for returning synthetic responses from `onRequestHead`/`onRequest` to short-circuit upstream fetches
 - Added internal request/response conversion helpers and expanded HTTP hook/network test coverage (including undici compatibility and body-size guardrails)
 - Updated networking/secrets docs to reflect the new hook API and short-circuit behavior
+- Reworked host VFS loading to import vendored `node:vfs` directly from `src/vfs/node/vendored-node-vfs`, removing the custom loader and adding clearly tagged patch markers for upstream syncs
 
 ## 0.5.0
 
