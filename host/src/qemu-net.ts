@@ -184,31 +184,6 @@ export type QemuHttpInternals = {
 
 export type HttpFetch = typeof undiciFetch;
 
-export type HttpHookRequest = {
-  /** http method */
-  method: string;
-  /** request url */
-  url: string;
-  /** request headers */
-  headers: Record<string, string>;
-  /** request body (null for empty) */
-  body: Buffer | null;
-};
-
-export type HeaderValue = string | string[];
-export type HttpResponseHeaders = Record<string, HeaderValue>;
-
-export type HttpHookResponse = {
-  /** http status code */
-  status: number;
-  /** http status text */
-  statusText: string;
-  /** response headers */
-  headers: HttpResponseHeaders;
-  /** response body */
-  body: Buffer;
-};
-
 export type HttpIpAllowInfo = {
   /** request hostname */
   hostname: string;
@@ -246,40 +221,27 @@ export type DnsOptions = {
   syntheticHostMapping?: SyntheticDnsHostMappingMode;
 };
 
-export type HttpHookRequestHeadResult = HttpHookRequest & {
-  /** whether the request body must be buffered before calling `httpHooks.onRequest` */
-  bufferRequestBody?: boolean;
-  /** max request body size in `bytes` (applies to both buffered bodies and streaming via Content-Length) */
-  maxBufferedRequestBodyBytes?: number;
-
-  /** request head to pass into `httpHooks.onRequest` when buffering is enabled */
-  requestForBodyHook?: HttpHookRequest;
-};
-
 export type HttpHooks = {
   /** allow/deny callback for request content (request body is always `null`) */
-  isRequestAllowed?: (request: HttpHookRequest) => Promise<boolean> | boolean;
+  isRequestAllowed?: (request: Request) => Promise<boolean> | boolean;
   /** allow/deny callback for resolved destination ip */
   isIpAllowed?: (info: HttpIpAllowInfo) => Promise<boolean> | boolean;
 
-  /** request rewrite hook for the request head (method/url/headers only; body is always `null`) */
+  /** request hook for request head (may rewrite request or short-circuit with response) */
   onRequestHead?: (
-    request: HttpHookRequest,
-  ) =>
-    | Promise<HttpHookRequestHeadResult | void>
-    | HttpHookRequestHeadResult
-    | void;
+    request: Request,
+  ) => Promise<Request | Response | void> | Request | Response | void;
 
-  /** request rewrite hook for buffered requests (request body is provided as a Buffer) */
+  /** request hook for buffered requests (may rewrite request or short-circuit with response) */
   onRequest?: (
-    request: HttpHookRequest,
-  ) => Promise<HttpHookRequest | void> | HttpHookRequest | void;
+    request: Request,
+  ) => Promise<Request | Response | void> | Request | Response | void;
 
   /** response rewrite hook */
   onResponse?: (
-    response: HttpHookResponse,
-    request: HttpHookRequest,
-  ) => Promise<HttpHookResponse | void> | HttpHookResponse | void;
+    response: Response,
+    request: Request,
+  ) => Promise<Response | void> | Response | void;
 };
 
 export type QemuNetworkOptions = {

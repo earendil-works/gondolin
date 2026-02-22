@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import net from "net";
 
-import type { HttpHookRequest, HttpHooks } from "./qemu-net";
+import type { HttpHooks } from "./qemu-net";
 import { HttpRequestBlockedError } from "./http-utils";
 import { extractIPv4Mapped, parseIPv6Hextets } from "./ip-utils";
 import { matchesAnyHost, normalizeHostnamePattern } from "./host-patterns";
@@ -75,8 +75,8 @@ export function createHttpHooks(
     ...secretEntries.flatMap((entry) => entry.hosts),
   ]);
 
-  const applySecretsToRequest = (request: HttpHookRequest): HttpHookRequest => {
-    const hostname = getHostname(request);
+  const applySecretsToRequest = (request: Request): Request => {
+    const hostname = getHostname(request.url);
 
     // Defense-in-depth: if the request already contains real secret values (eg: because
     // it was constructed from a redirected hop), make sure we still enforce per-secret
@@ -89,7 +89,7 @@ export function createHttpHooks(
     );
 
     const headers = replaceSecretPlaceholdersInHeaders(
-      request,
+      request.headers,
       hostname,
       secretEntries,
     );
@@ -100,7 +100,10 @@ export function createHttpHooks(
       options.replaceSecretsInQuery ?? false,
     );
 
-    return { ...request, url, headers };
+    return cloneRequestWith(request, {
+      url,
+      headers,
+    });
   };
 
   const httpHooks: HttpHooks = {
@@ -130,39 +133,21 @@ export function createHttpHooks(
     onRequestHead: async (request) => {
       // Run user hooks first so any URL/Host rewrites are taken into account when
       // evaluating which secrets may be substituted.
-      let nextRequest: HttpHookRequest = request;
+      let nextRequest = request;
 
       if (options.onRequestHead) {
         const updated = await options.onRequestHead(nextRequest);
         if (updated) {
-          // `onRequestHead` may return extra control fields; preserve them.
-          nextRequest = updated as unknown as HttpHookRequest;
+          if ("status" in updated) {
+            return normalizeResponse(updated);
+          }
+          nextRequest = updated;
         }
       }
 
-      // qemu-net may call `httpHooks.onRequest` later (buffered bodies) or immediately
-      // (eg: WebSocket handshake has no body). Preserve a copy of the head to feed into
-      // `onRequest`.
-      const requestForBodyHook = options.onRequest
-        ? ({
-            method: nextRequest.method,
-            url: nextRequest.url,
-            headers: nextRequest.headers,
-            body: null,
-          } satisfies HttpHookRequest)
-        : null;
-
-      const substituted = applySecretsToRequest(nextRequest);
-      const out: any = {
-        ...nextRequest,
-        url: substituted.url,
-        headers: substituted.headers,
-      };
-      if (requestForBodyHook && out.requestForBodyHook == null) {
-        out.requestForBodyHook = requestForBodyHook;
-      }
-
-      return out;
+      // Inject secrets after head rewrites. This keeps host allowlist checks bound to
+      // the rewritten destination while still applying substitution before forwarding.
+      return applySecretsToRequest(nextRequest);
     },
     onResponse: options.onResponse,
   };
@@ -172,31 +157,82 @@ export function createHttpHooks(
   if (options.onRequest) {
     httpHooks.onRequest = async (request) => {
       // Run the buffered hook first so rewrites can influence secret allowlist checks.
-      let nextRequest: HttpHookRequest = request;
+      let nextRequest = request;
 
       const updated = await options.onRequest!(nextRequest);
-      if (updated) nextRequest = updated;
+      if (updated) {
+        if ("status" in updated) {
+          return normalizeResponse(updated);
+        }
+
+        nextRequest = updated;
+      }
 
       // Inject secrets at the last possible moment (after rewrites).
-      nextRequest = applySecretsToRequest(nextRequest);
-
-      return nextRequest;
+      return applySecretsToRequest(nextRequest);
     };
   }
 
   return { httpHooks, env, allowedHosts };
 }
 
-function getHostname(request: HttpHookRequest): string {
+function cloneRequestWith(
+  request: Request,
+  options: {
+    url: string;
+    headers: Headers;
+  },
+): Request {
+  const method = request.method.toUpperCase();
+  const canHaveBody = method !== "GET" && method !== "HEAD";
+
+  return new Request(options.url, {
+    method: request.method,
+    headers: options.headers,
+    body: canHaveBody ? request.body : undefined,
+    ...(canHaveBody && request.body ? ({ duplex: "half" } as const) : {}),
+  });
+}
+
+function normalizeResponse(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: cloneHeaders(response.headers),
+  });
+}
+
+function cloneHeaders(headers: Headers): Headers {
+  const cloned = new Headers(headers);
+  const raw = headers as { getSetCookie?: () => unknown };
+  if (typeof raw.getSetCookie !== "function") {
+    return cloned;
+  }
+
+  const cookies = raw.getSetCookie();
+  if (!Array.isArray(cookies)) {
+    return cloned;
+  }
+
+  cloned.delete("set-cookie");
+  for (const value of cookies) {
+    if (typeof value === "string") {
+      cloned.append("set-cookie", value);
+    }
+  }
+  return cloned;
+}
+
+function getHostname(url: string): string {
   try {
-    return new URL(request.url).hostname.toLowerCase();
+    return new URL(url).hostname.toLowerCase();
   } catch {
     return "";
   }
 }
 
 function assertSecretValuesAllowedForHost(
-  request: HttpHookRequest,
+  request: Request,
   hostname: string,
   entries: SecretEntry[],
   checkQuery: boolean,
@@ -223,12 +259,12 @@ function assertSecretValuesAllowedForHost(
 }
 
 function requestContainsSecretValueInHeaders(
-  headers: Record<string, string>,
+  headers: Headers,
   entry: SecretEntry,
 ): boolean {
   if (!entry.value) return false;
 
-  for (const [headerName, headerValue] of Object.entries(headers)) {
+  for (const [headerName, headerValue] of headers.entries()) {
     if (!headerValue) continue;
 
     // Plaintext match (eg: Authorization: Bearer <token>)
@@ -285,15 +321,14 @@ function requestContainsSecretValueInQuery(
 }
 
 function replaceSecretPlaceholdersInHeaders(
-  request: HttpHookRequest,
+  incomingHeaders: Headers,
   hostname: string,
   entries: SecretEntry[],
-): Record<string, string> {
-  if (entries.length === 0) return request.headers;
+): Headers {
+  const headers = new Headers(incomingHeaders);
+  if (entries.length === 0) return headers;
 
-  const headers: Record<string, string> = { ...request.headers };
-
-  for (const [headerName, value] of Object.entries(headers)) {
+  for (const [headerName, value] of incomingHeaders.entries()) {
     let updated = value;
 
     // Plaintext placeholder replacement (eg: `Authorization: Bearer $TOKEN`).
@@ -308,7 +343,7 @@ function replaceSecretPlaceholdersInHeaders(
       entries,
     );
 
-    headers[headerName] = updated;
+    headers.set(headerName, updated);
   }
 
   return headers;

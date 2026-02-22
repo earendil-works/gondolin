@@ -102,8 +102,6 @@ export type {
   SyntheticDnsHostMappingMode,
   HttpIpAllowInfo,
   HttpHooks,
-  HttpHookRequest,
-  HttpHookRequestHeadResult,
   HttpFetch,
 } from "./qemu-net";
 export type {

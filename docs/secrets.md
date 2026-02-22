@@ -49,7 +49,7 @@ By default, placeholder substitution happens in **request headers**.
 Supported by default:
 - Plain header values (for example `Authorization: Bearer $TOKEN`)
 - `Authorization: Basic ...` and `Proxy-Authorization: Basic ...`
-  - Gondolin decodes base64 `username:password`, replaces placeholders, and re-encodes
+    - Gondolin decodes base64 `username:password`, replaces placeholders, and re-encodes
 
 Optional:
 - URL query string (`replaceSecretsInQuery: true`)
@@ -78,8 +78,8 @@ still added to the allowed host set.
 
 Important:
 
-- There is **no guarantee** that custom hooks (`onRequestHead` / `onRequest` / `onResponse`) will only see placeholders
-- Depending on control flow (for example redirects), hooks may observe requests where some secrets are already substituted
+- In `createHttpHooks`, user-provided `onRequestHead` / `onRequest` handlers may run after placeholder substitution
+- There is **no guarantee** that custom hooks (`onRequestHead` / `onRequest` / `onResponse`) only see placeholders
 
 Do not log request headers/URLs from hooks unless you are comfortable potentially logging real secret values.
 

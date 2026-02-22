@@ -4,13 +4,15 @@ import { fetch as undiciFetch } from "undici";
 import type { ReadableStream as WebReadableStream } from "stream/web";
 
 import type {
-  HttpHookRequest,
-  HttpHookResponse,
   HttpIpAllowInfo,
-  HttpResponseHeaders,
   QemuNetworkBackend,
   TcpSession,
 } from "./qemu-net";
+import type {
+  InternalHttpRequest,
+  InternalHttpResponse,
+  InternalHttpResponseHeaders,
+} from "./internal-http-types";
 
 import {
   bridgeWebSocketUpgrade,
@@ -35,6 +37,13 @@ import {
   stripHopByHopHeadersForWebSocket,
 } from "./http-utils";
 import type { HttpRequestData, LookupEntry } from "./http-utils";
+import {
+  webRequestToInternalHttpRequest,
+  webResponseToInternalHttpResponse,
+  internalHttpRequestToWebRequest,
+  internalHttpResponseToWebResponse,
+  responseHeadersToRecord,
+} from "./internal-http-conversion";
 
 export const MAX_HTTP_REDIRECTS = 10;
 export { MAX_HTTP_HEADER_BYTES };
@@ -65,9 +74,7 @@ export type HttpSession = {
     headers: Record<string, string>;
     bodyOffset: number;
 
-    hookRequest: HttpHookRequest;
-    /** request head used as the base for `httpHooks.onRequest` */
-    hookRequestForBodyHook?: HttpHookRequest | null;
+    hookRequest: InternalHttpRequest;
     bufferRequestBody: boolean;
     maxBodyBytes: number;
 
@@ -471,7 +478,7 @@ export async function handleHttpDataWithWriter(
         return;
       }
 
-      const headHookBase: HttpHookRequest = {
+      const headHookBase: InternalHttpRequest = {
         method: head.method,
         url,
         headers: upgradeIsWebSocket
@@ -482,13 +489,21 @@ export async function handleHttpDataWithWriter(
 
       const headHooked = await applyRequestHeadHooks(backend, headHookBase);
 
-      let maxBodyBytes = backend.http.maxHttpBodyBytes;
-      if (headHooked.maxBufferedRequestBodyBytes !== null) {
-        maxBodyBytes = Math.min(
-          maxBodyBytes,
-          headHooked.maxBufferedRequestBodyBytes,
+      if (headHooked.shortCircuitResponse) {
+        const normalized = normalizeHookResponseForGuest(
+          headHooked.shortCircuitResponse,
+          headHookBase.method,
         );
+        const version: "HTTP/1.0" | "HTTP/1.1" =
+          head.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
+        sendHttpResponse(options.write, normalized, version);
+        httpSession.closed = true;
+        options.finish();
+        backend.flush();
+        return;
       }
+
+      const maxBodyBytes = backend.http.maxHttpBodyBytes;
 
       if (
         bodyMode === "content-length" &&
@@ -541,7 +556,6 @@ export async function handleHttpDataWithWriter(
         headers,
         bodyOffset: head.bodyOffset,
         hookRequest: headHooked.request,
-        hookRequestForBodyHook: headHooked.requestForBodyHook,
         bufferRequestBody: headHooked.bufferRequestBody,
         maxBodyBytes,
         bodyMode,
@@ -603,7 +617,6 @@ export async function handleHttpDataWithWriter(
             httpVersion,
             {
               headHookRequest: state.hookRequest,
-              headHookRequestForBodyHook: state.hookRequestForBodyHook ?? null,
             },
           );
         } finally {
@@ -670,8 +683,8 @@ export async function handleHttpDataWithWriter(
       httpSession.buffer.resetTo(remaining);
 
       const body = chunked.body;
-      const baseHookRequest = state.hookRequestForBodyHook ?? state.hookRequest;
-      let hookRequest: HttpHookRequest = {
+      const baseHookRequest = state.hookRequest;
+      let hookRequest: InternalHttpRequest = {
         method: baseHookRequest.method,
         url: baseHookRequest.url,
         headers: {
@@ -682,7 +695,22 @@ export async function handleHttpDataWithWriter(
       };
 
       if (state.bufferRequestBody) {
-        hookRequest = await applyRequestBodyHooks(backend, hookRequest);
+        const bodyHooked = await applyRequestBodyHooks(backend, hookRequest, {
+          maxBodyBytes: state.maxBodyBytes,
+        });
+        if (bodyHooked.shortCircuitResponse) {
+          const normalized = normalizeHookResponseForGuest(
+            bodyHooked.shortCircuitResponse,
+            hookRequest.method,
+          );
+          sendHttpResponse(options.write, normalized, httpVersion);
+          httpSession.processing = false;
+          httpSession.closed = true;
+          options.finish();
+          backend.flush();
+          return;
+        }
+        hookRequest = bodyHooked.request;
       }
 
       // Normalize framing headers for fetch.
@@ -865,7 +893,7 @@ export async function handleHttpDataWithWriter(
       // Normalize framing headers for streaming requests.
       // If onRequestHead rewrote Content-Length / Transfer-Encoding, ensure we still
       // send a self-consistent request upstream.
-      const streamingRequest: HttpHookRequest = {
+      const streamingRequest: InternalHttpRequest = {
         method: state.hookRequest.method,
         url: state.hookRequest.url,
         headers: Object.fromEntries(
@@ -983,8 +1011,8 @@ export async function handleHttpDataWithWriter(
     const remaining = full.subarray(remainingStart);
     httpSession.buffer.resetTo(Buffer.from(remaining));
 
-    const baseHookRequest = state.hookRequestForBodyHook ?? state.hookRequest;
-    let hookRequest: HttpHookRequest = {
+    const baseHookRequest = state.hookRequest;
+    let hookRequest: InternalHttpRequest = {
       method: baseHookRequest.method,
       url: baseHookRequest.url,
       headers: { ...baseHookRequest.headers },
@@ -992,7 +1020,22 @@ export async function handleHttpDataWithWriter(
     };
 
     if (state.bufferRequestBody) {
-      hookRequest = await applyRequestBodyHooks(backend, hookRequest);
+      const bodyHooked = await applyRequestBodyHooks(backend, hookRequest, {
+        maxBodyBytes: state.maxBodyBytes,
+      });
+      if (bodyHooked.shortCircuitResponse) {
+        const normalized = normalizeHookResponseForGuest(
+          bodyHooked.shortCircuitResponse,
+          hookRequest.method,
+        );
+        sendHttpResponse(options.write, normalized, httpVersion);
+        httpSession.processing = false;
+        httpSession.closed = true;
+        options.finish();
+        backend.flush();
+        return;
+      }
+      hookRequest = bodyHooked.request;
     }
 
     // Normalize framing headers for fetch.
@@ -1265,7 +1308,7 @@ function decodeChunkedBodyFromReceiveBuffer(
 export async function fetchHookRequestAndRespond(
   backend: QemuNetworkBackend,
   options: {
-    request: HttpHookRequest;
+    request: InternalHttpRequest;
     httpVersion: "HTTP/1.0" | "HTTP/1.1";
     write: (chunk: Buffer) => void;
     waitForWritable?: () => Promise<void>;
@@ -1300,7 +1343,7 @@ export async function fetchHookRequestAndRespond(
 
   const fetcher = backend.options.fetch ?? undiciFetch;
 
-  let pendingRequest: HttpHookRequest = initialRequest;
+  let pendingRequest: InternalHttpRequest = initialRequest;
 
   for (
     let redirectCount = 0;
@@ -1318,8 +1361,16 @@ export async function fetchHookRequestAndRespond(
         body: null,
       });
 
-      const baseForBodyHook =
-        headResult.requestForBodyHook ?? headResult.request;
+      if (headResult.shortCircuitResponse) {
+        const normalized = normalizeHookResponseForGuest(
+          headResult.shortCircuitResponse,
+          currentRequest.method,
+        );
+        sendHttpResponse(write, normalized, httpVersion);
+        return;
+      }
+
+      const baseForBodyHook = headResult.request;
       const headForThisHop = enableBodyHook
         ? baseForBodyHook
         : headResult.request;
@@ -1332,7 +1383,22 @@ export async function fetchHookRequestAndRespond(
       };
 
       if (enableBodyHook) {
-        currentRequest = await applyRequestBodyHooks(backend, currentRequest);
+        const bodyHooked = await applyRequestBodyHooks(
+          backend,
+          currentRequest,
+          {
+            maxBodyBytes: backend.http.maxHttpBodyBytes,
+          },
+        );
+        if (bodyHooked.shortCircuitResponse) {
+          const normalized = normalizeHookResponseForGuest(
+            bodyHooked.shortCircuitResponse,
+            currentRequest.method,
+          );
+          sendHttpResponse(write, normalized, httpVersion);
+          return;
+        }
+        currentRequest = bodyHooked.request;
       }
     }
 
@@ -1472,7 +1538,7 @@ export async function fetchHookRequestAndRespond(
     }
 
     let responseHeaders = stripHopByHopHeaders(
-      headersToRecord(response.headers),
+      responseHeadersToRecord(response.headers),
     );
     const contentEncodingValue = responseHeaders["content-encoding"];
     const contentEncoding = Array.isArray(contentEncodingValue)
@@ -1502,6 +1568,7 @@ export async function fetchHookRequestAndRespond(
     const suppressBody =
       currentRequest.method === "HEAD" ||
       response.status === 204 ||
+      response.status === 205 ||
       response.status === 304;
 
     if (suppressBody) {
@@ -1516,7 +1583,11 @@ export async function fetchHookRequestAndRespond(
       // No message body is allowed for these responses.
       delete responseHeaders["transfer-encoding"];
 
-      if (response.status === 204 || response.status === 304) {
+      if (
+        response.status === 204 ||
+        response.status === 205 ||
+        response.status === 304
+      ) {
         delete responseHeaders["content-encoding"];
         responseHeaders["content-length"] = "0";
       } else {
@@ -1525,22 +1596,24 @@ export async function fetchHookRequestAndRespond(
           responseHeaders["content-length"] = "0";
       }
 
-      let hookResponse: HttpHookResponse = {
+      let hookResponse: InternalHttpResponse = {
         status: response.status,
         statusText: response.statusText || "OK",
         headers: responseHeaders,
         body: Buffer.alloc(0),
       };
 
-      if (backend.options.httpHooks?.onResponse) {
-        const updated = await backend.options.httpHooks.onResponse(
-          hookResponse,
-          currentRequest,
-        );
-        if (updated) hookResponse = updated;
-      }
+      hookResponse = await applyResponseHooks(
+        backend,
+        hookResponse,
+        currentRequest,
+      );
 
-      sendHttpResponse(write, hookResponse, httpVersion);
+      sendHttpResponse(
+        write,
+        normalizeHookResponseForGuest(hookResponse, currentRequest.method),
+        httpVersion,
+      );
       return;
     }
 
@@ -1651,20 +1724,22 @@ export async function fetchHookRequestAndRespond(
 
     responseHeaders["content-length"] = responseBody.length.toString();
 
-    let hookResponse: HttpHookResponse = {
+    let hookResponse: InternalHttpResponse = {
       status: response.status,
       statusText: response.statusText || "OK",
       headers: responseHeaders,
       body: responseBody,
     };
 
-    if (backend.options.httpHooks?.onResponse) {
-      const updated = await backend.options.httpHooks.onResponse(
-        hookResponse,
-        currentRequest,
-      );
-      if (updated) hookResponse = updated;
-    }
+    hookResponse = await applyResponseHooks(
+      backend,
+      hookResponse,
+      currentRequest,
+    );
+    hookResponse = normalizeHookResponseForGuest(
+      hookResponse,
+      currentRequest.method,
+    );
 
     sendHttpResponse(write, hookResponse, httpVersion);
     if (backend.options.debug) {
@@ -1689,10 +1764,8 @@ async function handleWebSocketUpgrade(
   },
   httpVersion: "HTTP/1.0" | "HTTP/1.1",
   hookContext: {
-    /** head after `onRequestHead` (and secret substitution) */
-    headHookRequest: HttpHookRequest;
-    /** placeholder-only head to feed into `onRequest` */
-    headHookRequestForBodyHook: HttpHookRequest | null;
+    /** head after `onRequestHead` */
+    headHookRequest: InternalHttpRequest;
   },
 ): Promise<boolean> {
   if (request.version !== "HTTP/1.1") {
@@ -1719,24 +1792,32 @@ async function handleWebSocketUpgrade(
     );
   }
 
-  const { headHookRequest, headHookRequestForBodyHook } = hookContext;
+  const { headHookRequest } = hookContext;
 
   // `handleHttpDataWithWriter` already ran `onRequestHead` (and the associated
   // policy checks) for this request. Avoid running it again here (duplicate
   // side effects + policy mismatches).
-  let hookRequest: HttpHookRequest = {
+  let hookRequest: InternalHttpRequest = {
     method: headHookRequest.method,
     url: headHookRequest.url,
     headers: { ...headHookRequest.headers },
     body: null,
   };
 
-  // Preserve placeholder-only values for `onRequest` (per secrets docs). The
-  // `createHttpHooks` wrapper will inject secrets after the user hook runs.
-  hookRequest = await applyRequestBodyHooks(
-    backend,
-    headHookRequestForBodyHook ?? hookRequest,
-  );
+  const bodyHooked = await applyRequestBodyHooks(backend, hookRequest, {
+    maxBodyBytes: 0,
+  });
+
+  if (bodyHooked.shortCircuitResponse) {
+    const normalized = normalizeHookResponseForGuest(
+      bodyHooked.shortCircuitResponse,
+      headHookRequest.method,
+    );
+    sendHttpResponse(options.write, normalized, httpVersion);
+    return false;
+  }
+
+  hookRequest = bodyHooked.request;
 
   // If `onRequest` rewrote the destination or relevant headers, re-run request
   // policy checks against the final (post-rewrite) request.
@@ -2000,17 +2081,17 @@ export async function resolveHostname(
 
 async function ensureRequestAllowed(
   backend: QemuNetworkBackend,
-  request: HttpHookRequest,
+  request: InternalHttpRequest,
 ) {
   if (!backend.options.httpHooks?.isRequestAllowed) return;
 
   // Request policy is head-only: never expose request body to this callback.
-  const headOnly: HttpHookRequest = {
+  const headOnly = internalHttpRequestToWebRequest({
     method: request.method,
     url: request.url,
     headers: request.headers,
     body: null,
-  };
+  });
 
   const allowed = await backend.options.httpHooks.isRequestAllowed(headOnly);
   if (!allowed) {
@@ -2033,8 +2114,8 @@ async function ensureIpAllowed(
 }
 
 function isSamePolicyRelevantRequestHead(
-  a: HttpHookRequest,
-  b: HttpHookRequest,
+  a: InternalHttpRequest,
+  b: InternalHttpRequest,
 ): boolean {
   if (a.method !== b.method) return false;
   if (a.url !== b.url) return false;
@@ -2067,98 +2148,168 @@ function isSamePolicyRelevantRequestHead(
 
 async function applyRequestHeadHooks(
   backend: QemuNetworkBackend,
-  request: HttpHookRequest,
+  request: InternalHttpRequest,
 ): Promise<{
-  request: HttpHookRequest;
-  /** optional placeholder request head to feed into `httpHooks.onRequest` */
-  requestForBodyHook: HttpHookRequest | null;
+  request: InternalHttpRequest;
   bufferRequestBody: boolean;
-  maxBufferedRequestBodyBytes: number | null;
+  shortCircuitResponse: InternalHttpResponse | null;
 }> {
   const hasBodyHook = Boolean(backend.options.httpHooks?.onRequest);
 
-  if (!backend.options.httpHooks?.onRequestHead) {
-    return {
-      request,
-      requestForBodyHook: null,
-      bufferRequestBody: hasBodyHook,
-      maxBufferedRequestBodyBytes: null,
-    };
-  }
-
-  const cloned: HttpHookRequest = {
+  const cloned: InternalHttpRequest = {
     method: request.method,
     url: request.url,
     headers: { ...request.headers },
     body: null,
   };
 
-  const updated = await backend.options.httpHooks.onRequestHead(cloned);
-  const next = (updated ?? cloned) as HttpHookRequest & {
-    bufferRequestBody?: boolean;
-    maxBufferedRequestBodyBytes?: number;
-    requestForBodyHook?: HttpHookRequest;
-  };
+  if (!backend.options.httpHooks?.onRequestHead) {
+    return {
+      request: cloned,
+      bufferRequestBody: hasBodyHook,
+      shortCircuitResponse: null,
+    };
+  }
+
+  const updated = await backend.options.httpHooks.onRequestHead(
+    internalHttpRequestToWebRequest(cloned),
+  );
+
+  let nextRequest = cloned;
+  let shortCircuitResponse: InternalHttpResponse | null = null;
+
+  if (updated) {
+    if ("status" in updated) {
+      shortCircuitResponse = await webResponseToInternalHttpResponse(updated, {
+        maxBodyBytes: backend.http.maxHttpResponseBodyBytes,
+      });
+    } else {
+      const normalizedRequest = await webRequestToInternalHttpRequest(updated, {
+        allowBody: false,
+        maxBodyBytes: null,
+      });
+
+      nextRequest = {
+        method: normalizedRequest.method,
+        url: normalizedRequest.url,
+        headers: normalizedRequest.headers,
+        body: null,
+      };
+    }
+  }
 
   return {
-    request: {
-      method: next.method,
-      url: next.url,
-      headers: next.headers,
-      body: null,
-    },
-    requestForBodyHook: next.requestForBodyHook ?? null,
-    bufferRequestBody:
-      typeof next.bufferRequestBody === "boolean"
-        ? next.bufferRequestBody
-        : hasBodyHook,
-    maxBufferedRequestBodyBytes:
-      typeof next.maxBufferedRequestBodyBytes === "number" &&
-      Number.isFinite(next.maxBufferedRequestBodyBytes) &&
-      next.maxBufferedRequestBodyBytes >= 0
-        ? next.maxBufferedRequestBodyBytes
-        : null,
+    request: nextRequest,
+    bufferRequestBody: hasBodyHook,
+    shortCircuitResponse,
   };
 }
 
 async function applyRequestBodyHooks(
   backend: QemuNetworkBackend,
-  request: HttpHookRequest,
-): Promise<HttpHookRequest> {
+  request: InternalHttpRequest,
+  options: {
+    maxBodyBytes: number | null;
+  },
+): Promise<{
+  request: InternalHttpRequest;
+  shortCircuitResponse: InternalHttpResponse | null;
+}> {
   if (!backend.options.httpHooks?.onRequest) {
-    return request;
+    return {
+      request,
+      shortCircuitResponse: null,
+    };
   }
 
-  const cloned: HttpHookRequest = {
+  const cloned: InternalHttpRequest = {
     method: request.method,
     url: request.url,
     headers: { ...request.headers },
     body: request.body,
   };
 
-  const updated = await backend.options.httpHooks.onRequest(cloned);
-  return updated ?? cloned;
-}
+  const updated = await backend.options.httpHooks.onRequest(
+    internalHttpRequestToWebRequest(cloned),
+  );
 
-function headersToRecord(headers: Headers): HttpResponseHeaders {
-  const record: HttpResponseHeaders = {};
-
-  headers.forEach((value, key) => {
-    record[key.toLowerCase()] = value;
-  });
-
-  // undici/Node fetch supports multiple Set-Cookie values via getSetCookie().
-  const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
-  if (typeof anyHeaders.getSetCookie === "function") {
-    const cookies = anyHeaders.getSetCookie();
-    if (cookies.length === 1) {
-      record["set-cookie"] = cookies[0]!;
-    } else if (cookies.length > 1) {
-      record["set-cookie"] = cookies;
-    }
+  if (!updated) {
+    return {
+      request: cloned,
+      shortCircuitResponse: null,
+    };
   }
 
-  return record;
+  if ("status" in updated) {
+    return {
+      request: cloned,
+      shortCircuitResponse: await webResponseToInternalHttpResponse(updated, {
+        maxBodyBytes: backend.http.maxHttpResponseBodyBytes,
+      }),
+    };
+  }
+
+  return {
+    request: await webRequestToInternalHttpRequest(updated, {
+      allowBody: true,
+      maxBodyBytes: options.maxBodyBytes,
+    }),
+    shortCircuitResponse: null,
+  };
+}
+
+async function applyResponseHooks(
+  backend: QemuNetworkBackend,
+  response: InternalHttpResponse,
+  request: InternalHttpRequest,
+): Promise<InternalHttpResponse> {
+  if (!backend.options.httpHooks?.onResponse) {
+    return response;
+  }
+
+  const updated = await backend.options.httpHooks.onResponse(
+    internalHttpResponseToWebResponse(response),
+    internalHttpRequestToWebRequest(request),
+  );
+  if (!updated) return response;
+
+  return await webResponseToInternalHttpResponse(updated, {
+    maxBodyBytes: backend.http.maxHttpResponseBodyBytes,
+  });
+}
+
+function normalizeHookResponseForGuest(
+  response: InternalHttpResponse,
+  requestMethod: string,
+): InternalHttpResponse {
+  const status = response.status;
+  const isHead = requestMethod.toUpperCase() === "HEAD";
+  const suppressBody =
+    isHead || status === 204 || status === 205 || status === 304;
+
+  const headers: InternalHttpResponseHeaders = { ...response.headers };
+  headers["connection"] = "close";
+  delete headers["transfer-encoding"];
+
+  const body = suppressBody ? Buffer.alloc(0) : response.body;
+
+  if (status === 204 || status === 205 || status === 304) {
+    delete headers["content-encoding"];
+    headers["content-length"] = "0";
+  } else if (isHead) {
+    if (!headers["content-length"]) {
+      headers["content-length"] = "0";
+    }
+  } else {
+    headers["content-length"] = String(body.length);
+  }
+
+  return {
+    status,
+    statusText: response.statusText || "OK",
+    headers,
+    body,
+  };
 }
 
 function getUrlProtocol(url: URL): "http" | "https" | null {

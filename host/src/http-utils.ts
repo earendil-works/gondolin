@@ -4,13 +4,15 @@ import { Agent } from "undici";
 import forge from "node-forge";
 
 import type {
-  HeaderValue,
-  HttpHookRequest,
   HttpHooks,
   HttpIpAllowInfo,
-  HttpResponseHeaders,
   QemuNetworkBackend,
 } from "./qemu-net";
+import type {
+  InternalHeaderValue,
+  InternalHttpRequest,
+  InternalHttpResponseHeaders,
+} from "./internal-http-types";
 
 export class HttpRequestBlockedError extends Error {
   status: number;
@@ -103,7 +105,7 @@ export function renderHttpResponseHead(
   response: {
     status: number;
     statusText: string;
-    headers: HttpResponseHeaders;
+    headers: InternalHttpResponseHeaders;
   },
   httpVersion: HttpWireVersion = "HTTP/1.1",
 ): string {
@@ -135,7 +137,7 @@ export function sendHttpResponseHead(
   response: {
     status: number;
     statusText: string;
-    headers: HttpResponseHeaders;
+    headers: InternalHttpResponseHeaders;
   },
   httpVersion: HttpWireVersion = "HTTP/1.1",
   encoding: BufferEncoding = "utf8",
@@ -149,7 +151,7 @@ export function sendHttpResponse(
   response: {
     status: number;
     statusText: string;
-    headers: HttpResponseHeaders;
+    headers: InternalHttpResponseHeaders;
     body: Buffer;
   },
   httpVersion: HttpWireVersion = "HTTP/1.1",
@@ -161,7 +163,7 @@ export function sendHttpResponse(
   }
 }
 
-function joinHeaderValue(raw: string | string[] | undefined): string {
+function joinInternalHeaderValue(raw: string | string[] | undefined): string {
   if (typeof raw === "string") return raw;
   if (Array.isArray(raw)) return raw.join(",");
   return "";
@@ -170,7 +172,7 @@ function joinHeaderValue(raw: string | string[] | undefined): string {
 export function isWebSocketUpgradeRequestHeaders(
   headers: Record<string, string | string[] | undefined>,
 ): boolean {
-  const upgrade = joinHeaderValue(headers["upgrade"]).toLowerCase();
+  const upgrade = joinInternalHeaderValue(headers["upgrade"]).toLowerCase();
   if (upgrade === "websocket") return true;
 
   // Some clients omit Upgrade/Connection but include the WebSocket-specific headers.
@@ -197,7 +199,7 @@ const DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN = 16;
 const DEFAULT_SHARED_UPSTREAM_MAX_ORIGINS = 512;
 const DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS = 30 * 1000;
 
-export function stripHopByHopHeaders<T extends HeaderValue>(
+export function stripHopByHopHeaders<T extends InternalHeaderValue>(
   this: any,
   headers: Record<string, T>,
 ): Record<string, T> {
@@ -226,7 +228,7 @@ export function stripHopByHopHeaders<T extends HeaderValue>(
   return output;
 }
 
-export function stripHopByHopHeadersForWebSocket<T extends HeaderValue>(
+export function stripHopByHopHeadersForWebSocket<T extends InternalHeaderValue>(
   this: any,
   headers: Record<string, T>,
 ): Record<string, T> {
@@ -445,11 +447,11 @@ export function getRedirectUrl(
 }
 
 export function applyRedirectRequest(
-  request: HttpHookRequest,
+  request: InternalHttpRequest,
   status: number,
   sourceUrl: URL,
   redirectUrl: URL,
-): HttpHookRequest {
+): InternalHttpRequest {
   let method = request.method;
   let body = request.body;
 
@@ -609,8 +611,8 @@ export function privateKeyMatchesLeafCert(
 export function headersToRecord(
   this: any,
   headers: Headers,
-): HttpResponseHeaders {
-  const record: HttpResponseHeaders = {};
+): InternalHttpResponseHeaders {
+  const record: InternalHttpResponseHeaders = {};
 
   headers.forEach((value, key) => {
     record[key.toLowerCase()] = value;
