@@ -20,7 +20,7 @@ import {
   type VmCheckpointData,
 } from "../checkpoint";
 import { loadAssetManifest } from "../assets";
-import { isRootfsMode, type RootfsMode } from "../rootfs-mode";
+import { isRootfsMode, type RootfsMode } from "../build/config";
 
 import {
   ErrorMessage,

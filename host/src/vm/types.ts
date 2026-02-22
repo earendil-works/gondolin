@@ -1,7 +1,7 @@
 import type { DebugLogFn } from "../debug";
 import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts";
 import type { SshOptions } from "../qemu/ssh";
-import type { RootfsMode } from "../rootfs-mode";
+import type { RootfsMode } from "../build/config";
 import type { SandboxServerOptions } from "../sandbox/server-options";
 import type { VirtualProvider } from "../vfs/node";
 import type { VfsHooks } from "../vfs/provider";

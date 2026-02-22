@@ -8,8 +8,8 @@ import type {
   BuildConfig,
   ContainerRuntime,
   OciPullPolicy,
+  RootfsMode,
 } from "./build/config";
-import type { RootfsMode } from "./rootfs-mode";
 
 const GITHUB_ORG = "earendil-works";
 const GITHUB_REPO = "gondolin";

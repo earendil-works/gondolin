@@ -5,9 +5,11 @@
  * edit it, and then build with `gondolin build --config <file> --output <dir>`.
  */
 
-import { isRootfsMode, type RootfsMode } from "../rootfs-mode";
+export type RootfsMode = "readonly" | "memory" | "cow";
 
-export type { RootfsMode };
+export function isRootfsMode(value: unknown): value is RootfsMode {
+  return value === "readonly" || value === "memory" || value === "cow";
+}
 
 export type Architecture = "aarch64" | "x86_64";
 

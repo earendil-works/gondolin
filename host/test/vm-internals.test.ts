@@ -8,7 +8,7 @@ import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
 import { createExecSession } from "../src/exec";
 import { VM, __test, type VMOptions } from "../src/vm/core";
 import { resolveEnvNumber } from "../src/utils/env";
-import type { RootfsMode } from "../src/rootfs-mode";
+import type { RootfsMode } from "../src/build/config";
 
 function makeTempResolvedServerOptions() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-vm-test-"));
