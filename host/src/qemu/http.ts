@@ -543,7 +543,15 @@ export async function handleHttpDataWithWriter(
 
       const policyPrechecked = shouldPrecheckRequestPolicies(backend);
       if (policyPrechecked) {
+        // Guard against re-entrant calls: the TLS data handler fires
+        // without awaiting, so a second chunk can arrive while we are
+        // blocked on DNS / IP-policy below.  Setting processing=true
+        // here causes the next call to return early at the check above
+        // (the new data is already appended to the buffer and will be
+        // consumed when the current call resumes).
+        httpSession.processing = true;
         await ensureRequestHeadPolicies(backend, requestBase);
+        httpSession.processing = false;
       }
 
       httpSession.head = {
@@ -772,13 +780,18 @@ export async function handleHttpDataWithWriter(
 
               const head = streamState.pending[0]!;
               if (head.length <= desired) {
-                c.enqueue(head);
+                // Dequeue BEFORE enqueue: c.enqueue() can synchronously
+                // trigger the pull() callback which re-enters drain().
+                // If we enqueue first, the re-entrant drain() sees the
+                // same head in pending and double-deducts pendingBytes.
                 streamState.pending.shift();
                 streamState.pendingBytes -= head.length;
+                c.enqueue(head);
               } else {
-                c.enqueue(head.subarray(0, desired));
-                streamState.pending[0] = head.subarray(desired);
+                const remainder = head.subarray(desired);
+                streamState.pending[0] = remainder;
                 streamState.pendingBytes -= desired;
+                c.enqueue(head.subarray(0, desired));
               }
             }
 
