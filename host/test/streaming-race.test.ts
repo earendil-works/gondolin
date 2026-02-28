@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import crypto from "node:crypto";
 
-import { QemuNetworkBackend } from "../src/qemu/net";
 import * as qemuHttp from "../src/qemu/http";
+import { QemuNetworkBackend } from "../src/qemu/net";
 
 function makeBackend(
   options?: Partial<ConstructorParameters<typeof QemuNetworkBackend>[0]>,
@@ -19,11 +19,7 @@ function makeBackend(
   });
 }
 
-/**
- * Build a chunked HTTP POST request split into TLS-record-sized pieces.
- * Returns the chunks and an async body consumer for use in a fetch stub.
- */
-function buildChunkedPost(bodySize: number, chunkSize = 16_384) {
+function buildPostChunks(bodySize: number, chunkSize = 16_384) {
   const head =
     `POST /upload HTTP/1.1\r\n` +
     `Host: example.com\r\n` +
@@ -31,18 +27,18 @@ function buildChunkedPost(bodySize: number, chunkSize = 16_384) {
     `\r\n`;
   const body = Buffer.alloc(bodySize, 0x41);
   const full = Buffer.concat([Buffer.from(head), body]);
+
   const chunks: Buffer[] = [];
   for (let i = 0; i < full.length; i += chunkSize) {
     chunks.push(full.subarray(i, Math.min(i + chunkSize, full.length)));
   }
+
   return { chunks, bodySize };
 }
 
-/**
- * Consume a streaming or buffered fetch body and return its total length.
- */
 async function consumeFetchBody(init: any): Promise<number> {
   if (!init?.body) return 0;
+
   if (typeof init.body === "object" && Symbol.asyncIterator in init.body) {
     let total = 0;
     for await (const chunk of init.body as AsyncIterable<Uint8Array>) {
@@ -50,188 +46,175 @@ async function consumeFetchBody(init: any): Promise<number> {
     }
     return total;
   }
-  if (init.body instanceof Uint8Array) return init.body.length;
+
+  if (init.body instanceof Uint8Array) {
+    return init.body.length;
+  }
+
   return 0;
 }
 
-/**
- * Create a writer that resolves `finished` when the response is fully sent.
- */
 function makeWriter() {
   let finishResolve: (() => void) | null = null;
   const finished = new Promise<void>((resolve) => {
     finishResolve = resolve;
   });
+
   const writes: Buffer[] = [];
-  const writer = {
-    scheme: "http" as const,
-    write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
-    finish: () => finishResolve?.(),
-    waitForWritable: () => Promise.resolve(),
+  return {
+    writes,
+    finished,
+    writer: {
+      scheme: "http" as const,
+      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+      finish: () => finishResolve?.(),
+      waitForWritable: () => Promise.resolve(),
+    },
   };
-  return { writer, writes, finished };
 }
 
-// ---------------------------------------------------------------------------
-// Bug 1: drain() re-entrancy
-//
-// ReadableStream.controller.enqueue() can synchronously trigger the pull()
-// callback, which re-enters drain(). If enqueue() is called before
-// pending.shift(), the re-entrant drain() processes the same chunk again,
-// double-decrementing pendingBytes to a negative value. The stream never
-// closes because (closeAfterPending && pendingBytes === 0) is never true.
-// ---------------------------------------------------------------------------
+async function waitForOrTimeout(done: Promise<void>, message: string) {
+  await Promise.race([
+    done,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(message)), 3_000),
+    ),
+  ]);
+}
 
-test("qemu-net: streaming POST body completes when chunks are serialized (drain re-entrancy)", async () => {
-  const { chunks, bodySize } = buildChunkedPost(50_000);
+async function waitForCondition(
+  predicate: () => boolean,
+  message: string,
+  timeoutMs = 1_000,
+) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
-  let fetchBodyLen = 0;
+async function runStreamingUpload(options: {
+  bodySize: number;
+  fireAndForget: boolean;
+  gateDnsPrecheck?: boolean;
+}) {
+  const { chunks, bodySize } = buildPostChunks(options.bodySize);
+
   let fetchCalls = 0;
+  let fetchBodyLen = 0;
+  let dnsLookupCalls = 0;
+
+  let releaseDns: (() => void) | null = null;
+  const dnsGate =
+    options.gateDnsPrecheck === true
+      ? new Promise<void>((resolve) => {
+          releaseDns = resolve;
+        })
+      : null;
 
   const backend = makeBackend({
     fetch: async (_url: any, init: any) => {
-      fetchCalls++;
+      fetchCalls += 1;
       fetchBodyLen = await consumeFetchBody(init);
       return new Response("ok", {
         status: 200,
         headers: { "content-length": "2" },
       });
     },
-    dnsLookup: ((_h: string, _o: any, cb: any) => {
-      setImmediate(() => cb(null, [{ address: "203.0.113.1", family: 4 }]));
+    dnsLookup: ((_hostname: string, _opts: any, cb: any) => {
+      dnsLookupCalls += 1;
+      setImmediate(() => {
+        if (dnsGate) {
+          dnsGate.then(() => cb(null, [{ address: "203.0.113.1", family: 4 }]));
+          return;
+        }
+        cb(null, [{ address: "203.0.113.1", family: 4 }]);
+      });
     }) as any,
     httpHooks: { isIpAllowed: () => true },
   });
 
-  const session: any = { http: undefined };
-  const { writer, finished } = makeWriter();
+  const errors: Error[] = [];
+  backend.on("error", (err) => {
+    errors.push(err instanceof Error ? err : new Error(String(err)));
+  });
 
+  const session: any = { http: undefined };
+  const { writer, writes, finished } = makeWriter();
+
+  const calls: Array<Promise<void>> = [];
   for (const chunk of chunks) {
-    await qemuHttp.handleHttpDataWithWriter(
+    const call = qemuHttp.handleHttpDataWithWriter(
       backend,
       "key",
       session,
       chunk,
       writer,
     );
+    calls.push(call);
+    if (!options.fireAndForget) {
+      await call;
+    }
   }
 
-  await Promise.race([
-    finished,
-    new Promise<never>((_, rej) =>
-      setTimeout(
-        () => rej(new Error("body stream never closed (drain re-entrancy)")),
-        3_000,
-      ),
-    ),
-  ]);
-
-  assert.equal(fetchCalls, 1, "fetch should be called exactly once");
-  assert.equal(fetchBodyLen, bodySize, "fetch should receive the full body");
-});
-
-test("qemu-net: large (200 KB) streaming POST body completes", async () => {
-  const { chunks, bodySize } = buildChunkedPost(200_000);
-
-  let fetchBodyLen = 0;
-
-  const backend = makeBackend({
-    fetch: async (_url: any, init: any) => {
-      fetchBodyLen = await consumeFetchBody(init);
-      return new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      });
-    },
-    dnsLookup: ((_h: string, _o: any, cb: any) => {
-      setImmediate(() => cb(null, [{ address: "203.0.113.1", family: 4 }]));
-    }) as any,
-    httpHooks: { isIpAllowed: () => true },
-  });
-
-  const session: any = { http: undefined };
-  const { writer, finished } = makeWriter();
-
-  for (const chunk of chunks) {
-    await qemuHttp.handleHttpDataWithWriter(
-      backend,
-      "key",
-      session,
-      chunk,
-      writer,
+  if (releaseDns) {
+    await waitForCondition(
+      () => dnsLookupCalls >= 1,
+      "DNS precheck never started",
     );
+    releaseDns();
   }
 
-  await Promise.race([
-    finished,
-    new Promise<never>((_, rej) =>
-      setTimeout(
-        () => rej(new Error("body stream never closed (drain re-entrancy)")),
-        3_000,
-      ),
-    ),
-  ]);
+  await waitForOrTimeout(finished, "response never completed");
 
-  assert.equal(fetchBodyLen, bodySize);
+  const settled = await Promise.allSettled(calls);
+  for (const result of settled) {
+    assert.equal(result.status, "fulfilled");
+  }
+
+  assert.equal(errors.length, 0, "no backend error events expected");
+  assert.match(Buffer.concat(writes).toString("ascii"), /^HTTP\/1\.1 200 /);
+
+  return {
+    fetchCalls,
+    fetchBodyLen,
+    dnsLookupCalls,
+    bodySize,
+  };
+}
+
+test("qemu-net: streaming POST body closes cleanly for medium and large payloads", async () => {
+  for (const bodySize of [50_000, 200_000]) {
+    const result = await runStreamingUpload({
+      bodySize,
+      fireAndForget: false,
+    });
+
+    assert.equal(result.fetchCalls, 1, `fetch once for ${bodySize} bytes`);
+    assert.equal(
+      result.fetchBodyLen,
+      result.bodySize,
+      `forwarded full ${bodySize}-byte body`,
+    );
+    assert.equal(result.dnsLookupCalls, 1, "single policy precheck lookup");
+  }
 });
 
-// ---------------------------------------------------------------------------
-// Bug 2: TLS data handler race
-//
-// tlsSocket.on("data") calls handleTlsHttpData without awaiting. When
-// ensureRequestHeadPolicies yields (async DNS lookup), a second data event
-// re-enters handleHttpDataWithWriter before httpSession.processing is set,
-// causing duplicate header parsing. Simulated here by firing all chunks
-// without awaiting, just like the real TLS handler does.
-// ---------------------------------------------------------------------------
-
-test("qemu-net: concurrent non-awaited data calls do not corrupt streaming state (TLS handler race)", async () => {
-  const { chunks, bodySize } = buildChunkedPost(120_000);
-
-  let fetchBodyLen = 0;
-  let fetchCalls = 0;
-
-  const backend = makeBackend({
-    fetch: async (_url: any, init: any) => {
-      fetchCalls++;
-      fetchBodyLen = await consumeFetchBody(init);
-      return new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      });
-    },
-    // Async DNS lookup via setImmediate — this is what creates the race
-    // window: the first call yields at ensureRequestHeadPolicies while
-    // subsequent calls re-enter with more data.
-    dnsLookup: ((_h: string, _o: any, cb: any) => {
-      setImmediate(() => cb(null, [{ address: "203.0.113.1", family: 4 }]));
-    }) as any,
-    httpHooks: { isIpAllowed: () => true },
+test("qemu-net: concurrent non-awaited data chunks do not re-parse request head", async () => {
+  const result = await runStreamingUpload({
+    bodySize: 120_000,
+    fireAndForget: true,
+    gateDnsPrecheck: true,
   });
 
-  const session: any = { http: undefined };
-  const { writer, finished } = makeWriter();
-
-  // Fire all chunks WITHOUT awaiting — mirrors tlsSocket.on("data") behavior.
-  for (const chunk of chunks) {
-    qemuHttp.handleHttpDataWithWriter(backend, "key", session, chunk, writer);
-  }
-
-  await Promise.race([
-    finished,
-    new Promise<never>((_, rej) =>
-      setTimeout(
-        () =>
-          rej(
-            new Error(
-              "response never arrived (concurrent data handler race)",
-            ),
-          ),
-        3_000,
-      ),
-    ),
-  ]);
-
-  assert.equal(fetchCalls, 1, "fetch should be called exactly once");
-  assert.equal(fetchBodyLen, bodySize, "fetch should receive the full body");
+  assert.equal(result.fetchCalls, 1, "fetch should run exactly once");
+  assert.equal(result.fetchBodyLen, result.bodySize, "full body forwarded");
+  assert.equal(
+    result.dnsLookupCalls,
+    1,
+    "request precheck should run once even under re-entrant data events",
+  );
 });
