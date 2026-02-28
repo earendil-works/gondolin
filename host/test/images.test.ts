@@ -72,19 +72,36 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
   return { dir, buildId };
 }
 
+function patchManifest(
+  dir: string,
+  update: (manifest: Record<string, unknown>) => void,
+): void {
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  update(manifest);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+}
+
 function patchManifestAssets(
   dir: string,
   assets: { kernel?: string; initramfs?: string; rootfs?: string },
 ): void {
-  const manifestPath = path.join(dir, "manifest.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
-    assets: { kernel: string; initramfs: string; rootfs: string };
-  };
-  manifest.assets = {
-    ...manifest.assets,
-    ...assets,
-  };
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+  patchManifest(dir, (manifest) => {
+    const currentAssets = (manifest.assets ?? {}) as Record<string, unknown>;
+    manifest.assets = {
+      ...currentAssets,
+      ...assets,
+    };
+  });
+}
+
+function patchManifestBuildId(dir: string, buildId: string): void {
+  patchManifest(dir, (manifest) => {
+    manifest.buildId = buildId;
+  });
 }
 
 test("images: import and resolve by build id", () => {
@@ -157,6 +174,48 @@ test("images: tagImage can tag from asset directory selectors", () => {
 
     const resolved = resolveImageSelector("tooling:dev", "x86_64");
     assert.equal(resolved.buildId, imported.buildId);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import rejects non-uuid manifest build ids", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    patchManifestBuildId(assets.dir, "../escaped");
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /invalid image build id: \.\.\/escaped/,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import rejects uppercase manifest build ids", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    patchManifestBuildId(assets.dir, assets.buildId.toUpperCase());
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /invalid image build id/,
+    );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });

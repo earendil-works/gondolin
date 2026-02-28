@@ -15,7 +15,11 @@ import {
   loadGuestAssets,
   type GuestAssets,
 } from "./assets";
-import { getImageObjectDirectory, resolveImageSelector } from "./images";
+import {
+  getImageObjectDirectory,
+  normalizeImageBuildId,
+  resolveImageSelector,
+} from "./images";
 import type { VMOptions } from "./vm/types";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
@@ -217,6 +221,7 @@ function resolveAssetDirByBuildId(buildId: string): {
   assetDir: string;
   searched: string[];
 } {
+  const canonicalBuildId = normalizeImageBuildId(buildId);
   const searched: string[] = [];
 
   const tryDir = (label: string, dir: string): string | null => {
@@ -224,7 +229,7 @@ function resolveAssetDirByBuildId(buildId: string): {
     searched.push(`${label}=${resolved}`);
 
     const manifest = loadAssetManifest(resolved);
-    if (manifest?.buildId !== buildId) {
+    if (manifest?.buildId !== canonicalBuildId) {
       return null;
     }
 
@@ -251,20 +256,20 @@ function resolveAssetDirByBuildId(buildId: string): {
   if (foundDefault) return { assetDir: foundDefault, searched };
 
   // 4) Local image object store
-  const objectDir = getImageObjectDirectory(buildId);
+  const objectDir = getImageObjectDirectory(canonicalBuildId);
   const foundObject = tryDir("image-object", objectDir);
   if (foundObject) return { assetDir: foundObject, searched };
 
   // 5) Cache scan
   const cacheRoot = path.join(cacheBaseDir(), "gondolin");
   searched.push(`cache-scan=${cacheRoot}`);
-  const found = scanForBuildId(cacheRoot, buildId);
+  const found = scanForBuildId(cacheRoot, canonicalBuildId);
   if (found) {
     return { assetDir: found, searched };
   }
 
   const msg =
-    `Unable to locate guest assets for checkpoint buildId=${buildId}\n` +
+    `Unable to locate guest assets for checkpoint buildId=${canonicalBuildId}\n` +
     `Searched:\n` +
     searched.map((x) => `  - ${x}`).join("\n") +
     `\n\n` +
@@ -294,6 +299,7 @@ function resolveGuestAssetsForResume(
   requiredBuildId: string,
   options: VMOptions,
 ): { imagePath: any; assets: GuestAssets } {
+  const canonicalRequiredBuildId = normalizeImageBuildId(requiredBuildId);
   const userImagePath = options.sandbox?.imagePath;
 
   if (userImagePath !== undefined) {
@@ -306,10 +312,10 @@ function resolveGuestAssetsForResume(
           `guest assets at ${assetDir} are missing manifest buildId (cannot resume checkpoint)`,
         );
       }
-      if (manifest.buildId !== requiredBuildId) {
+      if (manifest.buildId !== canonicalRequiredBuildId) {
         throw new Error(
           `guest assets do not match checkpoint buildId\n` +
-            `  required: ${requiredBuildId}\n` +
+            `  required: ${canonicalRequiredBuildId}\n` +
             `  provided: ${manifest.buildId}\n` +
             `Fix: pass the correct assets directory to sandbox.imagePath`,
         );
@@ -344,10 +350,10 @@ function resolveGuestAssetsForResume(
           `guest assets at ${commonDir} are missing manifest buildId (cannot resume checkpoint)`,
         );
       }
-      if (manifest.buildId !== requiredBuildId) {
+      if (manifest.buildId !== canonicalRequiredBuildId) {
         throw new Error(
           `guest assets do not match checkpoint buildId\n` +
-            `  required: ${requiredBuildId}\n` +
+            `  required: ${canonicalRequiredBuildId}\n` +
             `  provided: ${manifest.buildId}\n` +
             `Fix: pass the correct assets directory to sandbox.imagePath`,
         );
@@ -361,7 +367,7 @@ function resolveGuestAssetsForResume(
     );
   }
 
-  const { assetDir } = resolveAssetDirByBuildId(requiredBuildId);
+  const { assetDir } = resolveAssetDirByBuildId(canonicalRequiredBuildId);
   return { imagePath: assetDir, assets: loadGuestAssets(assetDir) };
 }
 
@@ -541,3 +547,8 @@ export class VmCheckpoint {
     writeCheckpointTrailer(diskPath, data);
   }
 }
+
+/** @internal */
+export const __test = {
+  resolveAssetDirByBuildId,
+};

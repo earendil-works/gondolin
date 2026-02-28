@@ -10,7 +10,7 @@ import type { Architecture } from "./build/config";
 const IMAGE_REF_INDEX_VERSION = 1 as const;
 
 const BUILD_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -147,6 +147,13 @@ function parseImageRef(reference: string): ParsedImageRef {
 
 function isBuildId(value: string): boolean {
   return BUILD_ID_PATTERN.test(value);
+}
+
+export function normalizeImageBuildId(buildId: string): string {
+  if (!isBuildId(buildId)) {
+    throw new Error(`invalid image build id: ${buildId}`);
+  }
+  return buildId;
 }
 
 function defaultRefIndex(): ImageRefIndex {
@@ -287,18 +294,17 @@ function detectImageArchFromAssetDir(assetDir: string): ImageArch {
 }
 
 export function getImageObjectDirectory(buildId: string): string {
-  return path.join(imageObjectRootDir(), buildId);
+  const canonicalBuildId = normalizeImageBuildId(buildId);
+  return path.join(imageObjectRootDir(), canonicalBuildId);
 }
 
 function ensureImageObjectExists(buildId: string): string {
-  if (!isBuildId(buildId)) {
-    throw new Error(`invalid image build id: ${buildId}`);
-  }
+  const canonicalBuildId = normalizeImageBuildId(buildId);
 
-  const objectDir = getImageObjectDirectory(buildId);
+  const objectDir = getImageObjectDirectory(canonicalBuildId);
   if (!fs.existsSync(objectDir)) {
     throw new Error(
-      `image object not found for buildId ${buildId} (expected ${objectDir})`,
+      `image object not found for buildId ${canonicalBuildId} (expected ${objectDir})`,
     );
   }
 
@@ -344,6 +350,8 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
     );
   }
 
+  const buildId = normalizeImageBuildId(manifest.buildId);
+
   const arch = normalizeImageArch(manifest.config?.arch);
   if (!arch) {
     throw new Error(
@@ -351,7 +359,7 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
     );
   }
 
-  const objectDir = getImageObjectDirectory(manifest.buildId);
+  const objectDir = getImageObjectDirectory(buildId);
 
   let created = false;
   if (!fs.existsSync(objectDir)) {
@@ -359,7 +367,7 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
 
     const tmpDir = path.join(
       imageObjectRootDir(),
-      `.tmp-${manifest.buildId}-${randomUUID().slice(0, 8)}`,
+      `.tmp-${buildId}-${randomUUID().slice(0, 8)}`,
     );
 
     fs.mkdirSync(tmpDir, { recursive: true });
@@ -449,7 +457,7 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
   loadGuestAssets(objectDir);
 
   return {
-    buildId: manifest.buildId,
+    buildId,
     arch,
     assetDir: objectDir,
     created,
@@ -588,7 +596,7 @@ export function resolveImageSelector(
   }
 
   if (isBuildId(trimmed)) {
-    const buildId = trimmed.toLowerCase();
+    const buildId = normalizeImageBuildId(trimmed);
     const assetDir = ensureImageObjectExists(buildId);
     return {
       source: "build-id",
@@ -635,4 +643,5 @@ export const __test = {
   parseImageRef,
   normalizeImageArch,
   isBuildId,
+  normalizeImageBuildId,
 };
