@@ -32,8 +32,8 @@ jobs:
       - name: Typecheck host
         run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
 
-      - name: Build host
-        run: pnpm run build
+      - name: Verify host CLI runtime
+        run: node host/bin/gondolin.ts --help >/dev/null
 
   build-guest:
     name: Build Guest (${{ matrix.arch }})
@@ -122,8 +122,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Build host dist
-        run: pnpm run build
+      - name: Verify host CLI runtime
+        run: node host/bin/gondolin.ts --help >/dev/null
 
       - name: Build guest binaries
         run: |
@@ -158,7 +158,7 @@ jobs:
           }
           JSON
 
-          node host/dist/bin/gondolin.js build \
+          node host/bin/gondolin.ts build \
             --config build-config-container-smoke.json \
             --output ./tmp-container-assets \
             --quiet
