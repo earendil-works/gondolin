@@ -2,7 +2,7 @@ import type {
   Architecture,
   ContainerRuntime,
   OciPullPolicy,
-} from "../build/config";
+} from "../build/config.ts";
 
 /** OCI rootfs source configuration */
 export interface OciRootfsOptions {

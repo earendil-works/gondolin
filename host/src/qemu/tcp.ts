@@ -1,6 +1,6 @@
 import net from "net";
 
-import type { DnsMode, SyntheticDnsHostMappingMode } from "./contracts";
+import type { DnsMode, SyntheticDnsHostMappingMode } from "./contracts.ts";
 
 export type TcpOptions = {
   /** guest host[:port] -> upstream host:port mappings */

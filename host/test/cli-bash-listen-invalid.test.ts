@@ -4,11 +4,11 @@ import path from "node:path";
 import test from "node:test";
 
 test("cli: gondolin bash --listen -1 errors (value starting with - is not silently ignored)", () => {
-  const hostDir = path.join(__dirname, "..");
+  const hostDir = path.join(import.meta.dirname, "..");
 
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "bin/gondolin.ts", "bash", "--listen", "-1"],
+    ["bin/gondolin.ts", "bash", "--listen", "-1"],
     {
       cwd: hostDir,
       env: process.env,
@@ -22,11 +22,11 @@ test("cli: gondolin bash --listen -1 errors (value starting with - is not silent
 });
 
 test("cli: gondolin bash --listen []:PORT errors (empty bracket host is rejected)", () => {
-  const hostDir = path.join(__dirname, "..");
+  const hostDir = path.join(import.meta.dirname, "..");
 
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "bin/gondolin.ts", "bash", "--listen", "[]:3000"],
+    ["bin/gondolin.ts", "bash", "--listen", "[]:3000"],
     {
       cwd: hostDir,
       env: process.env,

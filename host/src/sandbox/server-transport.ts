@@ -5,10 +5,10 @@ import { Duplex } from "stream";
 
 import {
   FrameReader,
-  IncomingMessage,
+  type IncomingMessage,
   decodeMessage,
   encodeFrame,
-} from "./virtio-protocol";
+} from "./virtio-protocol.ts";
 
 export const MAX_REQUEST_ID = 0xffffffff;
 

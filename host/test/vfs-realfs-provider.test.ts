@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { RealFSProvider } from "../src/vfs/node";
+import { RealFSProvider } from "../src/vfs/node/index.ts";
 
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;

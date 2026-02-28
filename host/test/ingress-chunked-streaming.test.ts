@@ -3,8 +3,8 @@ import { once } from "node:events";
 import { Duplex, Readable, Writable } from "node:stream";
 import test from "node:test";
 
-import { GondolinListeners, IngressGateway } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs/node";
+import { GondolinListeners, IngressGateway } from "../src/ingress.ts";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 class CaptureDuplex extends Duplex {
   readonly written: Buffer[] = [];

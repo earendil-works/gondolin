@@ -2,31 +2,33 @@
   "name": "@earendil-works/gondolin",
   "version": "0.5.0",
   "description": "Alpine Linux sandbox for running untrusted code with controlled filesystem and network access",
-  "type": "commonjs",
-  "main": "./dist/src/index.js",
-  "types": "./dist/src/index.d.ts",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "bin": {
-    "gondolin": "./dist/bin/gondolin.js"
+    "gondolin": "./bin/gondolin.ts"
   },
   "exports": {
     ".": {
-      "types": "./dist/src/index.d.ts",
-      "import": "./dist/src/index.js",
-      "require": "./dist/src/index.js"
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
     },
     "./package.json": "./package.json"
   },
   "files": [
-    "dist/"
+    "src/",
+    "bin/",
+    "fuzz/",
+    "README.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json && cp -R src/vfs/node/vendored-node-vfs dist/src/vfs/node/vendored-node-vfs",
-    "start": "node dist/bin/gondolin.js exec",
-    "dev": "tsx bin/gondolin.ts exec",
-    "test": "tsx --test test/*.test.ts",
-    "bash": "tsx bin/gondolin.ts bash",
-    "gondolin": "tsx bin/gondolin.ts",
-    "fuzz": "tsx fuzz/cli.ts",
+    "build": "echo 'native TypeScript runtime: no build step'",
+    "start": "node bin/gondolin.ts exec",
+    "dev": "node bin/gondolin.ts exec",
+    "test": "node --test test/*.test.ts",
+    "bash": "node bin/gondolin.ts bash",
+    "gondolin": "node bin/gondolin.ts",
+    "fuzz": "node fuzz/cli.ts",
     "dep:check": "pnpm dlx dependency-cruiser --config .dependency-cruiser.cjs src",
     "dep:graph": "pnpm dlx dependency-cruiser --config .dependency-cruiser.cjs --output-type dot src > /tmp/gondolin-host-deps.dot"
   },
@@ -55,11 +57,10 @@
     "@types/node": "^22.10.7",
     "@types/node-forge": "^1.3.14",
     "@types/ssh2": "^1.15.5",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=23.6.0"
   },
   "publishConfig": {
     "access": "public",

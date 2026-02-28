@@ -1,16 +1,16 @@
 import path from "node:path";
 import type { Dirent } from "node:fs";
 
-import { createErrnoError } from "./errors";
-import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node";
-import { delegateStatfsOrEnosys } from "./statfs";
+import { createErrnoError } from "./errors.ts";
+import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node/index.ts";
+import { delegateStatfsOrEnosys } from "./statfs.ts";
 import {
   ERRNO,
   isWriteFlag,
   normalizeVfsPath,
   VirtualProviderClass,
-} from "./utils";
-import { MemoryProvider } from "./node";
+} from "./utils.ts";
+import { MemoryProvider } from "./node/index.ts";
 
 export type ShadowWriteMode =
   /** reject any write/mutation against shadowed paths */

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { XorShift32 } from "./rng";
-import { mutateBuffer } from "./mutate";
-import { targets } from "./targets";
+import { XorShift32 } from "./rng.ts";
+import { mutateBuffer } from "./mutate.ts";
+import { targets } from "./targets/index.ts";
 
 function getArgv(): string[] {
   const argv = process.argv.slice(2);
@@ -32,7 +32,7 @@ function ensureDir(p: string) {
 }
 
 function writeArtifact(target: string, data: Buffer): string {
-  const dir = path.join(__dirname, "artifacts", target);
+  const dir = path.join(import.meta.dirname, "artifacts", target);
   ensureDir(dir);
   const name = `${Date.now()}-${process.pid}.bin`;
   const file = path.join(dir, name);

@@ -6,8 +6,8 @@ import type {
   Architecture,
   ContainerRuntime,
   OciPullPolicy,
-} from "../build/config";
-import type { OciResolvedSource, OciRootfsOptions } from "./types";
+} from "../build/config.ts";
+import type { OciResolvedSource, OciRootfsOptions } from "./types.ts";
 
 interface OciExportOptions extends OciRootfsOptions {
   /** target architecture */

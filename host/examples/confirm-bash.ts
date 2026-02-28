@@ -11,7 +11,7 @@
  *
  * Run with (from repo root):
  *   cd host
- *   pnpm exec tsx examples/confirm-bash.ts
+ *   node examples/confirm-bash.ts
  *
  * Notes:
  * - Decisions are memorized for the lifetime of the VM (this process)
@@ -32,7 +32,7 @@ import {
   type ExecProcess,
   type SshExecDecision,
   type SshExecRequest,
-} from "../src";
+} from "../src/index.ts";
 
 const execFileAsync = promisify(execFile);
 

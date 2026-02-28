@@ -3,23 +3,23 @@ import dns from "dns";
 import { fetch as undiciFetch } from "undici";
 import type { ReadableStream as WebReadableStream } from "stream/web";
 
-import { ON_REQUEST_EARLY_POLICY_SAFE } from "./contracts";
+import { ON_REQUEST_EARLY_POLICY_SAFE } from "./contracts.ts";
 import type {
   HttpIpAllowInfo,
   QemuNetworkBackend,
   TcpSession,
-} from "./contracts";
+} from "./contracts.ts";
 import type {
   InternalHttpRequest,
   InternalHttpResponse,
   InternalHttpResponseHeaders,
-} from "../internal/http-types";
+} from "../internal/http-types.ts";
 
 import {
   bridgeWebSocketUpgrade,
   handleWebSocketClientData,
   isWebSocketUpgradeRequest,
-} from "./ws";
+} from "./ws.ts";
 
 import {
   HttpReceiveBuffer,
@@ -36,15 +36,15 @@ import {
   sendHttpResponseHead,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
-} from "../http/utils";
-import type { HttpRequestData, LookupEntry } from "../http/utils";
+} from "../http/utils.ts";
+import type { HttpRequestData, LookupEntry } from "../http/utils.ts";
 import {
   webRequestToInternalHttpRequest,
   webResponseToInternalHttpResponse,
   internalHttpRequestToWebRequest,
   internalHttpResponseToWebResponse,
   responseHeadersToRecord,
-} from "../internal/http-conversion";
+} from "../internal/http-conversion.ts";
 
 const MAX_HTTP_REDIRECTS = 10;
 export { MAX_HTTP_HEADER_BYTES };

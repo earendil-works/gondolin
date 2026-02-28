@@ -1,7 +1,7 @@
-import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node";
-import { delegateStatfsOrEnosys } from "./statfs";
-import { ERRNO, VirtualProviderClass } from "./utils";
+import { createErrnoError } from "./errors.ts";
+import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node/index.ts";
+import { delegateStatfsOrEnosys } from "./statfs.ts";
+import { ERRNO, VirtualProviderClass } from "./utils.ts";
 
 export type VfsHookContext = {
   /** operation name */

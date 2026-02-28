@@ -1,6 +1,6 @@
-import { getInfoFromSshExecRequest } from "../../src/ssh/exec";
-import { XorShift32 } from "../rng";
-import type { FuzzTarget } from "./types";
+import { getInfoFromSshExecRequest } from "../../src/ssh/exec.ts";
+import { XorShift32 } from "../rng.ts";
+import type { FuzzTarget } from "./types.ts";
 
 function bytesToWeirdAscii(buf: Buffer): string {
   // Keep it mostly ASCII so the command parser sees quotes/backslashes etc.

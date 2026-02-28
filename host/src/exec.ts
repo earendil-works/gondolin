@@ -1,6 +1,6 @@
 import { Readable } from "stream";
 
-import { attachTty } from "./utils/tty-attach";
+import { attachTty } from "./utils/tty-attach.ts";
 
 const DEFAULT_ENCODING = "utf-8";
 const DEFAULT_WINDOW_BYTES = 256 * 1024;

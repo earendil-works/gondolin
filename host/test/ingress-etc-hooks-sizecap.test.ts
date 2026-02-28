@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GondolinListeners, createGondolinEtcHooks } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs/node";
+import { GondolinListeners, createGondolinEtcHooks } from "../src/ingress.ts";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 test("createGondolinEtcHooks: enforces /etc/gondolin/listeners size cap on write", () => {
   const provider = new MemoryProvider();

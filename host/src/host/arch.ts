@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 
-import type { Architecture } from "../build/config";
+import type { Architecture } from "../build/config.ts";
 
 let cachedHostNodeArch: NodeJS.Architecture = process.arch;
 

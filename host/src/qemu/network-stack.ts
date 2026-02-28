@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { performance } from "perf_hooks";
 
-import { normalizeIpv4Servers } from "../utils/dns";
+import { normalizeIpv4Servers } from "../utils/dns.ts";
 
 // Protocol Constants
 const ETH_P_IP = 0x0800;

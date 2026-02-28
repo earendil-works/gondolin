@@ -5,9 +5,9 @@ import {
   decodeMessage,
   encodeFrame,
   buildExecRequest,
-} from "../../src/sandbox/virtio-protocol";
-import { XorShift32 } from "../rng";
-import type { FuzzTarget } from "./types";
+} from "../../src/sandbox/virtio-protocol.ts";
+import { XorShift32 } from "../rng.ts";
+import type { FuzzTarget } from "./types.ts";
 
 function randChunking(input: Buffer, rng: XorShift32): Buffer[] {
   if (input.length === 0) return [Buffer.alloc(0)];

@@ -14,31 +14,31 @@ import {
   generateImageEnvScript,
   injectBeforeSandboxdExec,
   writeExecutable,
-} from "../alpine/utils";
-import { extractTarGz } from "../alpine/tar";
+} from "../alpine/utils.ts";
+import { extractTarGz } from "../alpine/tar.ts";
 import {
   assertSafeWritePath,
   ensureRootfsShell,
   hardenExtractedRootfs,
-} from "../alpine/rootfs";
-import { exportOciRootfs } from "../alpine/oci";
-import { installPackages, runPostBuildCommands } from "../alpine/packages";
-import { syncKernelModules } from "../alpine/kernel-modules";
+} from "../alpine/rootfs.ts";
+import { exportOciRootfs } from "../alpine/oci.ts";
+import { installPackages, runPostBuildCommands } from "../alpine/packages.ts";
+import { syncKernelModules } from "../alpine/kernel-modules.ts";
 import {
   INITRAMFS_INIT_SCRIPT,
   ROOTFS_INIT_SCRIPT,
-} from "../alpine/init-scripts";
+} from "../alpine/init-scripts.ts";
 import type {
   AlpineBuildOptions,
   AlpineBuildResult,
   OciResolvedSource,
-} from "../alpine/types";
+} from "../alpine/types.ts";
 
 export type {
   AlpineBuildOptions,
   AlpineBuildResult,
   OciResolvedSource,
-} from "../alpine/types";
+} from "../alpine/types.ts";
 
 /** Build Alpine rootfs and initramfs images */
 export async function buildAlpineImages(

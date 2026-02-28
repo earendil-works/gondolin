@@ -2,18 +2,17 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { MANIFEST_FILENAME, loadAssetManifest } from "../assets";
-import type { BuildConfig } from "./config";
+import { MANIFEST_FILENAME, loadAssetManifest } from "../assets.ts";
+import type { BuildConfig } from "./config.ts";
 import {
   detectContainerRuntime,
   runCommand,
-  ensureHostDistBuilt,
   findGuestDir,
   findHostPackageRoot,
   resolveConfigPath,
   type BuildOptions,
   type BuildResult,
-} from "./shared";
+} from "./shared.ts";
 
 /** Build assets inside a container */
 export async function buildInContainer(
@@ -39,20 +38,14 @@ export async function buildInContainer(
   if (!hostPkgRoot) {
     throw new Error("Could not locate host package root (package.json)");
   }
-  ensureHostDistBuilt(hostPkgRoot, log);
-
-  const hostDistSrcDir = path.join(hostPkgRoot, "dist", "src");
-  const hostDistBuilder = path.join(hostDistSrcDir, "build", "index.js");
-  if (!fs.existsSync(hostDistBuilder)) {
-    throw new Error(
-      `Host dist build not found at ${hostDistBuilder}. ` +
-        "Run `pnpm -C host build` (repo checkout) or reinstall the package.",
-    );
+  const hostSrcBuilder = path.join(hostPkgRoot, "src", "build", "index.ts");
+  if (!fs.existsSync(hostSrcBuilder)) {
+    throw new Error(`Host source build entry not found at ${hostSrcBuilder}`);
   }
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-build-"));
   const containerScriptPath = path.join(workDir, "build-in-container.sh");
-  const runnerPath = path.join(workDir, "run-build.js");
+  const runnerPath = path.join(workDir, "run-build.mjs");
   const configPath = path.join(workDir, "build-config.json");
 
   const containerConfig: BuildConfig = JSON.parse(JSON.stringify(config));
@@ -124,10 +117,9 @@ export async function buildInContainer(
 
   const verbose = options.verbose ?? true;
 
-  const runner = `"use strict";
-const fs = require("fs");
+  const runner = `import fs from "node:fs";
 
-const { buildAssets } = require("/host-dist-src/build/index.js");
+import { buildAssets } from "/host-pkg/src/build/index.ts";
 
 async function main() {
   const cfg = JSON.parse(fs.readFileSync("/work/build-config.json", "utf8"));
@@ -159,7 +151,7 @@ apk add --no-cache nodejs zig lz4 cpio e2fsprogs bash
 # Make guest sources discoverable for Zig compilation
 export GONDOLIN_GUEST_SRC=/guest
 
-node /work/run-build.js
+node --experimental-strip-types /work/run-build.mjs
 `;
 
   fs.writeFileSync(containerScriptPath, containerScript, { mode: 0o755 });
@@ -180,7 +172,7 @@ node /work/run-build.js
     "-v",
     `${workDir}:/work`,
     "-v",
-    `${hostDistSrcDir}:/host-dist-src:ro`,
+    `${hostPkgRoot}:/host-pkg:ro`,
     image,
     "/bin/sh",
     "/work/build-in-container.sh",

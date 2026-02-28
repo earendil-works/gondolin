@@ -27,12 +27,12 @@ export {
   type VmFsWriteFileInput,
   type VmFsWriteFileOptions,
   type VmFsDeleteOptions,
-} from "./vm/core";
-export { VmCheckpoint, type VmCheckpointData } from "./checkpoint";
-export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec";
+} from "./vm/core.ts";
+export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
+export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec.ts";
 
 // Server for running the sandbox
-export { SandboxServer } from "./sandbox/server";
+export { SandboxServer } from "./sandbox/server.ts";
 
 // VFS (Virtual File System) providers
 export {
@@ -43,15 +43,15 @@ export {
   type VirtualFileHandle,
   type VfsStatfs,
   type VirtualFileSystemOptions,
-} from "./vfs/node";
+} from "./vfs/node/index.ts";
 
 export {
   SandboxVfsProvider,
   type VfsHooks,
   type VfsHookContext,
-} from "./vfs/provider";
-export { ReadonlyProvider } from "./vfs/readonly";
-export { ReadonlyVirtualProvider } from "./vfs/readonly-virtual";
+} from "./vfs/provider.ts";
+export { ReadonlyProvider } from "./vfs/readonly.ts";
+export { ReadonlyVirtualProvider } from "./vfs/readonly-virtual.ts";
 export {
   ShadowProvider,
   createShadowPathPredicate,
@@ -59,7 +59,7 @@ export {
   type ShadowWriteMode,
   type ShadowPredicate,
   type ShadowContext,
-} from "./vfs/shadow";
+} from "./vfs/shadow.ts";
 export {
   VirtualProviderClass,
   ERRNO,
@@ -68,12 +68,12 @@ export {
   VirtualDirent,
   createVirtualDirStats,
   formatVirtualEntries,
-} from "./vfs/utils";
+} from "./vfs/utils.ts";
 export {
   FsRpcService,
   type FsRpcMetrics,
   MAX_RPC_DATA,
-} from "./vfs/rpc-service";
+} from "./vfs/rpc-service.ts";
 
 // HTTP hooks for network policy
 export {
@@ -81,7 +81,7 @@ export {
   type CreateHttpHooksOptions,
   type CreateHttpHooksResult,
   type SecretDefinition,
-} from "./http/hooks";
+} from "./http/hooks.ts";
 
 // Network types
 export type {
@@ -92,18 +92,18 @@ export type {
   HttpHooks,
   HttpFetch,
   TcpOptions,
-} from "./qemu/net";
+} from "./qemu/net.ts";
 export type {
   SshOptions,
   SshCredential,
   SshExecRequest,
   SshExecDecision,
   SshExecPolicy,
-} from "./qemu/ssh";
-export { HttpRequestBlockedError } from "./http/utils";
+} from "./qemu/ssh.ts";
+export { HttpRequestBlockedError } from "./http/utils.ts";
 
 // SSH helpers
-export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec";
+export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";
 
 // Debug helpers
 export {
@@ -111,7 +111,7 @@ export {
   type DebugConfig,
   type DebugComponent,
   type DebugLogFn,
-} from "./debug";
+} from "./debug.ts";
 
 // Ingress gateway
 export {
@@ -132,7 +132,7 @@ export {
   type IngressHookRequestPatch,
   type IngressHookResponse,
   type IngressHookResponsePatch,
-} from "./ingress";
+} from "./ingress.ts";
 
 // Session registry
 export {
@@ -146,7 +146,7 @@ export {
   type SessionInfo,
   type SessionEntry,
   type IpcClientCallbacks,
-} from "./session-registry";
+} from "./session-registry.ts";
 
 // Asset management
 export {
@@ -158,7 +158,7 @@ export {
   loadAssetManifest,
   type GuestAssets,
   type AssetManifest,
-} from "./assets";
+} from "./assets.ts";
 
 // Build configuration and builder
 export {
@@ -180,11 +180,11 @@ export {
   validateBuildConfig,
   parseBuildConfig,
   serializeBuildConfig,
-} from "./build/config";
+} from "./build/config.ts";
 
 export {
   buildAssets,
   verifyAssets,
   type BuildOptions,
   type BuildResult,
-} from "./build";
+} from "./build/index.ts";

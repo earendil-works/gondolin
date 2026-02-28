@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
 
-import { GondolinListeners } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs/node";
+import { GondolinListeners } from "../src/ingress.ts";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 test("GondolinListeners: invalid listeners file does not crash and keeps old routes", async () => {
   const etcProvider = new MemoryProvider();

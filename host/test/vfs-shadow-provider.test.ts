@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemoryProvider } from "../src/vfs/node";
-import { ShadowProvider } from "../src/vfs/shadow";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
+import { ShadowProvider } from "../src/vfs/shadow.ts";
 
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;

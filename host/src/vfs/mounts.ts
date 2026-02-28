@@ -1,8 +1,8 @@
 import fs from "node:fs";
 
-import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node";
-import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs";
+import { createErrnoError } from "./errors.ts";
+import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node/index.ts";
+import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs.ts";
 import {
   createVirtualDirStats,
   ERRNO,
@@ -10,7 +10,7 @@ import {
   normalizeVfsPath,
   VirtualDirent,
   VirtualProviderClass,
-} from "./utils";
+} from "./utils.ts";
 
 export class MountRouterProvider
   extends VirtualProviderClass

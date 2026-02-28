@@ -1,8 +1,8 @@
-import type { VmVfsOptions } from "./types";
+import type { VmVfsOptions } from "./types.ts";
 
-import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "../mitm";
-import { listMountPaths } from "../vfs/mounts";
-import { MemoryProvider, type VirtualProvider } from "../vfs/node";
+import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "../mitm.ts";
+import { listMountPaths } from "../vfs/mounts.ts";
+import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
 
 /** guest mount path for host-provided MITM trust material */
 const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";

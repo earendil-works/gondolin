@@ -1,6 +1,6 @@
 import path from "path";
 
-import type { BootCommandMessage } from "./control-protocol";
+import type { BootCommandMessage } from "./control-protocol.ts";
 
 export type SandboxFsConfig = {
   fuseMount: string;

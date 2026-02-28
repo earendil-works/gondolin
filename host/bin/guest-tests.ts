@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-import { VM } from "../src/vm/core";
+import { VM } from "../src/vm/core.ts";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 
@@ -85,7 +85,7 @@ function hasHardwareAccel(): boolean {
 }
 
 function resolveRepoRoot() {
-  return path.resolve(__dirname, "../..");
+  return path.resolve(import.meta.dirname, "../..");
 }
 
 function defaultTestPaths(repoRoot: string) {

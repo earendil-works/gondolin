@@ -1,9 +1,9 @@
-import type { FuzzTarget } from "./types";
-import { dnsTarget } from "./dns";
-import { virtioTarget } from "./virtio";
-import { networkTarget } from "./network";
-import { tarTarget } from "./tar";
-import { sshExecTarget } from "./ssh-exec";
+import type { FuzzTarget } from "./types.ts";
+import { dnsTarget } from "./dns.ts";
+import { virtioTarget } from "./virtio.ts";
+import { networkTarget } from "./network.ts";
+import { tarTarget } from "./tar.ts";
+import { sshExecTarget } from "./ssh-exec.ts";
 
 export const targets: Record<string, FuzzTarget> = {
   [dnsTarget.name]: dnsTarget,

@@ -8,7 +8,7 @@ import {
   ExecProcess,
   finishExecSession,
   resolveOutputMode,
-} from "../src/exec";
+} from "../src/exec.ts";
 
 test("resolveOutputMode only treats objects with write() as writable", () => {
   const buf = Buffer.from("x");

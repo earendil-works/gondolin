@@ -13,7 +13,7 @@ import {
   loadOrCreateMitmCa,
   loadOrCreateMitmCaSync,
   resolveMitmCertDir,
-} from "../src/mitm";
+} from "../src/mitm.ts";
 
 function makeTempDir(t: TestContext, prefix = "gondolin-mitm-") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

@@ -2,31 +2,31 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 
-import { getHostNodeArchCached } from "../host/arch";
+import { getHostNodeArchCached } from "../host/arch.ts";
 import {
   debugFlagsToArray,
   parseDebugEnv,
   resolveDebugFlags,
   type DebugConfig,
   type DebugFlag,
-} from "../debug";
+} from "../debug.ts";
 import {
   ensureGuestAssets,
   loadAssetManifest,
   loadGuestAssets,
   resolveGuestAssetsSync,
   type GuestAssets,
-} from "../assets";
+} from "../assets.ts";
 import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
   type DnsOptions,
   type HttpFetch,
   type HttpHooks,
-} from "../qemu/net";
-import type { SshOptions } from "../qemu/ssh";
-import type { TcpOptions } from "../qemu/tcp";
-import type { VirtualProvider } from "../vfs/node";
+} from "../qemu/net.ts";
+import type { SshOptions } from "../qemu/ssh.ts";
+import type { TcpOptions } from "../qemu/tcp.ts";
+import type { VirtualProvider } from "../vfs/node/index.ts";
 
 /**
  * Path to guest image assets.

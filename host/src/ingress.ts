@@ -7,8 +7,8 @@ import http, {
 import net from "net";
 import type { Duplex, Writable } from "stream";
 
-import type { VirtualProvider } from "./vfs/node";
-import type { SandboxServer } from "./sandbox/server";
+import type { VirtualProvider } from "./vfs/node/index.ts";
+import type { SandboxServer } from "./sandbox/server.ts";
 import {
   isWebSocketUpgradeRequestHeaders,
   MAX_HTTP_HEADER_BYTES,
@@ -18,7 +18,7 @@ import {
   sendHttpResponseHead,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
-} from "./http/utils";
+} from "./http/utils.ts";
 
 const MAX_LISTENERS_FILE_BYTES = 64 * 1024;
 

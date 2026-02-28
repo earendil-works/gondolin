@@ -4,8 +4,8 @@ import { createGunzip } from "zlib";
 import { Writable } from "stream";
 import { pipeline } from "stream/promises";
 
-import type { TarEntry } from "./types";
-import { hasSymlinkComponent } from "./rootfs";
+import type { TarEntry } from "./types.ts";
+import { hasSymlinkComponent } from "./rootfs.ts";
 
 /** Parse a raw tar archive buffer into entries */
 export function parseTar(buf: Buffer): TarEntry[] {

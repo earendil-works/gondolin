@@ -1,10 +1,10 @@
 /**
  * Basic usage examples for the Gondolin VM API.
  *
- * Run with: npx tsx examples/basic-usage.ts
+ * Run with: node examples/basic-usage.ts
  */
 
-import { VM } from "../src/vm/core";
+import { VM } from "../src/vm/core.ts";
 
 function printResult(
   label: string,

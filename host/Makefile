@@ -34,4 +34,4 @@ fuzz:
 	@$(PNPM) run fuzz -- $(TARGET)
 
 clean:
-	@rm -rf dist
+	@true

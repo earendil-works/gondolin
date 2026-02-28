@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { MemoryProvider } from "../src/vfs/node";
-import type { VfsStatfs } from "../src/vfs/node";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
+import type { VfsStatfs } from "../src/vfs/node/index.ts";
 import {
   MountRouterProvider,
   listMountPaths,
   normalizeMountMap,
   normalizeMountPath,
-} from "../src/vfs/mounts";
+} from "../src/vfs/mounts.ts";
 
 const { errno: ERRNO } = os.constants;
 

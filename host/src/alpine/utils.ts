@@ -2,8 +2,8 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 
-import { parseEnvEntry } from "../utils/env";
-import { assertSafeWritePath } from "./rootfs";
+import { parseEnvEntry } from "../utils/env.ts";
+import { assertSafeWritePath } from "./rootfs.ts";
 
 /** Download helper using Node's built-in fetch */
 export async function downloadFile(url: string, dest: string): Promise<void> {

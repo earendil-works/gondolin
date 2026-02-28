@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { MemoryProvider } from "../src/vfs/node";
-import { SandboxVfsProvider } from "../src/vfs/provider";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
+import { SandboxVfsProvider } from "../src/vfs/provider.ts";
 
 const { errno: ERRNO } = os.constants;
 

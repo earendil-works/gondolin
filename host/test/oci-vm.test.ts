@@ -5,14 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildAssets } from "../src/build";
+import { buildAssets } from "../src/build/index.ts";
 import {
   getDefaultArch,
   type BuildConfig,
   type ContainerRuntime,
-} from "../src/build/config";
-import { VM } from "../src/vm/core";
-import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture";
+} from "../src/build/config.ts";
+import { VM } from "../src/vm/core.ts";
+import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture.ts";
 
 function detectOciRuntime(): ContainerRuntime | null {
   for (const runtime of ["docker", "podman"] as const) {
@@ -29,7 +29,7 @@ function detectOciRuntime(): ContainerRuntime | null {
 function hasGuestBinaries(): boolean {
   const candidates = [
     path.resolve(process.cwd(), "..", "guest", "zig-out", "bin"),
-    path.resolve(__dirname, "..", "..", "guest", "zig-out", "bin"),
+    path.resolve(import.meta.dirname, "..", "..", "guest", "zig-out", "bin"),
   ];
 
   for (const binDir of candidates) {

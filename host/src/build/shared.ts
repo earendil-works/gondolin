@@ -7,8 +7,8 @@ import {
   MANIFEST_FILENAME,
   computeAssetBuildId,
   type AssetManifest,
-} from "../assets";
-import type { BuildConfig, Architecture } from "./config";
+} from "../assets.ts";
+import type { BuildConfig, Architecture } from "./config.ts";
 
 /** Fixed output filenames for assets */
 export const KERNEL_FILENAME = "vmlinuz-virt";
@@ -145,7 +145,7 @@ export function findGuestDir(): string | null {
     }
   }
 
-  const starts = [__dirname, process.cwd()];
+  const starts = [import.meta.dirname, process.cwd()];
   const visited = new Set<string>();
 
   for (const start of starts) {
@@ -173,7 +173,7 @@ export function findGuestDir(): string | null {
 
 /** Find the host package root (directory containing package.json) */
 export function findHostPackageRoot(): string | null {
-  let dir = __dirname;
+  let dir = import.meta.dirname;
 
   for (let i = 0; i < 8; i++) {
     const pkgJson = path.join(dir, "package.json");
@@ -189,83 +189,6 @@ export function findHostPackageRoot(): string | null {
   }
 
   return null;
-}
-
-/** Ensure `dist/` exists for container builds */
-export function ensureHostDistBuilt(
-  hostPkgRoot: string,
-  log: (msg: string) => void,
-): void {
-  const distBuilder = path.join(
-    hostPkgRoot,
-    "dist",
-    "src",
-    "build",
-    "index.js",
-  );
-
-  const runningFromDist =
-    path.basename(__dirname) === "src" &&
-    path.basename(path.dirname(__dirname)) === "dist";
-  if (runningFromDist) {
-    return;
-  }
-
-  const tsconfigPath = path.join(hostPkgRoot, "tsconfig.json");
-  const tscPath = path.join(
-    hostPkgRoot,
-    "node_modules",
-    "typescript",
-    "bin",
-    "tsc",
-  );
-
-  if (!fs.existsSync(tsconfigPath)) {
-    return;
-  }
-
-  if (!fs.existsSync(tscPath)) {
-    if (fs.existsSync(distBuilder)) {
-      return;
-    }
-    throw new Error(
-      `Cannot build host dist output: typescript not found at ${tscPath}. ` +
-        "Run `pnpm install` and then `pnpm -C host build`.",
-    );
-  }
-
-  log("Building host dist output (tsc) for container build...");
-
-  try {
-    execFileSync(process.execPath, [tscPath, "-p", tsconfigPath], {
-      cwd: hostPkgRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf8",
-    });
-  } catch (err) {
-    const e = err as {
-      stdout?: unknown;
-      stderr?: unknown;
-      status?: unknown;
-    };
-
-    const stdout = typeof e.stdout === "string" ? e.stdout : "";
-    const stderr = typeof e.stderr === "string" ? e.stderr : "";
-
-    throw new Error(
-      `Host dist build (tsc) failed (exit ${String(e.status ?? "?")}).\n` +
-        `Command: ${process.execPath} ${tscPath} -p ${tsconfigPath}\n` +
-        (stdout || stderr
-          ? `--- tsc output ---\n${stdout}${stderr}`
-          : "(no tsc output captured)"),
-    );
-  }
-
-  if (!fs.existsSync(distBuilder)) {
-    throw new Error(
-      `Host dist build failed: ${distBuilder} not found after tsc run`,
-    );
-  }
 }
 
 export type SandboxBinaryPaths = {

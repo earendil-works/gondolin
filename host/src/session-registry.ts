@@ -3,7 +3,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 
-import type { SandboxConnection } from "./sandbox/client";
+import type { SandboxConnection } from "./sandbox/client.ts";
 import {
   decodeOutputFrame,
   encodeOutputFrame,
@@ -17,7 +17,7 @@ import {
   type SnapshotCommandMessage,
   type SnapshotResponseMessage,
   type StdinCommandMessage,
-} from "./sandbox/control-protocol";
+} from "./sandbox/control-protocol.ts";
 
 const CACHE_BASE =
   process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");

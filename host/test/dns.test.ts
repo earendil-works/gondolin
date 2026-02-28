@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSyntheticDnsResponse, parseDnsQuery } from "../src/qemu/dns";
+import { buildSyntheticDnsResponse, parseDnsQuery } from "../src/qemu/dns.ts";
 
 function buildQuestionA(name: string): Buffer {
   const labels = name.split(".").filter(Boolean);

@@ -9,7 +9,7 @@ import {
   type SandboxConfig,
   type SandboxState,
   __test,
-} from "../src/sandbox/controller";
+} from "../src/sandbox/controller.ts";
 
 // In ESM, built-in modules expose live bindings via getters which cannot be
 // replaced with node:test mocks. The actual mutable exports object is on

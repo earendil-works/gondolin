@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
-import { ReadonlyProvider } from "../src/vfs/readonly";
-import { FsRpcService, MAX_RPC_DATA } from "../src/vfs/rpc-service";
+import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
+import { FsRpcService, MAX_RPC_DATA } from "../src/vfs/rpc-service.ts";
 
 const { errno: ERRNO } = os.constants;
 

@@ -5,8 +5,8 @@ import path from "path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildAssets } from "../src/build";
-import type { BuildConfig } from "../src/build/config";
+import { buildAssets } from "../src/build/index.ts";
+import type { BuildConfig } from "../src/build/config.ts";
 
 test("builder: container build path does not use guest/image/build.sh", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
@@ -63,7 +63,7 @@ if (args[0] === "run") {
   }
 
   const buildScriptPath = path.join(workDir, "build-in-container.sh");
-  const runnerPath = path.join(workDir, "run-build.js");
+  const runnerPath = path.join(workDir, "run-build.mjs");
   const cfgPath = path.join(workDir, "build-config.json");
 
   const buildScript = fs.readFileSync(buildScriptPath, "utf8");
@@ -72,12 +72,12 @@ if (args[0] === "run") {
     process.stderr.write("docker stub: build script still references guest/image/build.sh\\n");
     process.exit(2);
   }
-  if (!buildScript.includes("node /work/run-build.js")) {
+  if (!buildScript.includes("node --experimental-strip-types /work/run-build.mjs")) {
     process.stderr.write("docker stub: build script does not run the node builder\\n");
     process.exit(3);
   }
   if (!fs.existsSync(runnerPath)) {
-    process.stderr.write("docker stub: missing /work/run-build.js\\n");
+    process.stderr.write("docker stub: missing /work/run-build.mjs\\n");
     process.exit(4);
   }
   if (!fs.existsSync(cfgPath)) {

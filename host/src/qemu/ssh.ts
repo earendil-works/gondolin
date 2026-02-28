@@ -1,13 +1,16 @@
 import { Duplex } from "stream";
-import {
+import ssh2 from "ssh2";
+import type {
+  AuthContext as SshAuthContext,
   Client as SshClient,
+  ClientChannel as SshClientChannel,
+  Connection as SshServerConnection,
   Server as SshServer,
-  type AuthContext as SshAuthContext,
-  type ClientChannel as SshClientChannel,
-  type Connection as SshServerConnection,
-  type ServerChannel as SshServerChannel,
-  type Session as SshServerSession,
+  ServerChannel as SshServerChannel,
+  Session as SshServerSession,
 } from "ssh2";
+
+const { Client: SshClientCtor, Server: SshServerCtor } = ssh2;
 
 import {
   createOpenSshKnownHostsHostVerifier,
@@ -18,15 +21,15 @@ import {
   normalizeSshKnownHostsFiles,
   type ResolvedSshCredential,
   type SshAllowedTarget,
-} from "../ssh/utils";
-import type { SshCredential } from "../ssh/types";
+} from "../ssh/utils.ts";
+import type { SshCredential } from "../ssh/types.ts";
 
 import type {
   DnsMode,
   QemuNetworkBackend,
   SyntheticDnsHostMappingMode,
   TcpSession,
-} from "./contracts";
+} from "./contracts.ts";
 
 const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_PER_TCP_SESSION = 4;
 const DEFAULT_SSH_MAX_UPSTREAM_CONNECTIONS_TOTAL = 64;
@@ -34,7 +37,7 @@ const DEFAULT_SSH_UPSTREAM_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_INTERVAL_MS = 10_000;
 const DEFAULT_SSH_UPSTREAM_KEEPALIVE_COUNT_MAX = 3;
 
-export type { SshCredential } from "../ssh/types";
+export type { SshCredential } from "../ssh/types.ts";
 
 export type SshExecRequest = {
   /** target hostname derived from synthetic dns mapping */
@@ -477,7 +480,7 @@ function ensureSshProxySession(
     },
   );
 
-  const server = new SshServer({
+  const server = new SshServerCtor({
     hostKeys: [getOrCreateSshHostKey(backend)],
     ident: "SSH-2.0-gondolin-ssh-proxy",
   });
@@ -679,7 +682,7 @@ export async function bridgeSshExecChannel(options: {
     );
   }
 
-  const upstream = new SshClient();
+  const upstream = new SshClientCtor();
   proxy.upstreams.add(upstream);
   backend.ssh.upstreams.add(upstream);
 

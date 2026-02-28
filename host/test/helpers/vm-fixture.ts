@@ -1,5 +1,5 @@
 import fs from "fs";
-import { VM, type VMOptions } from "../../src/vm/core";
+import { VM, type VMOptions } from "../../src/vm/core.ts";
 
 /**
  * Check if hardware virtualization is available.

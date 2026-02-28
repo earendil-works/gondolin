@@ -15,7 +15,7 @@ You need QEMU installed to run the micro-VMs:
 | ------------------- | ---------------------------------- |
 | `brew install qemu` | `sudo apt install qemu-system-arm` |
 
-- Node.js >= 22
+- Node.js >= 23.6
 
 > **Note:** Only ARM64 (Apple Silicon, Linux aarch64) is currently tested.
 

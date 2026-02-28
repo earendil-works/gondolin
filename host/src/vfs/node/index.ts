@@ -1,6 +1,7 @@
 "use strict";
 
 import type { Dirent, Stats } from "node:fs";
+import { createRequire } from "node:module";
 
 /** Filesystem-level statistics returned by the optional `statfs` provider method. */
 export type VfsStatfs = {
@@ -349,6 +350,7 @@ interface NodeVfsModule {
 }
 
 // GONDOLIN_VENDORED_NODE_VFS_PATCH_BEGIN
+const require = createRequire(import.meta.url);
 const nodeVfs = require("./vendored-node-vfs/lib/vfs.js") as NodeVfsModule;
 // GONDOLIN_VENDORED_NODE_VFS_PATCH_END
 

@@ -11,15 +11,15 @@
  *
  * Run with:
  *   cd host
- *   pnpm exec tsx examples/uv.ts script.py [args...]
+ *   node examples/uv.ts script.py [args...]
  */
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { RealFSProvider } from "../src/vfs/node";
-import { VM } from "../src/vm/core";
+import { RealFSProvider } from "../src/vfs/node/index.ts";
+import { VM } from "../src/vm/core.ts";
 
 const GUEST_WORKSPACE = "/workspace";
 
@@ -44,17 +44,17 @@ function createDebugLogger(enabled: boolean) {
 }
 
 function printUsage() {
-  console.log("Usage: pnpm exec tsx examples/uv.ts <script.py|module args...>");
+  console.log("Usage: node examples/uv.ts <script.py|module args...>");
   console.log();
   console.log("Examples:");
-  console.log("  pnpm exec tsx examples/uv.ts hello.py");
+  console.log("  node examples/uv.ts hello.py");
   console.log(
-    "  pnpm exec tsx examples/uv.ts --with requests scripts/fetch.py",
+    "  node examples/uv.ts --with requests scripts/fetch.py",
   );
   console.log();
   console.log("Debugging:");
   console.log(
-    "  GONDOLIN_UV_DEBUG=1 pnpm exec tsx examples/uv.ts --with flask python -c \"import jinja2; print('ok')\"",
+    "  GONDOLIN_UV_DEBUG=1 node examples/uv.ts --with flask python -c \"import jinja2; print('ok')\"",
   );
   console.log(
     "  # Optional: add GONDOLIN_UV_DEBUG_GONDOLIN=1 for VM internals (very verbose)",

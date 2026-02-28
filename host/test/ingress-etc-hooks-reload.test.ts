@@ -6,10 +6,10 @@ import {
   GondolinListeners,
   createGondolinEtcHooks,
   createGondolinEtcMount,
-} from "../src/ingress";
-import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
-import { SandboxVfsProvider } from "../src/vfs/provider";
-import { MountRouterProvider, normalizeMountMap } from "../src/vfs/mounts";
+} from "../src/ingress.ts";
+import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
+import { SandboxVfsProvider } from "../src/vfs/provider.ts";
+import { MountRouterProvider, normalizeMountMap } from "../src/vfs/mounts.ts";
 
 function writeListenersLikeGuest(root: VirtualProvider, text: string) {
   // Simulate the guest's typical overwrite pattern:

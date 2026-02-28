@@ -7,12 +7,12 @@ import type {
   HttpHooks,
   HttpIpAllowInfo,
   QemuNetworkBackend,
-} from "../qemu/contracts";
+} from "../qemu/contracts.ts";
 import type {
   InternalHeaderValue,
   InternalHttpRequest,
   InternalHttpResponseHeaders,
-} from "../internal/http-types";
+} from "../internal/http-types.ts";
 
 export class HttpRequestBlockedError extends Error {
   status: number;

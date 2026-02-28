@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { VirtualProvider as VirtualProviderBase } from "./node";
+import { VirtualProvider as VirtualProviderBase } from "./node/index.ts";
 
 /**
  * Base class for implementing custom VFS providers

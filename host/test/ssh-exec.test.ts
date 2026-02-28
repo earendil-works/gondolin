@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getInfoFromSshExecRequest } from "../src/ssh/exec";
+import { getInfoFromSshExecRequest } from "../src/ssh/exec.ts";
 
 test("getInfoFromSshExecRequest parses git-upload-pack", () => {
   const info = getInfoFromSshExecRequest({
