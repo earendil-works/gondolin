@@ -370,87 +370,94 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       `.tmp-${buildId}-${randomUUID().slice(0, 8)}`,
     );
 
-    fs.mkdirSync(tmpDir, { recursive: true });
-
-    const manifestPath = path.join(resolvedDir, "manifest.json");
-    fs.copyFileSync(manifestPath, path.join(tmpDir, "manifest.json"));
-
-    const sourceKernelPath = resolveContainedAssetPath(
-      resolvedDir,
-      manifest.assets?.kernel,
-      "manifest.assets.kernel",
-    );
-    const sourceInitramfsPath = resolveContainedAssetPath(
-      resolvedDir,
-      manifest.assets?.initramfs,
-      "manifest.assets.initramfs",
-    );
-    const sourceRootfsPath = resolveContainedAssetPath(
-      resolvedDir,
-      manifest.assets?.rootfs,
-      "manifest.assets.rootfs",
-    );
-
-    if (!fs.existsSync(sourceKernelPath)) {
-      throw new Error(
-        `missing manifest.assets.kernel file at ${sourceKernelPath}`,
-      );
-    }
-    if (!fs.existsSync(sourceInitramfsPath)) {
-      throw new Error(
-        `missing manifest.assets.initramfs file at ${sourceInitramfsPath}`,
-      );
-    }
-    if (!fs.existsSync(sourceRootfsPath)) {
-      throw new Error(
-        `missing manifest.assets.rootfs file at ${sourceRootfsPath}`,
-      );
-    }
-
-    const targetKernelPath = resolveContainedAssetPath(
-      tmpDir,
-      manifest.assets?.kernel,
-      "manifest.assets.kernel",
-    );
-    const targetInitramfsPath = resolveContainedAssetPath(
-      tmpDir,
-      manifest.assets?.initramfs,
-      "manifest.assets.initramfs",
-    );
-    const targetRootfsPath = resolveContainedAssetPath(
-      tmpDir,
-      manifest.assets?.rootfs,
-      "manifest.assets.rootfs",
-    );
-
-    fs.mkdirSync(path.dirname(targetKernelPath), {
-      recursive: true,
-    });
-    fs.mkdirSync(path.dirname(targetInitramfsPath), {
-      recursive: true,
-    });
-    fs.mkdirSync(path.dirname(targetRootfsPath), {
-      recursive: true,
-    });
-
-    fs.copyFileSync(sourceKernelPath, targetKernelPath);
-    fs.copyFileSync(sourceInitramfsPath, targetInitramfsPath);
-    fs.copyFileSync(sourceRootfsPath, targetRootfsPath);
-
-    fs.mkdirSync(imageObjectRootDir(), { recursive: true });
+    let finalized = false;
 
     try {
-      fs.renameSync(tmpDir, objectDir);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-        throw err;
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      const manifestPath = path.join(resolvedDir, "manifest.json");
+      fs.copyFileSync(manifestPath, path.join(tmpDir, "manifest.json"));
+
+      const sourceKernelPath = resolveContainedAssetPath(
+        resolvedDir,
+        manifest.assets?.kernel,
+        "manifest.assets.kernel",
+      );
+      const sourceInitramfsPath = resolveContainedAssetPath(
+        resolvedDir,
+        manifest.assets?.initramfs,
+        "manifest.assets.initramfs",
+      );
+      const sourceRootfsPath = resolveContainedAssetPath(
+        resolvedDir,
+        manifest.assets?.rootfs,
+        "manifest.assets.rootfs",
+      );
+
+      if (!fs.existsSync(sourceKernelPath)) {
+        throw new Error(
+          `missing manifest.assets.kernel file at ${sourceKernelPath}`,
+        );
+      }
+      if (!fs.existsSync(sourceInitramfsPath)) {
+        throw new Error(
+          `missing manifest.assets.initramfs file at ${sourceInitramfsPath}`,
+        );
+      }
+      if (!fs.existsSync(sourceRootfsPath)) {
+        throw new Error(
+          `missing manifest.assets.rootfs file at ${sourceRootfsPath}`,
+        );
       }
 
-      // Handle races where another process imported the same build concurrently.
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-      created = false;
+      const targetKernelPath = resolveContainedAssetPath(
+        tmpDir,
+        manifest.assets?.kernel,
+        "manifest.assets.kernel",
+      );
+      const targetInitramfsPath = resolveContainedAssetPath(
+        tmpDir,
+        manifest.assets?.initramfs,
+        "manifest.assets.initramfs",
+      );
+      const targetRootfsPath = resolveContainedAssetPath(
+        tmpDir,
+        manifest.assets?.rootfs,
+        "manifest.assets.rootfs",
+      );
+
+      fs.mkdirSync(path.dirname(targetKernelPath), {
+        recursive: true,
+      });
+      fs.mkdirSync(path.dirname(targetInitramfsPath), {
+        recursive: true,
+      });
+      fs.mkdirSync(path.dirname(targetRootfsPath), {
+        recursive: true,
+      });
+
+      fs.copyFileSync(sourceKernelPath, targetKernelPath);
+      fs.copyFileSync(sourceInitramfsPath, targetInitramfsPath);
+      fs.copyFileSync(sourceRootfsPath, targetRootfsPath);
+
+      fs.mkdirSync(imageObjectRootDir(), { recursive: true });
+
+      try {
+        fs.renameSync(tmpDir, objectDir);
+        finalized = true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY") {
+          throw err;
+        }
+
+        // Handle races where another process imported the same build concurrently.
+        created = false;
+      }
+    } finally {
+      if (!finalized) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     }
   }
 

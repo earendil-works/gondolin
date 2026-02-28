@@ -180,6 +180,75 @@ test("images: tagImage can tag from asset directory selectors", () => {
   }
 });
 
+test("images: import handles ENOTEMPTY race as already-imported", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+  const objectDir = path.join(storeDir, "objects", assets.buildId);
+
+  const originalRenameSync = fs.renameSync;
+  let renameCalls = 0;
+
+  fs.renameSync = ((oldPath: any, newPath: any) => {
+    renameCalls += 1;
+    if (renameCalls === 1) {
+      fs.mkdirSync(path.dirname(objectDir), { recursive: true });
+      fs.cpSync(assets.dir, objectDir, { recursive: true });
+      const error = new Error("simulated concurrent import") as Error & {
+        code?: string;
+      };
+      error.code = "ENOTEMPTY";
+      throw error;
+    }
+    return originalRenameSync(oldPath, newPath);
+  }) as typeof fs.renameSync;
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    assert.equal(imported.created, false);
+    assert.equal(imported.buildId, assets.buildId);
+    assert.equal(path.resolve(imported.assetDir), path.resolve(objectDir));
+  } finally {
+    fs.renameSync = originalRenameSync;
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: failed import cleans up temporary staging directories", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    patchManifestAssets(assets.dir, {
+      kernel: "missing-kernel",
+    });
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /missing manifest\.assets\.kernel file/,
+    );
+
+    const objectsDir = path.join(storeDir, "objects");
+    if (fs.existsSync(objectsDir)) {
+      const leftovers = fs
+        .readdirSync(objectsDir)
+        .filter((name) => name.startsWith(`.tmp-${assets.buildId}-`));
+      assert.deepEqual(leftovers, []);
+    }
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
 test("images: import rejects non-uuid manifest build ids", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
