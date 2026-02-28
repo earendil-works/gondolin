@@ -71,7 +71,7 @@ This is a rough overview of the system today.
 - **Host (TypeScript)**
   - `SandboxController` spawns and manages QEMU
   - `SandboxServer` implements the virtio-serial control plane, VFS RPC service, and network backend
-  - `QemuNetworkBackend` implements an Ethernet/IP/TCP stack and HTTP/TLS bridging
+  - `QemuNetworkBackend` implements an Ethernet/IP/TCP stack, HTTP/TLS mediation, optional SSH egress proxying, and optional explicit mapped TCP egress
   - VFS providers implement programmable filesystem behavior (based on NodeJS's upcoming VFS)
 
 - **Guest (Zig + init scripts)**
@@ -124,7 +124,7 @@ This is what Gondolin actually enforces.
 
 ### Network Egress Confinement
 
-> "only HTTP + TLS is permitted, and only to allowed destinations"
+> "HTTP/TLS is mediated by default, with narrow explicit exceptions for SSH and host-mapped TCP"
 
 Gondolin does *not* provide the guest with a raw NAT to the host network.
 
@@ -134,16 +134,19 @@ and a backend that attaches to QEMU's `-netdev stream` Unix socket
 
 Key enforcement points:
 
-1. **Protocol allowlist (TCP flow sniffing)**
+1. **Protocol allowlist + explicit TCP mappings**
 
-    - For each outgoing TCP flow, the host sniffs the first bytes and classifies it as:
+    - For each outgoing TCP flow, the host first checks whether an explicit `tcp.hosts` mapping matches the synthetic hostname (+ optional port)
+        - this requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
+        - if matched, the flow is marked as mapped `tcp` and forwarded to the configured upstream `HOST:PORT`
+    - Otherwise, the host sniffs first bytes and classifies as:
         - `http` (HTTP/1.x request line)
         - `tls` (TLS ClientHello record)
         - `ssh` (SSH version banner on configured SSH ports, only when SSH egress is enabled)
         - otherwise **denied** (`unknown-protocol`)
     - HTTP `CONNECT` is explicitly denied (`connect-not-allowed`).
 
-    This prevents the guest from tunneling arbitrary TCP protocols.
+    This prevents arbitrary guest-selected TCP tunneling while allowing narrow, explicit TCP exceptions.
 
 2. **UDP is blocked except for DNS**
     - Only UDP destination port `53` is handled; other UDP is blocked.
@@ -184,14 +187,31 @@ Key enforcement points:
     - The host follows redirects itself (`redirect: "manual"` + explicit handling).
     - Each redirect target is revalidated against policy before fetching.
 
-**Guarantee:** the guest cannot open raw TCP tunnels, cannot use UDP (except DNS), and cannot
-reach blocked networks (e.g. localhost/metadata) *through DNS tricks or redirects*, as long
-as `httpHooks.isRequestAllowed` / `httpHooks.isIpAllowed` enforce those rules.
+#### Egress Capability Matrix
+
+| Path | Destination selection | Host mediation level | `httpHooks` / HTTP secret substitution |
+| --- | --- | --- | --- |
+| HTTP/TLS (default) | Hostname allowlists + DNS/IP checks | Full HTTP mediation (`fetch`, redirects, policy hooks) | Yes |
+| SSH egress (optional) | `ssh.allowedHosts` (`HOST[:PORT]`) | SSH proxy with host-key verification and exec restrictions | No |
+| Mapped TCP (optional) | `tcp.hosts` (`HOST[:PORT] -> HOST:PORT`) via synthetic per-host attribution | Raw TCP forwarding to explicit mapped target | No |
+
+**Guarantee:** the guest cannot open arbitrary raw TCP tunnels, cannot use UDP (except DNS), and cannot
+reach blocked networks (e.g. localhost/metadata) *through DNS tricks or redirects* in HTTP/TLS flows,
+as long as `httpHooks.isRequestAllowed` / `httpHooks.isIpAllowed` enforce those rules.
+
+Mapped TCP and SSH egress are explicit exception paths with their own policy controls.
+
+This does **not** change the core trust assumptions (host trusted, guest untrusted), but it
+changes what must be reasoned about in policy:
+
+- HTTP/TLS flows get content-aware mediation and HTTP-level policy enforcement
+- SSH/mapped TCP flows are transport-level controls (target allowlisting/mapping), not HTTP-level controls
+- Exfiltration risk for those exception paths is bounded by what targets you explicitly configure
 
 DNS within the system is supported because there is utility in it, but DNS resolutions are
 fully disregarded by the HTTP stack as the host will resolve it from scratch.
 
-ICMP ECHOs are supported by made up.  Any IP can be pinged.
+ICMP ECHOs are synthetic in this model; any IP can be pinged.
 
 ### Secret Non-Exposure
 
@@ -278,23 +298,27 @@ firewalling is correct, Gondolin narrows egress to a small set of patterns:
 - HTTP/1.x requests
 - TLS handshakes that can be terminated locally
 - Optional allowlisted SSH sessions (proxied by the host, exec-only)
+- Optional explicit host-mapped TCP rules (`tcp.hosts`)
 
 Everything else is dropped before it becomes a real host socket.
 
 This means:
-- No arbitrary TCP tunnels
+- No arbitrary TCP tunnels/NAT
 - No generic SSH/SOCKS/VPN/proxy protocols (SSH egress is only allowed when explicitly enabled + allowlisted, and is proxied/limited)
-- No custom binary protocols
+- No guest-selected custom binary protocols outside explicit mapped targets
 
 ### Make the Host the Policy Enforcement Point
-Because the host replays HTTP requests via `fetch`, the host can:
+For HTTP/TLS flows, the host replays requests via `fetch`, so the host can:
 
 - Enforce allowlists by hostname
 - Enforce IP-based rules after DNS resolution (including internal-range blocks)
 - Inspect/transform requests and responses
 - Insert secrets at the last possible moment
 
-The guest can ask for things, but it does not get to choose how packets are emitted.
+For SSH/mapped TCP exception paths, enforcement is narrower and transport-oriented
+(target allowlisting/mapping, protocol constraints), not content-aware HTTP policy.
+
+The guest can ask for things, but it does not get to choose unconstrained packet emission.
 
 ### Secrets Are Never Placed in the Guest's Possession
 
@@ -326,6 +350,12 @@ These are rules to not compromise the security guarantees of the system:
 4. **If you allow more than one host, add auditing**
     - Use `httpHooks.onRequest` / `onResponse` to log and/or block unexpected paths or methods
     - For body-aware checks, read from `request.clone()` in `onRequest`
+
+5. **Treat `tcp.hosts` as a reduced-security exception path**
+    - Keep mappings narrow (`HOST:PORT` when possible)
+    - Prefer local/dev-only upstream targets
+    - Use least-privilege, short-lived credentials on mapped services
+    - Remember mapped TCP does not use HTTP hooks or header secret substitution
 
 ### Secrets
 
@@ -378,10 +408,12 @@ Guidance:
 
 ## Known Limitations and Sharp Edges
 
-### "Only HTTP/TLS" Is Not the Same as "Safe Networking"
+### "Mediated Networking" Is Not the Same as "Safe Networking"
 - If you allow `api.example.com`, malicious guest code can still send *any* data
   it can read to that host.
 - Servers that can echo headers back (eg: httpbin) can be used to exfiltrate secrets.
+- Mapped TCP rules (`tcp.hosts`) are raw tunnels to explicit upstream targets and bypass HTTP hooks
+  (including header secret substitution)
 - Gondolin's network layer is meant to prevent **unexpected** exfiltration
   destinations and limit protocol abuse, not to prevent exfiltration to an allowed
   destination.

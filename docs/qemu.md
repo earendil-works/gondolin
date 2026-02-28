@@ -78,9 +78,9 @@ bridged tap device. Instead, the host is the guest's network peer.
 
 This is required for Gondolin's goals:
 
-- Only allow specific protocols (primarily HTTP and TLS that can be intercepted)
+- Only allow specific mediated protocols (primarily HTTP and TLS that can be intercepted)
 - Enforce destination policy (allowlist + internal-range blocking)
-- Prevent arbitrary TCP tunneling
+- Prevent arbitrary TCP tunneling (with only narrow explicit exceptions like SSH egress and mapped TCP rules)
 - Enable request and response hooks
 - Inject secrets at the network layer without exposing them to the guest
 

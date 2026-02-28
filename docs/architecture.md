@@ -32,7 +32,7 @@ Responsibilities:
 - Start/stop QEMU and wire up the devices Gondolin needs
 - Provide the **exec** (`vm.exec(...)`)
 - Provide the **programmable filesystem** (VFS providers)
-- Provide the **programmable network policy** (HTTP/TLS mediation + hooks)
+- Provide the **programmable network policy** (HTTP/TLS mediation + hooks, plus explicit SSH/mapped-TCP exception paths)
 - Download/cache guest assets (kernel/initramfs/rootfs) on demand
 
 Key concepts you interact with:
@@ -128,18 +128,25 @@ On the host side, Gondolin does **not** provide a generic NAT. Instead:
 
 1. The guest emits Ethernet frames via virtio-net.
 2. The host receives frames and implements a small userspace network stack.
-3. Outbound TCP flows are classified as **HTTP**, **TLS**, or **SSH** (anything
-   else is blocked).
-4. HTTP requests are parsed, checked against policy, optionally transformed
+3. Outbound TCP flows either match an explicit mapped TCP rule first, or are
+   classified as **HTTP**, **TLS**, or **SSH** (anything else is blocked).
+4. If a mapped TCP rule matches, the host connects to the explicit mapped
+   upstream `HOST:PORT` and forwards bytes.
+5. For HTTP requests, data is parsed, checked against policy, optionally transformed
    (hooks), and replayed via host `fetch`.
-5. For TLS flows, the host performs a controlled MITM so it can see the HTTP
+6. For TLS flows, the host performs a controlled MITM so it can see the HTTP
    request inside TLS and apply the same policy/hook pipeline.
+7. For SSH egress flows, the host runs the SSH proxy path (allowlist + host-key
+   verification + exec restrictions).
 
-This is the reason Gondolin can:
+For HTTP/TLS-mediated flows, this is the reason Gondolin can:
 
 - enforce allowlists by hostname
 - block internal ranges robustly
 - inject secrets into headers without exposing real values to the guest
+
+Mapped TCP/SSH exception paths use different controls (explicit target mapping/
+allowlisting and protocol constraints) and do not run the HTTP hook/secrets pipeline.
 
 See [Network Stack](./network.md) for the full details.
 

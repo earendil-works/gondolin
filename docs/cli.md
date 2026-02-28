@@ -40,7 +40,7 @@ CLI processes can discover and attach to them.
 ## Common Options (VFS + Network)
 
 Both `gondolin bash` and `gondolin exec` (VM mode) support the same set of
-options for configuring filesystem mounts and HTTP egress policy.
+options for configuring filesystem mounts and mediated network egress policy.
 
 ### VFS (Filesystem) Options
 
@@ -64,10 +64,10 @@ gondolin exec --mount-hostfs /data:/data:ro --mount-memfs /tmp -- ls -la /data
 
 ### Network Options (HTTP Allowlist + Secret Injection)
 
-Gondolin's network bridge forwards HTTP/HTTPS traffic and can optionally proxy
-allowlisted outbound SSH. Requests are intercepted on the host side, which
-allows enforcing host allowlists and injecting secrets without exposing them
-inside the VM.
+Gondolin's network bridge mediates HTTP/HTTPS traffic and can optionally proxy
+allowlisted outbound SSH or explicit mapped TCP flows. Requests are intercepted
+on the host side, which allows enforcing host allowlists and injecting secrets
+without exposing them inside the VM (for HTTP/TLS-mediated flows).
 
 - `--allow-host HOST_PATTERN`
   - Allow outbound HTTP/HTTPS requests to this host
@@ -104,6 +104,12 @@ inside the VM.
 - `--dns-synthetic-host-mapping MODE`
   - Hostname-to-IP mapping strategy when using synthetic DNS: `single` or `per-host`
 
+- `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
+  - Add an explicit mapped TCP rule (repeatable)
+  - `GUEST_HOST` (or `GUEST_HOST:PORT`) is matched using synthetic DNS host attribution
+  - Traffic is forwarded as raw TCP to the explicit `UPSTREAM_HOST:PORT`
+  - If both `GUEST_HOST` and `GUEST_HOST:PORT` are configured, the port-specific mapping wins
+
 Examples:
 
 ```bash
@@ -124,7 +130,23 @@ gondolin exec \
 
 # Allow multiple hosts / wildcards
 gondolin bash --allow-host "*.github.com" --allow-host api.openai.com
+
+# Map guest postgres hostname to a local dev database
+gondolin bash --tcp-map pg.internal=127.0.0.1:5432
 ```
+
+### Network Options (Mapped TCP Egress)
+
+Mapped TCP egress is an explicit exception path for non-HTTP protocols.
+
+- Rules are added with `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
+- `--tcp-map` requires synthetic DNS with per-host mapping
+  - the CLI auto-selects `--dns synthetic` and `--dns-synthetic-host-mapping per-host` when needed
+- Mapped TCP is raw forwarding to the explicit upstream target
+  - HTTP hooks and HTTP secret substitution do not apply on mapped flows
+
+Use this for narrow, explicit development targets (for example local Postgres),
+not as a general network mode.
 
 ### Network Options (SSH Egress Proxy)
 

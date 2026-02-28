@@ -4,9 +4,10 @@ See also: [SDK Overview](./sdk.md), [Network Stack](./network.md), [Ingress](./i
 
 ## Network Policy
 
-The network stack only allows HTTP and TLS traffic. TCP flows are classified and
-non-HTTP traffic is dropped. Requests are intercepted and replayed via `fetch`
-on the host side, enabling:
+The network stack mediates HTTP and TLS traffic by default. TCP flows are
+classified and non-HTTP/TLS traffic is dropped unless explicitly enabled via
+SSH egress or host-mapped TCP rules. HTTP requests are intercepted and replayed
+via `fetch` on the host side, enabling:
 
 - Host allowlists with wildcard support
 - Request/response hooks for logging and modification
@@ -89,6 +90,45 @@ Notable consequences:
   resolution to prevent DNS rebinding attacks
 
 For deeper conceptual background, see [Network stack](./network.md).
+
+## Mapped TCP Egress (Optional)
+
+If you need guest access to a non-HTTP protocol (for example Postgres in local
+development), you can configure explicit host mappings:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  dns: {
+    mode: "synthetic",
+    syntheticHostMapping: "per-host",
+  },
+  tcp: {
+    hosts: {
+      "foo.internal": "127.0.0.1:9999",
+      "foo.internal:42": "192.168.0.1:443",
+    },
+  },
+});
+```
+
+Semantics:
+
+- Mapping key `HOST` matches all guest destination ports for that host
+- Mapping key `HOST:PORT` matches that specific destination port
+- Mapping value is always `UPSTREAM_HOST:UPSTREAM_PORT`
+- If both `HOST` and `HOST:PORT` exist, the port-specific mapping wins
+
+Safety model:
+
+- This mode requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
+- Hostname matching uses synthetic DNS host attribution (same model as SSH egress)
+- Mapped TCP flows are raw tunnels to the configured upstream target
+  - they do **not** use HTTP request/response hooks
+  - they do **not** use HTTP secret placeholder substitution
+
+Use this as a narrow exception path, not a general-purpose network mode.
 
 ## `vm.enableIngress()`
 

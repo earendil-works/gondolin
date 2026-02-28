@@ -73,7 +73,7 @@ await vm.close();
 
 - [SDK Overview](./sdk.md): entry point and API map
 - [VM Lifecycle & Command Execution](./sdk-vm.md): VM lifecycle, `vm.exec()`, streaming, and host-driven file I/O
-- [Networking, Ingress, and SSH](./sdk-network.md): `createHttpHooks()`, ingress hooks, `vm.enableSsh()`, and SSH egress policy
+- [Networking, Ingress, and SSH](./sdk-network.md): `createHttpHooks()`, ingress hooks, `vm.enableSsh()`, SSH egress policy, and mapped TCP rules
 - [Filesystem, Guest Assets, and Snapshots](./sdk-storage.md): VFS, image management, and qcow2 checkpoints
 
 ## Images & Filesystem
@@ -86,6 +86,6 @@ await vm.close();
 
 - [Architecture Overview](./architecture.md): high-level component overview and data flow
 - [Security Design](./security.md): threat model, guarantees, and safe operating envelope
-- [Network Stack](./network.md): HTTP/TLS mediation, policy enforcement, DNS, and DNS rebinding protection
+- [Network Stack](./network.md): HTTP/TLS mediation, optional mapped TCP/SSH egress, policy enforcement, DNS, and DNS rebinding protection
 - [QEMU Backend](./qemu.md): QEMU integration and macOS/Linux parity
 - [Limitations](./limitations.md): current limitations and missing features

@@ -10,7 +10,7 @@ The main idea is:
 - The host does **not** provide a generic NAT.
 - Instead, the host terminates and mediates traffic in a **userspace network
   stack**, and only allows a narrow set of egress patterns (primarily HTTP and TLS
-  that can be intercepted).
+  that can be intercepted, plus optional explicit SSH and host-mapped TCP egress).
 
 The guest should be treated as adversarial: the host is the enforcement point.
 
@@ -149,9 +149,10 @@ tries to confuse policy via DNS tricks (e.g. DNS rebinding).
 
 ## TCP Stream Classification
 
-For each outbound TCP flow, Gondolin inspects the beginning of the byte stream
-and classifies it:
+For each outbound TCP flow, Gondolin either applies an explicit host mapping
+first (if configured) or inspects the beginning of the byte stream and classifies it:
 
+- **TCP (mapped)**: explicit `tcp.hosts` mapping matched by synthetic hostname (+ optional port)
 - **HTTP**: looks like an HTTP/1.x request line
 - **TLS**: looks like a TLS ClientHello
 - **SSH**: looks like an SSH client banner (`SSH-2.0-...`) and is only allowed
@@ -159,8 +160,8 @@ and classifies it:
 - Anything else: **blocked**
 
 This is the core mechanism that prevents arbitrary TCP tunneling. The guest can
-open TCP sockets, but only connections that quickly turn into HTTP, TLS, or
-configured SSH will be forwarded.
+open TCP sockets, but only connections that are explicitly mapped or quickly
+turn into HTTP, TLS, or configured SSH will be forwarded.
 
 Design notes:
 
@@ -194,6 +195,28 @@ connection caps and timeouts (configurable via `ssh.*` options):
 - max concurrent upstream SSH connections per guest TCP flow
 - max concurrent upstream SSH connections total (across all flows)
 - bounded handshake (`readyTimeout`) and SSH keepalives
+
+## Host-Mapped TCP Egress (Optional)
+
+For selected workloads, Gondolin can forward specific guest hostnames/ports to
+explicit upstream `HOST:PORT` targets via `tcp.hosts`.
+
+How it works:
+
+- The guest resolves `HOST` in synthetic DNS mode
+- In `syntheticHostMapping: "per-host"`, Gondolin can map destination synthetic IPs back to hostnames
+- If a `tcp.hosts` rule matches (`HOST` or `HOST:PORT`), the flow is marked as mapped TCP
+- The host opens a TCP socket to the configured upstream target and forwards bytes
+
+Important constraints:
+
+- Mapped TCP requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
+- Mapping values must be explicit `UPSTREAM_HOST:UPSTREAM_PORT`
+- Mapped TCP is a raw tunnel to the configured target
+  - no HTTP parsing/hook pipeline
+  - no HTTP secret placeholder substitution
+
+This keeps the exception explicit and narrow while still avoiding generic NAT.
 
 ## HTTP Bridging
 
@@ -318,7 +341,8 @@ Common limitations include:
 - WebSocket upgrades are supported, but after the `101` response the connection becomes an opaque tunnel (only the request handshake is mediated/hookable). Disable via `allowWebSockets: false` / `--disable-websockets`
 - No HTTP `CONNECT`
 - No generic UDP (DNS-only)
-- No arbitrary TCP protocols (SSH is only allowed when explicitly enabled + proxied)
+- No arbitrary TCP/NAT mode
+  - allowed TCP paths are limited to HTTP/TLS mediation, optional proxied SSH egress, and optional explicit host-mapped TCP rules
 - Limited handling for unusual IP behaviors (e.g. fragmentation is not a target feature)
 
 If your workload needs general networking, Gondolin's security properties will
