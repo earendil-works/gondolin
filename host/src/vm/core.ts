@@ -310,6 +310,9 @@ export class VM {
     ) {
       sandboxOptions.allowWebSockets = options.allowWebSockets;
     }
+    if (options.tcp && sandboxOptions.tcp === undefined) {
+      sandboxOptions.tcp = options.tcp;
+    }
     if (options.memory && sandboxOptions.memory === undefined) {
       sandboxOptions.memory = options.memory;
     }
@@ -448,6 +451,9 @@ export class VM {
       sandboxOptions.allowWebSockets === undefined
     ) {
       sandboxOptions.allowWebSockets = options.allowWebSockets;
+    }
+    if (options.tcp && sandboxOptions.tcp === undefined) {
+      sandboxOptions.tcp = options.tcp;
     }
     if (this.vfs && sandboxOptions.vfsProvider === undefined) {
       sandboxOptions.vfsProvider = this.vfs;

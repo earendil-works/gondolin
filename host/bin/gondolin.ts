@@ -263,6 +263,12 @@ function bashUsage() {
     "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
   );
   console.log(
+    "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
+  );
+  console.log(
+    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
+  );
+  console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
   );
   console.log(
@@ -391,6 +397,12 @@ function execUsage() {
     "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
   );
   console.log(
+    "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
+  );
+  console.log(
+    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
+  );
+  console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
   );
   console.log(
@@ -447,6 +459,9 @@ type CommonOptions = {
 
   /** synthetic dns hostname mapping mode */
   dnsSyntheticHostMapping?: "single" | "per-host";
+
+  /** guest host[:port] -> upstream host:port tcp mappings */
+  tcpHostMappings: Record<string, string>;
 
   /** allowed ssh host patterns for outbound ssh */
   sshAllowedHosts: string[];
@@ -647,6 +662,26 @@ function parseSshCredential(spec: string): SshCredentialSpec {
   return { host, username, keyPath, passphrase };
 }
 
+function parseTcpMapSpec(spec: string): { key: string; value: string } {
+  const trimmed = spec.trim();
+  const eq = trimmed.indexOf("=");
+  if (eq <= 0 || eq === trimmed.length - 1) {
+    throw new Error(
+      `Invalid --tcp-map format: ${spec} (expected GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT)`,
+    );
+  }
+
+  const key = trimmed.slice(0, eq).trim();
+  const value = trimmed.slice(eq + 1).trim();
+  if (!key || !value) {
+    throw new Error(
+      `Invalid --tcp-map format: ${spec} (expected GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT)`,
+    );
+  }
+
+  return { key, value };
+}
+
 function resolveSshAgent(explicit?: string): string {
   const sock = (explicit ?? process.env.SSH_AUTH_SOCK)?.trim();
   if (!sock) {
@@ -789,6 +824,18 @@ function buildVmOptions(common: CommonOptions) {
     }
   }
 
+  if (Object.keys(common.tcpHostMappings).length > 0) {
+    if (common.dnsMode && common.dnsMode !== "synthetic") {
+      throw new Error("--tcp-map requires --dns synthetic");
+    }
+    if (!common.dnsMode) {
+      common.dnsMode = "synthetic";
+    }
+    if (!common.dnsSyntheticHostMapping) {
+      common.dnsSyntheticHostMapping = "per-host";
+    }
+  }
+
   const sshCredentials =
     common.sshCredentials.length > 0
       ? Object.fromEntries(
@@ -838,6 +885,12 @@ function buildVmOptions(common: CommonOptions) {
                 : undefined,
           }
         : undefined,
+    tcp:
+      Object.keys(common.tcpHostMappings).length > 0
+        ? {
+            hosts: common.tcpHostMappings,
+          }
+        : undefined,
     env,
   };
 
@@ -857,6 +910,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
       allowedHosts: [],
       secrets: [],
       dnsTrustedServers: [],
+      tcpHostMappings: {},
       sshAllowedHosts: [],
       sshCredentials: [],
       sshAgent: undefined,
@@ -928,6 +982,17 @@ function parseExecArgs(argv: string[]): ExecArgs {
           fail("--dns-synthetic-host-mapping must be one of: single, per-host");
         }
         args.common.dnsSyntheticHostMapping = mode;
+        return i;
+      }
+      case "--tcp-map": {
+        const spec = optionArgs[++i];
+        if (!spec) fail("--tcp-map requires an argument");
+        try {
+          const mapping = parseTcpMapSpec(spec);
+          args.common.tcpHostMappings[mapping.key] = mapping.value;
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
+        }
         return i;
       }
       case "--ssh-allow-host": {
@@ -1254,6 +1319,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     allowedHosts: [],
     secrets: [],
     dnsTrustedServers: [],
+    tcpHostMappings: {},
     sshAllowedHosts: [],
     sshCredentials: [],
     sshAgent: undefined,
@@ -1342,6 +1408,21 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.dnsSyntheticHostMapping = mode;
+        break;
+      }
+      case "--tcp-map": {
+        const spec = argv[++i];
+        if (!spec) {
+          console.error("--tcp-map requires an argument");
+          process.exit(1);
+        }
+        try {
+          const mapping = parseTcpMapSpec(spec);
+          args.tcpHostMappings[mapping.key] = mapping.value;
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
         break;
       }
       case "--ssh-allow-host": {

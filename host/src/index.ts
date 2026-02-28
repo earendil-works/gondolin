@@ -91,6 +91,7 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
+  TcpOptions,
 } from "./qemu/net";
 export type {
   SshOptions,

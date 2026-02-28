@@ -39,6 +39,14 @@ import {
   type SshTcpSessionState,
 } from "./ssh";
 import {
+  assertTcpDnsConfig,
+  createQemuTcpInternals,
+  resolveMappedTcpTarget,
+  type QemuTcpInternals,
+  type TcpMappedTarget,
+  type TcpOptions,
+} from "./tcp";
+import {
   caCertVerifiesLeaf,
   closeSharedDispatchers,
   privateKeyMatchesLeafCert,
@@ -151,8 +159,12 @@ export type TcpSession = {
   dstPort: number;
   /** upstream host/ip used by the host socket connect */
   connectIP: string;
+  /** upstream port used by the host socket connect */
+  connectPort: number;
   /** synthetic hostname derived from destination synthetic dns ip */
   syntheticHostname: string | null;
+  /** mapped raw tcp target derived from synthetic host mapping */
+  mappedTcp: TcpMappedTarget | null;
 
   /** @internal */
   ssh?: SshTcpSessionState;
@@ -197,6 +209,7 @@ export type {
   HttpIpAllowInfo,
   SyntheticDnsHostMappingMode,
 } from "./contracts";
+export type { TcpOptions } from "./tcp";
 
 export type QemuNetworkOptions = {
   /** unix socket path for the qemu net backend */
@@ -217,6 +230,9 @@ export type QemuNetworkOptions = {
 
   /** ssh egress configuration */
   ssh?: SshOptions;
+
+  /** explicit host-mapped tcp egress configuration */
+  tcp?: TcpOptions;
 
   /** http fetch implementation */
   fetch?: HttpFetch;
@@ -316,6 +332,9 @@ export class QemuNetworkBackend extends EventEmitter {
   /** @internal */
   readonly ssh: QemuSshInternals;
 
+  /** @internal */
+  readonly tcp: QemuTcpInternals;
+
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
   private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
@@ -395,10 +414,13 @@ export class QemuNetworkBackend extends EventEmitter {
     };
 
     this.ssh = createQemuSshInternals(options.ssh);
+    this.tcp = createQemuTcpInternals(options.tcp);
 
     this.syntheticDnsHostMapping =
       options.dns?.syntheticHostMapping ??
-      (this.ssh.enabled ? "per-host" : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
+      (this.ssh.enabled || this.tcp.enabled
+        ? "per-host"
+        : DEFAULT_SYNTHETIC_DNS_HOST_MAPPING);
     this.syntheticDnsHostMap =
       this.syntheticDnsHostMapping === "per-host"
         ? new SyntheticDnsHostMap()
@@ -406,6 +428,11 @@ export class QemuNetworkBackend extends EventEmitter {
 
     assertSshDnsConfig({
       ssh: this.ssh,
+      dnsMode: this.dnsMode,
+      syntheticHostMapping: this.syntheticDnsHostMapping,
+    });
+    assertTcpDnsConfig({
+      tcp: this.tcp,
       dnsMode: this.dnsMode,
       syntheticHostMapping: this.syntheticDnsHostMapping,
     });
@@ -515,6 +542,24 @@ export class QemuNetworkBackend extends EventEmitter {
         onTcpResume: (message) => this.handleTcpResume(message),
       },
       allowTcpFlow: (info) => {
+        if (info.protocol === "tcp") {
+          const session = this.tcpSessions.get(info.key);
+          const allowed = Boolean(session?.mappedTcp);
+          if (!allowed) {
+            if (this.options.debug) {
+              this.emitDebug(
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
+              );
+            }
+            return false;
+          }
+
+          if (session) {
+            session.protocol = "tcp";
+          }
+          return true;
+        }
+
         if (info.protocol === "ssh") {
           const allowed = isSshFlowAllowed(
             this,
@@ -783,15 +828,35 @@ export class QemuNetworkBackend extends EventEmitter {
     );
   }
 
-  private handleTcpConnect(message: TcpConnectMessage) {
+  private handleTcpConnect(message: TcpConnectMessage): {
+    allowRawTcp?: boolean;
+  } {
     const syntheticHostname =
       this.syntheticDnsHostMap?.lookupHostByIp(message.dstIP) ?? null;
     let connectIP =
       message.dstIP === (this.options.gatewayIP ?? "192.168.127.1")
         ? "127.0.0.1"
         : message.dstIP;
+    let connectPort = message.dstPort;
 
-    if (syntheticHostname && this.ssh.sniffPortsSet.has(message.dstPort)) {
+    const mappedTcp = resolveMappedTcpTarget(
+      this.tcp,
+      syntheticHostname,
+      message.dstPort,
+    );
+
+    if (mappedTcp) {
+      connectIP = mappedTcp.connectHost;
+      connectPort = mappedTcp.connectPort;
+      if (this.options.debug) {
+        this.emitDebug(
+          `tcp map ${message.srcIP}:${message.srcPort} ${syntheticHostname}:${message.dstPort} -> ${mappedTcp.connectHost}:${mappedTcp.connectPort}`,
+        );
+      }
+    } else if (
+      syntheticHostname &&
+      this.ssh.sniffPortsSet.has(message.dstPort)
+    ) {
       connectIP = syntheticHostname;
     }
 
@@ -802,7 +867,9 @@ export class QemuNetworkBackend extends EventEmitter {
       dstIP: message.dstIP,
       dstPort: message.dstPort,
       connectIP,
+      connectPort,
       syntheticHostname,
+      mappedTcp,
       flowControlPaused: false,
       protocol: null,
       connected: false,
@@ -813,6 +880,8 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.stack?.handleTcpConnected({ key: message.key });
     this.flush();
+
+    return { allowRawTcp: Boolean(mappedTcp) };
   }
 
   /** @internal */
@@ -995,7 +1064,7 @@ export class QemuNetworkBackend extends EventEmitter {
     const socket = new net.Socket();
     session.socket = socket;
 
-    socket.connect(session.dstPort, session.connectIP, () => {
+    socket.connect(session.connectPort, session.connectIP, () => {
       session.connected = true;
       for (const pending of session.pendingWrites) {
         socket.write(pending);

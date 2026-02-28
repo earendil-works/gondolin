@@ -1,6 +1,7 @@
 import type { DebugLogFn } from "../debug";
 import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts";
 import type { SshOptions } from "../qemu/ssh";
+import type { TcpOptions } from "../qemu/tcp";
 import type { RootfsMode } from "../build/config";
 import type { SandboxServerOptions } from "../sandbox/server-options";
 import type { VirtualProvider } from "../vfs/node";
@@ -38,6 +39,8 @@ export type VMOptions = {
   dns?: DnsOptions;
   /** ssh egress configuration */
   ssh?: SshOptions;
+  /** explicit host-mapped tcp egress configuration */
+  tcp?: TcpOptions;
   /** max intercepted http request body size in `bytes` */
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */

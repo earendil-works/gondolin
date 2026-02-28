@@ -374,6 +374,7 @@ export class SandboxServer extends EventEmitter {
           httpHooks: this.options.httpHooks,
           dns: this.options.dns,
           ssh: this.options.ssh,
+          tcp: this.options.tcp,
           mitmCertDir: this.options.mitmCertDir,
           maxHttpBodyBytes: this.options.maxHttpBodyBytes,
           maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,

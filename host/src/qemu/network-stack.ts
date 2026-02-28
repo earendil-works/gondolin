@@ -86,6 +86,11 @@ export type TcpSendMessage = {
   data: Buffer;
 };
 
+export type TcpConnectDecision = {
+  /** whether to bypass protocol sniffing and allow raw tcp for this flow */
+  allowRawTcp?: boolean;
+};
+
 export type TcpCloseMessage = {
   /** nat/session key */
   key: string;
@@ -103,7 +108,7 @@ export type TcpResumeMessage = {
   key: string;
 };
 
-export type TcpFlowProtocol = "http" | "tls" | "ssh";
+export type TcpFlowProtocol = "http" | "tls" | "ssh" | "tcp";
 
 export type TcpFlowInfo = {
   /** nat/session key */
@@ -148,6 +153,8 @@ type TcpSession = {
   /** FIN pending until outbound payload is drained */
   endPending: boolean;
   flowProtocol: TcpFlowProtocol | null;
+  /** whether this flow can bypass protocol sniffing and run as raw tcp */
+  allowRawTcp: boolean;
   pendingData: Buffer;
   httpMethod?: string;
 };
@@ -731,17 +738,21 @@ export class NetworkStack extends EventEmitter {
         pendingOutbound: Buffer.alloc(0),
         endPending: false,
         flowProtocol: null,
+        allowRawTcp: false,
         pendingData: Buffer.alloc(0),
       };
       this.natTable.set(key, session);
 
-      this.callbacks.onTcpConnect({
+      // Keep callback typing backward-compatible (`void`) while allowing callers
+      // to optionally return a connect decision.
+      const connectDecision = this.callbacks.onTcpConnect({
         key,
         dstIP: dstIP.join("."),
         dstPort,
         srcIP: srcIP.join("."),
         srcPort,
-      });
+      }) as TcpConnectDecision | void;
+      session.allowRawTcp = Boolean(connectDecision?.allowRawTcp);
       return;
     }
 
@@ -822,30 +833,35 @@ export class NetworkStack extends EventEmitter {
 
       if (!session.flowProtocol) {
         session.pendingData = Buffer.concat([session.pendingData, newPayload]);
-        const classification = this.classifyTcpFlow(
-          session.pendingData,
-          session.dstPort,
-        );
 
-        if (classification.status === "need-more") {
-          if (session.pendingData.length >= this.MAX_FLOW_SNIFF) {
-            this.rejectTcpFlow(session, key, nextAck, "sniff-limit-exceeded");
+        if (session.allowRawTcp) {
+          session.flowProtocol = "tcp";
+        } else {
+          const classification = this.classifyTcpFlow(
+            session.pendingData,
+            session.dstPort,
+          );
+
+          if (classification.status === "need-more") {
+            if (session.pendingData.length >= this.MAX_FLOW_SNIFF) {
+              this.rejectTcpFlow(session, key, nextAck, "sniff-limit-exceeded");
+              return;
+            }
+          } else if (classification.status === "deny") {
+            this.rejectTcpFlow(session, key, nextAck, classification.reason);
             return;
+          } else if (classification.status === "http") {
+            if (classification.isConnect) {
+              this.rejectTcpFlow(session, key, nextAck, "connect-not-allowed");
+              return;
+            }
+            session.flowProtocol = "http";
+            session.httpMethod = classification.method;
+          } else if (classification.status === "tls") {
+            session.flowProtocol = "tls";
+          } else if (classification.status === "ssh") {
+            session.flowProtocol = "ssh";
           }
-        } else if (classification.status === "deny") {
-          this.rejectTcpFlow(session, key, nextAck, classification.reason);
-          return;
-        } else if (classification.status === "http") {
-          if (classification.isConnect) {
-            this.rejectTcpFlow(session, key, nextAck, "connect-not-allowed");
-            return;
-          }
-          session.flowProtocol = "http";
-          session.httpMethod = classification.method;
-        } else if (classification.status === "tls") {
-          session.flowProtocol = "tls";
-        } else if (classification.status === "ssh") {
-          session.flowProtocol = "ssh";
         }
 
         if (session.flowProtocol) {

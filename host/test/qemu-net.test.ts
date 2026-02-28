@@ -3148,6 +3148,8 @@ test("qemu-net: caps guest->upstream pendingWrites and aborts on overflow", () =
     dstIP: "5.6.7.8",
     dstPort: 222,
     connectIP: "5.6.7.8",
+    connectPort: 222,
+    mappedTcp: null,
     flowControlPaused: false,
     protocol: null,
     connected: false,
@@ -3471,6 +3473,103 @@ test("qemu-net: ssh egress auto-enables per-host synthetic mapping", () => {
     },
   });
   assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
+});
+
+test("qemu-net: tcp host mapping auto-enables per-host synthetic mapping", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic" },
+    tcp: {
+      hosts: {
+        "foo.internal": "127.0.0.1:9999",
+      },
+    },
+  });
+  assert.equal((backend as any).syntheticDnsHostMapping, "per-host");
+});
+
+test("qemu-net: tcp host mapping requires synthetic dns mode", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "trusted", trustedServers: ["1.1.1.1"] },
+        tcp: {
+          hosts: {
+            "foo.internal": "127.0.0.1:9999",
+          },
+        },
+      }),
+    /tcp host mapping requires dns mode 'synthetic'/i,
+  );
+});
+
+test("qemu-net: tcp host mapping rejects single synthetic host mapping", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "single" },
+        tcp: {
+          hosts: {
+            "foo.internal": "127.0.0.1:9999",
+          },
+        },
+      }),
+    /tcp host mapping requires dns syntheticHostMapping='per-host'/i,
+  );
+});
+
+test("qemu-net: tcp host mapping resolves host and host:port rules", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: {
+      hosts: {
+        "foo.internal": "127.0.0.1:9999",
+        "foo.internal:42": "127.0.0.1:4242",
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map",
+    srcIP: "192.168.127.3",
+    srcPort: 41125,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("foo.internal", 0x4012),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const fooIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  const exact = (backend as any).handleTcpConnect({
+    key: "tcp-map-42",
+    srcIP: "192.168.127.3",
+    srcPort: 50020,
+    dstIP: fooIp,
+    dstPort: 42,
+  });
+  const exactSession = (backend as any).tcpSessions.get("tcp-map-42");
+  assert.equal(exact.allowRawTcp, true);
+  assert.equal(exactSession.connectIP, "127.0.0.1");
+  assert.equal(exactSession.connectPort, 4242);
+
+  const hostOnly = (backend as any).handleTcpConnect({
+    key: "tcp-map-any",
+    srcIP: "192.168.127.3",
+    srcPort: 50021,
+    dstIP: fooIp,
+    dstPort: 43,
+  });
+  const hostOnlySession = (backend as any).tcpSessions.get("tcp-map-any");
+  assert.equal(hostOnly.allowRawTcp, true);
+  assert.equal(hostOnlySession.connectIP, "127.0.0.1");
+  assert.equal(hostOnlySession.connectPort, 9999);
 });
 
 test("qemu-net: ssh egress requires synthetic dns mode", () => {
