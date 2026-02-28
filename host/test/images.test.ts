@@ -72,6 +72,21 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
   return { dir, buildId };
 }
 
+function patchManifestAssets(
+  dir: string,
+  assets: { kernel?: string; initramfs?: string; rootfs?: string },
+): void {
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    assets: { kernel: string; initramfs: string; rootfs: string };
+  };
+  manifest.assets = {
+    ...manifest.assets,
+    ...assets,
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+}
+
 test("images: import and resolve by build id", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
@@ -142,6 +157,103 @@ test("images: tagImage can tag from asset directory selectors", () => {
 
     const resolved = resolveImageSelector("tooling:dev", "x86_64");
     assert.equal(resolved.buildId, imported.buildId);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import rejects manifest asset traversal paths", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const victimPath = path.join(storeDir, "victim.txt");
+    fs.writeFileSync(victimPath, "safe");
+
+    patchManifestAssets(assets.dir, {
+      kernel: "../../victim.txt",
+    });
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /manifest\.assets\.kernel.*must stay within/,
+    );
+    assert.equal(fs.readFileSync(victimPath, "utf8"), "safe");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import rejects absolute manifest asset paths", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    patchManifestAssets(assets.dir, {
+      rootfs: path.join(os.tmpdir(), "gondolin-evil-rootfs.ext4"),
+    });
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /manifest\.assets\.rootfs.*absolute paths are not allowed/,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: setImageRef fails fast on corrupted ref index json", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    const refsPath = path.join(storeDir, "refs.json");
+    fs.writeFileSync(refsPath, "{not-json");
+
+    assert.throws(
+      () => setImageRef("default:latest", imported.buildId, imported.arch),
+      /failed to parse image ref index/,
+    );
+    assert.equal(fs.readFileSync(refsPath, "utf8"), "{not-json");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: setImageRef fails fast on invalid ref index schema", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    const refsPath = path.join(storeDir, "refs.json");
+    fs.writeFileSync(refsPath, JSON.stringify({ version: 1, refs: [] }));
+
+    assert.throws(
+      () => setImageRef("default:latest", imported.buildId, imported.arch),
+      /refs must be an object/,
+    );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });

@@ -156,22 +156,113 @@ function defaultRefIndex(): ImageRefIndex {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateRefIndex(parsed: unknown, indexPath: string): ImageRefIndex {
+  if (!isRecord(parsed)) {
+    throw new Error(`invalid image ref index at ${indexPath}: expected object`);
+  }
+
+  if (parsed.version !== IMAGE_REF_INDEX_VERSION) {
+    throw new Error(
+      `invalid image ref index at ${indexPath}: unsupported version ${String(parsed.version)}`,
+    );
+  }
+
+  if (!isRecord(parsed.refs)) {
+    throw new Error(
+      `invalid image ref index at ${indexPath}: refs must be an object`,
+    );
+  }
+
+  const refs: Record<string, ImageRefIndexEntry> = {};
+
+  for (const [reference, entry] of Object.entries(parsed.refs)) {
+    if (!isRecord(entry)) {
+      throw new Error(
+        `invalid image ref index at ${indexPath}: ref '${reference}' must be an object`,
+      );
+    }
+
+    let parsedRef: ParsedImageRef;
+    try {
+      parsedRef = parseImageRef(reference);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "invalid ref key";
+      throw new Error(
+        `invalid image ref index at ${indexPath}: invalid ref key '${reference}': ${message}`,
+      );
+    }
+
+    if (parsedRef.canonical !== reference) {
+      throw new Error(
+        `invalid image ref index at ${indexPath}: ref key '${reference}' is not canonical`,
+      );
+    }
+
+    if (!isRecord(entry.targets)) {
+      throw new Error(
+        `invalid image ref index at ${indexPath}: ref '${reference}' targets must be an object`,
+      );
+    }
+
+    if (typeof entry.updatedAt !== "string" || entry.updatedAt.length === 0) {
+      throw new Error(
+        `invalid image ref index at ${indexPath}: ref '${reference}' updatedAt must be a non-empty string`,
+      );
+    }
+
+    const targets: ImageRefTargets = {};
+    for (const [archKey, buildId] of Object.entries(entry.targets)) {
+      const normalizedArch = normalizeImageArch(archKey);
+      if (!normalizedArch) {
+        throw new Error(
+          `invalid image ref index at ${indexPath}: ref '${reference}' has unknown arch '${archKey}'`,
+        );
+      }
+      if (typeof buildId !== "string" || !isBuildId(buildId)) {
+        throw new Error(
+          `invalid image ref index at ${indexPath}: ref '${reference}' has invalid build id for ${normalizedArch}`,
+        );
+      }
+      targets[normalizedArch] = buildId;
+    }
+
+    refs[reference] = {
+      targets,
+      updatedAt: entry.updatedAt,
+    };
+  }
+
+  return {
+    version: IMAGE_REF_INDEX_VERSION,
+    refs,
+  };
+}
+
 function loadRefIndex(): ImageRefIndex {
   const indexPath = imageRefIndexPath();
   if (!fs.existsSync(indexPath)) {
     return defaultRefIndex();
   }
 
+  const raw = fs.readFileSync(indexPath, "utf8");
+
+  let parsed: unknown;
   try {
-    const raw = fs.readFileSync(indexPath, "utf8");
-    const parsed = JSON.parse(raw) as ImageRefIndex;
-    if (parsed.version !== IMAGE_REF_INDEX_VERSION || !parsed.refs) {
-      return defaultRefIndex();
-    }
-    return parsed;
-  } catch {
-    return defaultRefIndex();
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "unknown json parse failure";
+    throw new Error(
+      `failed to parse image ref index at ${indexPath}: ${message}`,
+    );
   }
+
+  return validateRefIndex(parsed, indexPath);
 }
 
 function saveRefIndex(index: ImageRefIndex): void {
@@ -215,6 +306,35 @@ function ensureImageObjectExists(buildId: string): string {
   return objectDir;
 }
 
+function resolveContainedAssetPath(
+  baseDir: string,
+  assetPath: unknown,
+  fieldName: string,
+): string {
+  if (typeof assetPath !== "string" || assetPath.trim().length === 0) {
+    throw new Error(`invalid ${fieldName}: expected non-empty string`);
+  }
+  if (path.isAbsolute(assetPath)) {
+    throw new Error(`invalid ${fieldName}: absolute paths are not allowed`);
+  }
+
+  const resolvedPath = path.resolve(baseDir, assetPath);
+  const relative = path.relative(baseDir, resolvedPath);
+  if (
+    relative.length === 0 ||
+    relative === "." ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(
+      `invalid ${fieldName}: path must stay within ${baseDir} (got '${assetPath}')`,
+    );
+  }
+
+  return resolvedPath;
+}
+
 export function importImageFromDirectory(assetDir: string): ImportedImage {
   const resolvedDir = path.resolve(assetDir);
   const manifest = loadAssetManifest(resolvedDir);
@@ -231,7 +351,6 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
     );
   }
 
-  const sourceAssets = loadGuestAssets(resolvedDir);
   const objectDir = getImageObjectDirectory(manifest.buildId);
 
   let created = false;
@@ -248,29 +367,67 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
     const manifestPath = path.join(resolvedDir, "manifest.json");
     fs.copyFileSync(manifestPath, path.join(tmpDir, "manifest.json"));
 
-    const assetNames = manifest.assets;
-    fs.mkdirSync(path.dirname(path.join(tmpDir, assetNames.kernel)), {
+    const sourceKernelPath = resolveContainedAssetPath(
+      resolvedDir,
+      manifest.assets?.kernel,
+      "manifest.assets.kernel",
+    );
+    const sourceInitramfsPath = resolveContainedAssetPath(
+      resolvedDir,
+      manifest.assets?.initramfs,
+      "manifest.assets.initramfs",
+    );
+    const sourceRootfsPath = resolveContainedAssetPath(
+      resolvedDir,
+      manifest.assets?.rootfs,
+      "manifest.assets.rootfs",
+    );
+
+    if (!fs.existsSync(sourceKernelPath)) {
+      throw new Error(
+        `missing manifest.assets.kernel file at ${sourceKernelPath}`,
+      );
+    }
+    if (!fs.existsSync(sourceInitramfsPath)) {
+      throw new Error(
+        `missing manifest.assets.initramfs file at ${sourceInitramfsPath}`,
+      );
+    }
+    if (!fs.existsSync(sourceRootfsPath)) {
+      throw new Error(
+        `missing manifest.assets.rootfs file at ${sourceRootfsPath}`,
+      );
+    }
+
+    const targetKernelPath = resolveContainedAssetPath(
+      tmpDir,
+      manifest.assets?.kernel,
+      "manifest.assets.kernel",
+    );
+    const targetInitramfsPath = resolveContainedAssetPath(
+      tmpDir,
+      manifest.assets?.initramfs,
+      "manifest.assets.initramfs",
+    );
+    const targetRootfsPath = resolveContainedAssetPath(
+      tmpDir,
+      manifest.assets?.rootfs,
+      "manifest.assets.rootfs",
+    );
+
+    fs.mkdirSync(path.dirname(targetKernelPath), {
       recursive: true,
     });
-    fs.mkdirSync(path.dirname(path.join(tmpDir, assetNames.initramfs)), {
+    fs.mkdirSync(path.dirname(targetInitramfsPath), {
       recursive: true,
     });
-    fs.mkdirSync(path.dirname(path.join(tmpDir, assetNames.rootfs)), {
+    fs.mkdirSync(path.dirname(targetRootfsPath), {
       recursive: true,
     });
 
-    fs.copyFileSync(
-      sourceAssets.kernelPath,
-      path.join(tmpDir, assetNames.kernel),
-    );
-    fs.copyFileSync(
-      sourceAssets.initrdPath,
-      path.join(tmpDir, assetNames.initramfs),
-    );
-    fs.copyFileSync(
-      sourceAssets.rootfsPath,
-      path.join(tmpDir, assetNames.rootfs),
-    );
+    fs.copyFileSync(sourceKernelPath, targetKernelPath);
+    fs.copyFileSync(sourceInitramfsPath, targetInitramfsPath);
+    fs.copyFileSync(sourceRootfsPath, targetRootfsPath);
 
     fs.mkdirSync(imageObjectRootDir(), { recursive: true });
 
