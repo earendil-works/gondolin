@@ -82,8 +82,9 @@ jobs:
 
       - name: Build guest image
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=${{ matrix.arch }} make build
+          ALPINE_ARCH=${{ matrix.arch }} make build NODE="$NODE_BIN"
 
       - name: Package assets
         run: |
@@ -224,7 +225,8 @@ jobs:
         # concurrently (which can hang/time out on some CI runners).
         timeout-minutes: 20
         run: |
-          make -C guest test
+          NODE_BIN="$(node -p 'process.execPath')"
+          make -C guest test NODE="$NODE_BIN"
           make -C host test
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out

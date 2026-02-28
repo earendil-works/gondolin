@@ -50,8 +50,9 @@ jobs:
 
       - name: Build guest image
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          make build
+          make build NODE="$NODE_BIN"
 
       - name: Verify x64 kernel arch
         run: |
@@ -109,8 +110,9 @@ jobs:
 
       - name: Build guest image (arm64)
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=aarch64 make build
+          ALPINE_ARCH=aarch64 make build NODE="$NODE_BIN"
 
       - name: Verify arm64 kernel arch
         run: |
