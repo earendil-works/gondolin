@@ -118,12 +118,11 @@ export class ShadowProvider
   private readonly tmpfs: VirtualProvider;
   private readonly denySymlinkBypass: boolean;
   private readonly denyWriteErrno: number;
+  private readonly backend: VirtualProvider;
 
-  constructor(
-    private readonly backend: VirtualProvider,
-    options: ShadowProviderOptions,
-  ) {
+  constructor(backend: VirtualProvider, options: ShadowProviderOptions) {
     super();
+    this.backend = backend;
     if (!options || typeof options.shouldShadow !== "function") {
       throw new Error("ShadowProvider requires options.shouldShadow callback");
     }

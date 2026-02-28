@@ -730,12 +730,12 @@ export class HttpReceiveCursor {
   private chunkIndex = 0;
   private chunkOffset = 0;
   offset: number;
+  private readonly chunks: Buffer[];
+  private readonly totalBytes: number;
 
-  constructor(
-    private readonly chunks: Buffer[],
-    private readonly totalBytes: number,
-    startOffset: number,
-  ) {
+  constructor(chunks: Buffer[], totalBytes: number, startOffset: number) {
+    this.chunks = chunks;
+    this.totalBytes = totalBytes;
     this.offset = startOffset;
 
     let remaining = startOffset;

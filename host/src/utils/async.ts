@@ -5,11 +5,13 @@
 export class AsyncSemaphore {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
+  private readonly limit: number;
 
-  constructor(private readonly limit: number) {
+  constructor(limit: number) {
     if (!Number.isFinite(limit) || limit <= 0) {
       throw new Error(`max concurrent operations must be > 0 (got ${limit})`);
     }
+    this.limit = limit;
   }
 
   async acquire(): Promise<() => void> {

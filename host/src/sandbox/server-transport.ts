@@ -22,11 +22,13 @@ export class VirtioBridge {
   private waitingDrain = false;
   private allowReconnect = true;
   private closed = false;
+  private readonly socketPath: string;
+  private readonly maxPendingBytes: number;
 
-  constructor(
-    private readonly socketPath: string,
-    private readonly maxPendingBytes: number = 8 * 1024 * 1024,
-  ) {}
+  constructor(socketPath: string, maxPendingBytes: number = 8 * 1024 * 1024) {
+    this.socketPath = socketPath;
+    this.maxPendingBytes = maxPendingBytes;
+  }
 
   connect() {
     if (this.closed) return;
@@ -222,13 +224,19 @@ export class VirtioBridge {
 export class TcpForwardStream extends Duplex {
   private closedByRemote = false;
   private closeSent = false;
+  readonly id: number;
+  private readonly sendFrame: (message: object) => boolean;
+  private readonly onDispose: () => void;
 
   constructor(
-    readonly id: number,
-    private readonly sendFrame: (message: object) => boolean,
-    private readonly onDispose: () => void,
+    id: number,
+    sendFrame: (message: object) => boolean,
+    onDispose: () => void,
   ) {
     super();
+    this.id = id;
+    this.sendFrame = sendFrame;
+    this.onDispose = onDispose;
     this.on("close", () => {
       this.onDispose();
     });

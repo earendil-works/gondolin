@@ -11,8 +11,11 @@ export class ReadonlyProvider
   extends VirtualProviderClass
   implements VirtualProvider
 {
-  constructor(private readonly backend: VirtualProvider) {
+  private readonly backend: VirtualProvider;
+
+  constructor(backend: VirtualProvider) {
     super();
+    this.backend = backend;
   }
 
   get readonly() {

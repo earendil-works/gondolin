@@ -95,9 +95,11 @@ export class SandboxController extends EventEmitter {
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private manualStop = false;
+  private readonly config: SandboxConfig;
 
-  constructor(private readonly config: SandboxConfig) {
+  constructor(config: SandboxConfig) {
     super();
+    this.config = config;
   }
 
   setAppend(append: string) {

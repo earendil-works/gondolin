@@ -82,6 +82,7 @@ export class FsRpcService {
   >();
   private readdirCacheVersion = 0;
   private readonly logger?: (message: string) => void;
+  private readonly provider: VirtualProvider;
   readonly metrics: FsRpcMetrics = {
     requests: 0,
     errors: 0,
@@ -90,10 +91,8 @@ export class FsRpcService {
     ops: {},
   };
 
-  constructor(
-    private readonly provider: VirtualProvider,
-    options: FsRpcServiceOptions = {},
-  ) {
+  constructor(provider: VirtualProvider, options: FsRpcServiceOptions = {}) {
+    this.provider = provider;
     this.logger = options.logger;
     this.pathToIno.set("/", 1);
     this.inoToPaths.set(1, new Set(["/"]));

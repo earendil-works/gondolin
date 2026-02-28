@@ -119,10 +119,11 @@ type UdpSession = {
 };
 
 class GuestTlsStream extends Duplex {
-  constructor(
-    private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>,
-  ) {
+  private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>;
+
+  constructor(onEncryptedWrite: (chunk: Buffer) => void | Promise<void>) {
     super();
+    this.onEncryptedWrite = onEncryptedWrite;
   }
 
   pushEncrypted(data: Buffer) {

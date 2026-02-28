@@ -319,15 +319,25 @@ export class SessionIpcServer {
   private clients = new Set<net.Socket>();
   private allocatedInternalIds = new Set<number>();
   private nextInternalId = 0xffffffff;
+  private readonly sockPath: string;
+  private readonly connectToSandbox: (
+    onMessage: (data: Buffer | string, isBinary: boolean) => void,
+    onClose?: () => void,
+  ) => SandboxConnection;
+  private readonly handlers: SessionIpcServerHandlers;
 
   constructor(
-    private readonly sockPath: string,
-    private readonly connectToSandbox: (
+    sockPath: string,
+    connectToSandbox: (
       onMessage: (data: Buffer | string, isBinary: boolean) => void,
       onClose?: () => void,
     ) => SandboxConnection,
-    private readonly handlers: SessionIpcServerHandlers = {},
-  ) {}
+    handlers: SessionIpcServerHandlers = {},
+  ) {
+    this.sockPath = sockPath;
+    this.connectToSandbox = connectToSandbox;
+    this.handlers = handlers;
+  }
 
   start(): void {
     if (this.server) return;

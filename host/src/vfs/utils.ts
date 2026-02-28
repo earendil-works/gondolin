@@ -51,7 +51,11 @@ export function normalizeVfsPath(inputPath: string) {
 }
 
 export class VirtualDirent {
-  constructor(public readonly name: string) {}
+  public readonly name: string;
+
+  constructor(name: string) {
+    this.name = name;
+  }
 
   isFile() {
     return false;

@@ -264,11 +264,11 @@ function resolveWindowBytes(value: number | undefined): number {
 }
 
 class ExecPipeStream extends Readable {
-  constructor(
-    windowBytes: number,
-    private readonly onConsumed: () => void,
-  ) {
+  private readonly onConsumed: () => void;
+
+  constructor(windowBytes: number, onConsumed: () => void) {
     super({ highWaterMark: windowBytes });
+    this.onConsumed = onConsumed;
   }
 
   private bufferedBytes = 0;
@@ -436,11 +436,13 @@ export class ExecProcess
   implements PromiseLike<ExecResult>, AsyncIterable<string>
 {
   private attached = false;
+  private readonly session: ExecSession;
+  private readonly callbacks: ExecProcessCallbacks;
 
-  constructor(
-    private readonly session: ExecSession,
-    private readonly callbacks: ExecProcessCallbacks,
-  ) {}
+  constructor(session: ExecSession, callbacks: ExecProcessCallbacks) {
+    this.session = session;
+    this.callbacks = callbacks;
+  }
 
   get id(): number {
     return this.session.id;

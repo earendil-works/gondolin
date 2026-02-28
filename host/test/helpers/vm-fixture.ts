@@ -34,8 +34,11 @@ export function shouldSkipVmTests(): boolean {
 
 class Semaphore {
   private queue: Array<() => void> = [];
+  private count: number;
 
-  constructor(private count: number) {}
+  constructor(count: number) {
+    this.count = count;
+  }
 
   async acquire(): Promise<void> {
     if (this.count > 0) {

@@ -102,11 +102,16 @@ export type SshOptions = {
 };
 
 class GuestSshStream extends Duplex {
+  private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>;
+  private readonly onServerEnd: () => void | Promise<void>;
+
   constructor(
-    private readonly onServerWrite: (chunk: Buffer) => void | Promise<void>,
-    private readonly onServerEnd: () => void | Promise<void>,
+    onServerWrite: (chunk: Buffer) => void | Promise<void>,
+    onServerEnd: () => void | Promise<void>,
   ) {
     super();
+    this.onServerWrite = onServerWrite;
+    this.onServerEnd = onServerEnd;
   }
 
   pushFromGuest(data: Buffer) {

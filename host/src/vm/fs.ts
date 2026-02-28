@@ -188,7 +188,11 @@ export type VmFsControllerOptions = {
 };
 
 export class VmFsController implements VmFs {
-  constructor(private readonly options: VmFsControllerOptions) {}
+  private readonly options: VmFsControllerOptions;
+
+  constructor(options: VmFsControllerOptions) {
+    this.options = options;
+  }
 
   async access(
     filePath: string,
