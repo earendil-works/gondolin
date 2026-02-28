@@ -5,6 +5,7 @@ All notable changes to Gondolin are documented here.
 ## Unreleased
 
 - Add support for OCI container images with customizable pull policies, layer caching, and rootfs safety checks. #53
+- Add explicit host-mapped TCP egress rules (`tcp.hosts` / `--tcp-map`) for narrowly scoped non-HTTP workloads, using synthetic DNS per-host attribution
 - Switched egress `httpHooks` to WHATWG `Request`/`Response` types and added support for returning synthetic responses from `onRequest` to short-circuit upstream fetches
 - Added internal request/response conversion helpers and expanded HTTP hook/network test coverage (including undici compatibility and body-size guardrails)
 - Updated networking/secrets docs to reflect the new hook API and short-circuit behavior
