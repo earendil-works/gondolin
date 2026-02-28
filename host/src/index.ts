@@ -160,6 +160,22 @@ export {
   type AssetManifest,
 } from "./assets";
 
+// Local image store
+export {
+  getImageStoreDirectory,
+  getImageObjectDirectory,
+  importImageFromDirectory,
+  resolveImageSelector,
+  listImageRefs,
+  setImageRef,
+  tagImage,
+  type ImageArch,
+  type ImageRefTargets,
+  type LocalImageRef,
+  type ImportedImage,
+  type ResolvedImage,
+} from "./images";
+
 // Build configuration and builder
 export {
   type Architecture,

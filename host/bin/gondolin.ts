@@ -29,6 +29,14 @@ import {
 import { buildAssets, verifyAssets } from "../src/build";
 import { loadAssetManifest } from "../src/assets";
 import {
+  importImageFromDirectory,
+  listImageRefs,
+  resolveImageSelector,
+  setImageRef,
+  tagImage,
+  type ImageArch,
+} from "../src/images";
+import {
   connectToSession,
   findSession,
   gcSessions,
@@ -205,6 +213,7 @@ function usage() {
   console.log(
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
+  console.log("  image        Manage local image refs and objects");
   console.log("  help         Show this help");
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
@@ -229,6 +238,9 @@ function bashUsage() {
   );
   console.log(
     "  --resume ID_OR_PATH             Resume from a snapshot ID or .qcow2 path",
+  );
+  console.log(
+    "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log();
   console.log("VFS Options:");
@@ -380,6 +392,9 @@ function execUsage() {
   console.log(
     "  --mount-memfs PATH              Create memory-backed mount at path",
   );
+  console.log(
+    "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
+  );
   console.log();
   console.log("Network Options (VM mode only):");
   console.log("  --allow-host HOST               Allow HTTP requests to host");
@@ -447,6 +462,9 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+
+  /** image selector (asset dir, build id, or name:tag) */
+  image?: string;
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -894,6 +912,13 @@ function buildVmOptions(common: CommonOptions) {
     env,
   };
 
+  if (common.image) {
+    vmOptions.sandbox = {
+      ...(vmOptions.sandbox ?? {}),
+      imagePath: common.image,
+    };
+  }
+
   if (common.disableWebSockets) {
     vmOptions.allowWebSockets = false;
   }
@@ -946,6 +971,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const path = optionArgs[++i];
         if (!path) fail("--mount-memfs requires a path argument");
         args.common.memoryMounts.push(path);
+        return i;
+      }
+      case "--image": {
+        const image = optionArgs[++i];
+        if (!image) fail("--image requires an argument");
+        args.common.image = image;
         return i;
       }
       case "--allow-host": {
@@ -1357,6 +1388,15 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.memoryMounts.push(path);
+        break;
+      }
+      case "--image": {
+        const image = argv[++i];
+        if (!image) {
+          console.error("--image requires an argument");
+          process.exit(1);
+        }
+        args.image = image;
         break;
       }
       case "--allow-host": {
@@ -2222,13 +2262,16 @@ function buildUsage() {
     "  --config FILE           Use the specified build configuration file",
   );
   console.log(
-    "  --output DIR            Output directory for built assets (required for build)",
+    "  --output DIR            Output directory for built assets (optional)",
   );
   console.log(
     "  --arch ARCH             Target architecture (aarch64, x86_64)",
   );
   console.log(
     "  --verify DIR            Verify assets in directory against manifest",
+  );
+  console.log(
+    "  --tag REF              Tag the built image in the local image store",
   );
   console.log("  --quiet                 Reduce output verbosity");
   console.log();
@@ -2239,16 +2282,19 @@ function buildUsage() {
   console.log();
   console.log("  2. Edit the config to customize packages, settings, etc.");
   console.log();
-  console.log("  3. Build assets:");
+  console.log("  3. Build assets and import to local image store:");
   console.log(
-    "     gondolin build --config build-config.json --output ./my-assets",
+    "     gondolin build --config build-config.json --tag default:latest",
   );
   console.log();
-  console.log("  4. Use custom assets with VM:");
-  console.log("     GONDOLIN_GUEST_DIR=./my-assets gondolin bash");
+  console.log("  4. Run using the tagged image:");
+  console.log("     gondolin bash --image default:latest");
   console.log();
-  console.log("Quick build (uses defaults for current architecture):");
-  console.log("  gondolin build --output ./my-assets");
+  console.log("Quick build (defaults + store import):");
+  console.log("  gondolin build");
+  console.log();
+  console.log("Build and keep an explicit output directory too:");
+  console.log("  gondolin build --output ./my-assets --tag default:latest");
   console.log();
   console.log("Verify built assets:");
   console.log("  gondolin build --verify ./my-assets");
@@ -2260,6 +2306,8 @@ type BuildArgs = {
   outputDir?: string;
   arch?: "aarch64" | "x86_64";
   verify?: string;
+  /** optional local image ref to update after build */
+  tag?: string;
   quiet: boolean;
 };
 
@@ -2309,6 +2357,15 @@ function parseBuildArgs(argv: string[]): BuildArgs {
           process.exit(1);
         }
         args.verify = value;
+        break;
+      }
+      case "--tag": {
+        const value = argv[++i];
+        if (!value) {
+          console.error("--tag requires an image reference");
+          process.exit(1);
+        }
+        args.tag = value;
         break;
       }
       case "--quiet":
@@ -2366,13 +2423,6 @@ async function runBuild(argv: string[]) {
     }
   }
 
-  // Build mode - require output directory
-  if (!args.outputDir) {
-    console.error("--output is required for build");
-    buildUsage();
-    process.exit(1);
-  }
-
   // Load or create config
   let config: BuildConfig;
   let configDir: string | undefined;
@@ -2400,27 +2450,273 @@ async function runBuild(argv: string[]) {
     config.arch = args.arch;
   }
 
+  const cleanupOutputDir = args.outputDir === undefined;
+  const outputDir = path.resolve(
+    args.outputDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-build-")),
+  );
+
   // Run the build
   try {
     const result = await buildAssets(config, {
-      outputDir: args.outputDir,
+      outputDir,
       configDir,
       verbose: !args.quiet,
     });
 
+    const imported = importImageFromDirectory(result.outputDir);
+
+    let taggedRef: string | null = null;
+    if (args.tag) {
+      setImageRef(args.tag, imported.buildId, imported.arch);
+      taggedRef = args.tag;
+    }
+
     if (!args.quiet) {
       console.log();
       console.log("Build successful!");
-      console.log(`  Output directory: ${result.outputDir}`);
-      console.log(`  Manifest: ${result.manifestPath}`);
+      console.log(`  Build ID: ${imported.buildId}`);
+      console.log(`  Image object: ${imported.assetDir}`);
+      if (!cleanupOutputDir) {
+        console.log(`  Output directory: ${result.outputDir}`);
+        console.log(`  Manifest: ${result.manifestPath}`);
+      }
+      if (taggedRef) {
+        console.log(`  Tagged image: ${taggedRef}`);
+      }
       console.log();
-      console.log("To use these assets:");
-      console.log(`  GONDOLIN_GUEST_DIR=${result.outputDir} gondolin bash`);
+      console.log("To use this image:");
+      if (taggedRef) {
+        console.log(`  gondolin bash --image ${taggedRef}`);
+      } else {
+        console.log(`  gondolin bash --image ${imported.buildId}`);
+        console.log(
+          `  gondolin image tag ${imported.buildId} my-image:latest  # optional alias`,
+        );
+      }
+      if (!cleanupOutputDir) {
+        console.log();
+        console.log("To use explicit asset paths:");
+        console.log(`  GONDOLIN_GUEST_DIR=${result.outputDir} gondolin bash`);
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`Build failed: ${message}`);
-    process.exit(1);
+    throw new Error(`Build failed: ${message}`);
+  } finally {
+    if (cleanupOutputDir) {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }
+}
+
+function imageUsage() {
+  console.log("Usage: gondolin image <command> [options]");
+  console.log();
+  console.log("Manage local Gondolin image objects and refs.");
+  console.log();
+  console.log("Commands:");
+  console.log("  ls");
+  console.log("      List local image refs");
+  console.log();
+  console.log("  import <ASSET_DIR> [--tag REF]");
+  console.log(
+    "      Import built guest assets into the local image object store",
+  );
+  console.log();
+  console.log("  tag <SOURCE> <TARGET> [--arch aarch64|x86_64]");
+  console.log("      Create or update a ref to point at an image");
+  console.log();
+  console.log("  inspect <SELECTOR> [--arch aarch64|x86_64]");
+  console.log("      Show details for a path, build id, or ref");
+}
+
+function parseImageArchOption(value: string): ImageArch {
+  if (value === "aarch64" || value === "x86_64") {
+    return value;
+  }
+  throw new Error("--arch must be one of: aarch64, x86_64");
+}
+
+async function runImage(argv: string[]) {
+  const [subcommand, ...rest] = argv;
+
+  if (
+    !subcommand ||
+    subcommand === "--help" ||
+    subcommand === "-h" ||
+    subcommand === "help"
+  ) {
+    imageUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  switch (subcommand) {
+    case "ls": {
+      if (rest.includes("--help") || rest.includes("-h")) {
+        imageUsage();
+        return;
+      }
+      const refs = listImageRefs();
+      if (refs.length === 0) {
+        console.log("No local image refs found.");
+        return;
+      }
+      for (const ref of refs) {
+        const targets = [
+          ref.targets.aarch64 ? `aarch64=${ref.targets.aarch64}` : null,
+          ref.targets.x86_64 ? `x86_64=${ref.targets.x86_64}` : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        console.log(`${ref.reference}${targets ? `  ${targets}` : ""}`);
+      }
+      return;
+    }
+
+    case "import": {
+      let assetDir: string | undefined;
+      let tag: string | undefined;
+
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = rest[i]!;
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--tag") {
+          const value = rest[++i];
+          if (!value) {
+            throw new Error("--tag requires an image reference");
+          }
+          tag = value;
+          continue;
+        }
+        if (!assetDir) {
+          assetDir = arg;
+          continue;
+        }
+        throw new Error(`unexpected argument for image import: ${arg}`);
+      }
+
+      if (!assetDir) {
+        throw new Error("image import requires <ASSET_DIR>");
+      }
+
+      const imported = importImageFromDirectory(assetDir);
+      console.log(`Imported buildId: ${imported.buildId}`);
+      console.log(`  arch: ${imported.arch}`);
+      console.log(`  object: ${imported.assetDir}`);
+      console.log(
+        `  status: ${imported.created ? "created" : "already-present"}`,
+      );
+
+      if (tag) {
+        setImageRef(tag, imported.buildId, imported.arch);
+        console.log(`  tag: ${tag}`);
+      }
+      return;
+    }
+
+    case "tag": {
+      let source: string | undefined;
+      let target: string | undefined;
+      let arch: ImageArch | undefined;
+
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = rest[i]!;
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--arch") {
+          const value = rest[++i];
+          if (!value) {
+            throw new Error("--arch requires a value");
+          }
+          arch = parseImageArchOption(value);
+          continue;
+        }
+
+        if (!source) {
+          source = arg;
+          continue;
+        }
+        if (!target) {
+          target = arg;
+          continue;
+        }
+
+        throw new Error(`unexpected argument for image tag: ${arg}`);
+      }
+
+      if (!source || !target) {
+        throw new Error("image tag requires <SOURCE> and <TARGET>");
+      }
+
+      const updated = tagImage(source, target, arch);
+      console.log(`Updated ${updated.reference}`);
+      if (updated.targets.aarch64) {
+        console.log(`  aarch64: ${updated.targets.aarch64}`);
+      }
+      if (updated.targets.x86_64) {
+        console.log(`  x86_64: ${updated.targets.x86_64}`);
+      }
+      return;
+    }
+
+    case "inspect": {
+      let selector: string | undefined;
+      let arch: ImageArch | undefined;
+
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = rest[i]!;
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--arch") {
+          const value = rest[++i];
+          if (!value) {
+            throw new Error("--arch requires a value");
+          }
+          arch = parseImageArchOption(value);
+          continue;
+        }
+
+        if (!selector) {
+          selector = arg;
+          continue;
+        }
+
+        throw new Error(`unexpected argument for image inspect: ${arg}`);
+      }
+
+      if (!selector) {
+        throw new Error("image inspect requires <SELECTOR>");
+      }
+
+      const resolved = resolveImageSelector(selector, arch);
+      const manifest = loadAssetManifest(resolved.assetDir);
+
+      console.log(`selector: ${resolved.selector}`);
+      console.log(`source: ${resolved.source}`);
+      console.log(`assetDir: ${resolved.assetDir}`);
+      if (resolved.buildId) {
+        console.log(`buildId: ${resolved.buildId}`);
+      }
+      if (resolved.arch) {
+        console.log(`arch: ${resolved.arch}`);
+      }
+      if (manifest) {
+        console.log(
+          `manifest: ${path.join(resolved.assetDir, "manifest.json")}`,
+        );
+      }
+      return;
+    }
+
+    default:
+      throw new Error(`unknown image command: ${subcommand}`);
   }
 }
 
@@ -2455,6 +2751,9 @@ async function main() {
       return;
     case "build":
       await runBuild(args);
+      return;
+    case "image":
+      await runImage(args);
       return;
     default:
       console.error(`Unknown command: ${command}`);

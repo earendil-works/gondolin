@@ -15,6 +15,7 @@ import {
   loadGuestAssets,
   type GuestAssets,
 } from "./assets";
+import { getImageObjectDirectory, resolveImageSelector } from "./images";
 import type { VMOptions } from "./vm/types";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
@@ -249,7 +250,12 @@ function resolveAssetDirByBuildId(buildId: string): {
   const foundDefault = tryDir("default", defaultDir);
   if (foundDefault) return { assetDir: foundDefault, searched };
 
-  // 4) Cache scan
+  // 4) Local image object store
+  const objectDir = getImageObjectDirectory(buildId);
+  const foundObject = tryDir("image-object", objectDir);
+  if (foundObject) return { assetDir: foundObject, searched };
+
+  // 5) Cache scan
   const cacheRoot = path.join(cacheBaseDir(), "gondolin");
   searched.push(`cache-scan=${cacheRoot}`);
   const found = scanForBuildId(cacheRoot, buildId);
@@ -292,7 +298,8 @@ function resolveGuestAssetsForResume(
 
   if (userImagePath !== undefined) {
     if (typeof userImagePath === "string") {
-      const assetDir = path.resolve(userImagePath);
+      const resolved = resolveImageSelector(userImagePath);
+      const assetDir = path.resolve(resolved.assetDir);
       const manifest = loadAssetManifest(assetDir);
       if (!manifest?.buildId) {
         throw new Error(

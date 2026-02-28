@@ -17,6 +17,7 @@ import {
   resolveGuestAssetsSync,
   type GuestAssets,
 } from "../assets";
+import { resolveImageSelector } from "../images";
 import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
@@ -29,10 +30,11 @@ import type { TcpOptions } from "../qemu/tcp";
 import type { VirtualProvider } from "../vfs/node";
 
 /**
- * Path to guest image assets.
+ * Path or selector for guest image assets
  *
  * Can be either:
  * - A string path to a directory containing the assets (vmlinuz-virt, initramfs.cpio.lz4, rootfs.ext4)
+ * - A string image selector (ref like `name:tag` or a build id)
  * - An object with explicit paths to each asset file
  */
 export type ImagePath = string | GuestAssets;
@@ -273,11 +275,12 @@ export type GuestFileDeleteOptions = {
 };
 
 /**
- * Resolve imagePath to GuestAssets.
+ * Resolve imagePath selector to GuestAssets.
  */
 function resolveImagePath(imagePath: ImagePath): GuestAssets {
   if (typeof imagePath === "string") {
-    return loadGuestAssets(imagePath);
+    const resolved = resolveImageSelector(imagePath);
+    return loadGuestAssets(resolved.assetDir);
   }
   return imagePath;
 }
@@ -392,7 +395,7 @@ export function resolveSandboxServerOptions(
       "Guest assets not found. Either:\n" +
         "  1. Run from the gondolin repository with built guest images\n" +
         "  2. Use SandboxServer.create() to auto-download assets\n" +
-        "  3. Provide imagePath option (directory path or explicit paths)\n" +
+        "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
         "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
   }
