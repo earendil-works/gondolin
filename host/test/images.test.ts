@@ -520,23 +520,35 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
       },
     };
 
+    let registryFetches = 0;
+    let archiveFetches = 0;
+
     const archiveData = fs.readFileSync(archivePath);
     (globalThis as any).fetch = async (url: string) => {
       if (url.includes("builtin-image-registry.json")) {
+        registryFetches += 1;
         return new Response(JSON.stringify(registry), {
           status: 200,
           headers: { etag: '"test"' },
         });
       }
       if (url.endsWith("alpine-base-latest-x86_64.tar.gz")) {
+        archiveFetches += 1;
         return new Response(archiveData, { status: 200 });
       }
       return new Response("not found", { status: 404 });
     };
 
-    const resolved = await ensureImageSelector("alpine-base:latest", "x86_64");
-    assert.equal(resolved.source, "ref");
-    assert.equal(resolved.buildId, assets.buildId);
+    const first = await ensureImageSelector("alpine-base:latest", "x86_64");
+    assert.equal(first.source, "ref");
+    assert.equal(first.buildId, assets.buildId);
+
+    const second = await ensureImageSelector("alpine-base:latest", "x86_64");
+    assert.equal(second.source, "ref");
+    assert.equal(second.buildId, assets.buildId);
+
+    assert.equal(registryFetches, 1);
+    assert.equal(archiveFetches, 1);
 
     const refs = listImageRefs();
     assert.equal(refs[0]?.reference, "alpine-base:latest");
