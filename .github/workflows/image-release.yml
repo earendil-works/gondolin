@@ -1,25 +1,6 @@
 name: Image Release
 
 on:
-  workflow_call:
-    inputs:
-      image_tag:
-        description: "Image tag (e.g. 1.0.0)"
-        required: true
-        type: string
-      build_config:
-        description: "Build config JSON path (repo-relative)"
-        required: false
-        default: "images/alpine-base.json"
-        type: string
-      image_name:
-        description: "Optional image name override"
-        required: false
-        type: string
-      source_ref:
-        description: "Git ref to build from (branch/tag/sha)"
-        required: false
-        type: string
   workflow_dispatch:
     inputs:
       image_tag:
@@ -249,6 +230,7 @@ jobs:
           name: Image ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
           draft: false
           prerelease: ${{ contains(needs.prepare.outputs.image_tag, '-') }}
+          make_latest: false
           files: |
             gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz
             gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.sha256
