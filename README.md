@@ -67,7 +67,9 @@ npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
-first use via `builtin-image-registry.json` and cached locally.
+first use via `builtin-image-registry.json` and cached locally. When no image
+is specified, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
+`alpine-base:latest`).
 
 Requirements:
 

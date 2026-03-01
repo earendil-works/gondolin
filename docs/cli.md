@@ -28,11 +28,14 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 18
+- Node.js >= 23.6.0
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
 first use via `builtin-image-registry.json` and cached in
-`~/.cache/gondolin/images/`. Alternative you can [build and ship your own](./custom-images.md).
+`~/.cache/gondolin/images/`.
+
+When you do not pass `--image`, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
+`alpine-base:latest`). Alternative you can [build and ship your own](./custom-images.md).
 
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other

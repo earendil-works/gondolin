@@ -45,6 +45,10 @@ export GONDOLIN_DEFAULT_IMAGE=alpine-base:1.0
 export GONDOLIN_IMAGE_REGISTRY_URL=https://example.invalid/my-registry.json
 ```
 
+Build-id selectors (`uuid`) are resolved locally first and only downloaded from
+the builtin registry when that registry has an explicit `builds[buildId]`
+mapping.
+
 Check asset status programmatically:
 
 ```ts

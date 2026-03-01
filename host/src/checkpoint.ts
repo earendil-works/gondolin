@@ -1,5 +1,4 @@
 import fs from "fs";
-import os from "os";
 import path from "path";
 
 import {
@@ -51,25 +50,6 @@ function getVmCreate(): VmCreateFn {
   return vmCreateFn;
 }
 
-function cacheBaseDir(): string {
-  return process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-}
-
-function defaultCheckpointDir(): string {
-  return (
-    process.env.GONDOLIN_CHECKPOINT_DIR ??
-    path.join(cacheBaseDir(), "gondolin", "checkpoints")
-  );
-}
-
-function sanitizeName(name: string): string {
-  const trimmed = name.trim();
-  const safe = trimmed
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return safe.length ? safe : "checkpoint";
-}
-
 export type VmCheckpointData = {
   /** checkpoint schema version */
   version: typeof CHECKPOINT_SCHEMA_VERSION;
@@ -80,16 +60,12 @@ export type VmCheckpointData = {
   /** creation timestamp (iso 8601) */
   createdAt: string;
 
-  /** qcow2 disk filename (relative to checkpointDir in legacy directory format) */
+  /** qcow2 disk filename (`basename` of checkpoint file path) */
   diskFile: string;
 
   /** deterministic guest asset build identifier (uuid) */
   guestAssetBuildId: string;
 };
-
-type VmCheckpointDataV2 = Omit<VmCheckpointData, "version"> & { version: 2 };
-
-type VmCheckpointDataOnDisk = VmCheckpointData | VmCheckpointDataV2;
 
 function writeCheckpointTrailer(
   diskPath: string,
@@ -132,11 +108,11 @@ function readCheckpointTrailer(diskPath: string): VmCheckpointData {
     fs.readSync(fd, jsonBuf, 0, jsonLen, jsonStart);
 
     const raw = jsonBuf.toString("utf8");
-    const data = JSON.parse(raw) as VmCheckpointDataOnDisk;
+    const data = JSON.parse(raw) as VmCheckpointData;
 
     if (data.version !== CHECKPOINT_SCHEMA_VERSION) {
       throw new Error(
-        `unsupported checkpoint version: ${String((data as any).version)}`,
+        `unsupported checkpoint version: ${String(data.version)}`,
       );
     }
 
@@ -330,7 +306,6 @@ async function resolveGuestAssetsForResume(
  */
 export class VmCheckpoint {
   private readonly checkpointPath: string;
-  private readonly isDirectory: boolean;
   private readonly data: VmCheckpointData;
   private readonly baseVmOptions: VMOptions | null;
 
@@ -338,10 +313,8 @@ export class VmCheckpoint {
     checkpointPath: string,
     data: VmCheckpointData,
     baseVmOptions?: VMOptions | null,
-    opts?: { isDirectory?: boolean },
   ) {
     this.checkpointPath = checkpointPath;
-    this.isDirectory = opts?.isDirectory ?? false;
     this.data = data;
     this.baseVmOptions = baseVmOptions ?? null;
   }
@@ -351,23 +324,19 @@ export class VmCheckpoint {
     return this.data.name;
   }
 
-  /** absolute path to the checkpoint container */
+  /** absolute path to the checkpoint qcow2 file */
   get path(): string {
     return this.checkpointPath;
   }
 
   /** absolute path to the directory containing the checkpoint file */
   get dir(): string {
-    return this.isDirectory
-      ? this.checkpointPath
-      : path.dirname(this.checkpointPath);
+    return path.dirname(this.checkpointPath);
   }
 
   /** absolute path to the qcow2 disk file */
   get diskPath(): string {
-    return this.isDirectory
-      ? path.join(this.checkpointPath, this.data.diskFile)
-      : this.checkpointPath;
+    return this.checkpointPath;
   }
 
   /** deterministic guest asset build identifier (uuid) */
@@ -429,71 +398,30 @@ export class VmCheckpoint {
     return await this.resume<TVm>(options);
   }
 
-  /** Load a checkpoint from a qcow2 file (new) or checkpoint directory/json (legacy). */
+  /** Load a checkpoint from a qcow2 file with a metadata trailer. */
   static load(checkpointPath: string): VmCheckpoint {
     const resolved = path.resolve(checkpointPath);
     const stat = fs.statSync(resolved);
 
     if (stat.isDirectory()) {
-      const dir = resolved;
-      const jsonPath = path.join(dir, "checkpoint.json");
-      const raw = fs.readFileSync(jsonPath, "utf8");
-      const data = JSON.parse(raw) as VmCheckpointDataOnDisk;
-      const normalized =
-        (data as any).version === 2
-          ? ({ ...data, version: 1 } as VmCheckpointData)
-          : (data as VmCheckpointData);
-
-      if (normalized.version !== CHECKPOINT_SCHEMA_VERSION) {
-        throw new Error(
-          `unsupported checkpoint version: ${String((data as any).version)}`,
-        );
-      }
-
-      return new VmCheckpoint(dir, normalized, null, { isDirectory: true });
+      throw new Error(
+        `checkpoint path must be a .qcow2 file, got directory: ${resolved}`,
+      );
     }
 
-    // Legacy: explicit checkpoint.json path.
-    if (
-      resolved.endsWith(path.sep + "checkpoint.json") ||
-      path.basename(resolved) === "checkpoint.json"
-    ) {
-      const dir = path.dirname(resolved);
-      const raw = fs.readFileSync(resolved, "utf8");
-      const data = JSON.parse(raw) as VmCheckpointDataOnDisk;
-      const normalized =
-        (data as any).version === 2
-          ? ({ ...data, version: 1 } as VmCheckpointData)
-          : (data as VmCheckpointData);
-
-      if (normalized.version !== CHECKPOINT_SCHEMA_VERSION) {
-        throw new Error(
-          `unsupported checkpoint version: ${String((data as any).version)}`,
-        );
-      }
-
-      return new VmCheckpoint(dir, normalized, null, { isDirectory: true });
+    if (path.basename(resolved) === "checkpoint.json") {
+      throw new Error(
+        `legacy checkpoint.json format is no longer supported: ${resolved}`,
+      );
     }
 
-    // New: qcow2 file with metadata trailer.
     const data = readCheckpointTrailer(resolved);
-    return new VmCheckpoint(resolved, data, null, { isDirectory: false });
+    return new VmCheckpoint(resolved, data, null);
   }
 
-  /** Delete the checkpoint (file or legacy directory). */
+  /** Delete the checkpoint file. */
   delete(): void {
-    if (this.isDirectory) {
-      fs.rmSync(this.checkpointPath, { recursive: true, force: true });
-    } else {
-      fs.rmSync(this.checkpointPath, { force: true });
-    }
-  }
-
-  /**
-   * Create the canonical checkpoint directory path for a checkpoint name (legacy).
-   */
-  static getCheckpointDir(name: string): string {
-    return path.join(defaultCheckpointDir(), sanitizeName(name));
+    fs.rmSync(this.checkpointPath, { force: true });
   }
 
   /** Create a checkpoint metadata trailer and append it to a qcow2 file. */
