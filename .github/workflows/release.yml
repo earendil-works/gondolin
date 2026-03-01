@@ -244,8 +244,11 @@ jobs:
           fi
           echo "✅ Version matches: $PKG_VERSION"
 
-      - name: Verify host CLI runtime
-        run: node host/bin/gondolin.ts --help >/dev/null
+      - name: Build package artifacts
+        run: pnpm --filter @earendil-works/gondolin run build
+
+      - name: Verify packaged CLI runtime
+        run: node host/dist/bin/gondolin.js --help >/dev/null
 
       - name: Publish to NPM (with provenance)
         run: |

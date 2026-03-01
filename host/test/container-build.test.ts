@@ -72,7 +72,7 @@ if (args[0] === "run") {
     process.stderr.write("docker stub: build script still references guest/image/build.sh\\n");
     process.exit(2);
   }
-  if (!buildScript.includes("node --experimental-strip-types /work/run-build.mjs")) {
+  if (!buildScript.includes("node /work/run-build.mjs")) {
     process.stderr.write("docker stub: build script does not run the node builder\\n");
     process.exit(3);
   }

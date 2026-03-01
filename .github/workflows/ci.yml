@@ -32,8 +32,11 @@ jobs:
       - name: Typecheck host
         run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
 
-      - name: Verify host CLI runtime
-        run: node host/bin/gondolin.ts --help >/dev/null
+      - name: Build package artifacts
+        run: pnpm --filter @earendil-works/gondolin run build
+
+      - name: Verify packaged CLI runtime
+        run: node host/dist/bin/gondolin.js --help >/dev/null
 
   build-guest:
     name: Build Guest (${{ matrix.arch }})

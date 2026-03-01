@@ -7,6 +7,7 @@ import type { BuildConfig } from "./config.ts";
 import {
   detectContainerRuntime,
   runCommand,
+  ensureHostDistBuilt,
   findGuestDir,
   findHostPackageRoot,
   resolveConfigPath,
@@ -38,9 +39,15 @@ export async function buildInContainer(
   if (!hostPkgRoot) {
     throw new Error("Could not locate host package root (package.json)");
   }
-  const hostSrcBuilder = path.join(hostPkgRoot, "src", "build", "index.ts");
-  if (!fs.existsSync(hostSrcBuilder)) {
-    throw new Error(`Host source build entry not found at ${hostSrcBuilder}`);
+  ensureHostDistBuilt(hostPkgRoot, log);
+
+  const hostDistSrcDir = path.join(hostPkgRoot, "dist", "src");
+  const hostDistBuilder = path.join(hostDistSrcDir, "build", "index.js");
+  if (!fs.existsSync(hostDistBuilder)) {
+    throw new Error(
+      `Host dist build not found at ${hostDistBuilder}. ` +
+        "Run `pnpm -C host build` (repo checkout) or reinstall the package.",
+    );
   }
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-build-"));
@@ -119,7 +126,7 @@ export async function buildInContainer(
 
   const runner = `import fs from "node:fs";
 
-import { buildAssets } from "/host-pkg/src/build/index.ts";
+import { buildAssets } from "/host-pkg/dist/src/build/index.js";
 
 async function main() {
   const cfg = JSON.parse(fs.readFileSync("/work/build-config.json", "utf8"));
@@ -151,7 +158,7 @@ apk add --no-cache nodejs zig lz4 cpio e2fsprogs bash
 # Make guest sources discoverable for Zig compilation
 export GONDOLIN_GUEST_SRC=/guest
 
-node --experimental-strip-types /work/run-build.mjs
+node /work/run-build.mjs
 `;
 
   fs.writeFileSync(containerScriptPath, containerScript, { mode: 0o755 });

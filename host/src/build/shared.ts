@@ -191,6 +191,96 @@ export function findHostPackageRoot(): string | null {
   return null;
 }
 
+/** Ensure `dist/` exists for container builds */
+export function ensureHostDistBuilt(
+  hostPkgRoot: string,
+  log: (msg: string) => void,
+): void {
+  const distBuilder = path.join(
+    hostPkgRoot,
+    "dist",
+    "src",
+    "build",
+    "index.js",
+  );
+
+  const runningFromDist =
+    path.basename(import.meta.dirname) === "src" &&
+    path.basename(path.dirname(import.meta.dirname)) === "dist";
+  if (runningFromDist) {
+    return;
+  }
+
+  const tsconfigPath = path.join(hostPkgRoot, "tsconfig.build.json");
+  const postbuildPath = path.join(hostPkgRoot, "scripts", "postbuild.mjs");
+  const tscPath = path.join(
+    hostPkgRoot,
+    "node_modules",
+    "typescript",
+    "bin",
+    "tsc",
+  );
+
+  if (!fs.existsSync(tsconfigPath)) {
+    return;
+  }
+
+  if (!fs.existsSync(tscPath)) {
+    if (fs.existsSync(distBuilder)) {
+      return;
+    }
+    throw new Error(
+      `Cannot build host dist output: typescript not found at ${tscPath}. ` +
+        "Run `pnpm install` and then `pnpm -C host build`.",
+    );
+  }
+
+  log("Building host dist output (tsc) for container build...");
+
+  try {
+    execFileSync(process.execPath, [tscPath, "-p", tsconfigPath], {
+      cwd: hostPkgRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+
+    if (fs.existsSync(postbuildPath)) {
+      execFileSync(process.execPath, [postbuildPath], {
+        cwd: hostPkgRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+      });
+    }
+  } catch (err) {
+    const e = err as {
+      stdout?: unknown;
+      stderr?: unknown;
+      status?: unknown;
+    };
+
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+
+    throw new Error(
+      `Host dist build failed (exit ${String(e.status ?? "?")}).\n` +
+        `Build command: ${process.execPath} ${tscPath} -p ${tsconfigPath}` +
+        (fs.existsSync(postbuildPath)
+          ? ` && ${process.execPath} ${postbuildPath}`
+          : "") +
+        "\n" +
+        (stdout || stderr
+          ? `--- build output ---\n${stdout}${stderr}`
+          : "(no build output captured)"),
+    );
+  }
+
+  if (!fs.existsSync(distBuilder)) {
+    throw new Error(
+      `Host dist build failed: ${distBuilder} not found after tsc run`,
+    );
+  }
+}
+
 export type SandboxBinaryPaths = {
   sandboxdPath: string;
   sandboxfsPath: string;
