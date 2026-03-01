@@ -504,6 +504,85 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
   }
 });
 
+test("images: ensureImageSelector resolves build id via ref sources when builds map is empty", async () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const prevRegistryUrl = process.env.GONDOLIN_IMAGE_REGISTRY_URL;
+  process.env.GONDOLIN_IMAGE_REGISTRY_URL =
+    "https://example.invalid/builtin-image-registry.json";
+  const prevFetch = (globalThis as any).fetch;
+
+  const assets = createFakeAssets("x86_64");
+  const archivePath = path.join(
+    os.tmpdir(),
+    `gondolin-image-build-id-${Date.now()}.tar.gz`,
+  );
+
+  try {
+    child_process.execFileSync(
+      "tar",
+      [
+        "-czf",
+        archivePath,
+        "manifest.json",
+        "vmlinuz-virt",
+        "initramfs.cpio.lz4",
+        "rootfs.ext4",
+      ],
+      { cwd: assets.dir, stdio: "pipe" },
+    );
+
+    const registry = {
+      schema: 1,
+      refs: {
+        "alpine-base:latest": {
+          x86_64: {
+            url: "https://example.invalid/assets/alpine-base-latest-x86_64.tar.gz",
+          },
+        },
+      },
+      builds: {},
+    };
+
+    const archiveData = fs.readFileSync(archivePath);
+    (globalThis as any).fetch = async (url: string) => {
+      if (url.includes("builtin-image-registry.json")) {
+        return new Response(JSON.stringify(registry), {
+          status: 200,
+          headers: { etag: '"test-build-id"' },
+        });
+      }
+      if (url.endsWith("alpine-base-latest-x86_64.tar.gz")) {
+        return new Response(archiveData, { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const resolved = await ensureImageSelector(assets.buildId, "x86_64");
+    assert.equal(resolved.source, "build-id");
+    assert.equal(resolved.buildId, assets.buildId);
+
+    const refs = listImageRefs();
+    assert.equal(refs[0]?.reference, "alpine-base:latest");
+    assert.equal(refs[0]?.targets.x86_64, assets.buildId);
+  } finally {
+    (globalThis as any).fetch = prevFetch;
+
+    if (prevRegistryUrl === undefined) {
+      delete process.env.GONDOLIN_IMAGE_REGISTRY_URL;
+    } else {
+      process.env.GONDOLIN_IMAGE_REGISTRY_URL = prevRegistryUrl;
+    }
+
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+    fs.rmSync(archivePath, { force: true });
+  }
+});
+
 test("images: sandbox server options accept image refs", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),

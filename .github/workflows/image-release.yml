@@ -34,12 +34,19 @@ jobs:
             IMAGE_NAME="${{ github.event.inputs.image_name }}"
             IMAGE_TAG="${{ github.event.inputs.image_tag }}"
             SOURCE_REF="${{ github.event.inputs.source_ref }}"
-            RELEASE_TAG="image-${IMAGE_NAME}-${IMAGE_TAG}"
+            RELEASE_TAG="image-${IMAGE_NAME}--${IMAGE_TAG}"
           else
             RELEASE_TAG="${GITHUB_REF#refs/tags/}"
             REST="${RELEASE_TAG#image-}"
-            IMAGE_TAG="${REST##*-}"
-            IMAGE_NAME="${REST%-${IMAGE_TAG}}"
+
+            if [[ "$REST" != *"--"* ]]; then
+              echo "Invalid image release tag '$RELEASE_TAG'"
+              echo "Expected format: image-<name>--<tag>"
+              exit 1
+            fi
+
+            IMAGE_NAME="${REST%%--*}"
+            IMAGE_TAG="${REST#*--}"
             SOURCE_REF="${GITHUB_SHA}"
           fi
 

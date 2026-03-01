@@ -70,6 +70,22 @@ type ParsedImageRef = {
   canonical: string;
 };
 
+type ImageResolutionErrorCode =
+  | "object_not_found"
+  | "ref_not_found"
+  | "ref_arch_not_found";
+
+class ImageResolutionError extends Error {
+  /** stable resolution error code */
+  readonly code: ImageResolutionErrorCode;
+
+  constructor(code: ImageResolutionErrorCode, message: string) {
+    super(message);
+    this.name = "ImageResolutionError";
+    this.code = code;
+  }
+}
+
 type RegistryImageSource = {
   /** downloadable archive url */
   url: string;
@@ -248,7 +264,8 @@ function ensureImageObjectExists(buildId: string): string {
 
   const objectDir = getImageObjectDirectory(canonicalBuildId);
   if (!fs.existsSync(objectDir)) {
-    throw new Error(
+    throw new ImageResolutionError(
+      "object_not_found",
       `image object not found for buildId ${canonicalBuildId} (expected ${objectDir})`,
     );
   }
@@ -637,8 +654,16 @@ function resolveBuildIdFromRef(
     };
   }
 
+  if (available.length === 0) {
+    throw new ImageResolutionError(
+      "ref_not_found",
+      `image ref not found: ${parsedRef.canonical}`,
+    );
+  }
+
   const availableArchs = available.map(([name]) => name).join(", ") || "none";
-  throw new Error(
+  throw new ImageResolutionError(
+    "ref_arch_not_found",
     `image ref '${parsedRef.canonical}' has no target for ${requestedArch} (available: ${availableArchs})`,
   );
 }
@@ -1043,6 +1068,15 @@ async function importImageFromSource(
   }
 }
 
+type RegistryRefSourceCandidate = {
+  /** canonical image ref */
+  reference: string;
+  /** candidate architecture */
+  arch: ImageArch;
+  /** candidate source metadata */
+  source: RegistryImageSource;
+};
+
 function resolveRegistrySourceForRef(
   registry: BuiltinImageRegistry,
   reference: string,
@@ -1086,16 +1120,75 @@ function resolveRegistrySourceForRef(
   );
 }
 
+function collectRegistryRefSourceCandidates(
+  registry: BuiltinImageRegistry,
+): RegistryRefSourceCandidate[] {
+  const out: RegistryRefSourceCandidate[] = [];
+  for (const [reference, archMap] of Object.entries(registry.refs)) {
+    for (const [archKey, source] of Object.entries(archMap)) {
+      const arch = normalizeImageArch(archKey);
+      if (!arch || !source) continue;
+      out.push({
+        reference,
+        arch,
+        source,
+      });
+    }
+  }
+  return out;
+}
+
+async function importBuildIdFromRegistryRefs(
+  registry: BuiltinImageRegistry,
+  buildId: string,
+): Promise<ImportedImage> {
+  const candidates = collectRegistryRefSourceCandidates(registry)
+    .filter((candidate) => {
+      return (
+        candidate.source.buildId === undefined ||
+        candidate.source.buildId === buildId
+      );
+    })
+    .sort((a, b) => {
+      const aScore = a.source.buildId === buildId ? 0 : 1;
+      const bScore = b.source.buildId === buildId ? 0 : 1;
+      return aScore - bScore;
+    });
+
+  const seenUrls = new Set<string>();
+  let lastError: unknown = null;
+
+  for (const candidate of candidates) {
+    if (seenUrls.has(candidate.source.url)) continue;
+    seenUrls.add(candidate.source.url);
+
+    try {
+      const imported = await importImageFromSource(candidate.source, buildId);
+      setImageRef(candidate.reference, imported.buildId, candidate.arch);
+      return imported;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw new Error(
+      `image build id not found in builtin registry: ${buildId} (last error: ${lastError.message})`,
+    );
+  }
+
+  throw new Error(`image build id not found in builtin registry: ${buildId}`);
+}
+
 function isExpectedLocalImageMiss(error: unknown): boolean {
-  if (!(error instanceof Error)) {
+  if (!(error instanceof ImageResolutionError)) {
     return false;
   }
 
-  const message = error.message;
   return (
-    message.startsWith("image object not found for buildId ") ||
-    message.startsWith("image ref not found: ") ||
-    message.includes(" has no target for ")
+    error.code === "object_not_found" ||
+    error.code === "ref_not_found" ||
+    error.code === "ref_arch_not_found"
   );
 }
 
@@ -1131,13 +1224,12 @@ export async function ensureImageSelector(
   if (isBuildId(trimmed)) {
     const buildId = normalizeImageBuildId(trimmed);
     const source = registry.builds[buildId];
-    if (!source) {
-      throw new Error(
-        `image build id not found in builtin registry: ${buildId}`,
-      );
+    if (source) {
+      await importImageFromSource({ ...source, buildId }, buildId);
+      return resolveImageSelector(buildId, arch);
     }
 
-    await importImageFromSource({ ...source, buildId }, buildId);
+    await importBuildIdFromRegistryRefs(registry, buildId);
     return resolveImageSelector(buildId, arch);
   }
 
