@@ -230,7 +230,7 @@ jobs:
         run: |
           NODE_BIN="$(node -p 'process.execPath')"
           make -C guest test NODE="$NODE_BIN"
-          make -C host test
+          make -C host test NODE="$NODE_BIN"
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
