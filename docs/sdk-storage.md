@@ -49,6 +49,10 @@ Build-id selectors (`uuid`) are resolved locally first and only downloaded from
 the builtin registry when that registry has an explicit `builds[buildId]`
 mapping.
 
+Builtin registry entries are normalized: `refs[name:tag][arch]` stores a build
+id, and `builds[buildId]` stores the downloadable source metadata (`url`,
+optional `sha256`, optional `arch`).
+
 Check asset status programmatically:
 
 ```ts

@@ -104,8 +104,6 @@ type RegistryImageSource = {
   url: string;
   /** expected archive checksum (`sha256` hex) */
   sha256?: string;
-  /** expected imported build id */
-  buildId?: string;
   /** expected imported architecture */
   arch?: ImageArch;
 };
@@ -113,8 +111,8 @@ type RegistryImageSource = {
 type BuiltinImageRegistry = {
   /** registry schema version */
   schema: typeof BUILTIN_IMAGE_REGISTRY_SCHEMA;
-  /** named refs mapped by architecture */
-  refs: Record<string, Partial<Record<ImageArch, RegistryImageSource>>>;
+  /** named refs mapped by architecture to build ids */
+  refs: Record<string, Partial<Record<ImageArch, string>>>;
   /** build-id keyed sources */
   builds: Record<string, RegistryImageSource>;
 };
@@ -790,14 +788,8 @@ function parseRegistrySource(
   where: string,
   baseUrl: URL,
 ): RegistryImageSource {
-  if (typeof value === "string") {
-    return {
-      url: new URL(value, baseUrl).toString(),
-    };
-  }
-
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`invalid ${where}: expected string or object`);
+    throw new Error(`invalid ${where}: expected object`);
   }
 
   const rec = value as Record<string, unknown>;
@@ -816,13 +808,6 @@ function parseRegistrySource(
       );
     }
     out.sha256 = rec.sha256;
-  }
-
-  if (rec.buildId !== undefined) {
-    if (typeof rec.buildId !== "string") {
-      throw new Error(`invalid ${where}.buildId: expected string`);
-    }
-    out.buildId = normalizeImageBuildId(rec.buildId);
   }
 
   if (rec.arch !== undefined) {
@@ -856,14 +841,28 @@ function parseBuiltinRegistry(
 
   const baseUrl = new URL(sourceUrl);
 
+  if (
+    !rec.builds ||
+    typeof rec.builds !== "object" ||
+    Array.isArray(rec.builds)
+  ) {
+    throw new Error("invalid builtin image registry: builds must be an object");
+  }
+
+  const builds: Record<string, RegistryImageSource> = {};
+  for (const [buildId, value] of Object.entries(
+    rec.builds as Record<string, unknown>,
+  )) {
+    const canonical = normalizeImageBuildId(buildId);
+    const source = parseRegistrySource(value, `builds['${buildId}']`, baseUrl);
+    builds[canonical] = source;
+  }
+
   if (!rec.refs || typeof rec.refs !== "object" || Array.isArray(rec.refs)) {
     throw new Error("invalid builtin image registry: refs must be an object");
   }
 
-  const refs: Record<
-    string,
-    Partial<Record<ImageArch, RegistryImageSource>>
-  > = {};
+  const refs: Record<string, Partial<Record<ImageArch, string>>> = {};
   for (const [reference, archMap] of Object.entries(
     rec.refs as Record<string, unknown>,
   )) {
@@ -876,7 +875,7 @@ function parseBuiltinRegistry(
       throw new Error(`invalid registry ref '${reference}': expected object`);
     }
 
-    const mapped: Partial<Record<ImageArch, RegistryImageSource>> = {};
+    const mapped: Partial<Record<ImageArch, string>> = {};
     for (const [archKey, value] of Object.entries(
       archMap as Record<string, unknown>,
     )) {
@@ -887,47 +886,29 @@ function parseBuiltinRegistry(
         );
       }
 
-      mapped[arch] = parseRegistrySource(
-        value,
-        `refs['${reference}']['${archKey}']`,
-        baseUrl,
-      );
+      if (typeof value !== "string") {
+        throw new Error(
+          `invalid refs['${reference}']['${archKey}']: expected build id string`,
+        );
+      }
+
+      const buildId = normalizeImageBuildId(value);
+      const buildSource = builds[buildId];
+      if (!buildSource) {
+        throw new Error(
+          `invalid refs['${reference}']['${archKey}']: unknown build id ${buildId}`,
+        );
+      }
+      if (buildSource.arch && buildSource.arch !== arch) {
+        throw new Error(
+          `invalid refs['${reference}']['${archKey}']: arch ${arch} does not match build arch ${buildSource.arch}`,
+        );
+      }
+
+      mapped[arch] = buildId;
     }
 
     refs[parsedRef.canonical] = mapped;
-  }
-
-  const builds: Record<string, RegistryImageSource> = {};
-  if (rec.builds !== undefined) {
-    if (
-      !rec.builds ||
-      typeof rec.builds !== "object" ||
-      Array.isArray(rec.builds)
-    ) {
-      throw new Error(
-        "invalid builtin image registry: builds must be an object",
-      );
-    }
-
-    for (const [buildId, value] of Object.entries(
-      rec.builds as Record<string, unknown>,
-    )) {
-      const canonical = normalizeImageBuildId(buildId);
-      const source = parseRegistrySource(
-        value,
-        `builds['${buildId}']`,
-        baseUrl,
-      );
-      if (source.buildId && source.buildId !== canonical) {
-        throw new Error(
-          `invalid registry build '${buildId}': buildId mismatch (${source.buildId})`,
-        );
-      }
-      builds[canonical] = {
-        ...source,
-        buildId: canonical,
-      };
-    }
   }
 
   return {
@@ -1267,12 +1248,6 @@ async function importImageFromSource(
       );
     }
 
-    if (source.buildId && imported.buildId !== source.buildId) {
-      throw new Error(
-        `downloaded image buildId mismatch\n  expected: ${source.buildId}\n  got:      ${imported.buildId}\n  source:   ${source.url}`,
-      );
-    }
-
     if (expectedBuildId && imported.buildId !== expectedBuildId) {
       throw new Error(
         `downloaded image buildId mismatch\n  expected: ${expectedBuildId}\n  got:      ${imported.buildId}\n  source:   ${source.url}`,
@@ -1290,8 +1265,8 @@ function resolveRegistrySourceForRef(
   reference: string,
   arch?: ImageArch,
 ): {
-  source: RegistryImageSource;
-  requestedArch: ImageArch;
+  buildId: string;
+  resolvedArch: ImageArch;
 } {
   const parsedRef = parseImageRef(reference);
   const entries = registry.refs[parsedRef.canonical];
@@ -1302,23 +1277,26 @@ function resolveRegistrySourceForRef(
   }
 
   const requestedArch = normalizeImageArch(arch) ?? defaultImageArch();
-  const exact = entries[requestedArch];
-  if (exact) {
-    return { source: exact, requestedArch };
+  const exactBuildId = entries[requestedArch];
+  if (exactBuildId) {
+    return {
+      buildId: exactBuildId,
+      resolvedArch: requestedArch,
+    };
   }
 
   const available = Object.entries(entries).filter(
-    (pair): pair is [ImageArch, RegistryImageSource] => {
+    (pair): pair is [ImageArch, string] => {
       const [name, value] = pair;
-      return normalizeImageArch(name) !== null && value !== undefined;
+      return normalizeImageArch(name) !== null && typeof value === "string";
     },
   );
 
   if (available.length === 1) {
-    const [, source] = available[0]!;
+    const [resolvedArch, buildId] = available[0]!;
     return {
-      source,
-      requestedArch,
+      buildId,
+      resolvedArch,
     };
   }
 
@@ -1378,28 +1356,33 @@ export async function ensureImageSelector(
       );
     }
 
-    await importImageFromSource({ ...source, buildId }, buildId, buildId);
+    await importImageFromSource(source, buildId, buildId);
     return resolveImageSelector(buildId, arch);
   }
 
   const parsedRef = parseImageRef(trimmed);
-  const { source, requestedArch } = resolveRegistrySourceForRef(
+  const { buildId, resolvedArch } = resolveRegistrySourceForRef(
     registry,
     parsedRef.canonical,
     arch,
   );
 
+  const source = registry.builds[buildId];
+  if (!source) {
+    throw new Error(
+      `image ref '${parsedRef.canonical}' points to unknown registry build id: ${buildId}`,
+    );
+  }
+
   const imported = await importImageFromSource(
     source,
-    undefined,
+    buildId,
     parsedRef.canonical,
   );
-  if (source === registry.refs[parsedRef.canonical]?.[requestedArch]) {
-    if (imported.arch !== requestedArch) {
-      throw new Error(
-        `registry source for '${parsedRef.canonical}' (${requestedArch}) resolved to ${imported.arch}`,
-      );
-    }
+  if (imported.arch !== resolvedArch) {
+    throw new Error(
+      `registry ref '${parsedRef.canonical}' (${resolvedArch}) resolved to ${imported.arch}`,
+    );
   }
 
   setImageRef(parsedRef.canonical, imported.buildId, imported.arch);

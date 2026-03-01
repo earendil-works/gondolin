@@ -307,9 +307,12 @@ jobs:
             throw new Error(`unsupported builtin-image-registry schema: ${registry.schema}`);
           }
 
-          registry.refs = registry.refs && typeof registry.refs === 'object' ? registry.refs : {};
-          registry.builds =
-            registry.builds && typeof registry.builds === 'object' ? registry.builds : {};
+          if (!registry.refs || typeof registry.refs !== 'object' || Array.isArray(registry.refs)) {
+            throw new Error('invalid builtin-image-registry refs');
+          }
+          if (!registry.builds || typeof registry.builds !== 'object' || Array.isArray(registry.builds)) {
+            throw new Error('invalid builtin-image-registry builds');
+          }
 
           const loadArchMeta = (arch) => {
             const file = `gondolin-image-${imageName}-${imageTag}-${arch}.tar.gz.meta.json`;
@@ -327,16 +330,8 @@ jobs:
           const x86_64 = loadArchMeta('x86_64');
 
           const refValue = {
-            aarch64: {
-              buildId: aarch64.buildId,
-              url: aarch64.url,
-              sha256: aarch64.sha256,
-            },
-            x86_64: {
-              buildId: x86_64.buildId,
-              url: x86_64.url,
-              sha256: x86_64.sha256,
-            },
+            aarch64: aarch64.buildId,
+            x86_64: x86_64.buildId,
           };
 
           registry.refs[`${imageName}:${imageTag}`] = refValue;

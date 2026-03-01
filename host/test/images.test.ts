@@ -509,13 +509,15 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
       schema: 1,
       refs: {
         "alpine-base:latest": {
-          x86_64: {
-            url: "https://example.invalid/assets/alpine-base-latest-x86_64.tar.gz",
-            buildId: assets.buildId,
-          },
+          x86_64: assets.buildId,
         },
       },
-      builds: {},
+      builds: {
+        [assets.buildId]: {
+          arch: "x86_64",
+          url: "https://example.invalid/assets/alpine-base-latest-x86_64.tar.gz",
+        },
+      },
     };
 
     const archiveData = fs.readFileSync(archivePath);
@@ -568,13 +570,7 @@ test("images: ensureImageSelector fails fast for build id when builds metadata i
   try {
     const registry = {
       schema: 1,
-      refs: {
-        "alpine-base:latest": {
-          x86_64: {
-            url: "https://example.invalid/assets/alpine-base-latest-x86_64.tar.gz",
-          },
-        },
-      },
+      refs: {},
       builds: {},
     };
 
