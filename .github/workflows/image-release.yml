@@ -1,0 +1,240 @@
+name: Image Release
+
+on:
+  push:
+    tags:
+      - "image-*"
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: "Image name (e.g. alpine-base)"
+        required: true
+      image_tag:
+        description: "Image tag (e.g. 1.0.0)"
+        required: true
+      source_ref:
+        description: "Git ref to build from (branch/tag/sha)"
+        required: false
+        default: "main"
+
+jobs:
+  prepare:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+    steps:
+      - name: Resolve metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_NAME="${{ github.event.inputs.image_name }}"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+            SOURCE_REF="${{ github.event.inputs.source_ref }}"
+            RELEASE_TAG="image-${IMAGE_NAME}-${IMAGE_TAG}"
+          else
+            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+            REST="${RELEASE_TAG#image-}"
+            IMAGE_TAG="${REST##*-}"
+            IMAGE_NAME="${REST%-${IMAGE_TAG}}"
+            SOURCE_REF="${GITHUB_SHA}"
+          fi
+
+          if [ -z "$IMAGE_NAME" ] || [ -z "$IMAGE_TAG" ]; then
+            echo "Invalid image release metadata"
+            exit 1
+          fi
+
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
+
+  build-image:
+    name: Build Image (${{ matrix.arch }})
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            qemu: qemu-system-arm
+            zig_target: aarch64-linux-musl
+            archive_arch: aarch64
+          - arch: x86_64
+            qemu: qemu-system-x86
+            zig_target: x86_64-linux-musl
+            archive_arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.qemu }} lz4
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          pnpm install
+
+      - name: Build guest binaries
+        run: |
+          cd guest
+          zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.zig_target }}
+
+      - name: Build guest image
+        run: |
+          NODE_BIN="$(node -p 'process.execPath')"
+          cd guest
+          ALPINE_ARCH=${{ matrix.arch }} make build NODE="$NODE_BIN"
+
+      - name: Package image asset
+        run: |
+          ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
+          cd guest/image/out
+          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+
+      - name: Compute sha256 + metadata
+        run: |
+          ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
+          SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          echo "$SHA256  $ARCHIVE" > "$ARCHIVE.sha256"
+
+          BUILD_ID="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('guest/image/out/manifest.json','utf8'));process.stdout.write(m.buildId||'')")"
+          if [ -z "$BUILD_ID" ]; then
+            echo "manifest.json missing buildId"
+            exit 1
+          fi
+
+          cat > "$ARCHIVE.meta.json" <<JSON
+          {
+            "arch": "${{ matrix.archive_arch }}",
+            "buildId": "$BUILD_ID",
+            "sha256": "$SHA256"
+          }
+          JSON
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.archive_arch }}
+          path: |
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz.sha256
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz.meta.json
+          retention-days: 7
+
+  publish-image-release:
+    name: Publish Image Release
+    needs: [prepare, build-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: .
+
+      - name: Flatten artifacts
+        run: |
+          find . -type f -name '*.tar.gz' -exec mv {} . \;
+          find . -type f -name '*.tar.gz.sha256' -exec mv {} . \;
+
+      - name: Create image release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: Image ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.image_tag, '-') }}
+          files: |
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.sha256
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.meta.json
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz.sha256
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz.meta.json
+          body: |
+            ## Gondolin image: `${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}`
+
+            Update `builtin-image-registry.json` with URLs from this release.
+
+  registry-snippet:
+    name: Registry snippet
+    needs: [prepare, publish-image-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: .
+
+      - name: Flatten metadata artifacts
+        run: |
+          find . -type f -name '*.tar.gz.meta.json' -exec mv {} . \;
+
+      - name: Print snippet
+        run: |
+          IMAGE_NAME="${{ needs.prepare.outputs.image_name }}"
+          IMAGE_TAG="${{ needs.prepare.outputs.image_tag }}"
+          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+
+          AARCH64_URL="https://github.com/${OWNER}/${REPO}/releases/download/${RELEASE_TAG}/gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-aarch64.tar.gz"
+          X86_URL="https://github.com/${OWNER}/${REPO}/releases/download/${RELEASE_TAG}/gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-x86_64.tar.gz"
+
+          AARCH64_META="gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-aarch64.tar.gz.meta.json"
+          X86_META="gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-x86_64.tar.gz.meta.json"
+
+          AARCH64_BUILD_ID="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.buildId)" "$AARCH64_META")"
+          AARCH64_SHA256="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.sha256)" "$AARCH64_META")"
+
+          X86_BUILD_ID="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.buildId)" "$X86_META")"
+          X86_SHA256="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.sha256)" "$X86_META")"
+
+          {
+            echo "### builtin-image-registry.json snippet"
+            echo
+            echo "Update both \`${IMAGE_NAME}:${IMAGE_TAG}\` and (optionally) \`${IMAGE_NAME}:latest\`."
+            echo
+            echo '\`\`\`json'
+            cat <<JSON
+{
+  "refs": {
+    "${IMAGE_NAME}:${IMAGE_TAG}": {
+      "aarch64": { "buildId": "${AARCH64_BUILD_ID}", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
+      "x86_64": { "buildId": "${X86_BUILD_ID}", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
+    },
+    "${IMAGE_NAME}:latest": {
+      "aarch64": { "buildId": "${AARCH64_BUILD_ID}", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
+      "x86_64": { "buildId": "${X86_BUILD_ID}", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
+    }
+  },
+  "builds": {
+    "${AARCH64_BUILD_ID}": { "arch": "aarch64", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
+    "${X86_BUILD_ID}": { "arch": "x86_64", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
+  }
+}
+JSON
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"

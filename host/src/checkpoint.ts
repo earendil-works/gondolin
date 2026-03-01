@@ -10,15 +10,14 @@ import {
 } from "./qemu/img.ts";
 
 import {
-  getAssetDirectory,
   loadAssetManifest,
   loadGuestAssets,
   type GuestAssets,
 } from "./assets.ts";
 import {
+  ensureImageSelector,
   getImageObjectDirectory,
   normalizeImageBuildId,
-  resolveImageSelector,
 } from "./images.ts";
 import type { VMOptions } from "./vm/types.ts";
 
@@ -163,47 +162,6 @@ function findCommonAssetDir(assets: GuestAssets): string | null {
   return kernelDir;
 }
 
-function scanForBuildId(cacheRoot: string, buildId: string): string | null {
-  const root = path.resolve(cacheRoot);
-  if (!fs.existsSync(root)) return null;
-
-  const maxDirs = 5000;
-  const maxDepth = 6;
-  const queue: Array<{ dir: string; depth: number }> = [
-    { dir: root, depth: 0 },
-  ];
-  let visited = 0;
-
-  while (queue.length) {
-    const { dir, depth } = queue.shift()!;
-    visited++;
-    if (visited > maxDirs) return null;
-
-    try {
-      const manifest = loadAssetManifest(dir);
-      if (manifest?.buildId === buildId) {
-        // Ensure this looks like an actual asset directory
-        loadGuestAssets(dir);
-        return dir;
-      }
-
-      if (depth >= maxDepth) continue;
-
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        // Avoid scanning checkpoints (can contain huge files).
-        if (entry.name === "checkpoints") continue;
-        queue.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
-      }
-    } catch {
-      // ignore unreadable dirs
-    }
-  }
-
-  return null;
-}
-
 function devGuestOutDirs(): string[] {
   // Try to mirror host/src/assets.ts dev resolution. Keep this local to avoid
   // exporting more internal APIs.
@@ -250,31 +208,18 @@ function resolveAssetDirByBuildId(buildId: string): {
     if (found) return { assetDir: found, searched };
   }
 
-  // 3) Default asset directory (package version cache)
-  const defaultDir = getAssetDirectory();
-  const foundDefault = tryDir("default", defaultDir);
-  if (foundDefault) return { assetDir: foundDefault, searched };
-
-  // 4) Local image object store
+  // 3) Local image object store
   const objectDir = getImageObjectDirectory(canonicalBuildId);
   const foundObject = tryDir("image-object", objectDir);
   if (foundObject) return { assetDir: foundObject, searched };
-
-  // 5) Cache scan
-  const cacheRoot = path.join(cacheBaseDir(), "gondolin");
-  searched.push(`cache-scan=${cacheRoot}`);
-  const found = scanForBuildId(cacheRoot, canonicalBuildId);
-  if (found) {
-    return { assetDir: found, searched };
-  }
 
   const msg =
     `Unable to locate guest assets for checkpoint buildId=${canonicalBuildId}\n` +
     `Searched:\n` +
     searched.map((x) => `  - ${x}`).join("\n") +
     `\n\n` +
-    `To resume this checkpoint, pass the guest assets directory explicitly:\n` +
-    `  checkpoint.resume({ sandbox: { imagePath: \"/path/to/guest/assets\" } })`;
+    `Fix: pull this build id (or any ref pointing to it), then retry resume\n` +
+    `  gondolin image inspect ${canonicalBuildId}`;
   throw new Error(msg);
 }
 
@@ -295,16 +240,16 @@ function ensureCheckpointBackedByRootfs(
   rebaseQcow2InPlace(checkpointDiskPath, desired, "raw");
 }
 
-function resolveGuestAssetsForResume(
+async function resolveGuestAssetsForResume(
   requiredBuildId: string,
   options: VMOptions,
-): { imagePath: any; assets: GuestAssets } {
+): Promise<{ imagePath: any; assets: GuestAssets }> {
   const canonicalRequiredBuildId = normalizeImageBuildId(requiredBuildId);
   const userImagePath = options.sandbox?.imagePath;
 
   if (userImagePath !== undefined) {
     if (typeof userImagePath === "string") {
-      const resolved = resolveImageSelector(userImagePath);
+      const resolved = await ensureImageSelector(userImagePath);
       const assetDir = path.resolve(resolved.assetDir);
       const manifest = loadAssetManifest(assetDir);
       if (!manifest?.buildId) {
@@ -367,7 +312,16 @@ function resolveGuestAssetsForResume(
     );
   }
 
-  const { assetDir } = resolveAssetDirByBuildId(canonicalRequiredBuildId);
+  // Fast path: already present locally.
+  try {
+    const { assetDir } = resolveAssetDirByBuildId(canonicalRequiredBuildId);
+    return { imagePath: assetDir, assets: loadGuestAssets(assetDir) };
+  } catch {
+    // Fall through to builtin registry pull by build id.
+  }
+
+  const ensured = await ensureImageSelector(canonicalRequiredBuildId);
+  const assetDir = path.resolve(ensured.assetDir);
   return { imagePath: assetDir, assets: loadGuestAssets(assetDir) };
 }
 
@@ -441,7 +395,7 @@ export class VmCheckpoint {
       throw new Error(`checkpoint disk not found: ${checkpointDisk}`);
     }
 
-    const resolved = resolveGuestAssetsForResume(
+    const resolved = await resolveGuestAssetsForResume(
       this.data.guestAssetBuildId,
       options,
     );

@@ -109,11 +109,11 @@ If you do not pass `sandbox.imagePath`, resume will try (in order):
 
 1. `GONDOLIN_GUEST_DIR` (if set)
 2. Local development checkout (`guest/image/out`)
-3. The default asset directory (download cache used by `VM.create()`)
-4. A best-effort scan under `~/.cache/gondolin/**` for a matching `manifest.json`
+3. Local image object store (`~/.cache/gondolin/images/objects/<buildId>`)
+4. Builtin image registry lookup by build id (with local import on success)
 
 If resolution still fails, the error includes the required build id and a
-remediation: pass `sandbox.imagePath`.
+remediation hint.
 
 ## qcow2 Backing File Rebasing
 

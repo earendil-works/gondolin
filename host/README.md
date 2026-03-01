@@ -47,8 +47,8 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
-Guest images (~200MB) are automatically downloaded on first run and cached in
-`~/.cache/gondolin/`.
+Guest images (~200MB) are automatically resolved on first run via
+`builtin-image-registry.json` and cached in `~/.cache/gondolin/images/`.
 
 ## Hello world
 

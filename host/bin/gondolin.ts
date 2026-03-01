@@ -29,9 +29,9 @@ import {
 import { buildAssets, verifyAssets } from "../src/build/index.ts";
 import { loadAssetManifest } from "../src/assets.ts";
 import {
+  ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
-  resolveImageSelector,
   setImageRef,
   tagImage,
   type ImageArch,
@@ -2527,7 +2527,14 @@ function imageUsage() {
   console.log("      Create or update a ref to point at an image");
   console.log();
   console.log("  inspect <SELECTOR> [--arch aarch64|x86_64]");
-  console.log("      Show details for a path, build id, or ref");
+  console.log(
+    "      Show details for a path, build id, or ref (pulls from registry if needed)",
+  );
+  console.log();
+  console.log("  pull <SELECTOR> [--arch aarch64|x86_64]");
+  console.log(
+    "      Ensure a selector is available locally via the builtin registry",
+  );
 }
 
 function parseImageArchOption(value: string): ImageArch {
@@ -2695,7 +2702,7 @@ async function runImage(argv: string[]) {
         throw new Error("image inspect requires <SELECTOR>");
       }
 
-      const resolved = resolveImageSelector(selector, arch);
+      const resolved = await ensureImageSelector(selector, arch);
       const manifest = loadAssetManifest(resolved.assetDir);
 
       console.log(`selector: ${resolved.selector}`);
@@ -2711,6 +2718,49 @@ async function runImage(argv: string[]) {
         console.log(
           `manifest: ${path.join(resolved.assetDir, "manifest.json")}`,
         );
+      }
+      return;
+    }
+
+    case "pull": {
+      let selector: string | undefined;
+      let arch: ImageArch | undefined;
+
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = rest[i]!;
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--arch") {
+          const value = rest[++i];
+          if (!value) {
+            throw new Error("--arch requires a value");
+          }
+          arch = parseImageArchOption(value);
+          continue;
+        }
+
+        if (!selector) {
+          selector = arg;
+          continue;
+        }
+
+        throw new Error(`unexpected argument for image pull: ${arg}`);
+      }
+
+      if (!selector) {
+        throw new Error("image pull requires <SELECTOR>");
+      }
+
+      const resolved = await ensureImageSelector(selector, arch);
+      console.log(`Pulled ${resolved.selector}`);
+      console.log(`  assetDir: ${resolved.assetDir}`);
+      if (resolved.buildId) {
+        console.log(`  buildId: ${resolved.buildId}`);
+      }
+      if (resolved.arch) {
+        console.log(`  arch: ${resolved.arch}`);
       }
       return;
     }

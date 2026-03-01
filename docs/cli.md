@@ -30,9 +30,9 @@ gondolin bash
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
 - Node.js >= 18
 
-Guest assets (kernel/initramfs/rootfs, ~200MB) are downloaded automatically on
-first use and cached in `~/.cache/gondolin/`. Alternative you can [build and
-ship your own](./custom-images.md).
+Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
+first use via `builtin-image-registry.json` and cached in
+`~/.cache/gondolin/images/`. Alternative you can [build and ship your own](./custom-images.md).
 
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
@@ -456,6 +456,7 @@ Manage the local image object store and refs:
 gondolin image ls
 gondolin image import ./my-assets --tag default:latest
 gondolin image inspect default:latest
+gondolin image pull alpine-base:latest
 gondolin image tag default:latest tooling:dev
 ```
 
@@ -473,6 +474,14 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 
 - `GONDOLIN_IMAGE_STORE`
   - Override local image store location (default: `~/.cache/gondolin/images`)
+
+- `GONDOLIN_DEFAULT_IMAGE`
+  - Default image selector used by `VM.create()` / `gondolin bash` when no explicit image is set
+  - Default: `alpine-base:latest`
+
+- `GONDOLIN_IMAGE_REGISTRY_URL`
+  - Override builtin image registry JSON URL
+  - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`
 
 - `GONDOLIN_DEBUG`
   - Enable debug logging (see [Debug Logging](./debug.md))

@@ -166,6 +166,7 @@ export {
   getImageObjectDirectory,
   importImageFromDirectory,
   resolveImageSelector,
+  ensureImageSelector,
   listImageRefs,
   setImageRef,
   tagImage,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import child_process from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import test, { afterEach } from "node:test";
 
 import { computeAssetBuildId } from "../src/assets.ts";
 import {
+  ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
   resolveImageSelector,
@@ -341,7 +343,7 @@ test("images: import rejects absolute manifest asset paths", () => {
   }
 });
 
-test("images: setImageRef fails fast on corrupted ref index json", () => {
+test("images: setImageRef stores refs as symlinks", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
   );
@@ -351,40 +353,114 @@ test("images: setImageRef fails fast on corrupted ref index json", () => {
 
   try {
     const imported = importImageFromDirectory(assets.dir);
-    const refsPath = path.join(storeDir, "refs.json");
-    fs.writeFileSync(refsPath, "{not-json");
+    setImageRef("default:latest", imported.buildId, imported.arch);
 
-    assert.throws(
-      () => setImageRef("default:latest", imported.buildId, imported.arch),
-      /failed to parse image ref index/,
-    );
-    assert.equal(fs.readFileSync(refsPath, "utf8"), "{not-json");
+    const refLink = path.join(storeDir, "refs", "default", "latest", "aarch64");
+    assert.equal(fs.lstatSync(refLink).isSymbolicLink(), true);
+
+    const target = fs.readlinkSync(refLink);
+    const resolved = path.resolve(path.dirname(refLink), target);
+    assert.equal(path.resolve(resolved), path.resolve(imported.assetDir));
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
   }
 });
 
-test("images: setImageRef fails fast on invalid ref index schema", () => {
+test("images: resolveImageSelector fails fast on malformed ref links", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
   );
   process.env.GONDOLIN_IMAGE_STORE = storeDir;
 
-  const assets = createFakeAssets("x86_64");
-
   try {
-    const imported = importImageFromDirectory(assets.dir);
-    const refsPath = path.join(storeDir, "refs.json");
-    fs.writeFileSync(refsPath, JSON.stringify({ version: 1, refs: [] }));
+    const refPath = path.join(storeDir, "refs", "default", "latest", "x86_64");
+    fs.mkdirSync(path.dirname(refPath), { recursive: true });
+    fs.writeFileSync(refPath, "not-a-symlink");
 
     assert.throws(
-      () => setImageRef("default:latest", imported.buildId, imported.arch),
-      /refs must be an object/,
+      () => resolveImageSelector("default:latest", "x86_64"),
+      /not a symlink/,
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+});
+
+test("images: ensureImageSelector pulls refs from builtin registry", async () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const prevRegistryUrl = process.env.GONDOLIN_IMAGE_REGISTRY_URL;
+  process.env.GONDOLIN_IMAGE_REGISTRY_URL =
+    "https://example.invalid/builtin-image-registry.json";
+
+  const assets = createFakeAssets("x86_64");
+  const archivePath = path.join(
+    os.tmpdir(),
+    `gondolin-image-${Date.now()}.tar.gz`,
+  );
+
+  try {
+    child_process.execFileSync(
+      "tar",
+      [
+        "-czf",
+        archivePath,
+        "manifest.json",
+        "vmlinuz-virt",
+        "initramfs.cpio.lz4",
+        "rootfs.ext4",
+      ],
+      { cwd: assets.dir, stdio: "pipe" },
+    );
+
+    const registry = {
+      schema: 1,
+      refs: {
+        "alpine-base:latest": {
+          x86_64: {
+            url: "https://example.invalid/assets/alpine-base-latest-x86_64.tar.gz",
+            buildId: assets.buildId,
+          },
+        },
+      },
+      builds: {},
+    };
+
+    const archiveData = fs.readFileSync(archivePath);
+    (globalThis as any).fetch = async (url: string) => {
+      if (url.includes("builtin-image-registry.json")) {
+        return new Response(JSON.stringify(registry), {
+          status: 200,
+          headers: { etag: '"test"' },
+        });
+      }
+      if (url.endsWith("alpine-base-latest-x86_64.tar.gz")) {
+        return new Response(archiveData, { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const resolved = await ensureImageSelector("alpine-base:latest", "x86_64");
+    assert.equal(resolved.source, "ref");
+    assert.equal(resolved.buildId, assets.buildId);
+
+    const refs = listImageRefs();
+    assert.equal(refs[0]?.reference, "alpine-base:latest");
+    assert.equal(refs[0]?.targets.x86_64, assets.buildId);
+  } finally {
+    if (prevRegistryUrl === undefined) {
+      delete process.env.GONDOLIN_IMAGE_REGISTRY_URL;
+    } else {
+      process.env.GONDOLIN_IMAGE_REGISTRY_URL = prevRegistryUrl;
+    }
+
+    fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
+    fs.rmSync(archivePath, { force: true });
   }
 });
 

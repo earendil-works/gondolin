@@ -66,8 +66,8 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
-Guest assets (kernel/initramfs/rootfs, ~200MB) are downloaded automatically on
-first use.
+Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
+first use via `builtin-image-registry.json` and cached locally.
 
 Requirements:
 

@@ -1,19 +1,22 @@
+import child_process from "child_process";
+import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { randomUUID } from "crypto";
 
 import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
-import { getHostNodeArchCached } from "./host/arch.ts";
 import type { Architecture } from "./build/config.ts";
-
-const IMAGE_REF_INDEX_VERSION = 1 as const;
+import { getHostNodeArchCached } from "./host/arch.ts";
 
 const BUILD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+const BUILTIN_IMAGE_REGISTRY_SCHEMA = 1 as const;
+const DEFAULT_IMAGE_REGISTRY_URL =
+  "https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json";
 
 export type ImageArch = Architecture;
 
@@ -31,20 +34,6 @@ export interface LocalImageRef {
   targets: ImageRefTargets;
   /** last update timestamp (`iso 8601`) */
   updatedAt: string;
-}
-
-interface ImageRefIndexEntry {
-  /** build ids mapped by architecture */
-  targets: ImageRefTargets;
-  /** last update timestamp (`iso 8601`) */
-  updatedAt: string;
-}
-
-interface ImageRefIndex {
-  /** index schema version */
-  version: typeof IMAGE_REF_INDEX_VERSION;
-  /** image refs by canonical `name:tag` */
-  refs: Record<string, ImageRefIndexEntry>;
 }
 
 export interface ImportedImage {
@@ -80,6 +69,35 @@ type ParsedImageRef = {
   canonical: string;
 };
 
+type RegistryImageSource = {
+  /** downloadable archive url */
+  url: string;
+  /** expected archive checksum (`sha256` hex) */
+  sha256?: string;
+  /** expected imported build id */
+  buildId?: string;
+  /** expected imported architecture */
+  arch?: ImageArch;
+};
+
+type BuiltinImageRegistry = {
+  /** registry schema version */
+  schema: typeof BUILTIN_IMAGE_REGISTRY_SCHEMA;
+  /** named refs mapped by architecture */
+  refs: Record<string, Partial<Record<ImageArch, RegistryImageSource>>>;
+  /** build-id keyed sources */
+  builds: Record<string, RegistryImageSource>;
+};
+
+type RegistryCache = {
+  /** source registry URL */
+  url: string;
+  /** HTTP etag from the last successful fetch */
+  etag?: string;
+  /** cached registry payload */
+  registry: BuiltinImageRegistry;
+};
+
 function cacheBaseDir(): string {
   return process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
 }
@@ -95,8 +113,20 @@ function imageObjectRootDir(): string {
   return path.join(getImageStoreDirectory(), "objects");
 }
 
-function imageRefIndexPath(): string {
-  return path.join(getImageStoreDirectory(), "refs.json");
+function imageRefRootDir(): string {
+  return path.join(getImageStoreDirectory(), "refs");
+}
+
+function registryCachePath(): string {
+  return path.join(
+    getImageStoreDirectory(),
+    "builtin-image-registry-cache.json",
+  );
+}
+
+function builtinRegistryUrl(): string {
+  const value = process.env.GONDOLIN_IMAGE_REGISTRY_URL?.trim();
+  return value && value.length > 0 ? value : DEFAULT_IMAGE_REGISTRY_URL;
 }
 
 function normalizeImageArch(
@@ -154,132 +184,6 @@ export function normalizeImageBuildId(buildId: string): string {
     throw new Error(`invalid image build id: ${buildId}`);
   }
   return buildId;
-}
-
-function defaultRefIndex(): ImageRefIndex {
-  return {
-    version: IMAGE_REF_INDEX_VERSION,
-    refs: {},
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function validateRefIndex(parsed: unknown, indexPath: string): ImageRefIndex {
-  if (!isRecord(parsed)) {
-    throw new Error(`invalid image ref index at ${indexPath}: expected object`);
-  }
-
-  if (parsed.version !== IMAGE_REF_INDEX_VERSION) {
-    throw new Error(
-      `invalid image ref index at ${indexPath}: unsupported version ${String(parsed.version)}`,
-    );
-  }
-
-  if (!isRecord(parsed.refs)) {
-    throw new Error(
-      `invalid image ref index at ${indexPath}: refs must be an object`,
-    );
-  }
-
-  const refs: Record<string, ImageRefIndexEntry> = {};
-
-  for (const [reference, entry] of Object.entries(parsed.refs)) {
-    if (!isRecord(entry)) {
-      throw new Error(
-        `invalid image ref index at ${indexPath}: ref '${reference}' must be an object`,
-      );
-    }
-
-    let parsedRef: ParsedImageRef;
-    try {
-      parsedRef = parseImageRef(reference);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "invalid ref key";
-      throw new Error(
-        `invalid image ref index at ${indexPath}: invalid ref key '${reference}': ${message}`,
-      );
-    }
-
-    if (parsedRef.canonical !== reference) {
-      throw new Error(
-        `invalid image ref index at ${indexPath}: ref key '${reference}' is not canonical`,
-      );
-    }
-
-    if (!isRecord(entry.targets)) {
-      throw new Error(
-        `invalid image ref index at ${indexPath}: ref '${reference}' targets must be an object`,
-      );
-    }
-
-    if (typeof entry.updatedAt !== "string" || entry.updatedAt.length === 0) {
-      throw new Error(
-        `invalid image ref index at ${indexPath}: ref '${reference}' updatedAt must be a non-empty string`,
-      );
-    }
-
-    const targets: ImageRefTargets = {};
-    for (const [archKey, buildId] of Object.entries(entry.targets)) {
-      const normalizedArch = normalizeImageArch(archKey);
-      if (!normalizedArch) {
-        throw new Error(
-          `invalid image ref index at ${indexPath}: ref '${reference}' has unknown arch '${archKey}'`,
-        );
-      }
-      if (typeof buildId !== "string" || !isBuildId(buildId)) {
-        throw new Error(
-          `invalid image ref index at ${indexPath}: ref '${reference}' has invalid build id for ${normalizedArch}`,
-        );
-      }
-      targets[normalizedArch] = buildId;
-    }
-
-    refs[reference] = {
-      targets,
-      updatedAt: entry.updatedAt,
-    };
-  }
-
-  return {
-    version: IMAGE_REF_INDEX_VERSION,
-    refs,
-  };
-}
-
-function loadRefIndex(): ImageRefIndex {
-  const indexPath = imageRefIndexPath();
-  if (!fs.existsSync(indexPath)) {
-    return defaultRefIndex();
-  }
-
-  const raw = fs.readFileSync(indexPath, "utf8");
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "unknown json parse failure";
-    throw new Error(
-      `failed to parse image ref index at ${indexPath}: ${message}`,
-    );
-  }
-
-  return validateRefIndex(parsed, indexPath);
-}
-
-function saveRefIndex(index: ImageRefIndex): void {
-  const storeDir = getImageStoreDirectory();
-  fs.mkdirSync(storeDir, { recursive: true });
-
-  const indexPath = imageRefIndexPath();
-  const tmpPath = `${indexPath}.tmp-${randomUUID().slice(0, 8)}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(index, null, 2));
-  fs.renameSync(tmpPath, indexPath);
 }
 
 function detectImageArchFromAssetDir(assetDir: string): ImageArch {
@@ -471,6 +375,82 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
   };
 }
 
+function symlinkTargetForRef(reference: string, arch: ImageArch): string {
+  const parsed = parseImageRef(reference);
+  return path.join(imageRefRootDir(), parsed.name, parsed.tag, arch);
+}
+
+function writeRefSymlink(
+  reference: string,
+  arch: ImageArch,
+  objectDir: string,
+): void {
+  const linkPath = symlinkTargetForRef(reference, arch);
+  const linkDir = path.dirname(linkPath);
+  fs.mkdirSync(linkDir, { recursive: true });
+
+  const relativeTarget = path.relative(linkDir, objectDir) || ".";
+  const tmpPath = `${linkPath}.tmp-${randomUUID().slice(0, 8)}`;
+
+  fs.symlinkSync(relativeTarget, tmpPath, "dir");
+  try {
+    fs.renameSync(tmpPath, linkPath);
+  } catch (error) {
+    fs.rmSync(tmpPath, { force: true });
+    throw error;
+  }
+}
+
+function readBuildIdFromRefSymlink(linkPath: string): string {
+  const stat = fs.lstatSync(linkPath);
+  if (!stat.isSymbolicLink()) {
+    throw new Error(`invalid image ref link: ${linkPath} is not a symlink`);
+  }
+
+  const target = fs.readlinkSync(linkPath);
+  const objectDir = path.resolve(path.dirname(linkPath), target);
+  const manifest = loadAssetManifest(objectDir);
+  if (!manifest?.buildId) {
+    throw new Error(
+      `image ref points to object without manifest buildId: ${linkPath} -> ${objectDir}`,
+    );
+  }
+
+  normalizeImageBuildId(manifest.buildId);
+  loadGuestAssets(objectDir);
+  return manifest.buildId;
+}
+
+function readLocalRefTargets(reference: string): {
+  targets: ImageRefTargets;
+  updatedAt: string;
+} {
+  const parsed = parseImageRef(reference);
+  const targets: ImageRefTargets = {};
+  let newestMtime = 0;
+
+  for (const arch of ["aarch64", "x86_64"] as const) {
+    const linkPath = path.join(
+      imageRefRootDir(),
+      parsed.name,
+      parsed.tag,
+      arch,
+    );
+    if (!fs.existsSync(linkPath)) continue;
+
+    const stat = fs.lstatSync(linkPath);
+    newestMtime = Math.max(newestMtime, stat.mtimeMs);
+    targets[arch] = readBuildIdFromRefSymlink(linkPath);
+  }
+
+  const updatedAt =
+    newestMtime > 0
+      ? new Date(newestMtime).toISOString()
+      : new Date(0).toISOString();
+
+  return { targets, updatedAt };
+}
+
 export function setImageRef(
   reference: string,
   buildId: string,
@@ -490,36 +470,100 @@ export function setImageRef(
   }
 
   const parsedRef = parseImageRef(reference);
-  const index = loadRefIndex();
-  const now = new Date().toISOString();
+  writeRefSymlink(parsedRef.canonical, normalizedArch, objectDir);
 
-  const existing = index.refs[parsedRef.canonical];
-  const targets: ImageRefTargets = {
-    ...(existing?.targets ?? {}),
-    [normalizedArch]: buildId,
-  };
-
-  index.refs[parsedRef.canonical] = {
-    targets,
-    updatedAt: now,
-  };
-
-  saveRefIndex(index);
-
+  const { targets, updatedAt } = readLocalRefTargets(parsedRef.canonical);
   return {
     reference: parsedRef.canonical,
     targets,
-    updatedAt: now,
+    updatedAt,
   };
 }
 
+function collectRefSymlinkEntries(root: string): Array<{
+  reference: string;
+  arch: ImageArch;
+  updatedAtMs: number;
+}> {
+  if (!fs.existsSync(root)) return [];
+
+  const entries: Array<{
+    reference: string;
+    arch: ImageArch;
+    updatedAtMs: number;
+  }> = [];
+
+  const queue: string[] = [root];
+  while (queue.length > 0) {
+    const dir = queue.pop()!;
+    const dirEntries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of dirEntries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(full);
+        continue;
+      }
+
+      const normalizedArch = normalizeImageArch(entry.name);
+      if (!normalizedArch) continue;
+
+      const stat = fs.lstatSync(full);
+      if (!stat.isSymbolicLink()) continue;
+
+      const rel = path.relative(root, full);
+      const parts = rel.split(path.sep);
+      if (parts.length < 3) continue;
+
+      const tag = parts[parts.length - 2]!;
+      const name = parts.slice(0, parts.length - 2).join("/");
+      if (!name || !tag) continue;
+
+      try {
+        const parsed = parseImageRef(`${name}:${tag}`);
+        entries.push({
+          reference: parsed.canonical,
+          arch: normalizedArch,
+          updatedAtMs: stat.mtimeMs,
+        });
+      } catch {
+        // ignore invalid ref path entries
+      }
+    }
+  }
+
+  return entries;
+}
+
 export function listImageRefs(): LocalImageRef[] {
-  const index = loadRefIndex();
-  return Object.entries(index.refs)
+  const root = imageRefRootDir();
+  const symlinkEntries = collectRefSymlinkEntries(root);
+  const refs = new Map<
+    string,
+    { targets: ImageRefTargets; updatedAtMs: number }
+  >();
+
+  for (const entry of symlinkEntries) {
+    let current = refs.get(entry.reference);
+    if (!current) {
+      current = { targets: {}, updatedAtMs: 0 };
+      refs.set(entry.reference, current);
+    }
+
+    try {
+      const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
+      current.targets[entry.arch] = readBuildIdFromRefSymlink(linkPath);
+      current.updatedAtMs = Math.max(current.updatedAtMs, entry.updatedAtMs);
+    } catch {
+      // Ignore broken ref links in listing output.
+    }
+  }
+
+  return Array.from(refs.entries())
     .map(([reference, entry]) => ({
       reference,
-      targets: { ...entry.targets },
-      updatedAt: entry.updatedAt,
+      targets: entry.targets,
+      updatedAt: new Date(entry.updatedAtMs || 0).toISOString(),
     }))
     .sort((a, b) => a.reference.localeCompare(b.reference));
 }
@@ -532,20 +576,15 @@ function resolveBuildIdFromRef(
   arch: ImageArch;
 } {
   const parsedRef = parseImageRef(reference);
-  const index = loadRefIndex();
-  const entry = index.refs[parsedRef.canonical];
-
-  if (!entry) {
-    throw new Error(`image ref not found: ${parsedRef.canonical}`);
-  }
+  const local = readLocalRefTargets(parsedRef.canonical);
 
   const requestedArch = normalizeImageArch(arch) ?? defaultImageArch();
-  const exact = entry.targets[requestedArch];
+  const exact = local.targets[requestedArch];
   if (exact) {
     return { buildId: exact, arch: requestedArch };
   }
 
-  const available = Object.entries(entry.targets).filter(
+  const available = Object.entries(local.targets).filter(
     (pair): pair is [ImageArch, string] => {
       const [name, value] = pair;
       return normalizeImageArch(name) !== null && typeof value === "string";
@@ -626,6 +665,442 @@ export function resolveImageSelector(
   };
 }
 
+function parseRegistrySource(
+  value: unknown,
+  where: string,
+  baseUrl: URL,
+): RegistryImageSource {
+  if (typeof value === "string") {
+    return {
+      url: new URL(value, baseUrl).toString(),
+    };
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid ${where}: expected string or object`);
+  }
+
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.url !== "string" || rec.url.length === 0) {
+    throw new Error(`invalid ${where}.url: expected non-empty string`);
+  }
+
+  const out: RegistryImageSource = {
+    url: new URL(rec.url, baseUrl).toString(),
+  };
+
+  if (rec.sha256 !== undefined) {
+    if (typeof rec.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(rec.sha256)) {
+      throw new Error(
+        `invalid ${where}.sha256: expected 64-char lowercase hex`,
+      );
+    }
+    out.sha256 = rec.sha256;
+  }
+
+  if (rec.buildId !== undefined) {
+    if (typeof rec.buildId !== "string") {
+      throw new Error(`invalid ${where}.buildId: expected string`);
+    }
+    out.buildId = normalizeImageBuildId(rec.buildId);
+  }
+
+  if (rec.arch !== undefined) {
+    if (typeof rec.arch !== "string") {
+      throw new Error(`invalid ${where}.arch: expected string`);
+    }
+    const arch = normalizeImageArch(rec.arch);
+    if (!arch) {
+      throw new Error(`invalid ${where}.arch: ${String(rec.arch)}`);
+    }
+    out.arch = arch;
+  }
+
+  return out;
+}
+
+function parseBuiltinRegistry(
+  raw: unknown,
+  sourceUrl: string,
+): BuiltinImageRegistry {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("invalid builtin image registry: expected object");
+  }
+
+  const rec = raw as Record<string, unknown>;
+  if (rec.schema !== BUILTIN_IMAGE_REGISTRY_SCHEMA) {
+    throw new Error(
+      `invalid builtin image registry schema: expected ${BUILTIN_IMAGE_REGISTRY_SCHEMA}`,
+    );
+  }
+
+  const baseUrl = new URL(sourceUrl);
+
+  if (!rec.refs || typeof rec.refs !== "object" || Array.isArray(rec.refs)) {
+    throw new Error("invalid builtin image registry: refs must be an object");
+  }
+
+  const refs: Record<
+    string,
+    Partial<Record<ImageArch, RegistryImageSource>>
+  > = {};
+  for (const [reference, archMap] of Object.entries(
+    rec.refs as Record<string, unknown>,
+  )) {
+    const parsedRef = parseImageRef(reference);
+    if (parsedRef.canonical !== reference) {
+      throw new Error(`invalid builtin image registry ref key: ${reference}`);
+    }
+
+    if (!archMap || typeof archMap !== "object" || Array.isArray(archMap)) {
+      throw new Error(`invalid registry ref '${reference}': expected object`);
+    }
+
+    const mapped: Partial<Record<ImageArch, RegistryImageSource>> = {};
+    for (const [archKey, value] of Object.entries(
+      archMap as Record<string, unknown>,
+    )) {
+      const arch = normalizeImageArch(archKey);
+      if (!arch) {
+        throw new Error(
+          `invalid registry ref '${reference}' arch key: ${archKey}`,
+        );
+      }
+
+      mapped[arch] = parseRegistrySource(
+        value,
+        `refs['${reference}']['${archKey}']`,
+        baseUrl,
+      );
+    }
+
+    refs[parsedRef.canonical] = mapped;
+  }
+
+  const builds: Record<string, RegistryImageSource> = {};
+  if (rec.builds !== undefined) {
+    if (
+      !rec.builds ||
+      typeof rec.builds !== "object" ||
+      Array.isArray(rec.builds)
+    ) {
+      throw new Error(
+        "invalid builtin image registry: builds must be an object",
+      );
+    }
+
+    for (const [buildId, value] of Object.entries(
+      rec.builds as Record<string, unknown>,
+    )) {
+      const canonical = normalizeImageBuildId(buildId);
+      const source = parseRegistrySource(
+        value,
+        `builds['${buildId}']`,
+        baseUrl,
+      );
+      if (source.buildId && source.buildId !== canonical) {
+        throw new Error(
+          `invalid registry build '${buildId}': buildId mismatch (${source.buildId})`,
+        );
+      }
+      builds[canonical] = {
+        ...source,
+        buildId: canonical,
+      };
+    }
+  }
+
+  return {
+    schema: BUILTIN_IMAGE_REGISTRY_SCHEMA,
+    refs,
+    builds,
+  };
+}
+
+function loadRegistryCache(url: string): RegistryCache | null {
+  const cachePath = registryCachePath();
+  if (!fs.existsSync(cachePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(cachePath, "utf8"),
+    ) as RegistryCache;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (parsed.url !== url) return null;
+    const registry = parseBuiltinRegistry(parsed.registry as unknown, url);
+    return {
+      url,
+      etag: typeof parsed.etag === "string" ? parsed.etag : undefined,
+      registry,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveRegistryCache(cache: RegistryCache): void {
+  const storeDir = getImageStoreDirectory();
+  fs.mkdirSync(storeDir, { recursive: true });
+
+  const cachePath = registryCachePath();
+  const tmpPath = `${cachePath}.tmp-${randomUUID().slice(0, 8)}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(cache, null, 2));
+  fs.renameSync(tmpPath, cachePath);
+}
+
+async function fetchBuiltinImageRegistry(): Promise<BuiltinImageRegistry> {
+  const url = builtinRegistryUrl();
+  const cached = loadRegistryCache(url);
+
+  const headers: Record<string, string> = {
+    "User-Agent": "gondolin-image-registry",
+  };
+  if (cached?.etag) {
+    headers["If-None-Match"] = cached.etag;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, { headers });
+  } catch (error) {
+    if (cached) {
+      return cached.registry;
+    }
+    throw new Error(
+      `failed to fetch builtin image registry from ${url}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (response.status === 304 && cached) {
+    return cached.registry;
+  }
+
+  if (!response.ok) {
+    if (cached) {
+      return cached.registry;
+    }
+    throw new Error(
+      `failed to fetch builtin image registry: ${response.status} ${response.statusText} (${url})`,
+    );
+  }
+
+  const text = await response.text();
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `failed to parse builtin image registry json from ${url}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const registry = parseBuiltinRegistry(raw, url);
+  saveRegistryCache({
+    url,
+    etag: response.headers.get("etag") ?? undefined,
+    registry,
+  });
+
+  return registry;
+}
+
+async function downloadArchive(
+  source: RegistryImageSource,
+  archivePath: string,
+): Promise<void> {
+  const response = await fetch(source.url, {
+    headers: {
+      "User-Agent": "gondolin-image-fetch",
+    },
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(
+      `failed to download image archive: ${response.status} ${response.statusText} (${source.url})`,
+    );
+  }
+
+  const hash = createHash("sha256");
+  const stream = fs.createWriteStream(archivePath, { flags: "w" });
+
+  try {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      hash.update(value);
+      stream.write(Buffer.from(value));
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      stream.end((error: Error | null | undefined) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  } finally {
+    stream.destroy();
+  }
+
+  if (source.sha256) {
+    const got = hash.digest("hex");
+    if (got !== source.sha256) {
+      throw new Error(
+        `downloaded image checksum mismatch for ${source.url}\n  expected: ${source.sha256}\n  got:      ${got}`,
+      );
+    }
+  }
+}
+
+async function importImageFromSource(
+  source: RegistryImageSource,
+  expectedBuildId?: string,
+): Promise<ImportedImage> {
+  const tmpRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-image-pull-"),
+  );
+  const archivePath = path.join(tmpRoot, "image.tar.gz");
+  const extractDir = path.join(tmpRoot, "extract");
+
+  try {
+    await downloadArchive(source, archivePath);
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    child_process.execFileSync("tar", ["-xzf", archivePath, "-C", extractDir], {
+      stdio: "pipe",
+    });
+
+    const imported = importImageFromDirectory(extractDir);
+
+    if (source.arch && imported.arch !== source.arch) {
+      throw new Error(
+        `downloaded image arch mismatch\n  expected: ${source.arch}\n  got:      ${imported.arch}\n  source:   ${source.url}`,
+      );
+    }
+
+    if (source.buildId && imported.buildId !== source.buildId) {
+      throw new Error(
+        `downloaded image buildId mismatch\n  expected: ${source.buildId}\n  got:      ${imported.buildId}\n  source:   ${source.url}`,
+      );
+    }
+
+    if (expectedBuildId && imported.buildId !== expectedBuildId) {
+      throw new Error(
+        `downloaded image buildId mismatch\n  expected: ${expectedBuildId}\n  got:      ${imported.buildId}\n  source:   ${source.url}`,
+      );
+    }
+
+    return imported;
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+function resolveRegistrySourceForRef(
+  registry: BuiltinImageRegistry,
+  reference: string,
+  arch?: ImageArch,
+): {
+  source: RegistryImageSource;
+  requestedArch: ImageArch;
+} {
+  const parsedRef = parseImageRef(reference);
+  const entries = registry.refs[parsedRef.canonical];
+  if (!entries) {
+    throw new Error(
+      `image ref not found in builtin registry: ${parsedRef.canonical}`,
+    );
+  }
+
+  const requestedArch = normalizeImageArch(arch) ?? defaultImageArch();
+  const exact = entries[requestedArch];
+  if (exact) {
+    return { source: exact, requestedArch };
+  }
+
+  const available = Object.entries(entries).filter(
+    (pair): pair is [ImageArch, RegistryImageSource] => {
+      const [name, value] = pair;
+      return normalizeImageArch(name) !== null && value !== undefined;
+    },
+  );
+
+  if (available.length === 1) {
+    const [, source] = available[0]!;
+    return {
+      source,
+      requestedArch,
+    };
+  }
+
+  const availableArchs = available.map(([name]) => name).join(", ") || "none";
+  throw new Error(
+    `image ref '${parsedRef.canonical}' has no registry source for ${requestedArch} (available: ${availableArchs})`,
+  );
+}
+
+export async function ensureImageSelector(
+  selector: string,
+  arch?: ImageArch,
+): Promise<ResolvedImage> {
+  const trimmed = selector.trim();
+  if (!trimmed) {
+    throw new Error("image selector must not be empty");
+  }
+
+  const absoluteSelectorPath = path.resolve(trimmed);
+  if (fs.existsSync(absoluteSelectorPath)) {
+    const stat = fs.statSync(absoluteSelectorPath);
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `image selector path is not a directory: ${absoluteSelectorPath}`,
+      );
+    }
+  }
+
+  try {
+    return resolveImageSelector(selector, arch);
+  } catch {
+    // Fall through to remote registry lookup.
+  }
+
+  const registry = await fetchBuiltinImageRegistry();
+
+  if (isBuildId(trimmed)) {
+    const buildId = normalizeImageBuildId(trimmed);
+    const source = registry.builds[buildId];
+    if (!source) {
+      throw new Error(
+        `image build id not found in builtin registry: ${buildId}`,
+      );
+    }
+
+    await importImageFromSource({ ...source, buildId }, buildId);
+    return resolveImageSelector(buildId, arch);
+  }
+
+  const parsedRef = parseImageRef(trimmed);
+  const { source, requestedArch } = resolveRegistrySourceForRef(
+    registry,
+    parsedRef.canonical,
+    arch,
+  );
+
+  const imported = await importImageFromSource(source);
+  if (source === registry.refs[parsedRef.canonical]?.[requestedArch]) {
+    if (imported.arch !== requestedArch) {
+      throw new Error(
+        `registry source for '${parsedRef.canonical}' (${requestedArch}) resolved to ${imported.arch}`,
+      );
+    }
+  }
+
+  setImageRef(parsedRef.canonical, imported.buildId, imported.arch);
+  return resolveImageSelector(parsedRef.canonical, arch);
+}
+
 export function tagImage(
   source: string,
   targetReference: string,
@@ -651,4 +1126,5 @@ export const __test = {
   normalizeImageArch,
   isBuildId,
   normalizeImageBuildId,
+  parseBuiltinRegistry,
 };
