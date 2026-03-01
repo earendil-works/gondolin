@@ -4,11 +4,11 @@ import path from "node:path";
 import test from "node:test";
 
 test("cli: gondolin image --help renders usage", () => {
-  const hostDir = path.join(__dirname, "..");
+  const hostDir = path.join(import.meta.dirname, "..");
 
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "bin/gondolin.ts", "image", "--help"],
+    ["bin/gondolin.ts", "image", "--help"],
     {
       cwd: hostDir,
       env: process.env,
