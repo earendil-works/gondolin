@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import * as child_process from "child_process";
+import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
 

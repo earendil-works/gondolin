@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { createWriteStream } from "fs";
-import * as child_process from "child_process";
+import child_process from "child_process";
 import { createHash } from "crypto";
 import type {
   BuildConfig,
