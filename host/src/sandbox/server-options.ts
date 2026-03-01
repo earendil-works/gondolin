@@ -17,6 +17,7 @@ import {
   resolveGuestAssetsSync,
   type GuestAssets,
 } from "../assets.ts";
+import { ensureImageSelector, resolveImageSelector } from "../images.ts";
 import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
@@ -29,10 +30,11 @@ import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
 
 /**
- * Path to guest image assets.
+ * Path or selector for guest image assets
  *
  * Can be either:
  * - A string path to a directory containing the assets (vmlinuz-virt, initramfs.cpio.lz4, rootfs.ext4)
+ * - A string image selector (ref like `name:tag` or a build id)
  * - An object with explicit paths to each asset file
  */
 export type ImagePath = string | GuestAssets;
@@ -273,11 +275,12 @@ export type GuestFileDeleteOptions = {
 };
 
 /**
- * Resolve imagePath to GuestAssets.
+ * Resolve imagePath selector to GuestAssets.
  */
 function resolveImagePath(imagePath: ImagePath): GuestAssets {
   if (typeof imagePath === "string") {
-    return loadGuestAssets(imagePath);
+    const resolved = resolveImageSelector(imagePath);
+    return loadGuestAssets(resolved.assetDir);
   }
   return imagePath;
 }
@@ -392,7 +395,7 @@ export function resolveSandboxServerOptions(
       "Guest assets not found. Either:\n" +
         "  1. Run from the gondolin repository with built guest images\n" +
         "  2. Use SandboxServer.create() to auto-download assets\n" +
-        "  3. Provide imagePath option (directory path or explicit paths)\n" +
+        "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
         "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
   }
@@ -489,9 +492,18 @@ export function resolveSandboxServerOptions(
 export async function resolveSandboxServerOptionsAsync(
   options: SandboxServerOptions = {},
 ): Promise<ResolvedSandboxServerOptions> {
-  // If imagePath is explicitly provided, use sync version (no download needed)
-  if (options.imagePath !== undefined) {
+  // Explicit object imagePath is already fully resolved.
+  if (options.imagePath && typeof options.imagePath === "object") {
     return resolveSandboxServerOptions(options);
+  }
+
+  // String image selectors may require pulling from the builtin registry.
+  if (typeof options.imagePath === "string") {
+    const resolvedImage = await ensureImageSelector(options.imagePath);
+    return resolveSandboxServerOptions({
+      ...options,
+      imagePath: resolvedImage.assetDir,
+    });
   }
 
   const assets = await ensureGuestAssets();

@@ -3,161 +3,31 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.1.0)'
+        description: "Version tag (e.g., v0.1.0)"
         required: true
+        type: string
 
 jobs:
-  build-guest-x64:
-    name: Build Guest Image (x64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Install Node dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install Zig
-        run: |
-          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
-          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 lz4
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Build guest binaries
-        run: |
-          cd guest
-          zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
-
-      - name: Build guest image
-        run: |
-          NODE_BIN="$(node -p 'process.execPath')"
-          cd guest
-          make build NODE="$NODE_BIN"
-
-      - name: Verify x64 kernel arch
-        run: |
-          file guest/image/out/vmlinuz-virt | grep -qi "x86_64"
-
-      - name: Package x64 assets
-        run: |
-          cd guest/image/out
-          tar -czvf ../../../gondolin-guest-x64.tar.gz \
-            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
-
-      - name: Upload x64 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gondolin-guest-x64
-          path: gondolin-guest-x64.tar.gz
-          retention-days: 1
-
-  build-guest-arm64:
-    name: Build Guest Image (arm64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Install Node dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install Zig
-        run: |
-          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
-          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-arm lz4
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Build guest binaries (arm64 cross-compile)
-        run: |
-          cd guest
-          zig build -Doptimize=ReleaseSmall -Dtarget=aarch64-linux-musl
-
-      - name: Build guest image (arm64)
-        run: |
-          NODE_BIN="$(node -p 'process.execPath')"
-          cd guest
-          ALPINE_ARCH=aarch64 make build NODE="$NODE_BIN"
-
-      - name: Verify arm64 kernel arch
-        run: |
-          file guest/image/out/vmlinuz-virt | grep -qi "aarch64"
-
-      - name: Package arm64 assets
-        run: |
-          cd guest/image/out
-          tar -czvf ../../../gondolin-guest-arm64.tar.gz \
-            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
-
-      - name: Upload arm64 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gondolin-guest-arm64
-          path: gondolin-guest-arm64.tar.gz
-          retention-days: 1
-
   create-release:
-    name: Create Release
-    needs: [build-guest-x64, build-guest-arm64]
+    name: Create Package Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
-
-      - name: Download x64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: gondolin-guest-x64
-
-      - name: Download arm64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: gondolin-guest-arm64
 
       - name: Get version
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
@@ -175,17 +45,8 @@ jobs:
           name: Release ${{ steps.version.outputs.version }}
           draft: false
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
-          files: |
-            gondolin-guest-x64.tar.gz
-            gondolin-guest-arm64.tar.gz
           body: |
             ## Gondolin ${{ steps.version.outputs.version }}
-
-            ### Guest Image Assets
-
-            Download the appropriate asset for your platform:
-            - `gondolin-guest-x64.tar.gz` - For x86_64 systems
-            - `gondolin-guest-arm64.tar.gz` - For ARM64 systems (Apple Silicon, etc.)
 
             ### NPM Package
 
@@ -193,7 +54,11 @@ jobs:
             npm install @earendil-works/gondolin@${{ steps.npm_version.outputs.version }}
             ```
 
-            The guest image will be automatically downloaded on first use.
+            ### Guest Images
+
+            Guest images are published independently via the Image Release workflow.
+
+            Runtime image resolution uses `builtin-image-registry.json` from the main branch.
 
   publish-npm:
     name: Publish to NPM
@@ -205,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v2
@@ -214,18 +79,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Get version from tag
         id: tag_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${{ inputs.version }}"
           else
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
-          # Strip leading 'v' if present
           VERSION="${VERSION#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 

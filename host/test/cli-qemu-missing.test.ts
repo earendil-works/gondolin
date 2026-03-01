@@ -22,20 +22,16 @@ test("cli: gondolin bash renders a friendly error if qemu is missing from PATH",
   try {
     const hostDir = path.join(import.meta.dirname, "..");
 
-    const result = spawnSync(
-      process.execPath,
-      ["bin/gondolin.ts", "bash"],
-      {
-        cwd: hostDir,
-        env: {
-          ...process.env,
-          GONDOLIN_GUEST_DIR: guestDir,
-          PATH: emptyPathDir,
-        },
-        encoding: "utf8",
-        timeout: 15000,
+    const result = spawnSync(process.execPath, ["bin/gondolin.ts", "bash"], {
+      cwd: hostDir,
+      env: {
+        ...process.env,
+        GONDOLIN_GUEST_DIR: guestDir,
+        PATH: emptyPathDir,
       },
-    );
+      encoding: "utf8",
+      timeout: 15000,
+    });
 
     assert.notEqual(
       result.status,

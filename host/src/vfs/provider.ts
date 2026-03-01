@@ -1,5 +1,9 @@
 import { createErrnoError } from "./errors.ts";
-import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node/index.ts";
+import type {
+  VirtualProvider,
+  VirtualFileHandle,
+  VfsStatfs,
+} from "./node/index.ts";
 import { delegateStatfsOrEnosys } from "./statfs.ts";
 import { ERRNO, VirtualProviderClass } from "./utils.ts";
 

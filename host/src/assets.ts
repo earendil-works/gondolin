@@ -1,9 +1,7 @@
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { createWriteStream } from "fs";
-import child_process from "child_process";
 import { createHash } from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import type {
   BuildConfig,
   ContainerRuntime,
@@ -11,10 +9,13 @@ import type {
   RootfsMode,
 } from "./build/config.ts";
 
-const GITHUB_ORG = "earendil-works";
-const GITHUB_REPO = "gondolin";
-
 let cachedAssetVersion: string | null = null;
+
+const BUILD_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const IMAGE_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function resolveAssetVersion(): string {
   if (cachedAssetVersion) return cachedAssetVersion;
@@ -42,13 +43,19 @@ function resolveAssetVersion(): string {
   return cachedAssetVersion;
 }
 
-/**
- * Get the platform-specific asset bundle name.
- * We build separate bundles for arm64 and x64.
- */
-function getAssetBundleName(): string {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  return `gondolin-guest-${arch}.tar.gz`;
+function cacheBaseDir(): string {
+  return process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+}
+
+function getImageStoreDirectory(): string {
+  return (
+    process.env.GONDOLIN_IMAGE_STORE ??
+    path.join(cacheBaseDir(), "gondolin", "images")
+  );
+}
+
+function defaultGuestImageSelector(): string {
+  return process.env.GONDOLIN_DEFAULT_IMAGE ?? "alpine-base:latest";
 }
 
 /**
@@ -70,36 +77,140 @@ function findUpwards<T>(
   }
 }
 
-/**
- * Determine where to look for / store guest assets.
- *
- * Priority:
- * 1. GONDOLIN_GUEST_DIR environment variable (explicit override)
- * 2. Local repo checkout (searches upwards for guest/image/out)
- * 3. User cache directory (~/.cache/gondolin/<version>)
- */
-function getAssetDir(): string {
-  // Explicit override
-  if (process.env.GONDOLIN_GUEST_DIR) {
-    return process.env.GONDOLIN_GUEST_DIR;
-  }
-
-  const tryFindRepoAssetsFrom = (anchor: string): string | null =>
+function tryFindRepoGuestAssetsDir(): string | null {
+  const tryFindFrom = (anchor: string): string | null =>
     findUpwards(anchor, (dir) => {
       const candidate = path.join(dir, "guest", "image", "out");
       return assetsExist(candidate) ? candidate : null;
     });
 
-  // Prefer whatever directory the caller is operating in, but also check the
-  // module location (works even when invoked from a different cwd).
-  const repoDir =
-    tryFindRepoAssetsFrom(process.cwd()) ?? tryFindRepoAssetsFrom(import.meta.dirname);
+  return tryFindFrom(process.cwd()) ?? tryFindFrom(import.meta.dirname);
+}
+
+function normalizeImageArch(
+  value: string | undefined | null,
+): "aarch64" | "x86_64" | null {
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower === "aarch64" || lower === "arm64") return "aarch64";
+  if (lower === "x86_64" || lower === "amd64" || lower === "x64") {
+    return "x86_64";
+  }
+  return null;
+}
+
+function hostDefaultImageArch(): "aarch64" | "x86_64" {
+  return normalizeImageArch(process.arch) ?? "x86_64";
+}
+
+function ensurePathWithinRoot(root: string, candidate: string): string | null {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(candidate);
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    return null;
+  }
+  return resolvedCandidate;
+}
+
+function hasValidImageNameSegments(name: string): boolean {
+  const segments = name.split("/");
+  if (segments.length === 0) return false;
+
+  for (const segment of segments) {
+    if (segment.length === 0 || segment === "." || segment === "..") {
+      return false;
+    }
+    if (!IMAGE_NAME_SEGMENT_PATTERN.test(segment)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function parseImageRef(selector: string): { name: string; tag: string } | null {
+  const trimmed = selector.trim();
+  if (!trimmed) return null;
+
+  const colon = trimmed.lastIndexOf(":");
+  const hasExplicitTag = colon > 0 && colon < trimmed.length - 1;
+  const name = hasExplicitTag ? trimmed.slice(0, colon) : trimmed;
+  const tag = hasExplicitTag ? trimmed.slice(colon + 1) : "latest";
+
+  if (!IMAGE_NAME_PATTERN.test(name)) return null;
+  if (!hasValidImageNameSegments(name)) return null;
+  if (!IMAGE_TAG_PATTERN.test(tag)) return null;
+
+  return { name, tag };
+}
+
+function resolveDefaultImageAssetDirFromStore(): string | null {
+  const selector = defaultGuestImageSelector().trim();
+  if (!selector) return null;
+
+  const storeDir = getImageStoreDirectory();
+
+  if (BUILD_ID_PATTERN.test(selector)) {
+    const objectDir = path.join(storeDir, "objects", selector);
+    return assetsExist(objectDir) ? objectDir : null;
+  }
+
+  const parsedRef = parseImageRef(selector);
+  if (!parsedRef) return null;
+
+  const archOrder: Array<"aarch64" | "x86_64"> = [
+    hostDefaultImageArch(),
+    hostDefaultImageArch() === "aarch64" ? "x86_64" : "aarch64",
+  ];
+
+  const refsRoot = path.join(storeDir, "refs");
+
+  for (const arch of archOrder) {
+    const linkPath = ensurePathWithinRoot(
+      refsRoot,
+      path.join(refsRoot, parsedRef.name, parsedRef.tag, arch),
+    );
+    if (!linkPath || !fs.existsSync(linkPath)) continue;
+
+    try {
+      const target = fs.readlinkSync(linkPath);
+      const objectDir = path.resolve(path.dirname(linkPath), target);
+      if (assetsExist(objectDir)) {
+        return objectDir;
+      }
+    } catch {
+      // ignore malformed links and continue fallback order
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Determine where to look for guest assets.
+ *
+ * Priority:
+ * 1. GONDOLIN_GUEST_DIR environment variable (explicit override)
+ * 2. Local repo checkout (searches upwards for guest/image/out)
+ * 3. Local image store root (~/.cache/gondolin/images)
+ */
+function getAssetDir(): string {
+  if (process.env.GONDOLIN_GUEST_DIR) {
+    return process.env.GONDOLIN_GUEST_DIR;
+  }
+
+  const repoDir = tryFindRepoGuestAssetsDir();
   if (repoDir) return repoDir;
 
-  // User cache directory
-  const cacheBase =
-    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-  return path.join(cacheBase, "gondolin", resolveAssetVersion());
+  const localDefaultDir = resolveDefaultImageAssetDirFromStore();
+  if (localDefaultDir) return localDefaultDir;
+
+  return getImageStoreDirectory();
 }
 
 export const MANIFEST_FILENAME = "manifest.json";
@@ -338,139 +449,42 @@ function assetsExist(dir: string): boolean {
 }
 
 /**
- * Download and extract the guest image bundle from GitHub releases.
- */
-async function downloadAndExtract(assetDir: string): Promise<void> {
-  const bundleName = getAssetBundleName();
-  const assetVersion = resolveAssetVersion();
-  const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${assetVersion}/${bundleName}`;
-
-  fs.mkdirSync(assetDir, { recursive: true });
-
-  const tempFile = path.join(assetDir, bundleName);
-
-  try {
-    process.stderr.write(
-      `Downloading gondolin guest image (${assetVersion})...\n`,
-    );
-    process.stderr.write(`  URL: ${url}\n`);
-
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": `gondolin/${assetVersion}`,
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Failed to download guest image: ${response.status} ${response.statusText}\n` +
-          `URL: ${url}\n` +
-          `Make sure the release exists and the asset is uploaded.`,
-      );
-    }
-
-    const contentLength = response.headers.get("content-length");
-    const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
-
-    // Stream to temp file with progress
-    const fileStream = createWriteStream(tempFile);
-
-    if (response.body) {
-      let downloadedBytes = 0;
-      const reader = response.body.getReader();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        fileStream.write(Buffer.from(value));
-        downloadedBytes += value.length;
-
-        if (totalBytes) {
-          const percent = ((downloadedBytes / totalBytes) * 100).toFixed(1);
-          const mb = (downloadedBytes / 1024 / 1024).toFixed(1);
-          const totalMb = (totalBytes / 1024 / 1024).toFixed(1);
-          process.stderr.write(
-            `\r  Progress: ${mb}/${totalMb} MB (${percent}%)`,
-          );
-        }
-      }
-
-      process.stderr.write("\n");
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      fileStream.end((err: Error | null) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-
-    // Extract
-    process.stderr.write(`  Extracting to ${assetDir}...\n`);
-    child_process.execSync(`tar -xzf "${bundleName}"`, {
-      cwd: assetDir,
-      stdio: "pipe",
-    });
-
-    // Verify extraction
-    if (!assetsExist(assetDir)) {
-      throw new Error(
-        "Extraction completed but expected files are missing. " +
-          "The archive may be corrupted or have an unexpected structure.",
-      );
-    }
-
-    process.stderr.write(`  Guest image installed successfully.\n`);
-  } finally {
-    // Clean up temp file
-    if (fs.existsSync(tempFile)) {
-      fs.unlinkSync(tempFile);
-    }
-  }
-}
-
-/**
- * Ensure guest assets are available, downloading them if necessary.
+ * Ensure guest assets are available.
  *
- * This function checks for the guest image files (kernel, initramfs, rootfs)
- * and downloads them from GitHub releases if they're not present locally.
- *
- * Asset location priority:
- * 1. GONDOLIN_GUEST_DIR environment variable (explicit override, no download)
- * 2. Local development checkout (../guest/image/out)
- * 3. User cache (~/.cache/gondolin/<version>)
- *
- * @returns Paths to the guest assets
- * @throws If download fails or assets cannot be verified
- * @throws If GONDOLIN_GUEST_DIR is set but assets are missing
+ * Resolution priority:
+ * 1. GONDOLIN_GUEST_DIR environment override
+ * 2. Local dev checkout (`guest/image/out`)
+ * 3. Default image selector (`GONDOLIN_DEFAULT_IMAGE`, default `alpine-base:latest`)
  */
 export async function ensureGuestAssets(): Promise<GuestAssets> {
-  const assetDir = getAssetDir();
-
-  // If GONDOLIN_GUEST_DIR is explicitly set, don't download - require assets to exist
   if (process.env.GONDOLIN_GUEST_DIR) {
-    return loadGuestAssets(assetDir);
+    return loadGuestAssets(process.env.GONDOLIN_GUEST_DIR);
   }
 
-  // Check if already present (repo checkout or cache)
-  if (!assetsExist(assetDir)) {
-    await downloadAndExtract(assetDir);
+  const repoDir = tryFindRepoGuestAssetsDir();
+  if (repoDir) {
+    return loadGuestAssets(repoDir);
   }
 
-  return loadGuestAssets(assetDir);
+  const localDefaultDir = resolveDefaultImageAssetDirFromStore();
+  if (localDefaultDir) {
+    return loadGuestAssets(localDefaultDir);
+  }
+
+  const { ensureImageSelector } = await import("./images.ts");
+  const resolved = await ensureImageSelector(defaultGuestImageSelector());
+  return loadGuestAssets(resolved.assetDir);
 }
 
 /**
- * Get the current asset version string.
+ * Get the current package-derived asset version string.
  */
 export function getAssetVersion(): string {
   return resolveAssetVersion();
 }
 
 /**
- * Get the asset directory path without ensuring assets exist.
- * Useful for checking where assets would be stored.
+ * Get the preferred local asset location root.
  */
 export function getAssetDirectory(): string {
   return getAssetDir();
@@ -480,37 +494,47 @@ export function getAssetDirectory(): string {
  * Check if guest assets are available without downloading.
  */
 export function hasGuestAssets(): boolean {
-  return assetsExist(getAssetDir());
+  if (process.env.GONDOLIN_GUEST_DIR) {
+    return assetsExist(process.env.GONDOLIN_GUEST_DIR);
+  }
+
+  const repoDir = tryFindRepoGuestAssetsDir();
+  if (repoDir) {
+    return assetsExist(repoDir);
+  }
+
+  const localDefaultDir = resolveDefaultImageAssetDirFromStore();
+  return localDefaultDir !== null && assetsExist(localDefaultDir);
 }
 
 /**
  * Resolve guest assets synchronously without downloading.
- *
- * Resolution priority:
- * 1. GONDOLIN_GUEST_DIR (explicit override)
- * 2. Repo checkout (guest/image/out)
- * 3. Cache directory (if already populated)
  */
 export function resolveGuestAssetsSync(): GuestAssets | null {
-  // Explicit override must be respected (and should error if broken)
   if (process.env.GONDOLIN_GUEST_DIR) {
     return loadGuestAssets(process.env.GONDOLIN_GUEST_DIR);
   }
 
-  // getAssetDir() picks repo assets when available, otherwise the cache location
-  const dir = getAssetDir();
-  if (!assetsExist(dir)) return null;
-  return loadGuestAssets(dir);
+  const repoDir = tryFindRepoGuestAssetsDir();
+  if (repoDir && assetsExist(repoDir)) {
+    return loadGuestAssets(repoDir);
+  }
+
+  const localDefaultDir = resolveDefaultImageAssetDirFromStore();
+  if (!localDefaultDir || !assetsExist(localDefaultDir)) {
+    return null;
+  }
+
+  return loadGuestAssets(localDefaultDir);
 }
 
 /** @internal */
-// Expose internal helpers for unit tests. Not part of the public API.
 export const __test = {
   resolveAssetVersion,
-  getAssetBundleName,
   getAssetDir,
   assetsExist,
-  downloadAndExtract,
+  defaultGuestImageSelector,
+  resolveDefaultImageAssetDirFromStore,
   resetAssetVersionCache: () => {
     cachedAssetVersion = null;
   },

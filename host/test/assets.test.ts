@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach, mock } from "node:test";
-import * as child_process from "child_process";
 
 import {
   MANIFEST_FILENAME,
@@ -17,14 +16,8 @@ import {
   __test,
 } from "../src/assets.ts";
 
-// In ESM, built-in modules expose live bindings via getters which cannot be
-// replaced with node:test mocks. The actual mutable exports object is on
-// `default`.
-const cp: any = (child_process as any).default ?? (child_process as any);
-
 afterEach(() => {
   mock.restoreAll();
-  // reset cached asset version between tests so env changes are respected
   __test.resetAssetVersionCache();
 });
 
@@ -116,7 +109,6 @@ test("assets: loadGuestAssets uses manifest filenames and validates existence", 
       JSON.stringify(manifest),
     );
 
-    // missing should throw
     assert.throws(() => loadGuestAssets(dir), /Missing guest assets/);
 
     fs.writeFileSync(path.join(dir, "kernel.bin"), "");
@@ -165,7 +157,6 @@ test("assets: ensureGuestAssets with GONDOLIN_GUEST_DIR does not download", asyn
   try {
     process.env.GONDOLIN_GUEST_DIR = dir;
 
-    // No download should happen; missing assets should throw from loadGuestAssets.
     const fetchSpy = mock.fn();
     (globalThis as any).fetch = fetchSpy;
 
@@ -186,70 +177,108 @@ test("assets: ensureGuestAssets with GONDOLIN_GUEST_DIR does not download", asyn
   }
 });
 
-test("assets: downloadAndExtract downloads to temp file and cleans it up", async () => {
-  const dir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-assets-download-"),
+function writeDefaultManifest(dir: string, arch: "aarch64" | "x86_64"): string {
+  const checksums = {
+    kernel: `k-${arch}`,
+    initramfs: `i-${arch}`,
+    rootfs: `r-${arch}`,
+  };
+  const buildId = computeAssetBuildId({ checksums, arch });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
+  fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
+  fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
+  fs.writeFileSync(
+    path.join(dir, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      buildId,
+      config: {
+        arch,
+        distro: "alpine",
+        alpine: { version: "3.23.0" },
+      },
+      buildTime: new Date().toISOString(),
+      assets: {
+        kernel: "vmlinuz-virt",
+        initramfs: "initramfs.cpio.lz4",
+        rootfs: "rootfs.ext4",
+      },
+      checksums,
+    }),
+  );
+  return buildId;
+}
+
+test("assets: default image ref can resolve from image store symlink", () => {
+  const prevStore = process.env.GONDOLIN_IMAGE_STORE;
+  const prevDefault = process.env.GONDOLIN_DEFAULT_IMAGE;
+
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-image-store-"),
   );
 
   try {
-    const bundleName = __test.getAssetBundleName();
+    process.env.GONDOLIN_IMAGE_STORE = storeDir;
+    process.env.GONDOLIN_DEFAULT_IMAGE = "alpine-base:latest";
 
-    // Suppress progress output from downloadAndExtract.
-    mock.method(process.stderr, "write", () => true);
+    const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+    const buildId = writeDefaultManifest(
+      path.join(storeDir, "objects", "obj-1"),
+      arch,
+    );
 
-    // Mock fetch to stream a few bytes.
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([1, 2, 3]));
-        controller.close();
-      },
-    });
+    const linkPath = path.join(storeDir, "refs", "alpine-base", "latest", arch);
+    fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+    fs.symlinkSync(
+      path.join("..", "..", "..", "objects", "obj-1"),
+      linkPath,
+      "dir",
+    );
 
-    (globalThis as any).fetch = mock.fn(async () => {
-      return new Response(body, {
-        status: 200,
-        headers: { "content-length": "3" },
-      });
-    });
+    const resolvedDir = __test.resolveDefaultImageAssetDirFromStore();
+    assert.ok(resolvedDir);
+    assert.equal(
+      path.resolve(resolvedDir!),
+      path.resolve(storeDir, "objects", "obj-1"),
+    );
 
-    // Mock tar extraction: create expected files in the target dir.
-    mock.method(cp, "execSync", (cmd: string, opts: any) => {
-      assert.match(cmd, /tar -xzf/);
-      assert.equal(opts.cwd, dir);
-      fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
-      fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
-      fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
-      return Buffer.from("");
-    });
+    const resolved = loadGuestAssets(resolvedDir!);
+    assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
 
-    await __test.downloadAndExtract(dir);
-
-    // The downloaded tarball should be cleaned up.
-    assert.equal(fs.existsSync(path.join(dir, bundleName)), false);
-    // And the extracted assets should exist.
-    assert.equal(__test.assetsExist(dir), true);
+    const manifest = loadAssetManifest(path.dirname(resolved.kernelPath));
+    assert.equal(manifest?.buildId, buildId);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (prevStore === undefined) delete process.env.GONDOLIN_IMAGE_STORE;
+    else process.env.GONDOLIN_IMAGE_STORE = prevStore;
+
+    if (prevDefault === undefined) delete process.env.GONDOLIN_DEFAULT_IMAGE;
+    else process.env.GONDOLIN_DEFAULT_IMAGE = prevDefault;
+
+    fs.rmSync(storeDir, { recursive: true, force: true });
   }
 });
 
-test("assets: downloadAndExtract throws on non-ok response", async () => {
-  const dir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-assets-download-"),
+test("assets: default image ref rejects traversal segments", () => {
+  const prevStore = process.env.GONDOLIN_IMAGE_STORE;
+  const prevDefault = process.env.GONDOLIN_DEFAULT_IMAGE;
+
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-image-store-"),
   );
+
   try {
-    // Suppress progress output from downloadAndExtract.
-    mock.method(process.stderr, "write", () => true);
+    process.env.GONDOLIN_IMAGE_STORE = storeDir;
+    process.env.GONDOLIN_DEFAULT_IMAGE = "a/../../../tmp:latest";
 
-    (globalThis as any).fetch = mock.fn(async () => {
-      return new Response("no", { status: 404, statusText: "Not Found" });
-    });
-
-    await assert.rejects(
-      () => __test.downloadAndExtract(dir),
-      /Failed to download guest image/,
-    );
+    assert.equal(__test.resolveDefaultImageAssetDirFromStore(), null);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (prevStore === undefined) delete process.env.GONDOLIN_IMAGE_STORE;
+    else process.env.GONDOLIN_IMAGE_STORE = prevStore;
+
+    if (prevDefault === undefined) delete process.env.GONDOLIN_DEFAULT_IMAGE;
+    else process.env.GONDOLIN_DEFAULT_IMAGE = prevDefault;
+
+    fs.rmSync(storeDir, { recursive: true, force: true });
   }
 });

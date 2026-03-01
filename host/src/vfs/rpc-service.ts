@@ -3,8 +3,16 @@ import path from "path";
 import type { Dirent, Stats } from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
-import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node/index.ts";
-import { cloneSyntheticStatfs, isErrnoValue, normalizeStatfs } from "./statfs.ts";
+import type {
+  VirtualFileHandle,
+  VirtualProvider,
+  VfsStatfs,
+} from "./node/index.ts";
+import {
+  cloneSyntheticStatfs,
+  isErrnoValue,
+  normalizeStatfs,
+} from "./statfs.ts";
 import type { FsRequest, FsResponse } from "../sandbox/virtio-protocol.ts";
 
 const { errno: ERRNO } = os.constants;

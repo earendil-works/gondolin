@@ -8,6 +8,7 @@ Gondolin ships with a small command line interface (CLI) that lets you:
 - snapshot a running VM session (`snapshot`)
 - run one or more commands non-interactively (`exec`)
 - build and verify custom guest assets (`build`)
+- manage local image refs/objects (`image`)
 
 ## Installation / Running
 
@@ -27,11 +28,14 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 18
+- Node.js >= 23.6.0
 
-Guest assets (kernel/initramfs/rootfs, ~200MB) are downloaded automatically on
-first use and cached in `~/.cache/gondolin/`. Alternative you can [build and
-ship your own](./custom-images.md).
+Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
+first use via `builtin-image-registry.json` and cached in
+`~/.cache/gondolin/images/`.
+
+When you do not pass `--image`, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
+`alpine-base:latest`). Alternative you can [build and ship your own](./custom-images.md).
 
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
@@ -51,6 +55,9 @@ options for configuring filesystem mounts and mediated network egress policy.
 
 - `--mount-memfs GUEST_PATH`
   - Create an in-memory mount at `GUEST_PATH` (ephemeral)
+
+- `--image IMAGE`
+  - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 Examples:
 
@@ -413,9 +420,10 @@ Options:
 
 - `--init-config` -- print a default build configuration JSON to stdout
 - `--config FILE` -- use a build configuration file
-- `--output DIR` -- output directory for built assets (required when building)
+- `--output DIR` -- output directory for built assets (optional)
 - `--arch aarch64|x86_64` -- target architecture
 - `--verify DIR` -- verify an asset directory against its `manifest.json`
+- `--tag REF` -- tag the built assets in the local image store
 - `--quiet` / `-q` -- reduce output verbosity
 
 Examples:
@@ -424,10 +432,16 @@ Examples:
 # Generate a default config
 gondolin build --init-config > build-config.json
 
-# Build assets into ./my-assets
-gondolin build --config build-config.json --output ./my-assets
+# Build and import to the local image store (no explicit output dir)
+gondolin build --config build-config.json --tag default:latest
 
-# Use the custom assets
+# Use the tagged image
+gondolin bash --image default:latest
+
+# Optionally keep an explicit output directory too
+gondolin build --config build-config.json --output ./my-assets --tag default:latest
+
+# Use the custom assets directly
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 
 # Verify an asset directory
@@ -437,11 +451,40 @@ gondolin build --verify ./my-assets
 For a full configuration reference and build requirements, see:
 [Building Custom Images](./custom-images.md).
 
+### `gondolin image`
+
+Manage the local image object store and refs:
+
+```bash
+gondolin image ls
+gondolin image import ./my-assets --tag default:latest
+gondolin image inspect default:latest
+gondolin image pull alpine-base:latest
+gondolin image tag default:latest tooling:dev
+```
+
+Image selectors accepted by `--image` and `sandbox.imagePath` strings:
+
+- asset directory path
+- image build id (`uuid`)
+- image ref (`name:tag`)
+
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`
   - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs)
   - If set, Gondolin uses this directory instead of downloading cached assets
+
+- `GONDOLIN_IMAGE_STORE`
+  - Override local image store location (default: `~/.cache/gondolin/images`)
+
+- `GONDOLIN_DEFAULT_IMAGE`
+  - Default image selector used by `VM.create()` / `gondolin bash` when no explicit image is set
+  - Default: `alpine-base:latest`
+
+- `GONDOLIN_IMAGE_REGISTRY_URL`
+  - Override builtin image registry JSON URL
+  - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`
 
 - `GONDOLIN_DEBUG`
   - Enable debug logging (see [Debug Logging](./debug.md))

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "refs": {
+    "alpine-base:latest": {
+      "aarch64": {
+        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-arm64.tar.gz"
+      },
+      "x86_64": {
+        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-x64.tar.gz"
+      }
+    },
+    "alpine-base:0.5.0": {
+      "aarch64": {
+        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-arm64.tar.gz"
+      },
+      "x86_64": {
+        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-x64.tar.gz"
+      }
+    }
+  },
+  "builds": {}
+}
