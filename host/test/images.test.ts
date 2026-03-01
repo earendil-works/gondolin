@@ -554,7 +554,7 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
   }
 });
 
-test("images: ensureImageSelector resolves build id via ref sources when builds map is empty", async () => {
+test("images: ensureImageSelector fails fast for build id when builds metadata is missing", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
   );
@@ -565,26 +565,7 @@ test("images: ensureImageSelector resolves build id via ref sources when builds 
     "https://example.invalid/builtin-image-registry.json";
   const prevFetch = (globalThis as any).fetch;
 
-  const assets = createFakeAssets("x86_64");
-  const archivePath = path.join(
-    os.tmpdir(),
-    `gondolin-image-build-id-${Date.now()}.tar.gz`,
-  );
-
   try {
-    child_process.execFileSync(
-      "tar",
-      [
-        "-czf",
-        archivePath,
-        "manifest.json",
-        "vmlinuz-virt",
-        "initramfs.cpio.lz4",
-        "rootfs.ext4",
-      ],
-      { cwd: assets.dir, stdio: "pipe" },
-    );
-
     const registry = {
       schema: 1,
       refs: {
@@ -597,7 +578,7 @@ test("images: ensureImageSelector resolves build id via ref sources when builds 
       builds: {},
     };
 
-    const archiveData = fs.readFileSync(archivePath);
+    let archiveFetches = 0;
     (globalThis as any).fetch = async (url: string) => {
       if (url.includes("builtin-image-registry.json")) {
         return new Response(JSON.stringify(registry), {
@@ -605,19 +586,16 @@ test("images: ensureImageSelector resolves build id via ref sources when builds 
           headers: { etag: '"test-build-id"' },
         });
       }
-      if (url.endsWith("alpine-base-latest-x86_64.tar.gz")) {
-        return new Response(archiveData, { status: 200 });
-      }
+      archiveFetches += 1;
       return new Response("not found", { status: 404 });
     };
 
-    const resolved = await ensureImageSelector(assets.buildId, "x86_64");
-    assert.equal(resolved.source, "build-id");
-    assert.equal(resolved.buildId, assets.buildId);
-
-    const refs = listImageRefs();
-    assert.equal(refs[0]?.reference, "alpine-base:latest");
-    assert.equal(refs[0]?.targets.x86_64, assets.buildId);
+    await assert.rejects(
+      () =>
+        ensureImageSelector("972e9d26-f26f-52a6-bba5-89c6e1a2af15", "x86_64"),
+      /builds metadata/,
+    );
+    assert.equal(archiveFetches, 0);
   } finally {
     (globalThis as any).fetch = prevFetch;
 
@@ -628,8 +606,6 @@ test("images: ensureImageSelector resolves build id via ref sources when builds 
     }
 
     fs.rmSync(storeDir, { recursive: true, force: true });
-    fs.rmSync(assets.dir, { recursive: true, force: true });
-    fs.rmSync(archivePath, { force: true });
   }
 });
 
