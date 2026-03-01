@@ -13,14 +13,6 @@
         "sha256": "80fe91967a9ddf3c6de6e5f252f93410634d16aa794b425ebf3a88242f51973f"
       }
     },
-    "alpine-base:0.5.0": {
-      "aarch64": {
-        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-arm64.tar.gz"
-      },
-      "x86_64": {
-        "url": "https://github.com/earendil-works/gondolin/releases/download/v0.5.0/gondolin-guest-x64.tar.gz"
-      }
-    },
     "alpine-base:0.1.0": {
       "aarch64": {
         "buildId": "35a3d95d-7127-547e-b7df-07ac50cc4443",
