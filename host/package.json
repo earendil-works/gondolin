@@ -1,6 +1,6 @@
 {
   "name": "@earendil-works/gondolin",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Alpine Linux sandbox for running untrusted code with controlled filesystem and network access",
   "type": "module",
   "main": "./dist/src/index.js",
