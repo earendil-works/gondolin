@@ -367,6 +367,13 @@ test("images: setImageRef stores refs as symlinks", () => {
   }
 });
 
+test("images: resolveImageSelector rejects traversal refs", () => {
+  assert.throws(
+    () => resolveImageSelector("safe/../escape:latest", "x86_64"),
+    /must not contain path traversal segments/,
+  );
+});
+
 test("images: resolveImageSelector fails fast on malformed ref links", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
@@ -387,6 +394,36 @@ test("images: resolveImageSelector fails fast on malformed ref links", () => {
   }
 });
 
+test("images: ensureImageSelector does not hide malformed local refs", async () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const prevFetch = (globalThis as any).fetch;
+
+  try {
+    const refPath = path.join(storeDir, "refs", "default", "latest", "x86_64");
+    fs.mkdirSync(path.dirname(refPath), { recursive: true });
+    fs.writeFileSync(refPath, "not-a-symlink");
+
+    let fetchCalls = 0;
+    (globalThis as any).fetch = async () => {
+      fetchCalls += 1;
+      return new Response("{}", { status: 200 });
+    };
+
+    await assert.rejects(
+      () => ensureImageSelector("default:latest", "x86_64"),
+      /not a symlink/,
+    );
+    assert.equal(fetchCalls, 0);
+  } finally {
+    (globalThis as any).fetch = prevFetch;
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+});
+
 test("images: ensureImageSelector pulls refs from builtin registry", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
@@ -396,6 +433,7 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
   const prevRegistryUrl = process.env.GONDOLIN_IMAGE_REGISTRY_URL;
   process.env.GONDOLIN_IMAGE_REGISTRY_URL =
     "https://example.invalid/builtin-image-registry.json";
+  const prevFetch = (globalThis as any).fetch;
 
   const assets = createFakeAssets("x86_64");
   const archivePath = path.join(
@@ -452,6 +490,8 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
     assert.equal(refs[0]?.reference, "alpine-base:latest");
     assert.equal(refs[0]?.targets.x86_64, assets.buildId);
   } finally {
+    (globalThis as any).fetch = prevFetch;
+
     if (prevRegistryUrl === undefined) {
       delete process.env.GONDOLIN_IMAGE_REGISTRY_URL;
     } else {

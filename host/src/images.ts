@@ -12,6 +12,7 @@ const BUILD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const IMAGE_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 const BUILTIN_IMAGE_REGISTRY_SCHEMA = 1 as const;
@@ -145,6 +146,44 @@ function defaultImageArch(): ImageArch {
   return normalizeImageArch(getHostNodeArchCached()) ?? "x86_64";
 }
 
+function ensurePathWithinRoot(
+  root: string,
+  candidate: string,
+  label: string,
+): string {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(candidate);
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(`invalid ${label}: path escapes ${resolvedRoot}`);
+  }
+  return resolvedCandidate;
+}
+
+function validateImageNameSegments(name: string): void {
+  const segments = name.split("/");
+  if (segments.length === 0) {
+    throw new Error(`invalid image name '${name}'`);
+  }
+
+  for (const segment of segments) {
+    if (segment === "." || segment === ".." || segment.length === 0) {
+      throw new Error(
+        `invalid image name '${name}' (must not contain path traversal segments)`,
+      );
+    }
+    if (!IMAGE_NAME_SEGMENT_PATTERN.test(segment)) {
+      throw new Error(
+        `invalid image name '${name}' (invalid segment '${segment}')`,
+      );
+    }
+  }
+}
+
 function parseImageRef(reference: string): ParsedImageRef {
   const trimmed = reference.trim();
   if (!trimmed) {
@@ -162,6 +201,8 @@ function parseImageRef(reference: string): ParsedImageRef {
       `invalid image name '${name}' (allowed: letters, numbers, '.', '_', '-', '/')`,
     );
   }
+  validateImageNameSegments(name);
+
   if (!IMAGE_TAG_PATTERN.test(tag)) {
     throw new Error(
       `invalid image tag '${tag}' (allowed: letters, numbers, '.', '_', '-')`,
@@ -377,7 +418,9 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
 
 function symlinkTargetForRef(reference: string, arch: ImageArch): string {
   const parsed = parseImageRef(reference);
-  return path.join(imageRefRootDir(), parsed.name, parsed.tag, arch);
+  const refsRoot = imageRefRootDir();
+  const linkPath = path.resolve(refsRoot, parsed.name, parsed.tag, arch);
+  return ensurePathWithinRoot(refsRoot, linkPath, `image ref '${reference}'`);
 }
 
 function writeRefSymlink(
@@ -430,12 +473,7 @@ function readLocalRefTargets(reference: string): {
   let newestMtime = 0;
 
   for (const arch of ["aarch64", "x86_64"] as const) {
-    const linkPath = path.join(
-      imageRefRootDir(),
-      parsed.name,
-      parsed.tag,
-      arch,
-    );
+    const linkPath = symlinkTargetForRef(parsed.canonical, arch);
     if (!fs.existsSync(linkPath)) continue;
 
     const stat = fs.lstatSync(linkPath);
@@ -930,8 +968,15 @@ async function downloadArchive(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+
       hash.update(value);
-      stream.write(Buffer.from(value));
+      const chunk = Buffer.from(value);
+      await new Promise<void>((resolve, reject) => {
+        stream.write(chunk, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
     }
 
     await new Promise<void>((resolve, reject) => {
@@ -1041,6 +1086,19 @@ function resolveRegistrySourceForRef(
   );
 }
 
+function isExpectedLocalImageMiss(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message;
+  return (
+    message.startsWith("image object not found for buildId ") ||
+    message.startsWith("image ref not found: ") ||
+    message.includes(" has no target for ")
+  );
+}
+
 export async function ensureImageSelector(
   selector: string,
   arch?: ImageArch,
@@ -1062,8 +1120,10 @@ export async function ensureImageSelector(
 
   try {
     return resolveImageSelector(selector, arch);
-  } catch {
-    // Fall through to remote registry lookup.
+  } catch (error) {
+    if (!isExpectedLocalImageMiss(error)) {
+      throw error;
+    }
   }
 
   const registry = await fetchBuiltinImageRegistry();

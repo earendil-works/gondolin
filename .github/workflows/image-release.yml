@@ -159,6 +159,7 @@ jobs:
         run: |
           find . -type f -name '*.tar.gz' -exec mv {} . \;
           find . -type f -name '*.tar.gz.sha256' -exec mv {} . \;
+          find . -type f -name '*.tar.gz.meta.json' -exec mv {} . \;
 
       - name: Create image release
         uses: softprops/action-gh-release@v1
