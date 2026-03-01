@@ -19,6 +19,19 @@ const BUILTIN_IMAGE_REGISTRY_SCHEMA = 1 as const;
 const DEFAULT_IMAGE_REGISTRY_URL =
   "https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json";
 
+const DOWNLOAD_SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+] as const;
+
 export type ImageArch = Architecture;
 
 export interface ImageRefTargets {
@@ -957,6 +970,151 @@ function saveRegistryCache(cache: RegistryCache): void {
   fs.renameSync(tmpPath, cachePath);
 }
 
+function formatProgressBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+
+  if (unit === 0) {
+    return `${Math.round(value)}${units[unit]}`;
+  }
+  if (value >= 100) {
+    return `${value.toFixed(0)}${units[unit]}`;
+  }
+  if (value >= 10) {
+    return `${value.toFixed(1)}${units[unit]}`;
+  }
+  return `${value.toFixed(2)}${units[unit]}`;
+}
+
+function formatProgressDuration(totalMs: number): string {
+  if (totalMs < 1000) {
+    return `${Math.max(1, Math.round(totalMs))}ms`;
+  }
+
+  const totalSeconds = Math.max(1, Math.round(totalMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+type DownloadProgress = {
+  /** add downloaded chunk bytes */
+  addChunk: (chunkBytes: number) => void;
+  /** mark download success */
+  finish: () => void;
+  /** mark download failure */
+  fail: () => void;
+};
+
+function truncateProgressLine(line: string): string {
+  const columns = process.stderr.columns;
+  if (!columns || columns < 8) {
+    return line;
+  }
+  if (line.length <= columns - 1) {
+    return line;
+  }
+  return `${line.slice(0, Math.max(1, columns - 2))}…`;
+}
+
+function createDownloadProgress(
+  label: string,
+  totalBytes: number | null,
+): DownloadProgress {
+  const isTty = Boolean(process.stderr.isTTY) && process.env.CI !== "true";
+  if (!isTty) {
+    return {
+      addChunk() {},
+      finish() {},
+      fail() {},
+    };
+  }
+
+  const startedAt = Date.now();
+  let downloadedBytes = 0;
+  let frame = 0;
+  let interval: NodeJS.Timeout | null = null;
+  let finished = false;
+
+  const details = (elapsedMs: number): { progress: string; eta?: string } => {
+    if (!totalBytes || totalBytes <= 0) {
+      return {
+        progress: formatProgressBytes(downloadedBytes),
+      };
+    }
+
+    const progress = `${formatProgressBytes(downloadedBytes)}/${formatProgressBytes(totalBytes)}`;
+    const elapsedSeconds = Math.max(elapsedMs / 1000, 0.001);
+    const speedBytesPerSecond = downloadedBytes / elapsedSeconds;
+    if (downloadedBytes <= 0 || speedBytesPerSecond <= 0) {
+      return { progress };
+    }
+
+    const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
+    const etaSeconds = remainingBytes / speedBytesPerSecond;
+    return {
+      progress,
+      eta: formatProgressDuration(etaSeconds * 1000),
+    };
+  };
+
+  const render = (line: string, final = false): void => {
+    process.stderr.write(`\r\x1b[2K${truncateProgressLine(line)}`);
+    if (final) {
+      process.stderr.write("\n");
+    }
+  };
+
+  interval = setInterval(() => {
+    const spinner =
+      DOWNLOAD_SPINNER_FRAMES[frame % DOWNLOAD_SPINNER_FRAMES.length];
+    frame += 1;
+    const elapsedMs = Date.now() - startedAt;
+    const info = details(elapsedMs);
+    const etaSuffix = info.eta ? `, eta ${info.eta}` : "";
+    render(`${spinner} downloading ${label} ${info.progress}${etaSuffix}`);
+  }, 250);
+  interval.unref();
+
+  return {
+    addChunk(chunkBytes: number) {
+      downloadedBytes += chunkBytes;
+    },
+
+    finish() {
+      if (finished) return;
+      finished = true;
+      if (interval) {
+        clearInterval(interval);
+      }
+      const elapsed = formatProgressDuration(Date.now() - startedAt);
+      const progress = totalBytes
+        ? `${formatProgressBytes(totalBytes)}/${formatProgressBytes(totalBytes)}`
+        : formatProgressBytes(downloadedBytes);
+      render(`✓ downloaded ${label} ${progress} in ${elapsed}`, true);
+    },
+
+    fail() {
+      if (finished) return;
+      finished = true;
+      if (interval) {
+        clearInterval(interval);
+      }
+      const elapsed = formatProgressDuration(Date.now() - startedAt);
+      render(`✗ failed downloading ${label} after ${elapsed}`, true);
+    },
+  };
+}
+
 async function fetchBuiltinImageRegistry(): Promise<BuiltinImageRegistry> {
   const url = builtinRegistryUrl();
   const cached = loadRegistryCache(url);
@@ -1016,6 +1174,7 @@ async function fetchBuiltinImageRegistry(): Promise<BuiltinImageRegistry> {
 async function downloadArchive(
   source: RegistryImageSource,
   archivePath: string,
+  progressLabel: string,
 ): Promise<void> {
   const response = await fetch(source.url, {
     headers: {
@@ -1029,6 +1188,13 @@ async function downloadArchive(
     );
   }
 
+  const rawContentLength = response.headers.get("content-length");
+  const totalBytes =
+    rawContentLength && /^\d+$/.test(rawContentLength)
+      ? Number.parseInt(rawContentLength, 10)
+      : null;
+  const progress = createDownloadProgress(progressLabel, totalBytes);
+
   const hash = createHash("sha256");
   const stream = fs.createWriteStream(archivePath, { flags: "w" });
 
@@ -1040,6 +1206,7 @@ async function downloadArchive(
 
       hash.update(value);
       const chunk = Buffer.from(value);
+      progress.addChunk(chunk.length);
       await new Promise<void>((resolve, reject) => {
         stream.write(chunk, (error) => {
           if (error) reject(error);
@@ -1054,23 +1221,29 @@ async function downloadArchive(
         else resolve();
       });
     });
+
+    if (source.sha256) {
+      const got = hash.digest("hex");
+      if (got !== source.sha256) {
+        throw new Error(
+          `downloaded image checksum mismatch for ${source.url}\n  expected: ${source.sha256}\n  got:      ${got}`,
+        );
+      }
+    }
+
+    progress.finish();
+  } catch (error) {
+    progress.fail();
+    throw error;
   } finally {
     stream.destroy();
-  }
-
-  if (source.sha256) {
-    const got = hash.digest("hex");
-    if (got !== source.sha256) {
-      throw new Error(
-        `downloaded image checksum mismatch for ${source.url}\n  expected: ${source.sha256}\n  got:      ${got}`,
-      );
-    }
   }
 }
 
 async function importImageFromSource(
   source: RegistryImageSource,
   expectedBuildId?: string,
+  progressLabel = "image",
 ): Promise<ImportedImage> {
   const tmpRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-image-pull-"),
@@ -1079,7 +1252,7 @@ async function importImageFromSource(
   const extractDir = path.join(tmpRoot, "extract");
 
   try {
-    await downloadArchive(source, archivePath);
+    await downloadArchive(source, archivePath, progressLabel);
     fs.mkdirSync(extractDir, { recursive: true });
 
     child_process.execFileSync("tar", ["-xzf", archivePath, "-C", extractDir], {
@@ -1205,7 +1378,7 @@ export async function ensureImageSelector(
       );
     }
 
-    await importImageFromSource({ ...source, buildId }, buildId);
+    await importImageFromSource({ ...source, buildId }, buildId, buildId);
     return resolveImageSelector(buildId, arch);
   }
 
@@ -1216,7 +1389,11 @@ export async function ensureImageSelector(
     arch,
   );
 
-  const imported = await importImageFromSource(source);
+  const imported = await importImageFromSource(
+    source,
+    undefined,
+    parsedRef.canonical,
+  );
   if (source === registry.refs[parsedRef.canonical]?.[requestedArch]) {
     if (imported.arch !== requestedArch) {
       throw new Error(
