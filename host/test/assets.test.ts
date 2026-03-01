@@ -15,7 +15,7 @@ import {
   loadAssetManifest,
   loadGuestAssets,
   __test,
-} from "../src/assets";
+} from "../src/assets.ts";
 
 // In ESM, built-in modules expose live bindings via getters which cannot be
 // replaced with node:test mocks. The actual mutable exports object is on

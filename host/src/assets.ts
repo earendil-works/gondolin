@@ -2,14 +2,14 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { createWriteStream } from "fs";
-import * as child_process from "child_process";
+import child_process from "child_process";
 import { createHash } from "crypto";
 import type {
   BuildConfig,
   ContainerRuntime,
   OciPullPolicy,
   RootfsMode,
-} from "./build/config";
+} from "./build/config.ts";
 
 const GITHUB_ORG = "earendil-works";
 const GITHUB_REPO = "gondolin";
@@ -20,8 +20,8 @@ function resolveAssetVersion(): string {
   if (cachedAssetVersion) return cachedAssetVersion;
 
   const possiblePackageJsons = [
-    path.resolve(__dirname, "..", "package.json"), // src/ (tsx/dev) -> host/package.json
-    path.resolve(__dirname, "..", "..", "package.json"), // dist/src (npm) -> package/package.json
+    path.resolve(import.meta.dirname, "..", "package.json"), // src/ (native ts runtime) -> host/package.json
+    path.resolve(import.meta.dirname, "..", "..", "package.json"), // src/* (workspace) -> repo/package.json fallback
   ];
 
   for (const pkgPath of possiblePackageJsons) {
@@ -93,7 +93,8 @@ function getAssetDir(): string {
   // Prefer whatever directory the caller is operating in, but also check the
   // module location (works even when invoked from a different cwd).
   const repoDir =
-    tryFindRepoAssetsFrom(process.cwd()) ?? tryFindRepoAssetsFrom(__dirname);
+    tryFindRepoAssetsFrom(process.cwd()) ??
+    tryFindRepoAssetsFrom(import.meta.dirname);
   if (repoDir) return repoDir;
 
   // User cache directory

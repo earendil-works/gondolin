@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GondolinListeners } from "../src/ingress";
-import { MemoryProvider } from "../src/vfs/node";
+import { GondolinListeners } from "../src/ingress.ts";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 test("GondolinListeners.setRoutes validates port range", () => {
   const listeners = new GondolinListeners(new MemoryProvider());

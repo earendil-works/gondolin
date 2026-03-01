@@ -2,10 +2,10 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 
-import type { Architecture } from "../build/config";
-import { downloadFile } from "./utils";
-import { decompressTarGz, extractEntries, parseTar } from "./tar";
-import type { ApkMeta } from "./types";
+import type { Architecture } from "../build/config.ts";
+import { downloadFile } from "./utils.ts";
+import { decompressTarGz, extractEntries, parseTar } from "./tar.ts";
+import type { ApkMeta } from "./types.ts";
 
 /** Parse an APKINDEX file into package metadata records */
 export function parseApkIndex(content: string): ApkMeta[] {

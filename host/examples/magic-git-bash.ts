@@ -6,7 +6,7 @@
  *
  * Run with:
  *   cd host
- *   pnpm exec tsx examples/magic-git-bash.ts
+ *   node examples/magic-git-bash.ts
  *
  * Requirements:
  * - `gh` installed on the host
@@ -18,21 +18,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createHttpHooks } from "../src/http/hooks";
+import { createHttpHooks } from "../src/http/hooks.ts";
 import {
   RealFSProvider,
   type VirtualFileHandle,
   type VirtualProvider,
-} from "../src/vfs/node";
-import { ReadonlyProvider } from "../src/vfs/readonly";
-import { ReadonlyVirtualProvider } from "../src/vfs/readonly-virtual";
+} from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
+import { ReadonlyVirtualProvider } from "../src/vfs/readonly-virtual.ts";
 import {
   createVirtualDirStats,
   formatVirtualEntries,
   normalizeVfsPath,
-} from "../src/vfs/utils";
-import { createErrnoError } from "../src/vfs/errors";
-import { VM } from "../src/vm/core";
+} from "../src/vfs/utils.ts";
+import { createErrnoError } from "../src/vfs/errors.ts";
+import { VM } from "../src/vm/core.ts";
 
 const ALLOWED_HOSTS = [
   "registry.npmjs.org",
@@ -238,7 +238,7 @@ function isRepoRoot(resolved: Extract<ResolvedPath, { kind: "repo" }>) {
 
 async function main(): Promise<number> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log("Usage: pnpm exec tsx examples/magic-git-bash.ts");
+    console.log("Usage: node examples/magic-git-bash.ts");
     console.log();
     console.log(
       "Starts a bash shell with /git mounted and npm/pypi network access.",

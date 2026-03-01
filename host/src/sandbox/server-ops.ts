@@ -1,6 +1,6 @@
 import { Duplex, PassThrough, Readable } from "stream";
 
-import { toBufferIterable } from "../utils/buffer-iter";
+import { toBufferIterable } from "../utils/buffer-iter.ts";
 import {
   buildExecRequest,
   buildExecWindow,
@@ -10,7 +10,7 @@ import {
   buildFileWriteRequest,
   buildPtyResize,
   buildStdinData,
-} from "./virtio-protocol";
+} from "./virtio-protocol.ts";
 import {
   type BootCommandMessage,
   type ClientMessage,
@@ -18,33 +18,33 @@ import {
   type ExecWindowCommandMessage,
   type PtyResizeCommandMessage,
   type StdinCommandMessage,
-} from "./control-protocol";
-import type { SandboxState } from "./controller";
+} from "./control-protocol.ts";
+import type { SandboxState } from "./controller.ts";
 import {
   type GuestFileDeleteOptions,
   type GuestFileReadOptions,
   type GuestFileWriteOptions,
-} from "./server-options";
+} from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
   TcpForwardStream,
   estimateBase64Bytes,
   isValidRequestId,
-} from "./server-transport";
+} from "./server-transport.ts";
 import {
   type SandboxClient,
   type SandboxConnection,
   LocalSandboxClient,
   sendError,
   sendJson,
-} from "./client";
+} from "./client.ts";
 import {
   buildSandboxfsAppend,
   isSameSandboxFsConfig,
   normalizeSandboxFsConfig,
   type SandboxFsConfig,
-} from "./server-boot-config";
-import { stripTrailingNewline } from "../debug";
+} from "./server-boot-config.ts";
+import { stripTrailingNewline } from "../debug.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;

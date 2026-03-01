@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { __test as checkpointTest } from "../src/checkpoint";
+import { __test as checkpointTest } from "../src/checkpoint.ts";
 
 test("checkpoint: resolveAssetDirByBuildId rejects traversal payloads", () => {
   assert.throws(

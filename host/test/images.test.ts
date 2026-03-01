@@ -4,15 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 
-import { computeAssetBuildId } from "../src/assets";
+import { computeAssetBuildId } from "../src/assets.ts";
 import {
   importImageFromDirectory,
   listImageRefs,
   resolveImageSelector,
   setImageRef,
   tagImage,
-} from "../src/images";
-import { resolveSandboxServerOptions } from "../src/sandbox/server-options";
+} from "../src/images.ts";
+import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
 const prevImageStore = process.env.GONDOLIN_IMAGE_STORE;
 

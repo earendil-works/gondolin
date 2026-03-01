@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { NetworkStack } from "../src/qemu/network-stack";
+import { NetworkStack } from "../src/qemu/network-stack.ts";
 
 function checksum16(buf: Buffer): number {
   let sum = 0;

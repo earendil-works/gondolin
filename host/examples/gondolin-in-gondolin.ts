@@ -13,15 +13,11 @@
  * `/bin/bash` in L2.
  *
  * Prerequisites:
- *   1) Build host package so `/dist` exists:
- *        cd host
- *        pnpm build
- *
- *   2) Build outer guest assets with QEMU + Node installed:
+ *   1) Build outer guest assets with QEMU + Node installed:
  *        gondolin build --config examples/gondolin-in-gondolin.json --output ./tmp/nested-outer
  *
- *   3) Run this example:
- *        GONDOLIN_OUTER_GUEST_DIR=./tmp/nested-outer pnpm exec tsx examples/gondolin-in-gondolin.ts
+ *   2) Run this example:
+ *        GONDOLIN_OUTER_GUEST_DIR=./tmp/nested-outer node examples/gondolin-in-gondolin.ts
  *
  * Optional:
  *   - GONDOLIN_INNER_GUEST_DIR=/path/to/guest/assets
@@ -38,7 +34,7 @@ import {
   loadGuestAssets,
   RealFSProvider,
   ReadonlyProvider,
-} from "../dist/src/index.js";
+} from "../src/index.ts";
 
 type GuestAssets = {
   kernelPath: string;
@@ -52,7 +48,7 @@ function requireEnv(name: string): string {
     throw new Error(
       `${name} is required\n` +
         `Example:\n` +
-        `  ${name}=./tmp/nested-outer pnpm exec tsx examples/gondolin-in-gondolin.ts`,
+        `  ${name}=./tmp/nested-outer node examples/gondolin-in-gondolin.ts`,
     );
   }
   return value;
@@ -98,7 +94,7 @@ function resolveInnerGuestDir(outerGuestDir: string): string {
 
 function buildInnerRunnerScript() {
   return [
-    'const { VM } = require("/opt/gondolin-host/dist/src/index.js");',
+    'import { VM } from "/opt/gondolin-host/src/index.ts";',
     "",
     "async function main() {",
     "  const vm = await VM.create({",
@@ -156,7 +152,7 @@ async function installNestedCommand(outerVm: VM) {
   ]);
 
   await outerVm.fs.writeFile(
-    "/usr/local/lib/gondolin/run-inner-bash.js",
+    "/usr/local/lib/gondolin/run-inner-bash.mjs",
     buildInnerRunnerScript(),
   );
 
@@ -164,7 +160,7 @@ async function installNestedCommand(outerVm: VM) {
   // the command into /usr/bin and keep /usr/local/bin as a convenience symlink.
   await outerVm.fs.writeFile(
     "/usr/bin/gondolin-bash",
-    '#!/bin/sh\nexec node /usr/local/lib/gondolin/run-inner-bash.js "$@"\n',
+    '#!/bin/sh\nexec node --experimental-strip-types /usr/local/lib/gondolin/run-inner-bash.mjs "$@"\n',
   );
 
   const chmodResult = await outerVm.exec([
@@ -214,16 +210,11 @@ async function main() {
 
   const innerGuestDir = resolveInnerGuestDir(outerGuestDir);
 
-  const hostPackageDir = path.resolve(__dirname, "..");
-  const hostDistEntry = path.join(hostPackageDir, "dist/src/index.js");
+  const hostPackageDir = path.resolve(import.meta.dirname, "..");
+  const hostSourceEntry = path.join(hostPackageDir, "src/index.ts");
 
-  if (!fs.existsSync(hostDistEntry)) {
-    throw new Error(
-      `Host package build output missing: ${hostDistEntry}\n` +
-        `Run:\n` +
-        `  cd host\n` +
-        `  pnpm build`,
-    );
+  if (!fs.existsSync(hostSourceEntry)) {
+    throw new Error(`Host package source entry missing: ${hostSourceEntry}`);
   }
 
   const outerMemory = process.env.GONDOLIN_OUTER_MEMORY ?? "1536M";

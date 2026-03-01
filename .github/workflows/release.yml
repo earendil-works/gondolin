@@ -50,8 +50,9 @@ jobs:
 
       - name: Build guest image
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          make build
+          make build NODE="$NODE_BIN"
 
       - name: Verify x64 kernel arch
         run: |
@@ -109,8 +110,9 @@ jobs:
 
       - name: Build guest image (arm64)
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=aarch64 make build
+          ALPINE_ARCH=aarch64 make build NODE="$NODE_BIN"
 
       - name: Verify arm64 kernel arch
         run: |
@@ -242,8 +244,11 @@ jobs:
           fi
           echo "✅ Version matches: $PKG_VERSION"
 
-      - name: Build
-        run: pnpm run build
+      - name: Build package artifacts
+        run: pnpm --filter @earendil-works/gondolin run build
+
+      - name: Verify packaged CLI runtime
+        run: node host/dist/bin/gondolin.js --help >/dev/null
 
       - name: Publish to NPM (with provenance)
         run: |

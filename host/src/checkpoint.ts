@@ -7,20 +7,20 @@ import {
   ensureQemuImgAvailable,
   getQcow2BackingFilename,
   rebaseQcow2InPlace,
-} from "./qemu/img";
+} from "./qemu/img.ts";
 
 import {
   getAssetDirectory,
   loadAssetManifest,
   loadGuestAssets,
   type GuestAssets,
-} from "./assets";
+} from "./assets.ts";
 import {
   getImageObjectDirectory,
   normalizeImageBuildId,
   resolveImageSelector,
-} from "./images";
-import type { VMOptions } from "./vm/types";
+} from "./images.ts";
+import type { VMOptions } from "./vm/types.ts";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
@@ -208,8 +208,8 @@ function devGuestOutDirs(): string[] {
   // Try to mirror host/src/assets.ts dev resolution. Keep this local to avoid
   // exporting more internal APIs.
   const possibleRepoRoots = [
-    path.resolve(__dirname, "..", ".."),
-    path.resolve(__dirname, "..", "..", ".."),
+    path.resolve(import.meta.dirname, "..", ".."),
+    path.resolve(import.meta.dirname, "..", "..", ".."),
   ];
 
   return possibleRepoRoots.map((repoRoot) =>

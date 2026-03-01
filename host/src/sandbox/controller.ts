@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import * as child_process from "child_process";
+import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
 
@@ -95,9 +95,11 @@ export class SandboxController extends EventEmitter {
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private manualStop = false;
+  private readonly config: SandboxConfig;
 
-  constructor(private readonly config: SandboxConfig) {
+  constructor(config: SandboxConfig) {
     super();
+    this.config = config;
   }
 
   setAppend(append: string) {

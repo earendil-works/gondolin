@@ -3,8 +3,8 @@ import type {
   InternalHttpRequest,
   InternalHttpResponse,
   InternalHttpResponseHeaders,
-} from "./http-types";
-import { HttpRequestBlockedError } from "../http/utils";
+} from "./http-types.ts";
+import { HttpRequestBlockedError } from "../http/utils.ts";
 
 type RequestLike = Pick<Request, "url" | "method" | "headers" | "body"> & {
   arrayBuffer?: () => Promise<ArrayBuffer>;

@@ -2,9 +2,9 @@ import os from "os";
 import { EventEmitter } from "events";
 import { Duplex, PassThrough, Readable } from "stream";
 
-import { getHostNodeArchCached } from "../host/arch";
-import { AsyncSingleflight } from "../utils/async";
-import { toBufferIterable } from "../utils/buffer-iter";
+import { getHostNodeArchCached } from "../host/arch.ts";
+import { AsyncSingleflight } from "../utils/async.ts";
+import { toBufferIterable } from "../utils/buffer-iter.ts";
 import {
   buildExecRequest,
   buildPtyResize,
@@ -14,30 +14,30 @@ import {
   buildFileReadRequest,
   buildFileWriteData,
   buildFileWriteRequest,
-} from "./virtio-protocol";
+} from "./virtio-protocol.ts";
 import {
-  BootCommandMessage,
-  ClientMessage,
-  ExecCommandMessage,
-  ExecWindowCommandMessage,
-  PtyResizeCommandMessage,
-  StdinCommandMessage,
+  type BootCommandMessage,
+  type ClientMessage,
+  type ExecCommandMessage,
+  type ExecWindowCommandMessage,
+  type PtyResizeCommandMessage,
+  type StdinCommandMessage,
   encodeOutputFrame,
-} from "./control-protocol";
+} from "./control-protocol.ts";
 import {
   SandboxController,
-  SandboxConfig,
-  SandboxState,
+  type SandboxConfig,
+  type SandboxState,
   type SandboxLogStream,
-} from "./controller";
-import { QemuNetworkBackend } from "../qemu/net";
-import { FsRpcService } from "../vfs/rpc-service";
-import { SandboxVfsProvider } from "../vfs/provider";
+} from "./controller.ts";
+import { QemuNetworkBackend } from "../qemu/net.ts";
+import { FsRpcService } from "../vfs/rpc-service.ts";
+import { SandboxVfsProvider } from "../vfs/provider.ts";
 import {
   stripTrailingNewline,
   type DebugComponent,
   type DebugFlag,
-} from "../debug";
+} from "../debug.ts";
 import {
   type GuestFileDeleteOptions,
   type GuestFileReadOptions,
@@ -46,7 +46,7 @@ import {
   type SandboxServerOptions,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
-} from "./server-options";
+} from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
   TcpForwardStream,
@@ -54,7 +54,7 @@ import {
   estimateBase64Bytes,
   isValidRequestId,
   parseMac,
-} from "./server-transport";
+} from "./server-transport.ts";
 import {
   type SandboxClient,
   type SandboxConnection,
@@ -62,14 +62,14 @@ import {
   sendBinary,
   sendError,
   sendJson,
-} from "./client";
+} from "./client.ts";
 import {
   buildSandboxfsAppend,
   isSameSandboxFsConfig,
   normalizeSandboxFsConfig,
   type SandboxFsConfig,
-} from "./server-boot-config";
-import { SandboxServerOps, installSandboxServerOps } from "./server-ops";
+} from "./server-boot-config.ts";
+import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const { errno: ERRNO } = os.constants;

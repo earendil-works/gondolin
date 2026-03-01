@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
 
-import { assertSafeWritePath, resolveWritePath } from "./rootfs";
-import type { KernelModuleSyncOptions } from "./types";
+import { assertSafeWritePath, resolveWritePath } from "./rootfs.ts";
+import type { KernelModuleSyncOptions } from "./types.ts";
 
 const MODULE_FILE_SUFFIXES = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"] as const;
 const REQUIRED_INITRAMFS_MODULES = ["virtio_blk", "ext4"] as const;

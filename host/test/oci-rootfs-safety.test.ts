@@ -5,13 +5,13 @@ import path from "path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildOciCreateArgs, exportOciRootfs } from "../src/alpine/oci";
+import { buildOciCreateArgs, exportOciRootfs } from "../src/alpine/oci.ts";
 import {
   assertSafeWritePath,
   ensureRootfsShell,
   hardenExtractedRootfs,
-} from "../src/alpine/rootfs";
-import { syncKernelModules } from "../src/alpine/kernel-modules";
+} from "../src/alpine/rootfs.ts";
+import { syncKernelModules } from "../src/alpine/kernel-modules.ts";
 
 function writeCreateFailRuntime(binDir: string): void {
   const runtimePath = path.join(binDir, "docker");

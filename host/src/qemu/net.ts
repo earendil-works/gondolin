@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { stripTrailingNewline } from "../debug";
+import { stripTrailingNewline } from "../debug.ts";
 import net from "net";
 import fs from "fs";
 import fsp from "fs/promises";
@@ -17,17 +17,17 @@ import {
   isNonNegativeSerialNumberHex,
   loadOrCreateMitmCa,
   resolveMitmCertDir,
-} from "../mitm";
+} from "../mitm.ts";
 import {
   buildSyntheticDnsResponse,
   isLocalhostDnsName,
   isProbablyDnsPacket,
   parseDnsQuery,
-} from "./dns";
+} from "./dns.ts";
 import { Agent } from "undici";
 
-import { AsyncSemaphore } from "../utils/async";
-import { SyntheticDnsHostMap, normalizeIpv4Servers } from "../utils/dns";
+import { AsyncSemaphore } from "../utils/async.ts";
+import { SyntheticDnsHostMap, normalizeIpv4Servers } from "../utils/dns.ts";
 import {
   assertSshDnsConfig,
   cleanupSshTcpSession,
@@ -37,7 +37,7 @@ import {
   type QemuSshInternals,
   type SshOptions,
   type SshTcpSessionState,
-} from "./ssh";
+} from "./ssh.ts";
 import {
   assertTcpDnsConfig,
   createQemuTcpInternals,
@@ -45,29 +45,29 @@ import {
   type QemuTcpInternals,
   type TcpMappedTarget,
   type TcpOptions,
-} from "./tcp";
+} from "./tcp.ts";
 import {
   caCertVerifiesLeaf,
   closeSharedDispatchers,
   privateKeyMatchesLeafCert,
   HttpReceiveBuffer,
-} from "../http/utils";
+} from "../http/utils.ts";
 
 import {
   handlePlainHttpData,
   handleTlsHttpData,
   updateQemuRxPauseState,
   type HttpSession,
-} from "./http";
-import type { WebSocketState } from "./ws";
+} from "./http.ts";
+import type { WebSocketState } from "./ws.ts";
 import type {
   DnsMode,
   DnsOptions,
   HttpFetch,
   HttpHooks,
   SyntheticDnsHostMappingMode,
-} from "./contracts";
-import { QemuIcmpTracker, type IcmpTiming } from "./icmp";
+} from "./contracts.ts";
+import { QemuIcmpTracker, type IcmpTiming } from "./icmp.ts";
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -93,14 +93,14 @@ const DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS = 128;
 
 import {
   NetworkStack,
-  TcpCloseMessage,
-  TcpConnectMessage,
-  TcpPauseMessage,
-  TcpResumeMessage,
-  TcpSendMessage,
-  TcpFlowProtocol,
-  UdpSendMessage,
-} from "./network-stack";
+  type TcpCloseMessage,
+  type TcpConnectMessage,
+  type TcpPauseMessage,
+  type TcpResumeMessage,
+  type TcpSendMessage,
+  type TcpFlowProtocol,
+  type UdpSendMessage,
+} from "./network-stack.ts";
 
 type UdpSession = {
   socket: dgram.Socket;
@@ -119,10 +119,11 @@ type UdpSession = {
 };
 
 class GuestTlsStream extends Duplex {
-  constructor(
-    private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>,
-  ) {
+  private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>;
+
+  constructor(onEncryptedWrite: (chunk: Buffer) => void | Promise<void>) {
     super();
+    this.onEncryptedWrite = onEncryptedWrite;
   }
 
   pushEncrypted(data: Buffer) {
@@ -208,8 +209,8 @@ export type {
   HttpHooks,
   HttpIpAllowInfo,
   SyntheticDnsHostMappingMode,
-} from "./contracts";
-export type { TcpOptions } from "./tcp";
+} from "./contracts.ts";
+export type { TcpOptions } from "./tcp.ts";
 
 export type QemuNetworkOptions = {
   /** unix socket path for the qemu net backend */

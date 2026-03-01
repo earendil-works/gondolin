@@ -2,11 +2,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { buildAlpineImages } from "./alpine";
-import type { BuildConfig, Architecture } from "./config";
-import { parseApkIndex } from "../alpine/packages";
-import { decompressTarGz, parseTar } from "../alpine/tar";
-import { downloadFile } from "../alpine/utils";
+import { buildAlpineImages } from "./alpine.ts";
+import type { BuildConfig, Architecture } from "./config.ts";
+import { parseApkIndex } from "../alpine/packages.ts";
+import { decompressTarGz, parseTar } from "../alpine/tar.ts";
+import { downloadFile } from "../alpine/utils.ts";
 import {
   DEFAULT_ROOTFS_PACKAGES,
   INITRAMFS_FILENAME,
@@ -18,7 +18,7 @@ import {
   type BuildOptions,
   type BuildResult,
   type ResolvedAlpineConfig,
-} from "./shared";
+} from "./shared.ts";
 
 function hasOciRootfs(config: BuildConfig): boolean {
   return config.oci !== undefined;

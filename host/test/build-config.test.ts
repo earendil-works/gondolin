@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseBuildConfig, validateBuildConfig } from "../src/build/config";
+import { parseBuildConfig, validateBuildConfig } from "../src/build/config.ts";
 
 test("build-config: accepts postBuild.commands", () => {
   const cfg = {

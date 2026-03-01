@@ -7,8 +7,8 @@ import http, {
 import net from "net";
 import type { Duplex, Writable } from "stream";
 
-import type { VirtualProvider } from "./vfs/node";
-import type { SandboxServer } from "./sandbox/server";
+import type { VirtualProvider } from "./vfs/node/index.ts";
+import type { SandboxServer } from "./sandbox/server.ts";
 import {
   isWebSocketUpgradeRequestHeaders,
   MAX_HTTP_HEADER_BYTES,
@@ -18,7 +18,7 @@ import {
   sendHttpResponseHead,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
-} from "./http/utils";
+} from "./http/utils.ts";
 
 const MAX_LISTENERS_FILE_BYTES = 64 * 1024;
 
@@ -494,9 +494,11 @@ export class GondolinListeners extends EventEmitter {
   private routes: IngressRoute[] = [];
   private reloadTimer: NodeJS.Timeout | null = null;
   private lastReloadError: unknown = null;
+  private readonly etcProvider: VirtualProvider;
 
-  constructor(private readonly etcProvider: VirtualProvider) {
+  constructor(etcProvider: VirtualProvider) {
     super();
+    this.etcProvider = etcProvider;
   }
 
   getLastReloadError(): unknown {
@@ -782,10 +784,12 @@ export class IngressGateway {
   private allowWebSockets: boolean;
   private bufferResponseBody: boolean;
   private maxBufferedResponseBodyBytes: number;
+  private readonly sandbox: SandboxServer;
+  private readonly listeners: GondolinListeners;
 
   constructor(
-    private readonly sandbox: SandboxServer,
-    private readonly listeners: GondolinListeners,
+    sandbox: SandboxServer,
+    listeners: GondolinListeners,
     options: Pick<
       EnableIngressOptions,
       | "hooks"
@@ -794,6 +798,8 @@ export class IngressGateway {
       | "allowWebSockets"
     > = {},
   ) {
+    this.sandbox = sandbox;
+    this.listeners = listeners;
     this.hooks = options.hooks ?? null;
     this.allowWebSockets = options.allowWebSockets ?? true;
     this.bufferResponseBody = options.bufferResponseBody ?? false;

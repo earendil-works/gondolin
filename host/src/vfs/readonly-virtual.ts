@@ -1,8 +1,8 @@
 import fs from "node:fs";
 
-import { createErrnoError } from "./errors";
-import type { VirtualFileHandle, VirtualProvider } from "./node";
-import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils";
+import { createErrnoError } from "./errors.ts";
+import type { VirtualFileHandle, VirtualProvider } from "./node/index.ts";
+import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils.ts";
 
 /**
  * Small helper base-class for implementing a synchronous, read-only VFS provider.

@@ -3,16 +3,16 @@ import type { Stats } from "node:fs";
 import path from "path";
 import { Readable } from "stream";
 
-import { toBufferIterable } from "../utils/buffer-iter";
-import type { ExecResult } from "../exec";
-import type { SandboxServer } from "../sandbox/server";
+import { toBufferIterable } from "../utils/buffer-iter.ts";
+import type { ExecResult } from "../exec.ts";
+import type { SandboxServer } from "../sandbox/server.ts";
 import {
   getRelativePath,
   isNoEntryError,
   isUnderMountPoint,
-} from "../vfs/mounts";
-import type { SandboxVfsProvider } from "../vfs/provider";
-import { normalizeVfsPath } from "../vfs/utils";
+} from "../vfs/mounts.ts";
+import type { SandboxVfsProvider } from "../vfs/provider.ts";
+import { normalizeVfsPath } from "../vfs/utils.ts";
 
 const DEFAULT_VFS_FILE_CHUNK_SIZE = 64 * 1024;
 
@@ -188,7 +188,11 @@ export type VmFsControllerOptions = {
 };
 
 export class VmFsController implements VmFs {
-  constructor(private readonly options: VmFsControllerOptions) {}
+  private readonly options: VmFsControllerOptions;
+
+  constructor(options: VmFsControllerOptions) {
+    this.options = options;
+  }
 
   async access(
     filePath: string,

@@ -2,7 +2,7 @@ import type {
   ClientMessage,
   ErrorMessage,
   ServerMessage,
-} from "./control-protocol";
+} from "./control-protocol.ts";
 
 export type SandboxClient = {
   sendJson: (message: ServerMessage) => boolean;
@@ -19,14 +19,19 @@ export type SandboxConnection = {
 
 export class LocalSandboxClient implements SandboxClient {
   private closed = false;
+  private readonly onMessage: (
+    data: Buffer | string,
+    isBinary: boolean,
+  ) => void;
+  private readonly onClose?: () => void;
 
   constructor(
-    private readonly onMessage: (
-      data: Buffer | string,
-      isBinary: boolean,
-    ) => void,
-    private readonly onClose?: () => void,
-  ) {}
+    onMessage: (data: Buffer | string, isBinary: boolean) => void,
+    onClose?: () => void,
+  ) {
+    this.onMessage = onMessage;
+    this.onClose = onClose;
+  }
 
   sendJson(message: ServerMessage): boolean {
     if (this.closed) return false;

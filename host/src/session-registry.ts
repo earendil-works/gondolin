@@ -3,7 +3,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 
-import type { SandboxConnection } from "./sandbox/client";
+import type { SandboxConnection } from "./sandbox/client.ts";
 import {
   decodeOutputFrame,
   encodeOutputFrame,
@@ -17,7 +17,7 @@ import {
   type SnapshotCommandMessage,
   type SnapshotResponseMessage,
   type StdinCommandMessage,
-} from "./sandbox/control-protocol";
+} from "./sandbox/control-protocol.ts";
 
 const CACHE_BASE =
   process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
@@ -319,15 +319,25 @@ export class SessionIpcServer {
   private clients = new Set<net.Socket>();
   private allocatedInternalIds = new Set<number>();
   private nextInternalId = 0xffffffff;
+  private readonly sockPath: string;
+  private readonly connectToSandbox: (
+    onMessage: (data: Buffer | string, isBinary: boolean) => void,
+    onClose?: () => void,
+  ) => SandboxConnection;
+  private readonly handlers: SessionIpcServerHandlers;
 
   constructor(
-    private readonly sockPath: string,
-    private readonly connectToSandbox: (
+    sockPath: string,
+    connectToSandbox: (
       onMessage: (data: Buffer | string, isBinary: boolean) => void,
       onClose?: () => void,
     ) => SandboxConnection,
-    private readonly handlers: SessionIpcServerHandlers = {},
-  ) {}
+    handlers: SessionIpcServerHandlers = {},
+  ) {
+    this.sockPath = sockPath;
+    this.connectToSandbox = connectToSandbox;
+    this.handlers = handlers;
+  }
 
   start(): void {
     if (this.server) return;

@@ -3,8 +3,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import type { SshCredential } from "./types";
-import { matchHostname, normalizeHostnamePattern } from "../host/patterns";
+import type { SshCredential } from "./types.ts";
+import { matchHostname, normalizeHostnamePattern } from "../host/patterns.ts";
 
 export { matchHostname, normalizeHostnamePattern };
 

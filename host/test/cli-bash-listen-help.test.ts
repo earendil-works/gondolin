@@ -4,11 +4,11 @@ import path from "node:path";
 import test from "node:test";
 
 test("cli: gondolin bash --help documents --listen and --resume", () => {
-  const hostDir = path.join(__dirname, "..");
+  const hostDir = path.join(import.meta.dirname, "..");
 
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "bin/gondolin.ts", "bash", "--help"],
+    ["bin/gondolin.ts", "bash", "--help"],
     {
       cwd: hostDir,
       env: process.env,

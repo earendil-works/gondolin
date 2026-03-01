@@ -1,6 +1,6 @@
-import { NetworkStack } from "../../src/qemu/network-stack";
-import { XorShift32 } from "../rng";
-import type { FuzzTarget } from "./types";
+import { NetworkStack } from "../../src/qemu/network-stack.ts";
+import { XorShift32 } from "../rng.ts";
+import type { FuzzTarget } from "./types.ts";
 
 function sanitizeQemuFramedStream(buf: Buffer, maxFrame: number) {
   // Match guest fuzz sanitizer: clamp u32be length prefixes to remaining size.

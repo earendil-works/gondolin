@@ -8,8 +8,8 @@ ZIG ?= zig
 FUZZ_OPTIMIZE ?= ReleaseSafe
 REPRO_OPTIMIZE ?= Debug
 
-TSX ?= ../../host/node_modules/.bin/tsx
-GONDOLIN ?= $(TSX) ../../host/bin/gondolin.ts
+NODE ?= node
+GONDOLIN ?= $(NODE) ../../host/bin/gondolin.ts
 
 # Keep this in sync with guest/Makefile
 HOST_ARCH := $(shell uname -m)

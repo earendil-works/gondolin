@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseListenersFile, serializeListenersFile } from "../src/ingress";
+import { parseListenersFile, serializeListenersFile } from "../src/ingress.ts";
 
 test("listeners file: parses basic routes", () => {
   const parsed = parseListenersFile(

@@ -3,9 +3,9 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 
-import { loadAssetManifest, loadGuestAssets } from "./assets";
-import { getHostNodeArchCached } from "./host/arch";
-import type { Architecture } from "./build/config";
+import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
+import { getHostNodeArchCached } from "./host/arch.ts";
+import type { Architecture } from "./build/config.ts";
 
 const IMAGE_REF_INDEX_VERSION = 1 as const;
 

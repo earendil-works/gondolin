@@ -1,11 +1,11 @@
-import type { DebugLogFn } from "../debug";
-import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts";
-import type { SshOptions } from "../qemu/ssh";
-import type { TcpOptions } from "../qemu/tcp";
-import type { RootfsMode } from "../build/config";
-import type { SandboxServerOptions } from "../sandbox/server-options";
-import type { VirtualProvider } from "../vfs/node";
-import type { VfsHooks } from "../vfs/provider";
+import type { DebugLogFn } from "../debug.ts";
+import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts.ts";
+import type { SshOptions } from "../qemu/ssh.ts";
+import type { TcpOptions } from "../qemu/tcp.ts";
+import type { RootfsMode } from "../build/config.ts";
+import type { SandboxServerOptions } from "../sandbox/server-options.ts";
+import type { VirtualProvider } from "../vfs/node/index.ts";
+import type { VfsHooks } from "../vfs/provider.ts";
 
 export type EnvInput = string[] | Record<string, string>;
 

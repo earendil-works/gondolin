@@ -15,13 +15,18 @@ export class QemuIcmpTracker {
   private readonly icmpTimings = new Map<string, IcmpTiming>();
   private icmpDebugBuffer = Buffer.alloc(0);
   private icmpRxBuffer = Buffer.alloc(0);
+  private readonly emitDebug: (message: string) => void;
+  private readonly getEventLoopDelay: () => ReturnType<
+    typeof monitorEventLoopDelay
+  > | null;
 
   constructor(
-    private readonly emitDebug: (message: string) => void,
-    private readonly getEventLoopDelay: () => ReturnType<
-      typeof monitorEventLoopDelay
-    > | null,
-  ) {}
+    emitDebug: (message: string) => void,
+    getEventLoopDelay: () => ReturnType<typeof monitorEventLoopDelay> | null,
+  ) {
+    this.emitDebug = emitDebug;
+    this.getEventLoopDelay = getEventLoopDelay;
+  }
 
   reset() {
     this.icmpTimings.clear();

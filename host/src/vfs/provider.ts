@@ -1,7 +1,11 @@
-import { createErrnoError } from "./errors";
-import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node";
-import { delegateStatfsOrEnosys } from "./statfs";
-import { ERRNO, VirtualProviderClass } from "./utils";
+import { createErrnoError } from "./errors.ts";
+import type {
+  VirtualProvider,
+  VirtualFileHandle,
+  VfsStatfs,
+} from "./node/index.ts";
+import { delegateStatfsOrEnosys } from "./statfs.ts";
+import { ERRNO, VirtualProviderClass } from "./utils.ts";
 
 export type VfsHookContext = {
   /** operation name */
@@ -38,11 +42,15 @@ export type VfsHooks = {
 };
 
 class HookedHandle implements VirtualFileHandle {
-  constructor(
-    private readonly inner: VirtualFileHandle,
-    private readonly hooks: VfsHooks,
-    private readonly handlePath: string,
-  ) {}
+  private readonly inner: VirtualFileHandle;
+  private readonly hooks: VfsHooks;
+  private readonly handlePath: string;
+
+  constructor(inner: VirtualFileHandle, hooks: VfsHooks, handlePath: string) {
+    this.inner = inner;
+    this.hooks = hooks;
+    this.handlePath = handlePath;
+  }
 
   get path() {
     // Always report the path that was used to open the handle.
@@ -278,11 +286,13 @@ export class SandboxVfsProvider
   extends VirtualProviderClass
   implements VirtualProvider
 {
-  constructor(
-    private readonly backend: VirtualProvider,
-    private readonly hooks: VfsHooks = {},
-  ) {
+  private readonly backend: VirtualProvider;
+  private readonly hooks: VfsHooks;
+
+  constructor(backend: VirtualProvider, hooks: VfsHooks = {}) {
     super();
+    this.backend = backend;
+    this.hooks = hooks;
   }
 
   get readonly() {

@@ -1,6 +1,6 @@
-import { parseTar } from "../../src/build/alpine";
-import { XorShift32 } from "../rng";
-import type { FuzzTarget } from "./types";
+import { parseTar } from "../../src/build/alpine.ts";
+import { XorShift32 } from "../rng.ts";
+import type { FuzzTarget } from "./types.ts";
 
 export const tarTarget: FuzzTarget = {
   name: "tar",

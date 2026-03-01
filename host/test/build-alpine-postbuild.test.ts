@@ -5,8 +5,8 @@ import path from "path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runPostBuildCommands } from "../src/alpine/packages";
-import type { Architecture } from "../src/build/config";
+import { runPostBuildCommands } from "../src/alpine/packages.ts";
+import type { Architecture } from "../src/build/config.ts";
 
 function runtimeArch(): Architecture {
   if (process.arch === "arm64") return "aarch64";

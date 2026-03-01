@@ -32,8 +32,11 @@ jobs:
       - name: Typecheck host
         run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
 
-      - name: Build host
-        run: pnpm run build
+      - name: Build package artifacts
+        run: pnpm --filter @earendil-works/gondolin run build
+
+      - name: Verify packaged CLI runtime
+        run: node host/dist/bin/gondolin.js --help >/dev/null
 
   build-guest:
     name: Build Guest (${{ matrix.arch }})
@@ -82,8 +85,9 @@ jobs:
 
       - name: Build guest image
         run: |
+          NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=${{ matrix.arch }} make build
+          ALPINE_ARCH=${{ matrix.arch }} make build NODE="$NODE_BIN"
 
       - name: Package assets
         run: |
@@ -122,8 +126,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Build host dist
-        run: pnpm run build
+      - name: Verify host CLI runtime
+        run: node host/bin/gondolin.ts --help >/dev/null
 
       - name: Build guest binaries
         run: |
@@ -158,7 +162,7 @@ jobs:
           }
           JSON
 
-          node host/dist/bin/gondolin.js build \
+          node host/bin/gondolin.ts build \
             --config build-config-container-smoke.json \
             --output ./tmp-container-assets \
             --quiet
@@ -224,8 +228,9 @@ jobs:
         # concurrently (which can hang/time out on some CI runners).
         timeout-minutes: 20
         run: |
-          make -C guest test
-          make -C host test
+          NODE_BIN="$(node -p 'process.execPath')"
+          make -C guest test NODE="$NODE_BIN"
+          make -C host test NODE="$NODE_BIN"
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"

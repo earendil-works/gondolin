@@ -6,46 +6,46 @@ import { randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 import { Duplex, Readable } from "stream";
 
-import { AsyncSingleflight } from "../utils/async";
+import { AsyncSingleflight } from "../utils/async.ts";
 
 import {
   createTempQcow2Overlay,
   ensureQemuImgAvailable,
   inferDiskFormatFromPath,
   moveFile,
-} from "../qemu/img";
+} from "../qemu/img.ts";
 import {
   VmCheckpoint,
   registerVmCreate,
   type VmCheckpointData,
-} from "../checkpoint";
-import { loadAssetManifest } from "../assets";
-import { isRootfsMode, type RootfsMode } from "../build/config";
+} from "../checkpoint.ts";
+import { loadAssetManifest } from "../assets.ts";
+import { isRootfsMode, type RootfsMode } from "../build/config.ts";
 
 import {
-  ErrorMessage,
-  ExecResponseMessage,
-  StatusMessage,
+  type ErrorMessage,
+  type ExecResponseMessage,
+  type StatusMessage,
   decodeOutputFrame,
   type ClientMessage,
-} from "../sandbox/control-protocol";
-import { SandboxServer } from "../sandbox/server";
+} from "../sandbox/control-protocol.ts";
+import { SandboxServer } from "../sandbox/server.ts";
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
-} from "../sandbox/server-options";
-import type { SandboxConnection } from "../sandbox/client";
-import type { SandboxState } from "../sandbox/controller";
+} from "../sandbox/server-options.ts";
+import type { SandboxConnection } from "../sandbox/client.ts";
+import type { SandboxState } from "../sandbox/controller.ts";
 import {
   SessionIpcServer,
   gcSessions,
   registerSession,
   unregisterSession,
-} from "../session-registry";
-import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs";
-import type { EnvInput, VMOptions, VmVfsOptions } from "./types";
+} from "../session-registry.ts";
+import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs.ts";
+import type { EnvInput, VMOptions, VmVfsOptions } from "./types.ts";
 import {
   buildShellEnv,
   envInputToEntries,
@@ -53,13 +53,13 @@ import {
   mergeEnvInputs,
   parseEnvEntry,
   resolveEnvNumber,
-} from "../utils/env";
+} from "../utils/env.ts";
 import {
   defaultDebugLog,
   resolveDebugFlags,
   type DebugComponent,
   type DebugLogFn,
-} from "../debug";
+} from "../debug.ts";
 import {
   IngressGateway,
   type EnableIngressOptions,
@@ -67,26 +67,26 @@ import {
   type IngressRoute,
   createGondolinEtcHooks,
   createGondolinEtcMount,
-} from "../ingress";
-import { MemoryProvider, type VirtualProvider } from "../vfs/node";
+} from "../ingress.ts";
+import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
 import {
   SandboxVfsProvider,
   type VfsHooks,
   composeVfsHooks,
   wrapProvider,
-} from "../vfs/provider";
+} from "../vfs/provider.ts";
 import {
   MountRouterProvider,
   listMountPaths,
   normalizeMountMap,
   normalizeMountPath,
-} from "../vfs/mounts";
-import { VmFsController, type VmFs } from "./fs";
+} from "../vfs/mounts.ts";
+import { VmFsController, type VmFs } from "./fs.ts";
 import {
   ExecProcess,
-  ExecResult,
-  ExecOptions,
-  ExecSession,
+  type ExecResult,
+  type ExecOptions,
+  type ExecSession,
   createExecSession,
   finishExecSession,
   rejectExecSession,
@@ -94,7 +94,7 @@ import {
   applyOutputChunk,
   normalizeCommand,
   toAsyncIterable,
-} from "../exec";
+} from "../exec.ts";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
@@ -156,8 +156,8 @@ export type {
   VmFsWriteFileInput,
   VmFsWriteFileOptions,
   VmFsDeleteOptions,
-} from "./fs";
-export type { VMOptions, VmRootfsOptions, VmVfsOptions } from "./types";
+} from "./fs.ts";
+export type { VMOptions, VmRootfsOptions, VmVfsOptions } from "./types.ts";
 
 export type ShellOptions = {
   /** command to run (default: /bin/bash) */

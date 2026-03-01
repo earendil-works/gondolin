@@ -1,8 +1,8 @@
 import { getSystemErrorName } from "node:util";
 
-import { createErrnoError } from "./errors";
-import type { VfsStatfs } from "./node";
-import { ERRNO } from "./utils";
+import { createErrnoError } from "./errors.ts";
+import type { VfsStatfs } from "./node/index.ts";
+import { ERRNO } from "./utils.ts";
 
 type MaybeStatfsProvider = {
   statfs?: (path: string) => Promise<VfsStatfs>;

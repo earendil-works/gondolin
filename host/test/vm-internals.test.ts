@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MemoryProvider, type VirtualProvider } from "../src/vfs/node";
-import { createExecSession } from "../src/exec";
-import { VM, __test, type VMOptions } from "../src/vm/core";
-import { resolveEnvNumber } from "../src/utils/env";
-import type { RootfsMode } from "../src/build/config";
+import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
+import { createExecSession } from "../src/exec.ts";
+import { VM, __test, type VMOptions } from "../src/vm/core.ts";
+import { resolveEnvNumber } from "../src/utils/env.ts";
+import type { RootfsMode } from "../src/build/config.ts";
 
 function makeTempResolvedServerOptions() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-vm-test-"));

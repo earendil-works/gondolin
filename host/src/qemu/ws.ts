@@ -1,15 +1,15 @@
 import net from "net";
 import tls from "tls";
 
-import type { QemuNetworkBackend, TcpSession } from "./contracts";
-import type { InternalHttpRequest } from "../internal/http-types";
+import type { QemuNetworkBackend, TcpSession } from "./contracts.ts";
+import type { InternalHttpRequest } from "../internal/http-types.ts";
 
 import {
   MAX_HTTP_HEADER_BYTES,
   isWebSocketUpgradeRequestHeaders,
   sendHttpResponseHead,
-} from "../http/utils";
-import type { HttpRequestData } from "../http/utils";
+} from "../http/utils.ts";
+import type { HttpRequestData } from "../http/utils.ts";
 
 export type WebSocketState = {
   /** current websocket state */

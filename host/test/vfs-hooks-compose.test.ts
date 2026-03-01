@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { __test } from "../src/vm/core";
+import { __test } from "../src/vm/core.ts";
 
 test("composeVfsHooks preserves sync behavior when both hooks are sync", () => {
   const a: any = { before: () => {}, after: () => {} };

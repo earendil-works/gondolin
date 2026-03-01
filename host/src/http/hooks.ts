@@ -4,10 +4,10 @@ import net from "net";
 import {
   ON_REQUEST_EARLY_POLICY_SAFE,
   type HttpHooks,
-} from "../qemu/contracts";
-import { HttpRequestBlockedError } from "./utils";
-import { extractIPv4Mapped, parseIPv6Hextets } from "../utils/ip";
-import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns";
+} from "../qemu/contracts.ts";
+import { HttpRequestBlockedError } from "./utils.ts";
+import { extractIPv4Mapped, parseIPv6Hextets } from "../utils/ip.ts";
+import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns.ts";
 
 export type SecretDefinition = {
   /** host patterns this secret may be sent to */

@@ -1,7 +1,7 @@
-import { createErrnoError } from "./errors";
-import type { VirtualProvider, VfsStatfs } from "./node";
-import { delegateStatfsOrEnosys } from "./statfs";
-import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils";
+import { createErrnoError } from "./errors.ts";
+import type { VirtualProvider, VfsStatfs } from "./node/index.ts";
+import { delegateStatfsOrEnosys } from "./statfs.ts";
+import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils.ts";
 
 /**
  * Wraps a VirtualProvider and makes it read-only by blocking all write operations.
@@ -11,8 +11,11 @@ export class ReadonlyProvider
   extends VirtualProviderClass
   implements VirtualProvider
 {
-  constructor(private readonly backend: VirtualProvider) {
+  private readonly backend: VirtualProvider;
+
+  constructor(backend: VirtualProvider) {
     super();
+    this.backend = backend;
   }
 
   get readonly() {

@@ -2,10 +2,18 @@ import os from "os";
 import path from "path";
 import type { Dirent, Stats } from "node:fs";
 
-import { createErrnoError } from "./errors";
-import type { VirtualFileHandle, VirtualProvider, VfsStatfs } from "./node";
-import { cloneSyntheticStatfs, isErrnoValue, normalizeStatfs } from "./statfs";
-import type { FsRequest, FsResponse } from "../sandbox/virtio-protocol";
+import { createErrnoError } from "./errors.ts";
+import type {
+  VirtualFileHandle,
+  VirtualProvider,
+  VfsStatfs,
+} from "./node/index.ts";
+import {
+  cloneSyntheticStatfs,
+  isErrnoValue,
+  normalizeStatfs,
+} from "./statfs.ts";
+import type { FsRequest, FsResponse } from "../sandbox/virtio-protocol.ts";
 
 const { errno: ERRNO } = os.constants;
 
@@ -82,6 +90,7 @@ export class FsRpcService {
   >();
   private readdirCacheVersion = 0;
   private readonly logger?: (message: string) => void;
+  private readonly provider: VirtualProvider;
   readonly metrics: FsRpcMetrics = {
     requests: 0,
     errors: 0,
@@ -90,10 +99,8 @@ export class FsRpcService {
     ops: {},
   };
 
-  constructor(
-    private readonly provider: VirtualProvider,
-    options: FsRpcServiceOptions = {},
-  ) {
+  constructor(provider: VirtualProvider, options: FsRpcServiceOptions = {}) {
+    this.provider = provider;
     this.logger = options.logger;
     this.pathToIno.set("/", 1);
     this.inoToPaths.set(1, new Set(["/"]));

@@ -5,7 +5,7 @@ import path from "path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { exportOciRootfs } from "../src/alpine/oci";
+import { exportOciRootfs } from "../src/alpine/oci.ts";
 
 function writeFakeDockerRuntime(binDir: string): void {
   const runtimePath = path.join(binDir, "docker");

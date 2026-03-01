@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ensureGuestAssets, loadAssetManifest } from "../src/assets";
-import { VmCheckpoint } from "../src/checkpoint";
-import { getQcow2BackingFilename } from "../src/qemu/img";
-import { VM } from "../src/vm/core";
-import { shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture";
+import { ensureGuestAssets, loadAssetManifest } from "../src/assets.ts";
+import { VmCheckpoint } from "../src/checkpoint.ts";
+import { getQcow2BackingFilename } from "../src/qemu/img.ts";
+import { VM } from "../src/vm/core.ts";
+import { shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);

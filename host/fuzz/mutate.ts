@@ -1,4 +1,4 @@
-import { XorShift32 } from "./rng";
+import { XorShift32 } from "./rng.ts";
 
 export type MutateOptions = {
   maxLen: number;

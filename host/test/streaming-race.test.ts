@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import * as qemuHttp from "../src/qemu/http";
-import { QemuNetworkBackend } from "../src/qemu/net";
+import * as qemuHttp from "../src/qemu/http.ts";
+import { QemuNetworkBackend } from "../src/qemu/net.ts";
 
 function makeBackend(
   options?: Partial<ConstructorParameters<typeof QemuNetworkBackend>[0]>,

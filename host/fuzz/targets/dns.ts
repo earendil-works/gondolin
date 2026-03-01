@@ -4,9 +4,9 @@ import {
   DNS_TYPE_A,
   DNS_TYPE_AAAA,
   DNS_CLASS_IN,
-} from "../../src/qemu/dns";
-import { XorShift32 } from "../rng";
-import type { FuzzTarget } from "./types";
+} from "../../src/qemu/dns.ts";
+import { XorShift32 } from "../rng.ts";
+import type { FuzzTarget } from "./types.ts";
 
 function seedQuery(name: string, type: number): Buffer {
   // Minimal DNS query with 1 question, no compression.

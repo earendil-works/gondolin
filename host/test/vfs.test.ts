@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { MemoryProvider } from "../src/vfs/node";
-import { ReadonlyProvider } from "../src/vfs/readonly";
-import { createErrnoError } from "../src/vfs/errors";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
+import { createErrnoError } from "../src/vfs/errors.ts";
 import {
   closeVm,
   withVm,
   shouldSkipVmTests,
   scheduleForceExit,
-} from "./helpers/vm-fixture";
+} from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 60000);

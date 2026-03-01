@@ -5,9 +5,9 @@ import {
   webRequestToInternalHttpRequest,
   webResponseToInternalHttpResponse,
   internalHttpRequestToWebRequest,
-} from "../src/internal/http-conversion";
+} from "../src/internal/http-conversion.ts";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
-import { HttpRequestBlockedError } from "../src/http/utils";
+import { HttpRequestBlockedError } from "../src/http/utils.ts";
 
 function makeOverflowStream() {
   let cancelled = false;

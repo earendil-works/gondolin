@@ -4,8 +4,8 @@ RUN_PARALLEL ?= ../scripts/run-parallel
 
 ZIG ?= zig
 OPTIMIZE ?= ReleaseSmall
-TSX ?= ../host/node_modules/.bin/tsx
-GONDOLIN ?= $(TSX) ../host/bin/gondolin.ts
+NODE ?= node
+GONDOLIN ?= $(NODE) ../host/bin/gondolin.ts
 GONDOLIN_BUILD_CONFIG ?=
 GONDOLIN_BUILD_EXTRA_ARGS ?=
 
@@ -81,7 +81,7 @@ test:
 
 test-inner: assets
 	$(ZIG) build test-bins -Doptimize=$(OPTIMIZE)
-	$(TSX) ../host/bin/guest-tests.ts
+	$(NODE) ../host/bin/guest-tests.ts
 
 clean:
 	@rm -rf zig-cache zig-out $(IMAGE_OUT)

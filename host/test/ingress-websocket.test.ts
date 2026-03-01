@@ -4,7 +4,7 @@ import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { Duplex } from "node:stream";
 
-import { IngressGateway } from "../src/ingress";
+import { IngressGateway } from "../src/ingress.ts";
 
 class CaptureSocket extends EventEmitter {
   remoteAddress = "203.0.113.1";

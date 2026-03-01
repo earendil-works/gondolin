@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createHttpHooks } from "../src/http/hooks";
-import { HttpRequestBlockedError } from "../src/http/utils";
+import { createHttpHooks } from "../src/http/hooks.ts";
+import { HttpRequestBlockedError } from "../src/http/utils.ts";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 
 function makeRequest(init: {

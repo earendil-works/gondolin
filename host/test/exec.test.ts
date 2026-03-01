@@ -8,7 +8,7 @@ import {
   withVm,
   shouldSkipVmTests,
   scheduleForceExit,
-} from "./helpers/vm-fixture";
+} from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 60000);

@@ -1,6 +1,7 @@
 .PHONY: build typecheck lint test format clean fuzz
 
 PNPM ?= pnpm
+NODE ?= node
 RUN_PARALLEL ?= ../scripts/run-parallel
 PRETTIER ?= ../node_modules/.bin/prettier
 
@@ -28,7 +29,7 @@ format:
 
 test:
 	@$(RUN_PARALLEL) -j 1 \
-		"host:test" "$(PNPM) run test"
+		"host:test" "$(NODE) --test test/*.test.ts"
 
 fuzz:
 	@$(PNPM) run fuzz -- $(TARGET)

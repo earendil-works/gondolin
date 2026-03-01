@@ -6,28 +6,28 @@ import os from "os";
 import path from "path";
 import { PassThrough } from "stream";
 
-import { VmCheckpoint } from "../src/checkpoint";
-import { VM } from "../src/vm/core";
-import type { VirtualProvider } from "../src/vfs/node";
-import { MemoryProvider, RealFSProvider } from "../src/vfs/node";
-import { ReadonlyProvider } from "../src/vfs/readonly";
-import { createHttpHooks } from "../src/http/hooks";
+import { VmCheckpoint } from "../src/checkpoint.ts";
+import { VM } from "../src/vm/core.ts";
+import type { VirtualProvider } from "../src/vfs/node/index.ts";
+import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
+import { createHttpHooks } from "../src/http/hooks.ts";
 import {
   FrameReader,
   buildExecRequest,
   decodeMessage,
   encodeFrame,
-  IncomingMessage,
-} from "../src/sandbox/virtio-protocol";
-import { attachTty } from "../src/utils/tty-attach";
+  type IncomingMessage,
+} from "../src/sandbox/virtio-protocol.ts";
+import { attachTty } from "../src/utils/tty-attach.ts";
 import {
   getDefaultBuildConfig,
   serializeBuildConfig,
   parseBuildConfig,
   type BuildConfig,
-} from "../src/build/config";
-import { buildAssets, verifyAssets } from "../src/build";
-import { loadAssetManifest } from "../src/assets";
+} from "../src/build/config.ts";
+import { buildAssets, verifyAssets } from "../src/build/index.ts";
+import { loadAssetManifest } from "../src/assets.ts";
 import {
   importImageFromDirectory,
   listImageRefs,
@@ -35,18 +35,18 @@ import {
   setImageRef,
   tagImage,
   type ImageArch,
-} from "../src/images";
+} from "../src/images.ts";
 import {
   connectToSession,
   findSession,
   gcSessions,
   listSessions,
-} from "../src/session-registry";
+} from "../src/session-registry.ts";
 import {
   decodeOutputFrame,
   type ServerMessage,
   type SnapshotResponseMessage,
-} from "../src/sandbox/control-protocol";
+} from "../src/sandbox/control-protocol.ts";
 
 type Command = {
   cmd: string;
