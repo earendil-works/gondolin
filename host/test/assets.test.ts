@@ -258,3 +258,27 @@ test("assets: default image ref can resolve from image store symlink", () => {
     fs.rmSync(storeDir, { recursive: true, force: true });
   }
 });
+
+test("assets: default image ref rejects traversal segments", () => {
+  const prevStore = process.env.GONDOLIN_IMAGE_STORE;
+  const prevDefault = process.env.GONDOLIN_DEFAULT_IMAGE;
+
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-image-store-"),
+  );
+
+  try {
+    process.env.GONDOLIN_IMAGE_STORE = storeDir;
+    process.env.GONDOLIN_DEFAULT_IMAGE = "a/../../../tmp:latest";
+
+    assert.equal(__test.resolveDefaultImageAssetDirFromStore(), null);
+  } finally {
+    if (prevStore === undefined) delete process.env.GONDOLIN_IMAGE_STORE;
+    else process.env.GONDOLIN_IMAGE_STORE = prevStore;
+
+    if (prevDefault === undefined) delete process.env.GONDOLIN_DEFAULT_IMAGE;
+    else process.env.GONDOLIN_DEFAULT_IMAGE = prevDefault;
+
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+});

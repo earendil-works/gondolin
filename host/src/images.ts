@@ -303,6 +303,34 @@ function resolveContainedAssetPath(
   return resolvedPath;
 }
 
+function ensureSafeImportSourcePath(
+  rootDir: string,
+  sourcePath: string,
+  fieldName: string,
+): string {
+  const realSourcePath = fs.realpathSync(sourcePath);
+  const resolvedRootDir = fs.realpathSync(rootDir);
+  const relative = path.relative(resolvedRootDir, realSourcePath);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(
+      `invalid ${fieldName}: resolved path escapes ${resolvedRootDir} (${realSourcePath})`,
+    );
+  }
+
+  const stat = fs.statSync(realSourcePath);
+  if (!stat.isFile()) {
+    throw new Error(
+      `invalid ${fieldName}: expected regular file at ${realSourcePath}`,
+    );
+  }
+
+  return realSourcePath;
+}
+
 export function importImageFromDirectory(assetDir: string): ImportedImage {
   const resolvedDir = path.resolve(assetDir);
   const manifest = loadAssetManifest(resolvedDir);
@@ -372,6 +400,22 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         );
       }
 
+      const safeKernelPath = ensureSafeImportSourcePath(
+        resolvedDir,
+        sourceKernelPath,
+        "manifest.assets.kernel",
+      );
+      const safeInitramfsPath = ensureSafeImportSourcePath(
+        resolvedDir,
+        sourceInitramfsPath,
+        "manifest.assets.initramfs",
+      );
+      const safeRootfsPath = ensureSafeImportSourcePath(
+        resolvedDir,
+        sourceRootfsPath,
+        "manifest.assets.rootfs",
+      );
+
       const targetKernelPath = resolveContainedAssetPath(
         tmpDir,
         manifest.assets?.kernel,
@@ -398,9 +442,9 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         recursive: true,
       });
 
-      fs.copyFileSync(sourceKernelPath, targetKernelPath);
-      fs.copyFileSync(sourceInitramfsPath, targetInitramfsPath);
-      fs.copyFileSync(sourceRootfsPath, targetRootfsPath);
+      fs.copyFileSync(safeKernelPath, targetKernelPath);
+      fs.copyFileSync(safeInitramfsPath, targetInitramfsPath);
+      fs.copyFileSync(safeRootfsPath, targetRootfsPath);
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });
 

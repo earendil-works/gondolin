@@ -343,6 +343,56 @@ test("images: import rejects absolute manifest asset paths", () => {
   }
 });
 
+test("images: import allows in-root symlinked asset files", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const kernelLink = path.join(assets.dir, "kernel-link");
+    fs.symlinkSync("vmlinuz-virt", kernelLink);
+    patchManifestAssets(assets.dir, { kernel: "kernel-link" });
+
+    const imported = importImageFromDirectory(assets.dir);
+    const copiedKernel = path.join(imported.assetDir, "kernel-link");
+
+    assert.equal(fs.existsSync(copiedKernel), true);
+    assert.equal(fs.lstatSync(copiedKernel).isSymbolicLink(), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import rejects symlinked assets that resolve outside source dir", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const outsideKernel = path.join(storeDir, "outside-kernel.bin");
+    fs.writeFileSync(outsideKernel, "outside");
+
+    const kernelLink = path.join(assets.dir, "kernel-link");
+    fs.symlinkSync(outsideKernel, kernelLink);
+    patchManifestAssets(assets.dir, { kernel: "kernel-link" });
+
+    assert.throws(
+      () => importImageFromDirectory(assets.dir),
+      /manifest\.assets\.kernel.*resolved path escapes/,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
 test("images: setImageRef stores refs as symlinks", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),

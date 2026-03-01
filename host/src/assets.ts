@@ -14,6 +14,7 @@ let cachedAssetVersion: string | null = null;
 const BUILD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const IMAGE_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function resolveAssetVersion(): string {
@@ -102,6 +103,36 @@ function hostDefaultImageArch(): "aarch64" | "x86_64" {
   return normalizeImageArch(process.arch) ?? "x86_64";
 }
 
+function ensurePathWithinRoot(root: string, candidate: string): string | null {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(candidate);
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    return null;
+  }
+  return resolvedCandidate;
+}
+
+function hasValidImageNameSegments(name: string): boolean {
+  const segments = name.split("/");
+  if (segments.length === 0) return false;
+
+  for (const segment of segments) {
+    if (segment.length === 0 || segment === "." || segment === "..") {
+      return false;
+    }
+    if (!IMAGE_NAME_SEGMENT_PATTERN.test(segment)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function parseImageRef(selector: string): { name: string; tag: string } | null {
   const trimmed = selector.trim();
   if (!trimmed) return null;
@@ -112,6 +143,7 @@ function parseImageRef(selector: string): { name: string; tag: string } | null {
   const tag = hasExplicitTag ? trimmed.slice(colon + 1) : "latest";
 
   if (!IMAGE_NAME_PATTERN.test(name)) return null;
+  if (!hasValidImageNameSegments(name)) return null;
   if (!IMAGE_TAG_PATTERN.test(tag)) return null;
 
   return { name, tag };
@@ -136,15 +168,14 @@ function resolveDefaultImageAssetDirFromStore(): string | null {
     hostDefaultImageArch() === "aarch64" ? "x86_64" : "aarch64",
   ];
 
+  const refsRoot = path.join(storeDir, "refs");
+
   for (const arch of archOrder) {
-    const linkPath = path.join(
-      storeDir,
-      "refs",
-      parsedRef.name,
-      parsedRef.tag,
-      arch,
+    const linkPath = ensurePathWithinRoot(
+      refsRoot,
+      path.join(refsRoot, parsedRef.name, parsedRef.tag, arch),
     );
-    if (!fs.existsSync(linkPath)) continue;
+    if (!linkPath || !fs.existsSync(linkPath)) continue;
 
     try {
       const target = fs.readlinkSync(linkPath);
