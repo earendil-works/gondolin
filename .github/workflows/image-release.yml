@@ -1,21 +1,44 @@
 name: Image Release
 
 on:
-  push:
-    tags:
-      - "image-*"
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      image_name:
-        description: "Image name (e.g. alpine-base)"
-        required: true
       image_tag:
         description: "Image tag (e.g. 1.0.0)"
         required: true
+        type: string
+      build_config:
+        description: "Build config JSON path (repo-relative)"
+        required: false
+        default: "images/alpine-base.json"
+        type: string
+      image_name:
+        description: "Optional image name override"
+        required: false
+        type: string
       source_ref:
         description: "Git ref to build from (branch/tag/sha)"
         required: false
-        default: "main"
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (e.g. 1.0.0)"
+        required: true
+        type: string
+      build_config:
+        description: "Build config JSON path (repo-relative)"
+        required: false
+        default: "images/alpine-base.json"
+        type: string
+      image_name:
+        description: "Optional image name override"
+        required: false
+        type: string
+      source_ref:
+        description: "Git ref to build from (branch/tag/sha)"
+        required: false
+        type: string
 
 jobs:
   prepare:
@@ -26,39 +49,88 @@ jobs:
       image_name: ${{ steps.meta.outputs.image_name }}
       image_tag: ${{ steps.meta.outputs.image_tag }}
       source_ref: ${{ steps.meta.outputs.source_ref }}
+      build_config: ${{ steps.meta.outputs.build_config }}
     steps:
-      - name: Resolve metadata
-        id: meta
+      - name: Resolve source ref
+        id: source
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            IMAGE_NAME="${{ github.event.inputs.image_name }}"
-            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
-            SOURCE_REF="${{ github.event.inputs.source_ref }}"
-            RELEASE_TAG="image-${IMAGE_NAME}--${IMAGE_TAG}"
-          else
-            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
-            REST="${RELEASE_TAG#image-}"
-
-            if [[ "$REST" != *"--"* ]]; then
-              echo "Invalid image release tag '$RELEASE_TAG'"
-              echo "Expected format: image-<name>--<tag>"
-              exit 1
-            fi
-
-            IMAGE_NAME="${REST%%--*}"
-            IMAGE_TAG="${REST#*--}"
+          SOURCE_REF="${{ inputs.source_ref }}"
+          if [ -z "$SOURCE_REF" ]; then
             SOURCE_REF="${GITHUB_SHA}"
           fi
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
 
-          if [ -z "$IMAGE_NAME" ] || [ -z "$IMAGE_TAG" ]; then
-            echo "Invalid image release metadata"
-            exit 1
-          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.source_ref }}
+          fetch-depth: 0
 
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
+      - name: Resolve metadata
+        id: meta
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_BUILD_CONFIG: ${{ inputs.build_config }}
+          INPUT_IMAGE_NAME: ${{ inputs.image_name }}
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const imageTag = (process.env.INPUT_IMAGE_TAG || '').trim();
+          const buildConfigInput = (process.env.INPUT_BUILD_CONFIG || '').trim();
+          const imageNameInput = (process.env.INPUT_IMAGE_NAME || '').trim();
+          const sourceRef = (process.env.SOURCE_REF || '').trim();
+
+          if (!imageTag) {
+            throw new Error('image_tag is required');
+          }
+
+          const buildConfig = buildConfigInput || 'images/alpine-base.json';
+          const resolvedConfig = path.resolve(buildConfig);
+          const cwd = process.cwd();
+          const relativeConfig = path.relative(cwd, resolvedConfig);
+
+          if (
+            relativeConfig === '..' ||
+            relativeConfig.startsWith(`..${path.sep}`) ||
+            path.isAbsolute(relativeConfig)
+          ) {
+            throw new Error(`build_config must stay within repo root: ${buildConfig}`);
+          }
+
+          if (!fs.existsSync(resolvedConfig)) {
+            throw new Error(`build_config not found: ${buildConfig}`);
+          }
+
+          const parsed = JSON.parse(fs.readFileSync(resolvedConfig, 'utf8'));
+
+          const configImageName =
+            typeof parsed.imageName === 'string' && parsed.imageName.trim().length > 0
+              ? parsed.imageName.trim()
+              : typeof parsed.image?.name === 'string' && parsed.image.name.trim().length > 0
+                ? parsed.image.name.trim()
+                : '';
+
+          const imageName = imageNameInput || configImageName;
+          if (!imageName) {
+            throw new Error(
+              'image_name is required when build config does not define imageName',
+            );
+          }
+
+          const releaseTag = `image-${imageName}--${imageTag}`;
+
+          const output = fs.createWriteStream(process.env.GITHUB_OUTPUT, {
+            flags: 'a',
+          });
+          output.write(`release_tag=${releaseTag}\n`);
+          output.write(`image_name=${imageName}\n`);
+          output.write(`image_tag=${imageTag}\n`);
+          output.write(`source_ref=${sourceRef}\n`);
+          output.write(`build_config=${relativeConfig}\n`);
+          output.end();
+          NODE
 
   build-image:
     name: Build Image (${{ matrix.arch }})
@@ -113,7 +185,9 @@ jobs:
         run: |
           NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=${{ matrix.arch }} make build NODE="$NODE_BIN"
+          ALPINE_ARCH=${{ matrix.arch }} \
+          GONDOLIN_BUILD_CONFIG="../${{ needs.prepare.outputs.build_config }}" \
+          make build NODE="$NODE_BIN"
 
       - name: Package image asset
         run: |
@@ -185,13 +259,21 @@ jobs:
           body: |
             ## Gondolin image: `${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}`
 
-            Update `builtin-image-registry.json` with URLs from this release.
+            Built from `${{ needs.prepare.outputs.build_config }}` at `${{ needs.prepare.outputs.source_ref }}`.
+            `builtin-image-registry.json` is updated automatically by this workflow.
 
-  registry-snippet:
-    name: Registry snippet
+  update-registry:
+    name: Update builtin image registry
     needs: [prepare, publish-image-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: .
@@ -200,49 +282,99 @@ jobs:
         run: |
           find . -type f -name '*.tar.gz.meta.json' -exec mv {} . \;
 
-      - name: Print snippet
+      - name: Update builtin-image-registry.json
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+          IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
         run: |
-          IMAGE_NAME="${{ needs.prepare.outputs.image_name }}"
-          IMAGE_TAG="${{ needs.prepare.outputs.image_tag }}"
-          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
-          OWNER="${{ github.repository_owner }}"
-          REPO="${{ github.event.repository.name }}"
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
 
-          AARCH64_URL="https://github.com/${OWNER}/${REPO}/releases/download/${RELEASE_TAG}/gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-aarch64.tar.gz"
-          X86_URL="https://github.com/${OWNER}/${REPO}/releases/download/${RELEASE_TAG}/gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-x86_64.tar.gz"
+          const imageName = process.env.IMAGE_NAME;
+          const imageTag = process.env.IMAGE_TAG;
+          const releaseTag = process.env.RELEASE_TAG;
+          const owner = process.env.OWNER;
+          const repo = process.env.REPO;
 
-          AARCH64_META="gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-aarch64.tar.gz.meta.json"
-          X86_META="gondolin-image-${IMAGE_NAME}-${IMAGE_TAG}-x86_64.tar.gz.meta.json"
+          const registryPath = path.resolve('builtin-image-registry.json');
+          const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
 
-          AARCH64_BUILD_ID="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.buildId)" "$AARCH64_META")"
-          AARCH64_SHA256="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.sha256)" "$AARCH64_META")"
+          if (registry.schema !== 1) {
+            throw new Error(`unsupported builtin-image-registry schema: ${registry.schema}`);
+          }
 
-          X86_BUILD_ID="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.buildId)" "$X86_META")"
-          X86_SHA256="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(m.sha256)" "$X86_META")"
+          registry.refs = registry.refs && typeof registry.refs === 'object' ? registry.refs : {};
+          registry.builds =
+            registry.builds && typeof registry.builds === 'object' ? registry.builds : {};
 
-          {
-            echo "### builtin-image-registry.json snippet"
-            echo
-            echo "Update both \`${IMAGE_NAME}:${IMAGE_TAG}\` and (optionally) \`${IMAGE_NAME}:latest\`."
-            echo
-            echo '\`\`\`json'
-            cat <<JSON
-{
-  "refs": {
-    "${IMAGE_NAME}:${IMAGE_TAG}": {
-      "aarch64": { "buildId": "${AARCH64_BUILD_ID}", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
-      "x86_64": { "buildId": "${X86_BUILD_ID}", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
-    },
-    "${IMAGE_NAME}:latest": {
-      "aarch64": { "buildId": "${AARCH64_BUILD_ID}", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
-      "x86_64": { "buildId": "${X86_BUILD_ID}", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
-    }
-  },
-  "builds": {
-    "${AARCH64_BUILD_ID}": { "arch": "aarch64", "url": "${AARCH64_URL}", "sha256": "${AARCH64_SHA256}" },
-    "${X86_BUILD_ID}": { "arch": "x86_64", "url": "${X86_URL}", "sha256": "${X86_SHA256}" }
-  }
-}
-JSON
-            echo '\`\`\`'
-          } >> "$GITHUB_STEP_SUMMARY"
+          const loadArchMeta = (arch) => {
+            const file = `gondolin-image-${imageName}-${imageTag}-${arch}.tar.gz.meta.json`;
+            const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const url = `https://github.com/${owner}/${repo}/releases/download/${releaseTag}/gondolin-image-${imageName}-${imageTag}-${arch}.tar.gz`;
+            return {
+              arch,
+              buildId: parsed.buildId,
+              sha256: parsed.sha256,
+              url,
+            };
+          };
+
+          const aarch64 = loadArchMeta('aarch64');
+          const x86_64 = loadArchMeta('x86_64');
+
+          const refValue = {
+            aarch64: {
+              buildId: aarch64.buildId,
+              url: aarch64.url,
+              sha256: aarch64.sha256,
+            },
+            x86_64: {
+              buildId: x86_64.buildId,
+              url: x86_64.url,
+              sha256: x86_64.sha256,
+            },
+          };
+
+          registry.refs[`${imageName}:${imageTag}`] = refValue;
+          registry.refs[`${imageName}:latest`] = JSON.parse(JSON.stringify(refValue));
+
+          registry.builds[aarch64.buildId] = {
+            arch: 'aarch64',
+            url: aarch64.url,
+            sha256: aarch64.sha256,
+          };
+          registry.builds[x86_64.buildId] = {
+            arch: 'x86_64',
+            url: x86_64.url,
+            sha256: x86_64.sha256,
+          };
+
+          fs.writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+          NODE
+
+      - name: Commit registry update
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+          IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet -- builtin-image-registry.json; then
+            echo "No registry update needed"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add builtin-image-registry.json
+          git commit -m "chore(images): update registry for ${IMAGE_NAME}:${IMAGE_TAG}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+
+      - name: Summary
+        run: |
+          echo "### Registry updated" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Updated \`builtin-image-registry.json\` on \`${{ github.event.repository.default_branch }}\` for \`${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}\`." >> "$GITHUB_STEP_SUMMARY"

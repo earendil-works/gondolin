@@ -9,6 +9,7 @@ on:
       version:
         description: "Version tag (e.g., v0.1.0)"
         required: true
+        type: string
 
 jobs:
   create-release:
@@ -19,14 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
 
       - name: Get version
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
@@ -55,7 +56,7 @@ jobs:
 
             ### Guest Images
 
-            Guest images are published independently from package releases.
+            Guest images are published independently via the Image Release workflow.
 
             Runtime image resolution uses `builtin-image-registry.json` from the main branch.
 
@@ -69,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v2
@@ -85,7 +86,7 @@ jobs:
         id: tag_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${{ inputs.version }}"
           else
             VERSION="${GITHUB_REF#refs/tags/}"
           fi

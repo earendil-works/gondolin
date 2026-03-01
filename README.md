@@ -110,6 +110,7 @@ Requirements:
 
 - [Host package](host/README.md): installation, CLI usage, and SDK examples
 - [Guest sandbox](guest/README.md): Zig build and image/initramfs pipeline
+- [`images/`](images): canonical image release build configs (used by image-release workflow)
 - [Examples](host/examples): end-to-end integration examples
 
 
