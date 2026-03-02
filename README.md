@@ -77,6 +77,15 @@ Requirements:
 | ------------------------ | --------------------------------------------- |
 | `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
 
+Optional experimental libkrun backend setup:
+
+```bash
+make krun-runner
+```
+
+This stages `libkrun` under `.cache/` (no global install) and builds the local
+runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+
 > Linux and macOS are supported. ARM64 is the most tested path today.
 
 ## Feature Highlights

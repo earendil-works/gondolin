@@ -73,3 +73,37 @@ test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const otherArch = hostArch === "aarch64" ? "x86_64" : "aarch64";
+  const dir = makeTempAssetsDir(otherArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          vmm: "krun",
+        }),
+      /Guest image architecture mismatch for libkrun backend/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
+  const dir = makeTempAssetsDir("aarch64");
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          vmm: "wat" as any,
+        }),
+      /invalid sandbox vmm backend/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

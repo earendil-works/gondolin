@@ -39,6 +39,9 @@ import type { VirtualProvider } from "../vfs/node/index.ts";
  */
 export type ImagePath = string | GuestAssets;
 
+/** vm backend implementation */
+export type SandboxVmm = "qemu" | "krun";
+
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
@@ -52,8 +55,12 @@ const DEFAULT_MAX_QUEUED_EXECS = 64;
  * - an object with explicit asset paths
  */
 export type SandboxServerOptions = {
+  /** vm backend implementation */
+  vmm?: SandboxVmm;
   /** qemu binary path */
   qemuPath?: string;
+  /** krun runner binary path */
+  krunRunnerPath?: string;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -158,8 +165,12 @@ export type SandboxServerOptions = {
 };
 
 export type ResolvedSandboxServerOptions = {
+  /** vm backend implementation */
+  vmm: SandboxVmm;
   /** qemu binary path */
   qemuPath: string;
+  /** krun runner binary path */
+  krunRunnerPath: string;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -285,6 +296,15 @@ function resolveImagePath(imagePath: ImagePath): GuestAssets {
   return imagePath;
 }
 
+function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "qemu" || normalized === "krun") {
+    return normalized;
+  }
+  return null;
+}
+
 function normalizeArch(
   value: string | null | undefined,
 ): "arm64" | "x64" | null {
@@ -385,6 +405,8 @@ export function resolveSandboxServerOptions(
   const hostArch = getHostNodeArchCached();
   const defaultQemu =
     hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  const defaultKrunRunner =
+    process.env.GONDOLIN_KRUN_RUNNER ?? "gondolin-krun-runner";
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
@@ -400,35 +422,62 @@ export function resolveSandboxServerOptions(
     );
   }
 
+  const explicitVmm = normalizeVmm(options.vmm ?? null);
+  if (options.vmm !== undefined && !explicitVmm) {
+    throw new Error(
+      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu" or "krun")`,
+    );
+  }
+  const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
+  const vmm = explicitVmm ?? envVmm ?? "qemu";
   const qemuPath = options.qemuPath ?? defaultQemu;
+  const krunRunnerPath = options.krunRunnerPath ?? defaultKrunRunner;
 
-  // Fail fast if we can detect that the guest image doesn't match the QEMU target.
+  // Fail fast if we can detect that the guest image doesn't match the selected backend target.
   // Without this, the VM often just "hangs" until some higher-level timeout.
   const guestFromManifest = detectGuestArchFromManifest({
     kernelPath,
     initrdPath,
     rootfsPath,
   });
-  const qemuArch = detectQemuArch(qemuPath);
 
-  if (guestFromManifest && qemuArch && guestFromManifest.arch !== qemuArch) {
-    const host = normalizeArch(hostArch) ?? hostArch;
-    throw new Error(
-      "Guest image architecture mismatch.\n" +
-        `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
-        `  qemu binary:  ${qemuArch} (${qemuPath})\n` +
-        `  host arch:    ${host}\n\n` +
-        "Fix: use a matching qemuPath (e.g. qemu-system-aarch64 vs qemu-system-x86_64) " +
-        "or rebuild/download guest assets for the correct architecture.",
-    );
+  if (vmm === "qemu") {
+    const qemuArch = detectQemuArch(qemuPath);
+    if (guestFromManifest && qemuArch && guestFromManifest.arch !== qemuArch) {
+      const host = normalizeArch(hostArch) ?? hostArch;
+      throw new Error(
+        "Guest image architecture mismatch.\n" +
+          `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
+          `  qemu binary:  ${qemuArch} (${qemuPath})\n` +
+          `  host arch:    ${host}\n\n` +
+          "Fix: use a matching qemuPath (e.g. qemu-system-aarch64 vs qemu-system-x86_64) " +
+          "or rebuild/download guest assets for the correct architecture.",
+      );
+    }
+  } else if (guestFromManifest) {
+    const host = normalizeArch(hostArch);
+    if (host && guestFromManifest.arch !== host) {
+      throw new Error(
+        "Guest image architecture mismatch for libkrun backend.\n" +
+          `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
+          `  host arch:    ${host}\n\n` +
+          "Fix: select a guest image that matches the host architecture when using vmm=krun.",
+      );
+    }
   }
 
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;
   const rootDiskFormat =
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
-  const rootDiskSnapshot =
-    options.rootDiskSnapshot ?? (options.rootDiskPath ? false : true);
+  const defaultRootDiskSnapshot = options.rootDiskPath ? false : vmm === "qemu";
+  const rootDiskSnapshot = options.rootDiskSnapshot ?? defaultRootDiskSnapshot;
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
+
+  if (vmm === "krun" && rootDiskSnapshot) {
+    throw new Error(
+      "sandbox.rootDiskSnapshot is not supported with vmm=krun; use rootfs.mode='cow' or an explicit writable overlay disk",
+    );
+  }
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -441,7 +490,9 @@ export function resolveSandboxServerOptions(
   );
 
   return {
+    vmm,
     qemuPath,
+    krunRunnerPath,
     kernelPath,
     initrdPath,
     rootfsPath,

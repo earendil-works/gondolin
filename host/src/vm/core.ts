@@ -255,7 +255,7 @@ export class VM {
   private readonly shortcutBindMounts: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
-  private qemuChecked = false;
+  private vmmChecked = false;
   private debugLog: DebugLogFn | null = null;
   private debugListener:
     | ((component: DebugComponent, message: string) => void)
@@ -484,6 +484,7 @@ export class VM {
 
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
     const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
+    const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
 
     // Prepare root disk:
     // - Explicit sandbox.rootDisk* options win.
@@ -538,20 +539,42 @@ export class VM {
         deleteOnClose: false,
       };
     } else if (rootfsMode === "memory") {
-      const format = inferDiskFormatFromPath(resolved.rootfsPath);
+      if (supportsSnapshotRootDisk) {
+        const format = inferDiskFormatFromPath(resolved.rootfsPath);
 
-      resolved.rootDiskPath = resolved.rootfsPath;
-      resolved.rootDiskFormat = format;
-      resolved.rootDiskSnapshot = true;
-      resolved.rootDiskReadOnly = false;
+        resolved.rootDiskPath = resolved.rootfsPath;
+        resolved.rootDiskFormat = format;
+        resolved.rootDiskSnapshot = true;
+        resolved.rootDiskReadOnly = false;
 
-      this.rootDisk = {
-        path: resolved.rootfsPath,
-        format,
-        snapshot: true,
-        readOnly: false,
-        deleteOnClose: false,
-      };
+        this.rootDisk = {
+          path: resolved.rootfsPath,
+          format,
+          snapshot: true,
+          readOnly: false,
+          deleteOnClose: false,
+        };
+      } else {
+        ensureQemuImgAvailable();
+        const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
+        const overlayPath = createTempQcow2Overlay(
+          resolved.rootfsPath,
+          backingFormat,
+        );
+
+        resolved.rootDiskPath = overlayPath;
+        resolved.rootDiskFormat = "qcow2";
+        resolved.rootDiskSnapshot = false;
+        resolved.rootDiskReadOnly = false;
+
+        this.rootDisk = {
+          path: overlayPath,
+          format: "qcow2",
+          snapshot: false,
+          readOnly: false,
+          deleteOnClose: true,
+        };
+      }
     } else {
       ensureQemuImgAvailable();
       const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
@@ -1168,16 +1191,16 @@ fi
     }
   }
 
-  private ensureQemuAvailable() {
-    if (this.qemuChecked) return;
+  private ensureVmmAvailable() {
+    if (this.vmmChecked) return;
 
     const server = this.server;
     if (!server) {
       throw new Error("sandbox server is not available");
     }
 
-    execFileSync(server.getQemuPath(), ["--version"], { stdio: "ignore" });
-    this.qemuChecked = true;
+    execFileSync(server.getVmmPath(), ["--version"], { stdio: "ignore" });
+    this.vmmChecked = true;
   }
 
   private beginStartupGeneration() {
@@ -1217,7 +1240,7 @@ fi
     await this.withStartTimeout(
       async () => {
         this.ensureStartupGeneration(startupGeneration);
-        this.ensureQemuAvailable();
+        this.ensureVmmAvailable();
 
         if (this.server) {
           await this.server.start();
@@ -1899,6 +1922,10 @@ fi
       throw new Error(
         `checkpointPath must be an absolute path (got: ${checkpointPath})`,
       );
+    }
+
+    if ((this.resolvedSandboxOptions.vmm ?? "qemu") !== "qemu") {
+      throw new Error("checkpoint is currently only supported with vmm=qemu");
     }
 
     const rootDisk = this.rootDisk;

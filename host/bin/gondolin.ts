@@ -177,21 +177,27 @@ function renderCliError(err: unknown) {
   const code = (err as any)?.code;
   const binary = (err as any)?.path;
 
-  if (
-    code === "ENOENT" &&
-    typeof binary === "string" &&
-    binary.includes("qemu")
-  ) {
-    console.error(`Error: QEMU binary '${binary}' not found.`);
-    console.error("Please install QEMU to run the sandbox.");
-    if (process.platform === "darwin") {
-      console.error("  brew install qemu");
-    } else {
-      console.error(
-        "  sudo apt install qemu-system (or equivalent for your distro)",
-      );
+  if (code === "ENOENT" && typeof binary === "string") {
+    if (binary.includes("qemu")) {
+      console.error(`Error: QEMU binary '${binary}' not found.`);
+      console.error("Please install QEMU to run the sandbox.");
+      if (process.platform === "darwin") {
+        console.error("  brew install qemu");
+      } else {
+        console.error(
+          "  sudo apt install qemu-system (or equivalent for your distro)",
+        );
+      }
+      return;
     }
-    return;
+
+    if (binary.includes("krun-runner") || binary.includes("libkrun")) {
+      console.error(`Error: krun runner binary '${binary}' not found.`);
+      console.error(
+        "Build/install gondolin-krun-runner and set sandbox.krunRunnerPath or GONDOLIN_KRUN_RUNNER.",
+      );
+      return;
+    }
   }
 
   const message = err instanceof Error ? err.message : String(err);

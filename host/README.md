@@ -9,11 +9,18 @@ it can use.
 
 ## Requirements
 
-You need QEMU installed to run the micro-VMs:
+You need QEMU installed to run the micro-VMs (default backend):
 
 | macOS               | Linux (Debian/Ubuntu)              |
 | ------------------- | ---------------------------------- |
 | `brew install qemu` | `sudo apt install qemu-system-arm` |
+
+Optional experimental backend:
+
+- `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
+- `make krun-runner` from repo root stages dependencies locally + builds runner
+- `GONDOLIN_VMM=krun` selects it globally
+- `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
 
 - Node.js >= 23.6
 
