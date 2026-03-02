@@ -90,7 +90,6 @@ export {
   classifyEnvForGondolin,
   getPatternStore,
   PatternCompilationError,
-  PatternIntegrityError,
   PatternSchemaError,
   type ClassifyEnvResult,
   type ClassifyOptions,

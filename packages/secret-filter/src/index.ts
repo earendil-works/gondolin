@@ -7,7 +7,6 @@ export { classifyEnvForGondolin } from "./integration.ts";
 export {
   getPatternStore,
   PatternCompilationError,
-  PatternIntegrityError,
   PatternSchemaError,
 } from "./patterns.ts";
 export type {

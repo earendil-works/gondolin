@@ -1,10 +1,4 @@
-import { createHash } from "node:crypto";
-
-import {
-  SECRET_MAPPING_DATA,
-  SECRET_MAPPING_JSON,
-  SECRET_MAPPING_SHA256,
-} from "./generated/secret-mapping.ts";
+import { SECRET_MAPPING_DATA } from "./generated/secret-mapping.ts";
 import { compilePattern } from "./regex.ts";
 import type { SecretMappingData, ValuePattern } from "./types.ts";
 
@@ -50,21 +44,6 @@ export class PatternCompilationError extends Error {
     super(`Failed to compile ${failures.length} value pattern(s): ${ids}`);
     this.name = "PatternCompilationError";
     this.failures = failures;
-  }
-}
-
-export class PatternIntegrityError extends Error {
-  readonly code = "SECRET_FILTER_MAPPING_CHECKSUM_MISMATCH";
-  readonly expectedSha256: string;
-  readonly actualSha256: string;
-
-  constructor(expectedSha256: string, actualSha256: string) {
-    super(
-      `Mapping checksum mismatch for secret-mapping.gondolin.json (expected ${expectedSha256}, got ${actualSha256})`,
-    );
-    this.name = "PatternIntegrityError";
-    this.expectedSha256 = expectedSha256;
-    this.actualSha256 = actualSha256;
   }
 }
 
@@ -296,14 +275,6 @@ function deepFreeze<T>(value: T): T {
 export function getPatternStore(): PatternStore {
   if (cached) {
     return cached;
-  }
-
-  const actualSha = createHash("sha256")
-    .update(Buffer.from(SECRET_MAPPING_JSON, "utf8"))
-    .digest("hex");
-
-  if (actualSha !== SECRET_MAPPING_SHA256) {
-    throw new PatternIntegrityError(SECRET_MAPPING_SHA256, actualSha);
   }
 
   const validated = validateSecretMappingData(SECRET_MAPPING_DATA);
