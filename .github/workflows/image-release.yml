@@ -259,7 +259,7 @@ jobs:
           name: Image ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
           draft: false
           prerelease: ${{ contains(needs.prepare.outputs.image_tag, '-') }}
-          make_latest: false
+          make_latest: "false"
           files: |
             gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz
             gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.sha256
