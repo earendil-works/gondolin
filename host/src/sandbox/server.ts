@@ -1,4 +1,3 @@
-import os from "os";
 import { EventEmitter } from "events";
 import { Duplex, PassThrough, Readable } from "stream";
 
@@ -32,6 +31,7 @@ import {
 } from "./controller.ts";
 import { QemuNetworkBackend } from "../qemu/net.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
+import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
 import { SandboxVfsProvider } from "../vfs/provider.ts";
 import {
   stripTrailingNewline,
@@ -72,7 +72,6 @@ import {
 import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
-const { errno: ERRNO } = os.constants;
 
 type FileReadOperation = {
   /** file operation kind */
@@ -703,7 +702,7 @@ export class SandboxServer extends EventEmitter {
           id: message.id,
           p: {
             op: message.p.op,
-            err: ERRNO.ENOSYS,
+            err: LINUX_ERRNO.ENOSYS,
             message: "filesystem service unavailable",
           },
         });
@@ -726,7 +725,7 @@ export class SandboxServer extends EventEmitter {
             id: message.id,
             p: {
               op: message.p.op,
-              err: ERRNO.EIO,
+              err: LINUX_ERRNO.EIO,
               message: detail,
             },
           });

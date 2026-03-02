@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Normalize host filesystem RPC error propagation to canonical Linux errno values so guests receive consistent errors across macOS and Linux hosts
+
 ## 0.6.0
 
 - Add support for OCI container images with customizable pull policies, layer caching, and rootfs safety checks. #53

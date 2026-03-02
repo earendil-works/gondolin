@@ -1372,8 +1372,50 @@ test("fs rpc normalizeError includes message and maps unknown errors to EIO", as
   assert.equal(res2.p.err, ERRNO.EIO);
   assert.equal(res2.p.message, "unknown error");
 
+  const provider3 = new Proxy(base as any, {
+    get(target, prop, receiver) {
+      if (prop === "lstat") {
+        return async (_p: string) => {
+          throw {
+            code: "ENOTEMPTY",
+            errno: 66,
+            message: "directory not empty",
+          };
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+
+  const service3 = new FsRpcService(provider3);
+  const res3 = await send(service3, "getattr", { ino: 1 });
+  assert.equal(res3.p.err, 39);
+  assert.equal(res3.p.message, "directory not empty");
+
+  const provider4 = new Proxy(base as any, {
+    get(target, prop, receiver) {
+      if (prop === "lstat") {
+        return async (_p: string) => {
+          throw {
+            code: "ENOSYS",
+            errno: 78,
+            message: "not implemented",
+          };
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+
+  const service4 = new FsRpcService(provider4);
+  const res4 = await send(service4, "getattr", { ino: 1 });
+  assert.equal(res4.p.err, 38);
+  assert.equal(res4.p.message, "not implemented");
+
   await service.close();
   await service2.close();
+  await service3.close();
+  await service4.close();
 });
 
 test("fs rpc statfs returns valid stats for root inode", async () => {

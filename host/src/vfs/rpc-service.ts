@@ -3,6 +3,7 @@ import path from "path";
 import type { Dirent, Stats } from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
+import { LINUX_ERRNO, toLinuxErrno } from "./linux-errno.ts";
 import type {
   VirtualFileHandle,
   VirtualProvider,
@@ -1174,19 +1175,15 @@ type ErrnoResult = {
 
 function normalizeError(error: unknown): ErrnoResult {
   if (isErrnoError(error)) {
-    let errno = typeof error.errno === "number" ? error.errno : ERRNO.EIO;
-    // Some providers (and some syscall layers) use negative errno values.
-    // Normalize to a positive errno for the RPC protocol.
-    if (errno < 0) errno = -errno;
     return {
-      errno,
+      errno: toLinuxErrno(error, LINUX_ERRNO.EIO),
       message: error.message,
     };
   }
   if (error instanceof Error) {
-    return { errno: ERRNO.EIO, message: error.message };
+    return { errno: LINUX_ERRNO.EIO, message: error.message };
   }
-  return { errno: ERRNO.EIO, message: "unknown error" };
+  return { errno: LINUX_ERRNO.EIO, message: "unknown error" };
 }
 
 function isErrnoError(error: unknown): error is NodeJS.ErrnoException {
