@@ -788,16 +788,6 @@ function buildVmOptions(common: CommonOptions) {
     }
   })();
 
-  if (autoSecrets && autoSecrets.dropped.length > 0) {
-    const droppedNames = autoSecrets.dropped.map((entry) => entry.name);
-    const preview = droppedNames.slice(0, 10).join(", ");
-    const more =
-      droppedNames.length > 10 ? ` (+${droppedNames.length - 10} more)` : "";
-    process.stderr.write(
-      `[gondolin] dropped ${droppedNames.length} secret-like env var(s) without host mapping: ${preview}${more}\n`,
-    );
-  }
-
   const secrets: Record<string, { hosts: string[]; value: string }> = {
     ...(autoSecrets?.secretsMap ?? {}),
   };
