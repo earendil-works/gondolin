@@ -2,6 +2,7 @@ import type {
   Architecture,
   ContainerRuntime,
   OciPullPolicy,
+  PostBuildCopyEntry,
 } from "../build/config.ts";
 
 /** OCI rootfs source configuration */
@@ -50,6 +51,8 @@ export interface AlpineBuildOptions {
   initramfsInit?: string;
   /** extra shell script content appended to rootfs init before sandboxd starts */
   rootfsInitExtra?: string;
+  /** host files or directories copied into rootfs before post-build commands */
+  postBuildCopy?: PostBuildCopyEntry[];
   /** shell commands executed in rootfs after package installation */
   postBuildCommands?: string[];
   /** default environment variables baked into the guest image */

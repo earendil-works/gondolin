@@ -23,6 +23,7 @@ import {
 } from "../alpine/rootfs.ts";
 import { exportOciRootfs } from "../alpine/oci.ts";
 import { installPackages, runPostBuildCommands } from "../alpine/packages.ts";
+import { applyPostBuildCopies } from "../alpine/post-build-copy.ts";
 import { syncKernelModules } from "../alpine/kernel-modules.ts";
 import {
   INITRAMFS_INIT_SCRIPT,
@@ -50,6 +51,7 @@ export async function buildAlpineImages(
     alpineBranch,
     rootfsPackages,
     initramfsPackages,
+    postBuildCopy = [],
     postBuildCommands = [],
     sandboxdBin,
     sandboxfsBin,
@@ -122,6 +124,10 @@ export async function buildAlpineImages(
 
   if (opts.ociRootfs) {
     ensureRootfsShell(rootfsDir, opts.ociRootfs.image, initramfsDir, log);
+  }
+
+  if (postBuildCopy.length > 0) {
+    applyPostBuildCopies(rootfsDir, postBuildCopy, log);
   }
 
   if (postBuildCommands.length > 0) {

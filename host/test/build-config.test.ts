@@ -21,6 +21,32 @@ test("build-config: accepts postBuild.commands", () => {
   ]);
 });
 
+test("build-config: accepts postBuild.copy", () => {
+  const cfg = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    postBuild: {
+      copy: [
+        {
+          src: "./dist/my-tool.tar.gz",
+          dest: "/tmp/my-tool.tar.gz",
+        },
+      ],
+    },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.deepEqual(parsed.postBuild?.copy, [
+    {
+      src: "./dist/my-tool.tar.gz",
+      dest: "/tmp/my-tool.tar.gz",
+    },
+  ]);
+});
+
 test("build-config: rejects invalid postBuild.commands", () => {
   const invalid = {
     arch: "aarch64",
@@ -34,6 +60,38 @@ test("build-config: rejects invalid postBuild.commands", () => {
   assert.equal(validateBuildConfig(invalid), false);
   assert.throws(
     () => parseBuildConfig(JSON.stringify(invalid)),
+    /Invalid build configuration/,
+  );
+});
+
+test("build-config: rejects invalid postBuild.copy", () => {
+  const invalidType = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    postBuild: {
+      copy: [{ src: "./dist/tool.tar.gz", dest: 42 }],
+    },
+  };
+
+  assert.equal(validateBuildConfig(invalidType), false);
+  assert.throws(
+    () => parseBuildConfig(JSON.stringify(invalidType)),
+    /Invalid build configuration/,
+  );
+
+  const invalidRelativeDest = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    postBuild: {
+      copy: [{ src: "./dist/tool.tar.gz", dest: "tmp/tool.tar.gz" }],
+    },
+  };
+
+  assert.equal(validateBuildConfig(invalidRelativeDest), false);
+  assert.throws(
+    () => parseBuildConfig(JSON.stringify(invalidRelativeDest)),
     /Invalid build configuration/,
   );
 });
