@@ -51,7 +51,7 @@ Building custom images requires the following tools:
 
 | Tool | Purpose |
 |------|---------|
-| **Zig 0.15.1+** | Cross-compiling sandboxd/sandboxfs binaries |
+| **Zig 0.15.2+** | Cross-compiling sandboxd/sandboxfs binaries |
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating ext4 rootfs images (mke2fs) |
@@ -68,7 +68,7 @@ The build tries to locate `mke2fs` automatically (including common Homebrew loca
 ### Linux (Debian/Ubuntu)
 
 ```bash
-# Install Zig 0.15.1+ from https://ziglang.org/download/
+# Install Zig 0.15.2+ from https://ziglang.org/download/
 sudo apt install lz4 cpio e2fsprogs
 ```
 

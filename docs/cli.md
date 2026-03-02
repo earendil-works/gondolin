@@ -31,11 +31,11 @@ gondolin bash
 - Node.js >= 23.6.0
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
-first use via `builtin-image-registry.json` and cached in
-`~/.cache/gondolin/images/`.
+first use from local overrides/store first, then via `builtin-image-registry.json`,
+and cached in `~/.cache/gondolin/images/`.
 
 When you do not pass `--image`, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
-`alpine-base:latest`). Alternative you can [build and ship your own](./custom-images.md).
+`alpine-base:latest`). Alternatively you can [build and ship your own](./custom-images.md).
 
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
@@ -485,6 +485,14 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 - `GONDOLIN_IMAGE_REGISTRY_URL`
   - Override builtin image registry JSON URL
   - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`
+
+- `GONDOLIN_CHECKPOINT_DIR`
+  - Override checkpoint directory used by `gondolin snapshot` / `gondolin bash --resume`
+  - Default: `~/.cache/gondolin/checkpoints`
+
+- `GONDOLIN_SESSIONS_DIR`
+  - Override session registry directory used by `gondolin list` / `gondolin attach`
+  - Default: `~/.cache/gondolin/sessions`
 
 - `GONDOLIN_DEBUG`
   - Enable debug logging (see [Debug Logging](./debug.md))

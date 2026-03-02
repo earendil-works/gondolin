@@ -128,7 +128,7 @@ This is what Gondolin actually enforces.
 
 Gondolin does *not* provide the guest with a raw NAT to the host network.
 
-Instead, the host implements its own network stack (`host/src/network-stack.ts`)
+Instead, the host implements its own network stack (`host/src/qemu/network-stack.ts`)
 and a backend that attaches to QEMU's `-netdev stream` Unix socket
 (`host/src/qemu/net.ts`).
 
