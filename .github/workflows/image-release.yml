@@ -67,6 +67,13 @@ jobs:
             throw new Error('image_tag is required');
           }
 
+          const imageTagPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+          if (!imageTagPattern.test(imageTag)) {
+            throw new Error(
+              `image_tag must match ${imageTagPattern} (for example "1.0.0"), got: ${imageTag}`,
+            );
+          }
+
           const buildConfig = buildConfigInput || 'images/alpine-base.json';
           const resolvedConfig = path.resolve(buildConfig);
           const cwd = process.cwd();
@@ -97,6 +104,13 @@ jobs:
           if (!imageName) {
             throw new Error(
               'image_name is required when build config does not define imageName',
+            );
+          }
+
+          const imageNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+          if (!imageNamePattern.test(imageName)) {
+            throw new Error(
+              `image_name must match ${imageNamePattern}, got: ${imageName}`,
             );
           }
 
@@ -154,7 +168,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.qemu }} lz4
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+          UV_BIN_DIR=""
+          if [ -x "$HOME/.local/bin/uv" ]; then
+            UV_BIN_DIR="$HOME/.local/bin"
+          elif [ -x "$HOME/.cargo/bin/uv" ]; then
+            UV_BIN_DIR="$HOME/.cargo/bin"
+          else
+            echo "uv binary not found after install"
+            exit 1
+          fi
+
+          echo "$UV_BIN_DIR" >> "$GITHUB_PATH"
+          "$UV_BIN_DIR/uv" --version
           pnpm install
 
       - name: Build guest binaries
@@ -164,6 +190,9 @@ jobs:
 
       - name: Build guest image
         run: |
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          command -v uv
+
           NODE_BIN="$(node -p 'process.execPath')"
           cd guest
           ALPINE_ARCH=${{ matrix.arch }} \
