@@ -83,6 +83,12 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
   - The secret is only permitted for the listed host(s)
   - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
+- `--auto-host-secrets`
+  - Auto-classify host environment variables and map recognized secrets to host allowlists
+  - Uses `@earendil-works/secret-filter` mapping data
+  - Secret-like variables without a host mapping are dropped and reported
+  - Explicit `--host-secret` entries override auto-classified entries
+
 - `--disable-websockets`
   - Disable WebSocket upgrades through the bridge
   - Affects both:
@@ -127,6 +133,10 @@ gondolin exec \
   --host-secret BASIC_USER@example.com \
   --host-secret BASIC_PASS@example.com \
   -- curl -sS -u "$BASIC_USER:$BASIC_PASS" https://example.com/private
+
+# Auto-map process env secrets using built-in host mapping
+# (secret-like vars without host mapping are dropped)
+gondolin bash --auto-host-secrets
 
 # Allow multiple hosts / wildcards
 gondolin bash --allow-host "*.github.com" --allow-host api.openai.com
@@ -445,7 +455,6 @@ For a full configuration reference and build requirements, see:
 
 - `GONDOLIN_DEBUG`
   - Enable debug logging (see [Debug Logging](./debug.md))
-
 
 ## Help
 

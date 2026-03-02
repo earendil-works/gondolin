@@ -23,11 +23,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'pnpm'
+          node-version: "24"
+          cache: "pnpm"
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Typecheck secret-filter
+        run: pnpm --filter @earendil-works/secret-filter run typecheck
 
       - name: Typecheck host
         run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
@@ -62,8 +65,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'pnpm'
+          node-version: "24"
+          cache: "pnpm"
 
       - name: Install Zig
         run: |
@@ -115,8 +118,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'pnpm'
+          node-version: "24"
+          cache: "pnpm"
 
       - name: Install Zig
         run: |
@@ -185,8 +188,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'pnpm'
+          node-version: "24"
+          cache: "pnpm"
 
       - name: Download guest assets
         uses: actions/download-artifact@v4

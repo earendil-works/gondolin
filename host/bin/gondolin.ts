@@ -12,6 +12,7 @@ import type { VirtualProvider } from "../src/vfs/node/index.ts";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
+import { classifyEnvForGondolin } from "@earendil-works/secret-filter";
 import {
   FrameReader,
   buildExecRequest,
@@ -254,6 +255,9 @@ function bashUsage() {
     "                                  If =VALUE is omitted, reads from $NAME",
   );
   console.log(
+    "  --auto-host-secrets            Auto-map host env secrets to allowed destinations",
+  );
+  console.log(
     "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
   );
   console.log(
@@ -311,6 +315,7 @@ function bashUsage() {
   );
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
+  console.log("  gondolin bash --auto-host-secrets");
   console.log("  gondolin bash --cmd claude --cwd /workspace");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
@@ -388,6 +393,9 @@ function execUsage() {
     "                                  Add secret for specified hosts",
   );
   console.log(
+    "  --auto-host-secrets            Auto-map host env secrets to allowed destinations",
+  );
+  console.log(
     "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
   );
   console.log(
@@ -447,6 +455,8 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+  /** auto-classify process env vars into host-filtered secrets */
+  autoHostSecrets?: boolean;
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -765,12 +775,39 @@ function buildVmOptions(common: CommonOptions) {
   let httpHooks;
   let env: Record<string, string> | undefined;
 
-  if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
-    const secrets: Record<string, { hosts: string[]; value: string }> = {};
-    for (const secret of common.secrets) {
-      secrets[secret.name] = { hosts: secret.hosts, value: secret.value };
+  const autoSecrets = (() => {
+    if (!common.autoHostSecrets) {
+      return null;
     }
 
+    try {
+      return classifyEnvForGondolin(process.env);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`failed to classify --auto-host-secrets: ${message}`);
+    }
+  })();
+
+  if (autoSecrets && autoSecrets.dropped.length > 0) {
+    const droppedNames = autoSecrets.dropped.map((entry) => entry.name);
+    const preview = droppedNames.slice(0, 10).join(", ");
+    const more =
+      droppedNames.length > 10 ? ` (+${droppedNames.length - 10} more)` : "";
+    process.stderr.write(
+      `[gondolin] dropped ${droppedNames.length} secret-like env var(s) without host mapping: ${preview}${more}\n`,
+    );
+  }
+
+  const secrets: Record<string, { hosts: string[]; value: string }> = {
+    ...(autoSecrets?.secretsMap ?? {}),
+  };
+
+  for (const secret of common.secrets) {
+    // Explicit --host-secret definitions override auto-classified entries.
+    secrets[secret.name] = { hosts: secret.hosts, value: secret.value };
+  }
+
+  if (common.allowedHosts.length > 0 || Object.keys(secrets).length > 0) {
     const result = createHttpHooks({
       allowedHosts: common.allowedHosts,
       secrets,
@@ -958,6 +995,10 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const spec = optionArgs[++i];
         if (!spec) fail("--host-secret requires an argument");
         args.common.secrets.push(parseHostSecret(spec));
+        return i;
+      }
+      case "--auto-host-secrets": {
+        args.common.autoHostSecrets = true;
         return i;
       }
       case "--dns": {
@@ -1375,6 +1416,10 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.secrets.push(parseHostSecret(spec));
+        break;
+      }
+      case "--auto-host-secrets": {
+        args.autoHostSecrets = true;
         break;
       }
       case "--dns": {

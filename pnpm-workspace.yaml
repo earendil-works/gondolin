@@ -1,3 +1,4 @@
 packages:
   - "host"
+  - "packages/*"
   - "examples/*"

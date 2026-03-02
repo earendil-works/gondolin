@@ -83,6 +83,24 @@ export {
   type SecretDefinition,
 } from "./http/hooks.ts";
 
+// Env secret classification helpers
+export {
+  classify,
+  classifyEnv,
+  classifyEnvForGondolin,
+  getPatternStore,
+  PatternCompilationError,
+  PatternIntegrityError,
+  PatternSchemaError,
+  type ClassifyEnvResult,
+  type ClassifyOptions,
+  type ClassifyResult,
+  type MatchSource,
+  type SecretMappingData,
+  type GondolinIntegrationResult,
+  type GondolinSecretDefinition,
+} from "@earendil-works/secret-filter";
+
 // Network types
 export type {
   DnsMode,

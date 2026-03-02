@@ -1,0 +1,41 @@
+{
+  "name": "@earendil-works/secret-filter",
+  "version": "0.1.0",
+  "description": "Classify environment variables and build host-filtered secret maps",
+  "license": "Apache-2.0",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/earendil-works/gondolin.git",
+    "directory": "packages/secret-filter"
+  },
+  "scripts": {
+    "build": "pnpm run typecheck",
+    "test": "node -e \"process.exit(0)\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "mapping:update": "node ./scripts/update-mapping.mjs --latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=23.6.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

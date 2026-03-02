@@ -4,6 +4,7 @@ This page documents how Gondolin handles API keys/tokens so the guest can use
 secrets without directly reading them.
 
 See also:
+
 - [SDK Networking, Ingress, and SSH](./sdk-network.md)
 - [Network Stack](./network.md)
 - [Security Design](./security.md)
@@ -47,21 +48,24 @@ the guest will not have placeholder env vars to reference.
 By default, placeholder substitution happens in **request headers**.
 
 Supported by default:
+
 - Plain header values (for example `Authorization: Bearer $TOKEN`)
 - `Authorization: Basic ...` and `Proxy-Authorization: Basic ...`
-    - Gondolin decodes base64 `username:password`, replaces placeholders, and re-encodes
+  - Gondolin decodes base64 `username:password`, replaces placeholders, and re-encodes
 
 Optional:
+
 - URL query string (`replaceSecretsInQuery: true`)
 
 Not substituted:
+
 - Request body
 - URL path
 - Response content
 
 ## Host Matching and Allowlists
 
-Each secret has its own host pattern allowlist (`secrets.NAME.hosts`).  Patterns
+Each secret has its own host pattern allowlist (`secrets.NAME.hosts`). Patterns
 are case-insensitive and support `*` wildcards.
 
 `createHttpHooks` also builds the final network host allowlist as:
@@ -89,6 +93,10 @@ CLI `--host-secret NAME@HOST[,HOST...][=VALUE]` uses the same mechanism.
 
 - If `=VALUE` is omitted, the value is read from host env var `NAME`
 - Inside the guest, `$NAME` is a placeholder, not the real value
+
+You can also use `--auto-host-secrets` to classify `process.env` with
+`@earendil-works/secret-filter` and automatically wire mapped secrets.
+Secret-like env vars without host mapping are dropped.
 
 ## Operational guidance
 

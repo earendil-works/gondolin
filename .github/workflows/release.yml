@@ -3,11 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.1.0)'
+        description: "Version tag (e.g., v0.1.0)"
         required: true
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
@@ -86,7 +86,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
@@ -195,8 +195,8 @@ jobs:
 
             The guest image will be automatically downloaded on first use.
 
-  publish-npm:
-    name: Publish to NPM
+  publish-secret-filter:
+    name: Publish secret-filter to NPM
     needs: [create-release]
     runs-on: ubuntu-latest
     permissions:
@@ -214,8 +214,61 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Read secret-filter version
+        id: secret_filter_version
+        run: |
+          cd packages/secret-filter
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if version is already published
+        id: published
+        run: |
+          VERSION="${{ steps.secret_filter_version.outputs.version }}"
+          if npm view @earendil-works/secret-filter@${VERSION} version >/dev/null 2>&1; then
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "@earendil-works/secret-filter@${VERSION} is already published"
+          else
+            echo "published=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Typecheck secret-filter
+        if: steps.published.outputs.published != 'true'
+        run: pnpm --filter @earendil-works/secret-filter run build
+
+      - name: Publish secret-filter (with provenance)
+        if: steps.published.outputs.published != 'true'
+        run: |
+          cd packages/secret-filter
+          npm publish --access public --provenance
+
+  publish-npm:
+    name: Publish to NPM
+    needs: [create-release, publish-secret-filter]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Get version from tag
         id: tag_version
