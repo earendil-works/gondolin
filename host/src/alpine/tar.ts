@@ -7,10 +7,24 @@ import { pipeline } from "stream/promises";
 import type { TarEntry } from "./types.ts";
 import { hasSymlinkComponent } from "./rootfs.ts";
 
+const TAR_TYPE_FILE = 0x30;
+const TAR_TYPE_DIRECTORY = 0x35;
+const TAR_TYPE_SYMLINK = 0x32;
+const TAR_TYPE_HARDLINK = 0x31;
+const TAR_TYPE_PAX_LOCAL = 0x78;
+const TAR_TYPE_PAX_GLOBAL = 0x67;
+const TAR_TYPE_GNU_LONGNAME = 0x4c;
+const TAR_TYPE_GNU_LONGLINK = 0x4b;
+
 /** Parse a raw tar archive buffer into entries */
 export function parseTar(buf: Buffer): TarEntry[] {
   const entries: TarEntry[] = [];
   let offset = 0;
+
+  let globalPaxHeaders: Record<string, string> = {};
+  let nextPaxHeaders: Record<string, string> | null = null;
+  let nextLongName: string | null = null;
+  let nextLongLink: string | null = null;
 
   while (offset + 512 <= buf.length) {
     const header = buf.subarray(offset, offset + 512);
@@ -24,7 +38,7 @@ export function parseTar(buf: Buffer): TarEntry[] {
     const mode = parseInt(readTarString(header, 100, 8), 8) || 0;
     const size = parseInt(readTarString(header, 124, 12), 8) || 0;
     const typeFlag = header[156];
-    const linkName = readTarString(header, 157, 100);
+    const headerLinkName = readTarString(header, 157, 100);
 
     // Handle UStar prefix
     const magic = readTarString(header, 257, 6);
@@ -36,24 +50,6 @@ export function parseTar(buf: Buffer): TarEntry[] {
       }
     }
 
-    // PAX extended headers (type 'x' or 'g') — read content and skip
-    if (typeFlag === 0x78 || typeFlag === 0x67) {
-      const blocks = Math.ceil(size / 512);
-      offset += 512 + blocks * 512;
-      continue;
-    }
-
-    const type =
-      typeFlag === 0 || typeFlag === 0x30
-        ? 0 // regular file
-        : typeFlag === 0x35
-          ? 5 // directory
-          : typeFlag === 0x32
-            ? 2 // symlink
-            : typeFlag === 0x31
-              ? 1 // hardlink
-              : typeFlag;
-
     offset += 512;
 
     let content: Buffer | null = null;
@@ -62,10 +58,120 @@ export function parseTar(buf: Buffer): TarEntry[] {
       offset += Math.ceil(size / 512) * 512;
     }
 
+    // PAX extended headers (type 'x' or 'g')
+    if (typeFlag === TAR_TYPE_PAX_LOCAL || typeFlag === TAR_TYPE_PAX_GLOBAL) {
+      const paxHeaders = parsePaxHeaders(content);
+      if (typeFlag === TAR_TYPE_PAX_GLOBAL) {
+        globalPaxHeaders = {
+          ...globalPaxHeaders,
+          ...paxHeaders,
+        };
+      } else {
+        nextPaxHeaders = paxHeaders;
+      }
+      continue;
+    }
+
+    // GNU long path/link name records apply to the next non-meta entry
+    if (typeFlag === TAR_TYPE_GNU_LONGNAME) {
+      nextLongName = readLongTarString(content);
+      continue;
+    }
+    if (typeFlag === TAR_TYPE_GNU_LONGLINK) {
+      nextLongLink = readLongTarString(content);
+      continue;
+    }
+
+    const effectivePaxHeaders = nextPaxHeaders
+      ? { ...globalPaxHeaders, ...nextPaxHeaders }
+      : globalPaxHeaders;
+
+    if (nextLongName) {
+      fullName = nextLongName;
+    } else if (effectivePaxHeaders.path) {
+      fullName = effectivePaxHeaders.path;
+    }
+
+    let linkName = headerLinkName;
+    if (nextLongLink) {
+      linkName = nextLongLink;
+    } else if (effectivePaxHeaders.linkpath) {
+      linkName = effectivePaxHeaders.linkpath;
+    }
+
+    const type =
+      typeFlag === 0 || typeFlag === TAR_TYPE_FILE
+        ? 0 // regular file
+        : typeFlag === TAR_TYPE_DIRECTORY
+          ? 5 // directory
+          : typeFlag === TAR_TYPE_SYMLINK
+            ? 2 // symlink
+            : typeFlag === TAR_TYPE_HARDLINK
+              ? 1 // hardlink
+              : typeFlag;
+
     entries.push({ name: fullName, type, mode, size, linkName, content });
+
+    nextPaxHeaders = null;
+    nextLongName = null;
+    nextLongLink = null;
   }
 
   return entries;
+}
+
+function parsePaxHeaders(content: Buffer | null): Record<string, string> {
+  if (!content || content.length === 0) {
+    return {};
+  }
+
+  const out: Record<string, string> = {};
+  let offset = 0;
+
+  while (offset < content.length) {
+    const spaceIdx = content.indexOf(0x20, offset);
+    if (spaceIdx === -1) {
+      break;
+    }
+
+    const lenStr = content.subarray(offset, spaceIdx).toString("utf8").trim();
+    const recordLen = Number.parseInt(lenStr, 10);
+    if (!Number.isFinite(recordLen) || recordLen <= 0) {
+      break;
+    }
+
+    const recordEnd = offset + recordLen;
+    if (recordEnd > content.length) {
+      break;
+    }
+
+    const record = content.subarray(spaceIdx + 1, recordEnd).toString("utf8");
+    const newline = record.endsWith("\n") ? record.slice(0, -1) : record;
+    const eqIdx = newline.indexOf("=");
+    if (eqIdx !== -1) {
+      const key = newline.slice(0, eqIdx);
+      const value = newline.slice(eqIdx + 1);
+      if (key) {
+        out[key] = value;
+      }
+    }
+
+    offset = recordEnd;
+  }
+
+  return out;
+}
+
+function readLongTarString(content: Buffer | null): string {
+  if (!content || content.length === 0) {
+    return "";
+  }
+
+  let end = content.length;
+  while (end > 0 && (content[end - 1] === 0 || content[end - 1] === 0x0a)) {
+    end -= 1;
+  }
+  return content.subarray(0, end).toString("utf8");
 }
 
 function readTarString(buf: Buffer, offset: number, length: number): string {
