@@ -2,12 +2,16 @@
   "schema": 1,
   "refs": {
     "alpine-base:latest": {
-      "aarch64": "35a3d95d-7127-547e-b7df-07ac50cc4443",
-      "x86_64": "c2150715-0e66-5819-bbb6-c747ed3ddd87"
+      "aarch64": "ad0ae835-0f53-5816-a38a-ee2116d2ac3d",
+      "x86_64": "6248284f-cac8-51c0-b828-4f8434bcdca1"
     },
     "alpine-base:0.1.0": {
       "aarch64": "35a3d95d-7127-547e-b7df-07ac50cc4443",
       "x86_64": "c2150715-0e66-5819-bbb6-c747ed3ddd87"
+    },
+    "alpine-base:0.1.1": {
+      "aarch64": "ad0ae835-0f53-5816-a38a-ee2116d2ac3d",
+      "x86_64": "6248284f-cac8-51c0-b828-4f8434bcdca1"
     }
   },
   "builds": {
@@ -20,6 +24,16 @@
       "arch": "x86_64",
       "url": "https://github.com/earendil-works/gondolin/releases/download/image-alpine-base--0.1.0/gondolin-image-alpine-base-0.1.0-x86_64.tar.gz",
       "sha256": "80fe91967a9ddf3c6de6e5f252f93410634d16aa794b425ebf3a88242f51973f"
+    },
+    "ad0ae835-0f53-5816-a38a-ee2116d2ac3d": {
+      "arch": "aarch64",
+      "url": "https://github.com/earendil-works/gondolin/releases/download/image-alpine-base--0.1.1/gondolin-image-alpine-base-0.1.1-aarch64.tar.gz",
+      "sha256": "ababef5cd11754906da32de5ce821e6c76d4fa3ff50cbb0e417b57c980f92ee9"
+    },
+    "6248284f-cac8-51c0-b828-4f8434bcdca1": {
+      "arch": "x86_64",
+      "url": "https://github.com/earendil-works/gondolin/releases/download/image-alpine-base--0.1.1/gondolin-image-alpine-base-0.1.1-x86_64.tar.gz",
+      "sha256": "93fa1de30305b79b58e10447c51bc818e4d12a7192e66281e611e87242c3bc4f"
     }
   }
 }
