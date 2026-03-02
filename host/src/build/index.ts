@@ -10,7 +10,11 @@ import { loadAssetManifest } from "../assets.ts";
 import type { BuildConfig } from "./config.ts";
 import { detectHostArchitectureSync } from "../host/arch.ts";
 import { buildInContainer } from "./container.ts";
-import { computeFileHash, type BuildOptions, type BuildResult } from "./shared.ts";
+import {
+  computeFileHash,
+  type BuildOptions,
+  type BuildResult,
+} from "./shared.ts";
 import { buildNative } from "./native.ts";
 
 export type { BuildOptions, BuildResult } from "./shared.ts";

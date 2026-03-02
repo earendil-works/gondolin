@@ -290,3 +290,289 @@ process.exit(0);
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
 });
+
+test("builder: container build stages postBuild.copy sources under /work", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
+  const stubDir = path.join(tmp, "bin");
+  fs.mkdirSync(stubDir, { recursive: true });
+
+  const dockerStubPath = path.join(stubDir, "docker");
+
+  const dockerStub = `#!${process.execPath}
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+
+function parseMount(mount) {
+  const first = mount.indexOf(":");
+  if (first === -1) return null;
+  const host = mount.slice(0, first);
+  const rest = mount.slice(first + 1);
+  const second = rest.indexOf(":");
+  const container = second === -1 ? rest : rest.slice(0, second);
+  return { host, container };
+}
+
+if (args[0] === "--version") {
+  process.stdout.write("Docker version 0.0.0-stub\\n");
+  process.exit(0);
+}
+
+if (args[0] === "run") {
+  let outDir = null;
+  let workDir = null;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "-v") {
+      const parsed = parseMount(args[++i]);
+      if (!parsed) continue;
+      if (parsed.container === "/output") outDir = parsed.host;
+      if (parsed.container === "/work") workDir = parsed.host;
+    }
+  }
+
+  if (!outDir || !workDir) {
+    process.stderr.write("docker stub: missing /output or /work mount\\n");
+    process.exit(20);
+  }
+
+  const cfg = JSON.parse(fs.readFileSync(path.join(workDir, "build-config.json"), "utf8"));
+  const copy = cfg.postBuild && Array.isArray(cfg.postBuild.copy) ? cfg.postBuild.copy : [];
+  if (copy.length !== 1) {
+    process.stderr.write("docker stub: expected one postBuild.copy entry\\n");
+    process.exit(21);
+  }
+
+  if (copy[0].src !== "/work/postbuild-copy-0/tool.tar.gz") {
+    process.stderr.write("docker stub: postBuild.copy src did not preserve source basename\\n");
+    process.exit(22);
+  }
+
+  if (!fs.existsSync(path.join(workDir, "postbuild-copy-0", "tool.tar.gz"))) {
+    process.stderr.write("docker stub: staged postBuild.copy source missing\\n");
+    process.exit(23);
+  }
+
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, "vmlinuz-virt"), "");
+  fs.writeFileSync(path.join(outDir, "initramfs.cpio.lz4"), "");
+  fs.writeFileSync(path.join(outDir, "rootfs.ext4"), "");
+  fs.writeFileSync(
+    path.join(outDir, "manifest.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        config: cfg,
+        buildTime: new Date().toISOString(),
+        assets: {
+          kernel: "vmlinuz-virt",
+          initramfs: "initramfs.cpio.lz4",
+          rootfs: "rootfs.ext4"
+        },
+        checksums: {
+          kernel: "00",
+          initramfs: "00",
+          rootfs: "00"
+        }
+      },
+      null,
+      2,
+    ),
+  );
+
+  process.exit(0);
+}
+
+process.exit(0);
+`;
+
+  fs.writeFileSync(dockerStubPath, dockerStub, { mode: 0o755 });
+
+  const sourcePath = path.join(tmp, "tool.tar.gz");
+  fs.writeFileSync(sourcePath, "archive");
+
+  const outputDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-assets-out-"),
+  );
+
+  const config: BuildConfig = {
+    arch: "x86_64",
+    distro: "alpine",
+    alpine: {
+      version: "3.23.0",
+    },
+    postBuild: {
+      copy: [
+        {
+          src: sourcePath,
+          dest: "/tmp/tool.tar.gz",
+        },
+      ],
+    },
+    container: {
+      force: true,
+      runtime: "docker",
+      image: "alpine:3.23",
+    },
+  };
+
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${stubDir}:${oldPath ?? ""}`;
+
+    await buildAssets(config, {
+      outputDir,
+      verbose: false,
+      skipBinaries: true,
+    });
+  } finally {
+    process.env.PATH = oldPath;
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("builder: container build preserves postBuild.copy symlinks", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
+  const stubDir = path.join(tmp, "bin");
+  fs.mkdirSync(stubDir, { recursive: true });
+
+  const dockerStubPath = path.join(stubDir, "docker");
+
+  const dockerStub = `#!${process.execPath}
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+
+function parseMount(mount) {
+  const first = mount.indexOf(":");
+  if (first === -1) return null;
+  const host = mount.slice(0, first);
+  const rest = mount.slice(first + 1);
+  const second = rest.indexOf(":");
+  const container = second === -1 ? rest : rest.slice(0, second);
+  return { host, container };
+}
+
+if (args[0] === "--version") {
+  process.stdout.write("Docker version 0.0.0-stub\\n");
+  process.exit(0);
+}
+
+if (args[0] === "run") {
+  let outDir = null;
+  let workDir = null;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "-v") {
+      const parsed = parseMount(args[++i]);
+      if (!parsed) continue;
+      if (parsed.container === "/output") outDir = parsed.host;
+      if (parsed.container === "/work") workDir = parsed.host;
+    }
+  }
+
+  if (!outDir || !workDir) {
+    process.stderr.write("docker stub: missing /output or /work mount\\n");
+    process.exit(30);
+  }
+
+  const cfg = JSON.parse(fs.readFileSync(path.join(workDir, "build-config.json"), "utf8"));
+  const stagedPath = path.join(workDir, "postbuild-copy-0", "tool-link");
+
+  if (cfg.postBuild.copy[0].src !== "/work/postbuild-copy-0/tool-link") {
+    process.stderr.write("docker stub: symlink source path rewrite mismatch\\n");
+    process.exit(31);
+  }
+
+  if (!fs.lstatSync(stagedPath).isSymbolicLink()) {
+    process.stderr.write("docker stub: staged postBuild.copy source is not a symlink\\n");
+    process.exit(32);
+  }
+
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, "vmlinuz-virt"), "");
+  fs.writeFileSync(path.join(outDir, "initramfs.cpio.lz4"), "");
+  fs.writeFileSync(path.join(outDir, "rootfs.ext4"), "");
+  fs.writeFileSync(
+    path.join(outDir, "manifest.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        config: cfg,
+        buildTime: new Date().toISOString(),
+        assets: {
+          kernel: "vmlinuz-virt",
+          initramfs: "initramfs.cpio.lz4",
+          rootfs: "rootfs.ext4"
+        },
+        checksums: {
+          kernel: "00",
+          initramfs: "00",
+          rootfs: "00"
+        }
+      },
+      null,
+      2,
+    ),
+  );
+
+  process.exit(0);
+}
+
+process.exit(0);
+`;
+
+  fs.writeFileSync(dockerStubPath, dockerStub, { mode: 0o755 });
+
+  const sourceTargetPath = path.join(tmp, "tool.tar.gz");
+  const sourceLinkPath = path.join(tmp, "tool-link");
+  fs.writeFileSync(sourceTargetPath, "archive");
+  fs.symlinkSync("tool.tar.gz", sourceLinkPath);
+
+  const outputDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-assets-out-"),
+  );
+
+  const config: BuildConfig = {
+    arch: "x86_64",
+    distro: "alpine",
+    alpine: {
+      version: "3.23.0",
+    },
+    postBuild: {
+      copy: [
+        {
+          src: sourceLinkPath,
+          dest: "/tmp/",
+        },
+      ],
+    },
+    container: {
+      force: true,
+      runtime: "docker",
+      image: "alpine:3.23",
+    },
+  };
+
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${stubDir}:${oldPath ?? ""}`;
+
+    await buildAssets(config, {
+      outputDir,
+      verbose: false,
+      skipBinaries: true,
+    });
+  } finally {
+    process.env.PATH = oldPath;
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});

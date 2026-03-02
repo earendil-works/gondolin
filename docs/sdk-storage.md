@@ -28,14 +28,30 @@ const vm = await VM.create({
 
 ## Image Management
 
-Guest images (kernel, initramfs, rootfs) are automatically downloaded from
-GitHub releases on first use. The default cache location is `~/.cache/gondolin/`.
+Guest images (kernel, initramfs, rootfs) are resolved automatically from local
+overrides/store first, then from `builtin-image-registry.json` when needed.
+The default cache location is `~/.cache/gondolin/images/`.
 
-Override the cache location:
+Override image selection / source:
 
 ```bash
+# Use explicit local assets
 export GONDOLIN_GUEST_DIR=/path/to/assets
+
+# Change default image selector
+export GONDOLIN_DEFAULT_IMAGE=alpine-base:1.0
+
+# Override builtin registry URL
+export GONDOLIN_IMAGE_REGISTRY_URL=https://example.invalid/my-registry.json
 ```
+
+Build-id selectors (`uuid`) are resolved locally first and only downloaded from
+the builtin registry when that registry has an explicit `builds[buildId]`
+mapping.
+
+Builtin registry entries are normalized: `refs[name:tag][arch]` stores a build
+id, and `builds[buildId]` stores the downloadable source metadata (`url`,
+optional `sha256`, optional `arch`).
 
 Check asset status programmatically:
 

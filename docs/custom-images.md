@@ -51,7 +51,7 @@ Building custom images requires the following tools:
 
 | Tool | Purpose |
 |------|---------|
-| **Zig 0.15.1+** | Cross-compiling sandboxd/sandboxfs binaries |
+| **Zig 0.15.2+** | Cross-compiling sandboxd/sandboxfs binaries |
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating ext4 rootfs images (mke2fs) |
@@ -68,7 +68,7 @@ The build tries to locate `mke2fs` automatically (including common Homebrew loca
 ### Linux (Debian/Ubuntu)
 
 ```bash
-# Install Zig 0.15.1+ from https://ziglang.org/download/
+# Install Zig 0.15.2+ from https://ziglang.org/download/
 sudo apt install lz4 cpio e2fsprogs
 ```
 
@@ -113,6 +113,12 @@ The file has the following structure:
     "label": "gondolin-root"
   },
   "postBuild": {
+    "copy": [
+      {
+        "src": "./dist/my-tool.tar.gz",
+        "dest": "/tmp/my-tool.tar.gz"
+      }
+    ],
     "commands": [
       "pip3 install llm llm-anthropic"
     ]
@@ -131,7 +137,7 @@ The file has the following structure:
 | `oci` | object | OCI rootfs source (uses exported container filesystem as rootfs base) |
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
-| `postBuild` | object | Post-package commands executed in the rootfs |
+| `postBuild` | object | Host file copies + post-package commands executed in the rootfs |
 | `container` | object | Container build settings (for cross-platform) |
 | `sandboxdPath` | string | Path to custom sandboxd binary |
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
@@ -226,16 +232,20 @@ Example:
 
 ### Post-Build Configuration
 
-Run shell commands inside the built rootfs after APK packages are extracted.
-This is useful for package managers like `pip` that need to install files into
-`/usr` during image creation.
+Copy host files into the built rootfs and run shell commands after APK packages
+are extracted.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `copy` | `{ src, dest }[]` | `[]` | Copy host file/dir `src` into absolute guest path `dest` before commands |
 | `commands` | string[] | `[]` | Commands executed in order via `/bin/sh -lc` inside chroot |
 
 Notes:
 
+- `postBuild.copy[].src` is resolved relative to the build config file path
+- `postBuild.copy[].dest` must be an absolute guest path (for example `/tmp/tool.tgz`)
+- Directory copies merge source contents into the destination directory
+- `postBuild.copy` runs before `postBuild.commands`
 - Commands run in a Linux chroot environment
 - Native Linux builds need root privileges for chroot (or use `container.force=true`)
 - On macOS, builds with `postBuild.commands` automatically use a container

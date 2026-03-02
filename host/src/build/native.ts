@@ -106,6 +106,11 @@ export async function buildNative(
     );
   }
 
+  const postBuildCopy = (config.postBuild?.copy ?? []).map((entry) => ({
+    src: resolveConfigPath(entry.src, configDir),
+    dest: entry.dest,
+  }));
+
   let alpineUrl: string | undefined;
   if (alpineConfig.mirror) {
     const branch =
@@ -133,6 +138,7 @@ export async function buildNative(
     rootfsInit,
     initramfsInit,
     rootfsInitExtra,
+    postBuildCopy,
     postBuildCommands: config.postBuild?.commands ?? [],
     defaultEnv: config.env,
     workDir,

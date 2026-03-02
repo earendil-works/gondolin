@@ -1993,7 +1993,6 @@ fi
       resolvedCheckpointPath,
       data,
       this.baseOptionsForClone,
-      { isDirectory: false },
     );
   }
 

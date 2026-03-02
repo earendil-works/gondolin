@@ -1,7 +1,11 @@
 import fs from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
-import type { VirtualProvider, VirtualFileHandle, VfsStatfs } from "./node/index.ts";
+import type {
+  VirtualProvider,
+  VirtualFileHandle,
+  VfsStatfs,
+} from "./node/index.ts";
 import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs.ts";
 import {
   createVirtualDirStats,

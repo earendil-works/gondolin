@@ -1,3 +1,5 @@
+import path from "path";
+
 /**
  * Build configuration schema for custom Linux kernel and rootfs builds.
  *
@@ -103,9 +105,21 @@ export interface InitConfig {
 }
 
 /**
+ * A host path copied into the rootfs during image assembly.
+ */
+export interface PostBuildCopyEntry {
+  /** host source path (resolved relative to the build config file) */
+  src: string;
+  /** absolute destination path inside the guest rootfs */
+  dest: string;
+}
+
+/**
  * Post-build command configuration.
  */
 export interface PostBuildConfig {
+  /** host files or directories copied into rootfs before commands */
+  copy?: PostBuildCopyEntry[];
   /** shell commands executed in rootfs after package installation */
   commands?: string[];
 }
@@ -230,6 +244,17 @@ const isOptionalNumber = (value: unknown): boolean =>
 const isOptionalStringArray = (value: unknown): boolean =>
   value === undefined || isStringArray(value);
 
+const isPostBuildCopyEntry = (value: unknown): value is PostBuildCopyEntry =>
+  isRecord(value) &&
+  typeof value.src === "string" &&
+  value.src.trim() !== "" &&
+  typeof value.dest === "string" &&
+  path.posix.isAbsolute(value.dest);
+
+const isOptionalPostBuildCopyEntryArray = (value: unknown): boolean =>
+  value === undefined ||
+  (Array.isArray(value) && value.every(isPostBuildCopyEntry));
+
 const isEnvRecord = (value: unknown): value is Record<string, string> =>
   isRecord(value) &&
   Object.values(value).every((entry) => typeof entry === "string");
@@ -342,6 +367,9 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       return false;
     }
     const postBuild = cfg.postBuild as Record<string, unknown>;
+    if (!isOptionalPostBuildCopyEntryArray(postBuild.copy)) {
+      return false;
+    }
     if (!isOptionalStringArray(postBuild.commands)) {
       return false;
     }

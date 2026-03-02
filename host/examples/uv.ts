@@ -48,9 +48,7 @@ function printUsage() {
   console.log();
   console.log("Examples:");
   console.log("  node examples/uv.ts hello.py");
-  console.log(
-    "  node examples/uv.ts --with requests scripts/fetch.py",
-  );
+  console.log("  node examples/uv.ts --with requests scripts/fetch.py");
   console.log();
   console.log("Debugging:");
   console.log(

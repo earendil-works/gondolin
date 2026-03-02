@@ -45,7 +45,7 @@ Design your workloads so that throwing away a VM is always safe.  This means:
 The key takeaway: if you need data to survive, write it to a VFS mount or
 extract it via `vm.exec(...)` before closing the VM *and store that state*.
 
-Generally managing persistance is hard, particularly with agents that might
+Generally managing persistence is hard, particularly with agents that might
 touch completely random places.  Ideally you avoid this problem as much as
 you can!
 

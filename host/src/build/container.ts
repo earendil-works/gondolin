@@ -67,6 +67,71 @@ export async function buildInContainer(
     return dest;
   };
 
+  const stagePostBuildCopySource = (source: string, name: string): string => {
+    const sourceStat = fs.lstatSync(source);
+    const stageRoot = path.join(workDir, name);
+
+    if (sourceStat.isDirectory()) {
+      copyPostBuildSourceTree(source, stageRoot);
+      return `/work/${name}`;
+    }
+
+    const sourceBaseName = path.basename(source);
+    const stagedPath = path.join(stageRoot, sourceBaseName);
+    copyPostBuildSourceTree(source, stagedPath);
+    return `/work/${name}/${sourceBaseName}`;
+  };
+
+  const copyPostBuildSourceTree = (source: string, dest: string): void => {
+    const sourceStat = fs.lstatSync(source);
+
+    if (sourceStat.isDirectory()) {
+      fs.mkdirSync(dest, { recursive: true, mode: sourceStat.mode & 0o777 });
+      for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+        copyPostBuildSourceTree(
+          path.join(source, entry.name),
+          path.join(dest, entry.name),
+        );
+      }
+      return;
+    }
+
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+
+    if (sourceStat.isSymbolicLink()) {
+      const linkTarget = fs.readlinkSync(source);
+      fs.symlinkSync(linkTarget, dest);
+      return;
+    }
+
+    if (sourceStat.isFile()) {
+      fs.copyFileSync(source, dest);
+      fs.chmodSync(dest, sourceStat.mode & 0o777);
+      return;
+    }
+
+    throw new Error(`postBuild.copy source type is not supported: ${source}`);
+  };
+
+  if (containerConfig.postBuild?.copy) {
+    containerConfig.postBuild.copy = containerConfig.postBuild.copy.map(
+      (entry, index) => {
+        const resolved = resolveConfigPath(entry.src, options.configDir);
+        if (!fs.existsSync(resolved)) {
+          throw new Error(`postBuild.copy source not found: ${resolved}`);
+        }
+
+        const stagedName = `postbuild-copy-${index}`;
+        const stagedSource = stagePostBuildCopySource(resolved, stagedName);
+
+        return {
+          src: stagedSource,
+          dest: entry.dest,
+        };
+      },
+    );
+  }
+
   if (containerConfig.init?.rootfsInit) {
     copyExecutable(
       resolveConfigPath(containerConfig.init.rootfsInit, options.configDir),
