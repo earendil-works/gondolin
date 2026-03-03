@@ -320,9 +320,12 @@ export class SandboxServer extends EventEmitter {
     const hostArch = getHostNodeArchCached();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
-    const baseAppend = (
-      this.options.append ?? `console=${consoleDevice} initramfs_async=1`
-    ).trim();
+    const defaultAppend =
+      this.options.vmm === "krun"
+        ? "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init"
+        : `console=${consoleDevice} initramfs_async=1`;
+
+    const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
 
     if (this.options.vmm === "krun") {

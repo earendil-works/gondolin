@@ -107,3 +107,63 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("resolveSandboxServerOptions uses GONDOLIN_KRUN_KERNEL override", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const kernelOverride = path.join(dir, "krun-override-kernel");
+  const initrdOverride = path.join(dir, "krun-override-initrd");
+  fs.writeFileSync(kernelOverride, "kernel");
+  fs.writeFileSync(initrdOverride, "");
+
+  const prevKernel = process.env.GONDOLIN_KRUN_KERNEL;
+  const prevInitrd = process.env.GONDOLIN_KRUN_INITRD;
+  process.env.GONDOLIN_KRUN_KERNEL = kernelOverride;
+  process.env.GONDOLIN_KRUN_INITRD = initrdOverride;
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      imagePath: dir,
+      vmm: "krun",
+    });
+
+    assert.equal(resolved.kernelPath, kernelOverride);
+    assert.equal(resolved.initrdPath, initrdOverride);
+  } finally {
+    if (prevKernel === undefined) delete process.env.GONDOLIN_KRUN_KERNEL;
+    else process.env.GONDOLIN_KRUN_KERNEL = prevKernel;
+    if (prevInitrd === undefined) delete process.env.GONDOLIN_KRUN_INITRD;
+    else process.env.GONDOLIN_KRUN_INITRD = prevInitrd;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const kernelOverride = path.join(dir, "krun-override-kernel");
+  fs.writeFileSync(kernelOverride, "kernel");
+
+  const prevKernel = process.env.GONDOLIN_KRUN_KERNEL;
+  process.env.GONDOLIN_KRUN_KERNEL = kernelOverride;
+
+  try {
+    const explicitAssets = {
+      kernelPath: path.join(dir, "vmlinuz-virt"),
+      initrdPath: path.join(dir, "initramfs.cpio.lz4"),
+      rootfsPath: path.join(dir, "rootfs.ext4"),
+    };
+
+    const resolved = resolveSandboxServerOptions({
+      imagePath: explicitAssets,
+      vmm: "krun",
+    });
+
+    assert.equal(resolved.kernelPath, explicitAssets.kernelPath);
+    assert.equal(resolved.initrdPath, explicitAssets.initrdPath);
+  } finally {
+    if (prevKernel === undefined) delete process.env.GONDOLIN_KRUN_KERNEL;
+    else process.env.GONDOLIN_KRUN_KERNEL = prevKernel;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

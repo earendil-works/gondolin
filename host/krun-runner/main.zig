@@ -85,7 +85,7 @@ fn parseArgs(allocator: std.mem.Allocator) !CliConfig {
 }
 
 fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
-    _ = c.krun_init_log(c.KRUN_LOG_TARGET_DEFAULT, c.KRUN_LOG_LEVEL_DEBUG, c.KRUN_LOG_STYLE_NEVER, 0);
+    _ = c.krun_init_log(c.KRUN_LOG_TARGET_DEFAULT, c.KRUN_LOG_LEVEL_WARN, c.KRUN_LOG_STYLE_NEVER, 0);
 
     const ctx_raw = c.krun_create_ctx();
     if (ctx_raw < 0) return krunError("krun_create_ctx", ctx_raw);
@@ -110,11 +110,13 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     );
     if (kernel_rc < 0) return krunError("krun_set_kernel", kernel_rc);
 
-    if (cfg.console == .none) {
-        const dev_null = try allocator.dupeZ(u8, "/dev/null");
-        const console_rc = c.krun_set_console_output(ctx, dev_null.ptr);
-        if (console_rc < 0) return krunError("krun_set_console_output", console_rc);
-    }
+    const console_output_path = switch (cfg.console) {
+        .none => "/dev/null",
+        .stdio => "/dev/stdout",
+    };
+    const console_output_z = try allocator.dupeZ(u8, console_output_path);
+    const console_rc = c.krun_set_console_output(ctx, console_output_z.ptr);
+    if (console_rc < 0) return krunError("krun_set_console_output", console_rc);
 
     if (cfg.rootDiskPath) |root_disk_path| {
         const root_disk_path_z = try allocator.dupeZ(u8, root_disk_path);
@@ -219,8 +221,7 @@ fn detectKernelFormat(kernel_path: []const u8) !u32 {
     const n = try file.readAll(&header);
 
     if (n >= 2 and header[0] == 'M' and header[1] == 'Z') {
-        // Alpine arm64 kernels are EFI-stubbed (MZ) Linux Images; keep raw loading
-        return c.KRUN_KERNEL_FORMAT_RAW;
+        return c.KRUN_KERNEL_FORMAT_PE_GZ;
     }
 
     if (n >= 4 and header[0] == 0x7f and header[1] == 'E' and header[2] == 'L' and header[3] == 'F') {

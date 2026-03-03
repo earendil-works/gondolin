@@ -10,8 +10,10 @@ Preferred (repo root):
 make krun-runner
 ```
 
-This stages `libkrun` under `.cache/libkrun-install/<version>` and builds the
-runner with bundled shared libraries under `host/krun-runner/zig-out/lib/`.
+This stages `libkrun` under `.cache/libkrun-install/<version>`, extracts a
+libkrunfw-compatible kernel under `~/.cache/gondolin/krun/libkrunfw/`, and
+builds the runner with bundled shared libraries under
+`host/krun-runner/zig-out/lib/`.
 
 Manual build:
 
@@ -41,4 +43,5 @@ Use with Gondolin:
 ## Notes
 
 - Runner is linked against `libkrun` and uses an rpath that prefers bundled libs
+- The krun backend expects a libkrunfw-compatible kernel image (Gondolin auto-detects the cache populated by `make krun-runner`)
 - Currently experimental

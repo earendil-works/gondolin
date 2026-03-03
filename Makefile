@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun libkrunfw-kernel krun-runner
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -9,16 +9,27 @@ LIBKRUN_SRC_DIR ?= .cache/libkrun-$(LIBKRUN_VERSION)
 LIBKRUN_BUILD_FLAGS ?= BLK=1 NET=1
 LIBKRUN_PREFIX ?= $(CURDIR)/.cache/libkrun-install/$(LIBKRUN_VERSION)
 
+LIBKRUNFW_VERSION ?= v5.2.1
+LIBKRUNFW_REPO ?= https://github.com/containers/libkrunfw
+
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
 ifeq ($(UNAME_M),arm64)
 LIBKRUN_TARGET_ARCH := aarch64
+LIBKRUNFW_TARGET_ARCH := aarch64
 else ifeq ($(UNAME_M),x86_64)
 LIBKRUN_TARGET_ARCH := x86_64
+LIBKRUNFW_TARGET_ARCH := x86_64
 else
 LIBKRUN_TARGET_ARCH := $(UNAME_M)
+LIBKRUNFW_TARGET_ARCH := $(UNAME_M)
 endif
+
+LIBKRUNFW_CACHE_DIR ?= $(HOME)/.cache/gondolin/krun/libkrunfw/$(LIBKRUNFW_VERSION)/$(LIBKRUNFW_TARGET_ARCH)
+LIBKRUNFW_KERNEL_PATH ?= $(LIBKRUNFW_CACHE_DIR)/Image
+LIBKRUNFW_EMPTY_INITRD_PATH ?= $(HOME)/.cache/gondolin/krun/empty-initrd
+LIBKRUNFW_PREBUILT_URL ?= $(LIBKRUNFW_REPO)/releases/download/$(LIBKRUNFW_VERSION)/libkrunfw-prebuilt-$(LIBKRUNFW_TARGET_ARCH).tgz
 
 ifeq ($(UNAME_S),Darwin)
 BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
@@ -59,6 +70,7 @@ help:
 	@echo "  make serve-docs  - Serve documentation locally (Zensical)"
 	@echo "  make hooks       - Install git hooks"
 	@echo "  make libkrun     - Build + stage libkrun locally under .cache/"
+	@echo "  make libkrunfw-kernel - Download/extract libkrunfw-compatible kernel Image"
 	@echo "  make krun-runner - Build libkrun + host/krun-runner helper"
 
 build:
@@ -128,7 +140,44 @@ libkrun:
 	fi
 	@echo "Staged libkrun under $(LIBKRUN_PREFIX)"
 
-krun-runner: libkrun
+libkrunfw-kernel:
+	@command -v curl >/dev/null 2>&1 || (echo "curl is required to download libkrunfw artifacts" && exit 1)
+	@command -v tar >/dev/null 2>&1 || (echo "tar is required to extract libkrunfw artifacts" && exit 1)
+	@command -v cc >/dev/null 2>&1 || (echo "a C compiler (cc) is required to extract the embedded kernel" && exit 1)
+	@mkdir -p "$(LIBKRUNFW_CACHE_DIR)"
+	@if [ ! -s "$(LIBKRUNFW_KERNEL_PATH)" ]; then \
+		set -eu; \
+		tmpdir="$$(mktemp -d)"; \
+		trap 'rm -rf "$$tmpdir"' EXIT; \
+		echo "Downloading libkrunfw prebuilt archive ($(LIBKRUNFW_VERSION), $(LIBKRUNFW_TARGET_ARCH))"; \
+		curl -fsSL "$(LIBKRUNFW_PREBUILT_URL)" -o "$$tmpdir/libkrunfw-prebuilt.tgz"; \
+		tar -xzf "$$tmpdir/libkrunfw-prebuilt.tgz" -C "$$tmpdir"; \
+		printf '%s\n' \
+			'#include <stdio.h>' \
+			'#include <stddef.h>' \
+			'#ifndef ABI_VERSION' \
+			'#define ABI_VERSION 0' \
+			'#endif' \
+			'#include "libkrunfw/kernel.c"' \
+			'int main(void) {' \
+			'    size_t load_addr = 0, entry_addr = 0, size = 0;' \
+			'    char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);' \
+			'    (void)load_addr;' \
+			'    (void)entry_addr;' \
+			'    if (!kernel || size == 0) {' \
+			'        return 1;' \
+			'    }' \
+			'    return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;' \
+			'}' > "$$tmpdir/extract-kernel.c"; \
+		cc -O2 -I"$$tmpdir" "$$tmpdir/extract-kernel.c" -o "$$tmpdir/extract-kernel"; \
+		"$$tmpdir/extract-kernel" > "$(LIBKRUNFW_KERNEL_PATH)"; \
+		echo "Extracted kernel: $(LIBKRUNFW_KERNEL_PATH)"; \
+	fi
+	@mkdir -p "$(dir $(LIBKRUNFW_EMPTY_INITRD_PATH))"
+	@if [ ! -e "$(LIBKRUNFW_EMPTY_INITRD_PATH)" ]; then : > "$(LIBKRUNFW_EMPTY_INITRD_PATH)"; fi
+	@echo "Prepared empty initrd: $(LIBKRUNFW_EMPTY_INITRD_PATH)"
+
+krun-runner: libkrun libkrunfw-kernel
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required to build host/krun-runner" && exit 1)
 	@echo "Building host krun runner"
 	@cd host/krun-runner && \
@@ -153,6 +202,8 @@ krun-runner: libkrun
 		fi
 	@echo "Built runner: host/krun-runner/zig-out/bin/gondolin-krun-runner"
 	@echo "Bundled libs: host/krun-runner/zig-out/lib/libkrun*"
+	@echo "Prepared krun kernel: $(LIBKRUNFW_KERNEL_PATH)"
+	@echo "Prepared empty initrd: $(LIBKRUNFW_EMPTY_INITRD_PATH)"
 	@echo "Run with: GONDOLIN_VMM=krun GONDOLIN_KRUN_RUNNER=$$(pwd)/host/krun-runner/zig-out/bin/gondolin-krun-runner npx @earendil-works/gondolin bash"
 
 ZENSICAL_VERSION ?= 0.0.21

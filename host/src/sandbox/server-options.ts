@@ -1,3 +1,4 @@
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
@@ -327,6 +328,71 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   return null;
 }
 
+const DEFAULT_LIBKRUNFW_VERSION = "v5.2.1";
+
+type KrunKernelOverride = {
+  /** replacement kernel image path */
+  kernelPath: string;
+  /** replacement initrd path */
+  initrdPath: string;
+};
+
+function toKrunArch(hostArch: "arm64" | "x64") {
+  return hostArch === "arm64" ? "aarch64" : "x86_64";
+}
+
+function getDefaultKrunKernelPath(hostArch: "arm64" | "x64") {
+  const version =
+    process.env.GONDOLIN_KRUN_LIBKRUNFW_VERSION ?? DEFAULT_LIBKRUNFW_VERSION;
+  return path.join(
+    os.homedir(),
+    ".cache",
+    "gondolin",
+    "krun",
+    "libkrunfw",
+    version,
+    toKrunArch(hostArch),
+    "Image",
+  );
+}
+
+function ensureEmptyInitrdFile(initrdPath: string): boolean {
+  try {
+    if (fs.existsSync(initrdPath)) return true;
+    fs.mkdirSync(path.dirname(initrdPath), { recursive: true });
+    fs.writeFileSync(initrdPath, "");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveKrunKernelOverride(
+  hostArch: "arm64" | "x64",
+): KrunKernelOverride | null {
+  const envKernel = process.env.GONDOLIN_KRUN_KERNEL?.trim();
+  const kernelPath =
+    envKernel && envKernel.length > 0
+      ? envKernel
+      : getDefaultKrunKernelPath(hostArch);
+
+  if (!fs.existsSync(kernelPath)) {
+    return null;
+  }
+
+  const envInitrd = process.env.GONDOLIN_KRUN_INITRD?.trim();
+  const initrdPath =
+    envInitrd && envInitrd.length > 0
+      ? envInitrd
+      : path.join(os.homedir(), ".cache", "gondolin", "krun", "empty-initrd");
+
+  if (!ensureEmptyInitrdFile(initrdPath) && !fs.existsSync(initrdPath)) {
+    return null;
+  }
+
+  return { kernelPath, initrdPath };
+}
+
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
   const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
   const initrdDir = assets.initrdPath ? path.dirname(assets.initrdPath) : null;
@@ -374,8 +440,8 @@ export function resolveSandboxServerOptions(
     resolvedAssets = resolveGuestAssetsSync() ?? {};
   }
 
-  const kernelPath = resolvedAssets.kernelPath;
-  const initrdPath = resolvedAssets.initrdPath;
+  const baseKernelPath = resolvedAssets.kernelPath;
+  const baseInitrdPath = resolvedAssets.initrdPath;
   const rootfsPath = resolvedAssets.rootfsPath;
 
   // we are running into length limits on macos on the default temp dir
@@ -403,6 +469,7 @@ export function resolveSandboxServerOptions(
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
+  const normalizedHostArch = normalizeArch(hostArch) ?? "x64";
   const defaultQemu =
     hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultKrunRunner =
@@ -411,16 +478,6 @@ export function resolveSandboxServerOptions(
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
   const debug = debugFlagsToArray(resolvedDebugFlags);
-
-  if (!kernelPath || !initrdPath || !rootfsPath) {
-    throw new Error(
-      "Guest assets not found. Either:\n" +
-        "  1. Run from the gondolin repository with built guest images\n" +
-        "  2. Use SandboxServer.create() to auto-download assets\n" +
-        "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
-        "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
-    );
-  }
 
   const explicitVmm = normalizeVmm(options.vmm ?? null);
   if (options.vmm !== undefined && !explicitVmm) {
@@ -433,11 +490,35 @@ export function resolveSandboxServerOptions(
   const qemuPath = options.qemuPath ?? defaultQemu;
   const krunRunnerPath = options.krunRunnerPath ?? defaultKrunRunner;
 
+  const explicitImageObject =
+    typeof options.imagePath === "object" && options.imagePath !== null;
+
+  let kernelPath = baseKernelPath;
+  let initrdPath = baseInitrdPath;
+
+  if (vmm === "krun" && !explicitImageObject) {
+    const krunKernelOverride = resolveKrunKernelOverride(normalizedHostArch);
+    if (krunKernelOverride) {
+      kernelPath = krunKernelOverride.kernelPath;
+      initrdPath = krunKernelOverride.initrdPath;
+    }
+  }
+
+  if (!kernelPath || !initrdPath || !rootfsPath) {
+    throw new Error(
+      "Guest assets not found. Either:\n" +
+        "  1. Run from the gondolin repository with built guest images\n" +
+        "  2. Use SandboxServer.create() to auto-download assets\n" +
+        "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
+        "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
+    );
+  }
+
   // Fail fast if we can detect that the guest image doesn't match the selected backend target.
   // Without this, the VM often just "hangs" until some higher-level timeout.
   const guestFromManifest = detectGuestArchFromManifest({
-    kernelPath,
-    initrdPath,
+    kernelPath: baseKernelPath,
+    initrdPath: baseInitrdPath,
     rootfsPath,
   });
 

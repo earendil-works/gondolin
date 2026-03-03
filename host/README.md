@@ -18,9 +18,11 @@ You need QEMU installed to run the micro-VMs (default backend):
 Optional experimental backend:
 
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
-- `make krun-runner` from repo root stages dependencies locally + builds runner
+- `make krun-runner` from repo root stages dependencies locally, extracts a libkrunfw-compatible kernel, and builds the runner
 - `GONDOLIN_VMM=krun` selects it globally
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
+- `GONDOLIN_KRUN_KERNEL=/path/to/Image` overrides the krun kernel image
+- `GONDOLIN_KRUN_INITRD=/path/to/initrd` overrides the krun initrd (defaults to an auto-created empty file)
 
 - Node.js >= 23.6
 

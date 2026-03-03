@@ -83,8 +83,13 @@ Optional experimental libkrun backend setup:
 make krun-runner
 ```
 
-This stages `libkrun` under `.cache/` (no global install) and builds the local
-runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+This stages `libkrun` under `.cache/` (no global install), extracts a
+libkrunfw-compatible kernel to `~/.cache/gondolin/krun/libkrunfw/.../Image`,
+and builds the local runner helper at
+`host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+
+When `vmm=krun` is selected, Gondolin automatically prefers this cached kernel
+(and an empty initrd) unless you provide explicit asset paths.
 
 > Linux and macOS are supported. ARM64 is the most tested path today.
 
