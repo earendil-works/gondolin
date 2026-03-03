@@ -152,6 +152,29 @@ test(
       fs.symlinkSync(assets.kernelPath, path.join(dir, kernelName));
       fs.symlinkSync(assets.initrdPath, path.join(dir, initrdName));
       fs.symlinkSync(assets.rootfsPath, path.join(dir, rootfsName));
+
+      if (sourceManifest.assets?.krunKernel) {
+        const sourceKrunKernel = path.join(
+          sourceDir,
+          sourceManifest.assets.krunKernel,
+        );
+        fs.symlinkSync(
+          sourceKrunKernel,
+          path.join(dir, sourceManifest.assets.krunKernel),
+        );
+      }
+
+      if (sourceManifest.assets?.krunInitrd) {
+        const sourceKrunInitrd = path.join(
+          sourceDir,
+          sourceManifest.assets.krunInitrd,
+        );
+        fs.symlinkSync(
+          sourceKrunInitrd,
+          path.join(dir, sourceManifest.assets.krunInitrd),
+        );
+      }
+
       fs.writeFileSync(
         path.join(dir, "manifest.json"),
         JSON.stringify(sourceManifest, null, 2),
