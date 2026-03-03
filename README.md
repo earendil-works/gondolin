@@ -88,6 +88,8 @@ This stages `libkrun` under `.cache/` (no global install), extracts a
 libkrunfw-compatible kernel to `~/.cache/gondolin/krun/libkrunfw/.../Image`,
 and builds the local runner helper at
 `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+On macOS, the build ad-hoc signs the runner with the
+`com.apple.security.hypervisor` entitlement so Hypervisor.framework access is allowed.
 On architectures without `libkrunfw-prebuilt-<arch>.tgz` (currently `x86_64`),
 the build falls back to `libkrunfw-<arch>.tgz` and extracts the kernel from the
 shared library.

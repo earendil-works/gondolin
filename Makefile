@@ -227,6 +227,12 @@ krun-runner: libkrun libkrunfw-kernel
 			echo "Failed to find staged libkrun libraries under $(LIBKRUN_PREFIX)/lib{,64}"; \
 			exit 1; \
 		fi
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		command -v codesign >/dev/null 2>&1 || { echo "codesign is required on macOS"; exit 1; }; \
+		codesign --force --sign - \
+			--entitlements host/krun-runner/gondolin-krun-runner.entitlements \
+			host/krun-runner/zig-out/bin/gondolin-krun-runner; \
+	fi
 	@echo "Built runner: host/krun-runner/zig-out/bin/gondolin-krun-runner"
 	@echo "Bundled libs: host/krun-runner/zig-out/lib/libkrun*"
 	@echo "Prepared krun kernel: $(LIBKRUNFW_KERNEL_PATH)"

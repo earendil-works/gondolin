@@ -14,6 +14,8 @@ This stages `libkrun` under `.cache/libkrun-install/<version>`, extracts a
 libkrunfw-compatible kernel under `~/.cache/gondolin/krun/libkrunfw/`, and
 builds the runner with bundled shared libraries under
 `host/krun-runner/zig-out/lib/`.
+On macOS, `make krun-runner` also ad-hoc signs the runner with
+`com.apple.security.hypervisor` (via `gondolin-krun-runner.entitlements`).
 If `libkrunfw-prebuilt-<arch>.tgz` is not available (for example `x86_64`),
 `make krun-runner` falls back to `libkrunfw-<arch>.tgz` and extracts the kernel
 via `libkrunfw.so`.

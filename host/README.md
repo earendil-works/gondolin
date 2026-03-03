@@ -19,6 +19,7 @@ Optional experimental backend:
 
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
 - `make krun-runner` from repo root stages dependencies locally, extracts a libkrunfw-compatible kernel, and builds the runner
+  - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
   - if `libkrunfw-prebuilt-<arch>.tgz` is unavailable (for example `x86_64`), Gondolin falls back to `libkrunfw-<arch>.tgz` automatically
 - `GONDOLIN_VMM=krun` selects it globally
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
