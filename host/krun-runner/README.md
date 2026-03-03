@@ -14,6 +14,23 @@ This stages `libkrun` under `.cache/libkrun-install/<version>`, extracts a
 libkrunfw-compatible kernel under `~/.cache/gondolin/krun/libkrunfw/`, and
 builds the runner with bundled shared libraries under
 `host/krun-runner/zig-out/lib/`.
+If `libkrunfw-prebuilt-<arch>.tgz` is not available (for example `x86_64`),
+`make krun-runner` falls back to `libkrunfw-<arch>.tgz` and extracts the kernel
+via `libkrunfw.so`.
+
+Linux prerequisites (Ubuntu/Debian):
+
+```bash
+sudo apt install \
+  build-essential curl git make pkg-config clang lld xz-utils \
+  libclang-dev llvm-dev libcap-ng-dev
+
+# libkrun currently needs a modern Rust toolchain (edition2024)
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# install Zig 0.15.1 for your Linux architecture
+```
 
 Manual build:
 

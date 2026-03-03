@@ -172,6 +172,34 @@ jobs:
           test -s ./tmp-container-assets/initramfs.cpio.lz4
           test -s ./tmp-container-assets/rootfs.ext4
 
+  krun-linux-build:
+    name: Build krun runner (Linux x86_64 smoke)
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Verify krun runner binary
+        run: host/krun-runner/zig-out/bin/gondolin-krun-runner --version
+
   test:
     name: Test
     needs: [check, build-guest]

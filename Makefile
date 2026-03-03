@@ -30,6 +30,7 @@ LIBKRUNFW_CACHE_DIR ?= $(HOME)/.cache/gondolin/krun/libkrunfw/$(LIBKRUNFW_VERSIO
 LIBKRUNFW_KERNEL_PATH ?= $(LIBKRUNFW_CACHE_DIR)/Image
 LIBKRUNFW_EMPTY_INITRD_PATH ?= $(HOME)/.cache/gondolin/krun/empty-initrd
 LIBKRUNFW_PREBUILT_URL ?= $(LIBKRUNFW_REPO)/releases/download/$(LIBKRUNFW_VERSION)/libkrunfw-prebuilt-$(LIBKRUNFW_TARGET_ARCH).tgz
+LIBKRUNFW_ARCHIVE_URL ?= $(LIBKRUNFW_REPO)/releases/download/$(LIBKRUNFW_VERSION)/libkrunfw-$(LIBKRUNFW_TARGET_ARCH).tgz
 
 ifeq ($(UNAME_S),Darwin)
 BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
@@ -132,6 +133,7 @@ libkrun:
 	fi
 	@echo "Building libkrun ($(LIBKRUN_BUILD_FLAGS))"
 	@env $(LIBKRUN_BUILD_ENV) $(MAKE) -C "$(LIBKRUN_SRC_DIR)" $(LIBKRUN_MAKE_ARGS)
+	@rm -rf "$(LIBKRUN_PREFIX)"
 	@mkdir -p "$(LIBKRUN_PREFIX)"
 	@echo "Staging libkrun into $(LIBKRUN_PREFIX)"
 	@env $(LIBKRUN_BUILD_ENV) $(MAKE) -C "$(LIBKRUN_SRC_DIR)" $(LIBKRUN_MAKE_ARGS) install PREFIX="$(LIBKRUN_PREFIX)"
@@ -149,28 +151,52 @@ libkrunfw-kernel:
 		set -eu; \
 		tmpdir="$$(mktemp -d)"; \
 		trap 'rm -rf "$$tmpdir"' EXIT; \
-		echo "Downloading libkrunfw prebuilt archive ($(LIBKRUNFW_VERSION), $(LIBKRUNFW_TARGET_ARCH))"; \
-		curl -fsSL "$(LIBKRUNFW_PREBUILT_URL)" -o "$$tmpdir/libkrunfw-prebuilt.tgz"; \
-		tar -xzf "$$tmpdir/libkrunfw-prebuilt.tgz" -C "$$tmpdir"; \
-		printf '%s\n' \
-			'#include <stdio.h>' \
-			'#include <stddef.h>' \
-			'#ifndef ABI_VERSION' \
-			'#define ABI_VERSION 0' \
-			'#endif' \
-			'#include "libkrunfw/kernel.c"' \
-			'int main(void) {' \
-			'    size_t load_addr = 0, entry_addr = 0, size = 0;' \
-			'    char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);' \
-			'    (void)load_addr;' \
-			'    (void)entry_addr;' \
-			'    if (!kernel || size == 0) {' \
-			'        return 1;' \
-			'    }' \
-			'    return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;' \
-			'}' > "$$tmpdir/extract-kernel.c"; \
-		cc -O2 -I"$$tmpdir" "$$tmpdir/extract-kernel.c" -o "$$tmpdir/extract-kernel"; \
-		"$$tmpdir/extract-kernel" > "$(LIBKRUNFW_KERNEL_PATH)"; \
+		if curl -fsSL "$(LIBKRUNFW_PREBUILT_URL)" -o "$$tmpdir/libkrunfw.tgz" 2>/dev/null; then \
+			echo "Using libkrunfw prebuilt archive ($(LIBKRUNFW_VERSION), $(LIBKRUNFW_TARGET_ARCH))"; \
+			tar -xzf "$$tmpdir/libkrunfw.tgz" -C "$$tmpdir"; \
+			printf '%s\n' \
+				'#include <stdio.h>' \
+				'#include <stddef.h>' \
+				'#ifndef ABI_VERSION' \
+				'#define ABI_VERSION 0' \
+				'#endif' \
+				'#include "libkrunfw/kernel.c"' \
+				'int main(void) {' \
+				'    size_t load_addr = 0, entry_addr = 0, size = 0;' \
+				'    char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);' \
+				'    (void)load_addr;' \
+				'    (void)entry_addr;' \
+				'    if (!kernel || size == 0) {' \
+				'        return 1;' \
+				'    }' \
+				'    return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;' \
+				'}' > "$$tmpdir/extract-kernel.c"; \
+			cc -O2 -I"$$tmpdir" "$$tmpdir/extract-kernel.c" -o "$$tmpdir/extract-kernel"; \
+			"$$tmpdir/extract-kernel" > "$(LIBKRUNFW_KERNEL_PATH)"; \
+		else \
+			echo "Prebuilt archive missing for $(LIBKRUNFW_TARGET_ARCH); falling back to libkrunfw archive"; \
+			curl -fsSL "$(LIBKRUNFW_ARCHIVE_URL)" -o "$$tmpdir/libkrunfw.tgz"; \
+			tar -xzf "$$tmpdir/libkrunfw.tgz" -C "$$tmpdir"; \
+			printf '%s\n' \
+				'#include <stdio.h>' \
+				'#include <stddef.h>' \
+				'extern char *krunfw_get_kernel(size_t *load_addr, size_t *entry_addr, size_t *size);' \
+				'int main(void) {' \
+				'    size_t load_addr = 0, entry_addr = 0, size = 0;' \
+				'    char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);' \
+				'    (void)load_addr;' \
+				'    (void)entry_addr;' \
+				'    if (!kernel || size == 0) {' \
+				'        return 1;' \
+				'    }' \
+				'    return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;' \
+				'}' > "$$tmpdir/extract-kernel.c"; \
+			libdir="$$tmpdir/lib64"; \
+			if [ ! -e "$$libdir/libkrunfw.so" ]; then libdir="$$tmpdir/lib"; fi; \
+			[ -e "$$libdir/libkrunfw.so" ] || { echo "libkrunfw.so not found in fallback archive"; exit 1; }; \
+			cc -O2 "$$tmpdir/extract-kernel.c" -L"$$libdir" -Wl,-rpath,"$$libdir" -lkrunfw -o "$$tmpdir/extract-kernel"; \
+			LD_LIBRARY_PATH="$$libdir:$${LD_LIBRARY_PATH:-}" "$$tmpdir/extract-kernel" > "$(LIBKRUNFW_KERNEL_PATH)"; \
+		fi; \
 		echo "Extracted kernel: $(LIBKRUNFW_KERNEL_PATH)"; \
 	fi
 	@mkdir -p "$(dir $(LIBKRUNFW_EMPTY_INITRD_PATH))"
@@ -181,9 +207,10 @@ krun-runner: libkrun libkrunfw-kernel
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required to build host/krun-runner" && exit 1)
 	@echo "Building host krun runner"
 	@cd host/krun-runner && \
-		PKG_CONFIG_PATH="$(LIBKRUN_PREFIX)/lib/pkgconfig:$(LIBKRUN_PREFIX)/lib64/pkgconfig:$$PKG_CONFIG_PATH" \
+		PKG_CONFIG_PATH="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
+		PKG_CONFIG_LIBDIR="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
 		C_INCLUDE_PATH="$(LIBKRUN_PREFIX)/include:$$C_INCLUDE_PATH" \
-		LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib:$(LIBKRUN_PREFIX)/lib64:$$LIBRARY_PATH" \
+		LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib64:$(LIBKRUN_PREFIX)/lib:$$LIBRARY_PATH" \
 		zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix="$(LIBKRUN_PREFIX)"
 	@mkdir -p host/krun-runner/zig-out/lib
 	@set -eu; \

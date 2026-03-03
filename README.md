@@ -87,11 +87,29 @@ This stages `libkrun` under `.cache/` (no global install), extracts a
 libkrunfw-compatible kernel to `~/.cache/gondolin/krun/libkrunfw/.../Image`,
 and builds the local runner helper at
 `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+On architectures without `libkrunfw-prebuilt-<arch>.tgz` (currently `x86_64`),
+the build falls back to `libkrunfw-<arch>.tgz` and extracts the kernel from the
+shared library.
+
+Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
+
+```bash
+sudo apt install \
+  build-essential curl git make pkg-config clang lld xz-utils \
+  libclang-dev llvm-dev libcap-ng-dev
+
+# libkrun requires a modern Rust toolchain (edition2024)
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# install Zig 0.15.1 for your Linux architecture
+```
 
 When `vmm=krun` is selected, Gondolin automatically prefers this cached kernel
 (and an empty initrd) unless you provide explicit asset paths.
 
-> Linux and macOS are supported. ARM64 is the most tested path today.
+> Linux and macOS are supported. ARM64 is the most tested runtime path today.
+> Linux x86_64 `make krun-runner` is covered by CI smoke builds.
 
 ## Feature Highlights
 

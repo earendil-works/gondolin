@@ -22,12 +22,12 @@ pub fn build(b: *std.Build) void {
         const lib64_dir = std.fs.path.join(b.allocator, &.{ libkrun_prefix, "lib64" }) catch @panic("OOM");
 
         exe.addIncludePath(.{ .cwd_relative = include_dir });
-        exe.addLibraryPath(.{ .cwd_relative = lib_dir });
-        if (std.fs.cwd().access(lib64_dir, .{})) |_| {
-            exe.addLibraryPath(.{ .cwd_relative = lib64_dir });
-        } else |_| {
-            // optional
-        }
+
+        const preferred_lib_dir = switch (target.result.os.tag) {
+            .macos => lib_dir,
+            else => lib64_dir,
+        };
+        exe.addLibraryPath(.{ .cwd_relative = preferred_lib_dir });
     }
 
     switch (target.result.os.tag) {

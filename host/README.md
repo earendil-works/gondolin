@@ -19,14 +19,30 @@ Optional experimental backend:
 
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
 - `make krun-runner` from repo root stages dependencies locally, extracts a libkrunfw-compatible kernel, and builds the runner
+  - if `libkrunfw-prebuilt-<arch>.tgz` is unavailable (for example `x86_64`), Gondolin falls back to `libkrunfw-<arch>.tgz` automatically
 - `GONDOLIN_VMM=krun` selects it globally
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
 - `GONDOLIN_KRUN_KERNEL=/path/to/Image` overrides the krun kernel image
 - `GONDOLIN_KRUN_INITRD=/path/to/initrd` overrides the krun initrd (defaults to an auto-created empty file)
 
+Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
+
+```bash
+sudo apt install \
+  build-essential curl git make pkg-config clang lld xz-utils \
+  libclang-dev llvm-dev libcap-ng-dev
+
+# libkrun needs current stable Rust (edition2024 crates)
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# install Zig 0.15.1 for your Linux architecture
+```
+
 - Node.js >= 23.6
 
-> **Note:** Only ARM64 (Apple Silicon, Linux aarch64) is currently tested.
+> **Note:** Runtime validation is currently strongest on ARM64 (Apple Silicon, Linux aarch64).
+> Linux x86_64 is currently smoke-tested for `make krun-runner` in CI.
 
 ## Installation
 
