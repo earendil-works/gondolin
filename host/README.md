@@ -2,10 +2,10 @@
 
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
-Gondolin runs lightweight QEMU micro-VMs on your Mac or Linux machine. The
-network stack and virtual filesystem are implemented in TypeScript, giving you
-complete programmatic control over what the sandbox can access and what secrets
-it can use.
+Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
+default, optional `krun` backend). The network stack and virtual filesystem are
+implemented in TypeScript, giving you complete programmatic control over what
+the sandbox can access and what secrets it can use.
 
 ## Requirements
 
@@ -24,6 +24,7 @@ Optional experimental backend:
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
 - `GONDOLIN_KRUN_KERNEL=/path/to/Image` overrides the krun kernel image
 - `GONDOLIN_KRUN_INITRD=/path/to/initrd` overrides the krun initrd (defaults to an auto-created empty file)
+- backend parity matrix: [docs/backends.md](../docs/backends.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 

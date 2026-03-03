@@ -6,7 +6,7 @@ Gondolin is not a single binary. It is a small system made of:
 
 - **A host-side library + CLI**: for TypeScript / Node.js, also called the control plane
 - **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
-- **QEMU**: that is our VM
+- **VM backend**: QEMU (default) or `libkrun` (experimental)
 
 The high-level idea is:
 
@@ -29,7 +29,7 @@ host.
 
 Responsibilities:
 
-- Start/stop QEMU and wire up the devices Gondolin needs
+- Start/stop the selected VM backend and wire up the devices Gondolin needs
 - Provide the **exec** (`vm.exec(...)`)
 - Provide the **programmable filesystem** (VFS providers)
 - Provide the **programmable network policy** (HTTP/TLS mediation + hooks, plus explicit SSH/mapped-TCP exception paths)
@@ -60,12 +60,13 @@ Guest daemons/components:
 - `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
 - `/init`: mounts tmpfs, brings up networking, starts services
 
-### QEMU
+### VM backend (QEMU default, optional krun)
 
-QEMU is the VM engine (and the primary isolation boundary).  Gondolin runs QEMU
-in a minimal configuration and uses virtio devices for I/O.
+QEMU is the default VM engine (and primary isolation boundary). Gondolin also
+has an experimental `libkrun` backend.
 
-See [QEMU](./qemu.md) for details.
+See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
+[QEMU](./qemu.md) for QEMU-specific internals.
 
 ## System Diagram
 
@@ -75,7 +76,7 @@ See [QEMU](./qemu.md) for details.
 |  Your Node.js app / CLI                                                      |
 |  (policy + secrets + VFS providers)                                          |
 |                                                                              |
-|  +----------------------------- QEMU boundary -----------------------------+ |
+|  +------------------------------ VM boundary ------------------------------+ |
 |  | Guest Linux VM (untrusted)                                              | |
 |  |                                                                         | |
 |  |  [virtio-net]   eth0  <---- Ethernet frames ---->  host network backend | |

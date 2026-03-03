@@ -47,12 +47,19 @@ is not supported.
 This means software that relies on UDP-based application protocols (or generic
 UDP connectivity) will not work in the default network model.
 
-## Only QEMU (no krun)
+## Backend parity gaps (QEMU vs krun)
 
-Gondolin currently runs guests using QEMU.  There is no krun backend yet
-but we're investigating it.
+Gondolin supports both `qemu` (default) and an experimental `krun` backend, but
+feature parity is not complete.
 
-Tracking issue: [#7](https://github.com/earendil-works/gondolin/issues/7)
+Notable gaps today:
+
+- `vm.checkpoint(...)` is currently only supported with `vmm=qemu`
+- qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
+  rejected when `vmm=krun`
+- `sandbox.rootDiskSnapshot` is rejected when `vmm=krun`
+
+See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 
 ## No Windows support
 

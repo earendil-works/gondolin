@@ -116,6 +116,9 @@ Gondolin supports **disk-only checkpoints** of the VM root filesystem.
 A checkpoint captures the VM's writable disk state and can be resumed cheaply
 using qcow2 backing files.
 
+> **Backend support:** checkpoints currently require `vmm=qemu`.
+> See [VM Backends (QEMU vs krun)](./backends.md).
+
 See also: [Snapshots](./snapshots.md).
 
 ```ts

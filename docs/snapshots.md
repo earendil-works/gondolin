@@ -8,6 +8,9 @@ QEMU's internal snapshot mode.
 A snapshot is stored as a single `.qcow2` file. The checkpoint metadata is
 stored as a JSON trailer appended to the end of the qcow2 file.
 
+> **Backend support:** checkpoints currently require `vmm=qemu`.
+> See [VM Backends (QEMU vs krun)](./backends.md).
+
 ## CLI Workflow
 
 The CLI exposes snapshots for running sessions:

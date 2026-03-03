@@ -7,6 +7,9 @@ Gondolin runs untrusted code inside a real Linux VM. QEMU is the VM engine that
 provides the hardware boundary and the virtio devices that Gondolin uses for I/O
 mediation.
 
+For backend capability differences (`qemu` vs `krun`), see
+[VM Backends (QEMU vs krun)](./backends.md).
+
 ## Why QEMU
 
 Gondolin is designed to behave the same way on developer laptops and in CI.
