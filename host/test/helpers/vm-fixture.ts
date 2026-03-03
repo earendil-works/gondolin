@@ -111,6 +111,11 @@ export function shouldSkipKrunVmTests(): string | false {
 
 let krunRuntimeSkipCheck: Promise<string | false> | null = null;
 
+const krunPrecheckTimeoutMs = Math.max(
+  1,
+  Number(process.env.GONDOLIN_KRUN_PRECHECK_TIMEOUT_MS ?? 30000),
+);
+
 /** Probe whether krun can actually boot/exec on this host. */
 export async function getKrunRuntimeSkipReason(): Promise<string | false> {
   const staticReason = shouldSkipKrunVmTests();
@@ -121,14 +126,11 @@ export async function getKrunRuntimeSkipReason(): Promise<string | false> {
   if (!krunRuntimeSkipCheck) {
     krunRuntimeSkipCheck = (async () => {
       const vm = await VM.create({
-        autoStart: false,
+        startTimeoutMs: krunPrecheckTimeoutMs,
         sandbox: {
           vmm: "krun",
           krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
           console: "none",
-        },
-        rootfs: {
-          mode: "readonly",
         },
       });
 
