@@ -108,6 +108,45 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
   }
 });
 
+test("resolveSandboxServerOptions rejects qemu-only options for krun", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          vmm: "krun",
+          qemuPath: "qemu-system-aarch64",
+          machineType: "virt",
+          accel: "tcg",
+          cpu: "max",
+        }),
+      /Unsupported sandbox options for vmm=krun: sandbox\.qemuPath, sandbox\.machineType, sandbox\.accel, sandbox\.cpu/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions rejects single qemu-only option for krun", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          vmm: "krun",
+          machineType: "virt",
+        }),
+      /Unsupported sandbox option for vmm=krun: sandbox\.machineType/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions uses GONDOLIN_KRUN_KERNEL override", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);

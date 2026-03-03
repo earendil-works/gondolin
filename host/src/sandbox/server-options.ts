@@ -490,6 +490,22 @@ export function resolveSandboxServerOptions(
   const qemuPath = options.qemuPath ?? defaultQemu;
   const krunRunnerPath = options.krunRunnerPath ?? defaultKrunRunner;
 
+  if (vmm === "krun") {
+    const unsupported: string[] = [];
+    if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
+    if (options.machineType !== undefined)
+      unsupported.push("sandbox.machineType");
+    if (options.accel !== undefined) unsupported.push("sandbox.accel");
+    if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
+
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=krun: ${unsupported.join(", ")}. ` +
+          "These options are only supported with vmm=qemu.",
+      );
+    }
+  }
+
   const explicitImageObject =
     typeof options.imagePath === "object" && options.imagePath !== null;
 
