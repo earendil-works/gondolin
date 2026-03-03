@@ -1251,10 +1251,11 @@ export class NetworkStack extends EventEmitter {
   }
 
   /**
-   * Tears down the NAT flow when a host->guest TCP packet is dropped
+   * Tears down the NAT flow when a host->guest TCP packet with payload is dropped
    *
    * We cannot retransmit dropped payload from this userspace stack, so keeping
-   * the session open can deadlock on in-flight accounting.
+   * the session open can deadlock on in-flight accounting. Pure control packets
+   * (ACK/FIN/RST without payload) are left to normal TCP recovery.
    */
   private teardownDroppedTcpSession(ipPayload: Buffer) {
     if (ipPayload.length < 20) return;
@@ -1262,18 +1263,32 @@ export class NetworkStack extends EventEmitter {
     const version = ipPayload[0] >> 4;
     const ipProto = ipPayload[9];
     const headerLen = (ipPayload[0] & 0x0f) * 4;
+    const totalLen = ipPayload.readUInt16BE(2);
     if (
       version !== 4 ||
       ipProto !== IP_PROTO_TCP ||
-      ipPayload.length < headerLen + 4
+      headerLen < 20 ||
+      totalLen < headerLen + 20 ||
+      ipPayload.length < totalLen
     ) {
       return;
     }
 
+    const tcpStart = headerLen;
+    const tcpHeaderLen = ((ipPayload[tcpStart + 12] >> 4) & 0x0f) * 4;
+    if (tcpHeaderLen < 20) {
+      return;
+    }
+
+    const tcpPayloadLen = totalLen - headerLen - tcpHeaderLen;
+    if (tcpPayloadLen <= 0) {
+      return;
+    }
+
     const guestIP = ipPayload.subarray(16, 20).join(".");
-    const guestPort = ipPayload.readUInt16BE(headerLen + 2);
+    const guestPort = ipPayload.readUInt16BE(tcpStart + 2);
     const upstreamIP = ipPayload.subarray(12, 16).join(".");
-    const upstreamPort = ipPayload.readUInt16BE(headerLen);
+    const upstreamPort = ipPayload.readUInt16BE(tcpStart);
     const key = makeTcpNatKey(guestIP, guestPort, upstreamIP, upstreamPort);
 
     if (this.natTable.has(key)) {
