@@ -81,9 +81,20 @@ test("assets: computeAssetBuildId is deterministic", () => {
     checksums: { kernel: "a", initramfs: "b", rootfs: "d" },
     arch: "aarch64",
   });
+  const id4 = computeAssetBuildId({
+    checksums: {
+      kernel: "a",
+      initramfs: "b",
+      rootfs: "c",
+      krunKernel: "k1",
+      krunInitrd: "i1",
+    },
+    arch: "aarch64",
+  });
 
   assert.equal(id1, id2);
   assert.notEqual(id1, id3);
+  assert.notEqual(id1, id4);
 });
 
 test("assets: loadGuestAssets uses manifest filenames and validates existence", () => {

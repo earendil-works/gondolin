@@ -1,5 +1,4 @@
 import fs from "fs";
-import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 
@@ -61,36 +60,6 @@ export function resolveKrunRunnerPath(): string | null {
   return null;
 }
 
-/** Resolve the libkrunfw-compatible kernel path used by krun test runs. */
-export function resolveKrunKernelPath(): string | null {
-  const envPath = process.env.GONDOLIN_KRUN_KERNEL?.trim();
-  if (envPath) {
-    return fs.existsSync(envPath) ? envPath : null;
-  }
-
-  const arch =
-    process.arch === "arm64"
-      ? "aarch64"
-      : process.arch === "x64"
-        ? "x86_64"
-        : null;
-  if (!arch) return null;
-
-  const version = process.env.GONDOLIN_KRUN_LIBKRUNFW_VERSION ?? "v5.2.1";
-  const defaultPath = path.join(
-    os.homedir(),
-    ".cache",
-    "gondolin",
-    "krun",
-    "libkrunfw",
-    version,
-    arch,
-    "Image",
-  );
-
-  return fs.existsSync(defaultPath) ? defaultPath : null;
-}
-
 /** Return a skip reason for krun VM integration tests or false when runnable. */
 export function shouldSkipKrunVmTests(): string | false {
   if (shouldSkipVmTests()) {
@@ -100,10 +69,6 @@ export function shouldSkipKrunVmTests(): string | false {
   const runnerPath = resolveKrunRunnerPath();
   if (!runnerPath) {
     return "krun runner unavailable (build host/krun-runner or set GONDOLIN_KRUN_RUNNER)";
-  }
-
-  if (!resolveKrunKernelPath()) {
-    return "libkrunfw kernel missing (run make krun-runner or set GONDOLIN_KRUN_KERNEL)";
   }
 
   return false;
@@ -125,16 +90,17 @@ export async function getKrunRuntimeSkipReason(): Promise<string | false> {
 
   if (!krunRuntimeSkipCheck) {
     krunRuntimeSkipCheck = (async () => {
-      const vm = await VM.create({
-        startTimeoutMs: krunPrecheckTimeoutMs,
-        sandbox: {
-          vmm: "krun",
-          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
-          console: "none",
-        },
-      });
-
+      let vm: VM | null = null;
       try {
+        vm = await VM.create({
+          startTimeoutMs: krunPrecheckTimeoutMs,
+          sandbox: {
+            vmm: "krun",
+            krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+            console: "none",
+          },
+        });
+
         await vm.start();
         const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
         if (probe.exitCode !== 0) {
@@ -145,7 +111,9 @@ export async function getKrunRuntimeSkipReason(): Promise<string | false> {
         const message = err instanceof Error ? err.message : String(err);
         return `krun runtime unavailable: ${message}`;
       } finally {
-        await closeWithTimeout(vm);
+        if (vm) {
+          await closeWithTimeout(vm);
+        }
       }
     })();
   }

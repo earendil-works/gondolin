@@ -28,8 +28,9 @@ const vm = await VM.create({
 
 ## Image Management
 
-Guest images (kernel, initramfs, rootfs) are resolved automatically from local
-overrides/store first, then from `builtin-image-registry.json` when needed.
+Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
+resolved automatically from local overrides/store first, then from
+`builtin-image-registry.json` when needed.
 The default cache location is `~/.cache/gondolin/images/`.
 
 Override image selection / source:

@@ -6,13 +6,21 @@ import test from "node:test";
 
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
-function makeTempAssetsDir(arch: "aarch64" | "x86_64"): string {
+function makeTempAssetsDir(
+  arch: "aarch64" | "x86_64",
+  options: { includeKrunAssets?: boolean } = {},
+): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-arch-"));
+  const includeKrunAssets = options.includeKrunAssets ?? true;
 
   // Required asset files (can be empty for this test).
   fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
   fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
   fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
+  if (includeKrunAssets) {
+    fs.writeFileSync(path.join(dir, "krun-kernel"), "");
+    fs.writeFileSync(path.join(dir, "krun-initrd"), "");
+  }
 
   // Manifest is what we use to detect the guest architecture.
   fs.writeFileSync(
@@ -30,11 +38,23 @@ function makeTempAssetsDir(arch: "aarch64" | "x86_64"): string {
           kernel: "vmlinuz-virt",
           initramfs: "initramfs.cpio.lz4",
           rootfs: "rootfs.ext4",
+          ...(includeKrunAssets
+            ? {
+                krunKernel: "krun-kernel",
+                krunInitrd: "krun-initrd",
+              }
+            : {}),
         },
         checksums: {
           kernel: "",
           initramfs: "",
           rootfs: "",
+          ...(includeKrunAssets
+            ? {
+                krunKernel: "",
+                krunInitrd: "",
+              }
+            : {}),
         },
       },
       null,
@@ -108,6 +128,24 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
   }
 });
 
+test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });
+
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          vmm: "krun",
+        }),
+      /Selected image does not provide krun boot assets/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions rejects qemu-only options for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
@@ -147,18 +185,20 @@ test("resolveSandboxServerOptions rejects single qemu-only option for krun", () 
   }
 });
 
-test("resolveSandboxServerOptions uses GONDOLIN_KRUN_KERNEL override", () => {
+test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
-  const kernelOverride = path.join(dir, "krun-override-kernel");
-  const initrdOverride = path.join(dir, "krun-override-initrd");
-  fs.writeFileSync(kernelOverride, "kernel");
-  fs.writeFileSync(initrdOverride, "");
 
-  const prevKernel = process.env.GONDOLIN_KRUN_KERNEL;
-  const prevInitrd = process.env.GONDOLIN_KRUN_INITRD;
-  process.env.GONDOLIN_KRUN_KERNEL = kernelOverride;
-  process.env.GONDOLIN_KRUN_INITRD = initrdOverride;
+  const krunKernel = path.join(dir, "krun-kernel");
+  const krunInitrd = path.join(dir, "krun-initrd");
+  fs.writeFileSync(krunKernel, "kernel");
+  fs.writeFileSync(krunInitrd, "");
+
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.assets.krunKernel = "krun-kernel";
+  manifest.assets.krunInitrd = "krun-initrd";
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
 
   try {
     const resolved = resolveSandboxServerOptions({
@@ -166,13 +206,9 @@ test("resolveSandboxServerOptions uses GONDOLIN_KRUN_KERNEL override", () => {
       vmm: "krun",
     });
 
-    assert.equal(resolved.kernelPath, kernelOverride);
-    assert.equal(resolved.initrdPath, initrdOverride);
+    assert.equal(resolved.kernelPath, krunKernel);
+    assert.equal(resolved.initrdPath, krunInitrd);
   } finally {
-    if (prevKernel === undefined) delete process.env.GONDOLIN_KRUN_KERNEL;
-    else process.env.GONDOLIN_KRUN_KERNEL = prevKernel;
-    if (prevInitrd === undefined) delete process.env.GONDOLIN_KRUN_INITRD;
-    else process.env.GONDOLIN_KRUN_INITRD = prevInitrd;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -180,11 +216,6 @@ test("resolveSandboxServerOptions uses GONDOLIN_KRUN_KERNEL override", () => {
 test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
-  const kernelOverride = path.join(dir, "krun-override-kernel");
-  fs.writeFileSync(kernelOverride, "kernel");
-
-  const prevKernel = process.env.GONDOLIN_KRUN_KERNEL;
-  process.env.GONDOLIN_KRUN_KERNEL = kernelOverride;
 
   try {
     const explicitAssets = {
@@ -201,8 +232,6 @@ test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
     assert.equal(resolved.kernelPath, explicitAssets.kernelPath);
     assert.equal(resolved.initrdPath, explicitAssets.initrdPath);
   } finally {
-    if (prevKernel === undefined) delete process.env.GONDOLIN_KRUN_KERNEL;
-    else process.env.GONDOLIN_KRUN_KERNEL = prevKernel;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

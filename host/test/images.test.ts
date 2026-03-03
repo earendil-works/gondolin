@@ -89,7 +89,13 @@ function patchManifest(
 
 function patchManifestAssets(
   dir: string,
-  assets: { kernel?: string; initramfs?: string; rootfs?: string },
+  assets: {
+    kernel?: string;
+    initramfs?: string;
+    rootfs?: string;
+    krunKernel?: string;
+    krunInitrd?: string;
+  },
 ): void {
   patchManifest(dir, (manifest) => {
     const currentAssets = (manifest.assets ?? {}) as Record<string, unknown>;
@@ -125,6 +131,40 @@ test("images: import and resolve by build id", () => {
     assert.equal(
       path.resolve(resolved.assetDir),
       path.resolve(imported.assetDir),
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import preserves optional krun assets from manifest", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+  const krunKernel = path.join(assets.dir, "krun-kernel");
+  const krunInitrd = path.join(assets.dir, "krun-initrd");
+  fs.writeFileSync(krunKernel, "krun-kernel");
+  fs.writeFileSync(krunInitrd, "");
+
+  patchManifestAssets(assets.dir, {
+    krunKernel: "krun-kernel",
+    krunInitrd: "krun-initrd",
+  });
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+
+    assert.equal(
+      fs.readFileSync(path.join(imported.assetDir, "krun-kernel"), "utf8"),
+      "krun-kernel",
+    );
+    assert.equal(
+      fs.existsSync(path.join(imported.assetDir, "krun-initrd")),
+      true,
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });

@@ -1,17 +1,21 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { createHash } from "crypto";
+import { execFileSync } from "child_process";
 
 import { buildAlpineImages } from "./alpine.ts";
 import type { BuildConfig, Architecture } from "./config.ts";
 import { parseApkIndex } from "../alpine/packages.ts";
-import { decompressTarGz, parseTar } from "../alpine/tar.ts";
+import { decompressTarGz, extractTarGz, parseTar } from "../alpine/tar.ts";
 import { downloadFile } from "../alpine/utils.ts";
 import {
   DEFAULT_ROOTFS_PACKAGES,
   INITRAMFS_FILENAME,
   KERNEL_FILENAME,
   ROOTFS_FILENAME,
+  KRUN_KERNEL_FILENAME,
+  KRUN_INITRD_FILENAME,
   resolveConfigPath,
   resolveSandboxBinaryPaths,
   writeAssetManifest,
@@ -19,6 +23,10 @@ import {
   type BuildResult,
   type ResolvedAlpineConfig,
 } from "./shared.ts";
+
+const LIBKRUNFW_RELEASE_BASE_URL =
+  "https://github.com/containers/libkrunfw/releases/download";
+const DEFAULT_LIBKRUNFW_VERSION = "v5.2.1";
 
 function hasOciRootfs(config: BuildConfig): boolean {
   return config.oci !== undefined;
@@ -48,6 +56,7 @@ function resolveAlpineConfig(config: BuildConfig): ResolvedAlpineConfig {
     mirror: alpine.mirror,
     kernelPackage: alpine.kernelPackage,
     kernelImage: alpine.kernelImage,
+    krunfwVersion: alpine.krunfwVersion ?? DEFAULT_LIBKRUNFW_VERSION,
     rootfsPackages: useOciRootfs
       ? []
       : (alpine.rootfsPackages ?? defaultRootfsPackages),
@@ -149,19 +158,34 @@ export async function buildNative(
   log("Fetching kernel...");
   await fetchKernel(workDir, config.arch, alpineConfig, cacheDir, log);
 
+  log("Fetching libkrunfw-compatible kernel...");
+  await fetchKrunBootAssets(
+    workDir,
+    config.arch,
+    alpineConfig.krunfwVersion,
+    cacheDir,
+    log,
+  );
+
   log("Copying assets to output directory...");
 
   const kernelSrc = path.join(workDir, KERNEL_FILENAME);
   const initramfsSrc = path.join(workDir, INITRAMFS_FILENAME);
   const rootfsSrc = path.join(workDir, ROOTFS_FILENAME);
+  const krunKernelSrc = path.join(workDir, KRUN_KERNEL_FILENAME);
+  const krunInitrdSrc = path.join(workDir, KRUN_INITRD_FILENAME);
 
   const kernelDst = path.join(outputDir, KERNEL_FILENAME);
   const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
   const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
+  const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
+  const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
 
   fs.copyFileSync(kernelSrc, kernelDst);
   fs.copyFileSync(initramfsSrc, initramfsDst);
   fs.copyFileSync(rootfsSrc, rootfsDst);
+  fs.copyFileSync(krunKernelSrc, krunKernelDst);
+  fs.copyFileSync(krunInitrdSrc, krunInitrdDst);
 
   log("Generating manifest...");
   const { manifestPath, manifest } = writeAssetManifest(
@@ -288,4 +312,357 @@ async function fetchKernel(
   }
 
   fs.writeFileSync(kernelPath, kernelEntry.content);
+}
+
+type KrunArchive = {
+  archivePath: string;
+  kind: "prebuilt" | "shared";
+};
+
+async function fetchKrunBootAssets(
+  outputDir: string,
+  arch: Architecture,
+  krunfwVersion: string,
+  cacheDir: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const kernelPath = path.join(outputDir, KRUN_KERNEL_FILENAME);
+  const initrdPath = path.join(outputDir, KRUN_INITRD_FILENAME);
+
+  if (fs.existsSync(kernelPath) && fs.existsSync(initrdPath)) {
+    log("libkrunfw boot artifacts already present, skipping download");
+    return;
+  }
+
+  const casKernelPath = await ensureKrunKernelInCache(
+    arch,
+    krunfwVersion,
+    cacheDir,
+    log,
+  );
+
+  fs.copyFileSync(casKernelPath, kernelPath);
+  if (!fs.existsSync(initrdPath)) {
+    fs.writeFileSync(initrdPath, "");
+  }
+}
+
+async function ensureKrunKernelInCache(
+  arch: Architecture,
+  krunfwVersion: string,
+  cacheDir: string,
+  log: (msg: string) => void,
+): Promise<string> {
+  const archName = mapKrunArch(arch);
+  const indexDir = path.join(
+    cacheDir,
+    "libkrunfw",
+    "index",
+    krunfwVersion,
+    archName,
+  );
+  const digestPath = path.join(indexDir, "kernel.sha256");
+
+  if (fs.existsSync(digestPath)) {
+    const digest = fs.readFileSync(digestPath, "utf8").trim();
+    if (digest) {
+      const cached = path.join(cacheDir, "cas", "sha256", digest);
+      if (fs.existsSync(cached)) {
+        log(`Using cached libkrunfw kernel ${digest.slice(0, 12)}...`);
+        return cached;
+      }
+    }
+  }
+
+  const archive = await downloadKrunArchive(
+    krunfwVersion,
+    archName,
+    cacheDir,
+    log,
+  );
+  const kernel = await extractKrunKernelFromArchive(archive, archName, log);
+  const digest = sha256(kernel);
+
+  const casDir = path.join(cacheDir, "cas", "sha256");
+  fs.mkdirSync(casDir, { recursive: true });
+  const casPath = path.join(casDir, digest);
+  if (!fs.existsSync(casPath)) {
+    fs.writeFileSync(casPath, kernel);
+  }
+
+  fs.mkdirSync(indexDir, { recursive: true });
+  fs.writeFileSync(digestPath, `${digest}\n`);
+
+  log(`Cached libkrunfw kernel ${digest.slice(0, 12)}...`);
+  return casPath;
+}
+
+async function downloadKrunArchive(
+  krunfwVersion: string,
+  archName: "aarch64" | "x86_64",
+  cacheDir: string,
+  log: (msg: string) => void,
+): Promise<KrunArchive> {
+  const releaseDir = path.join(
+    cacheDir,
+    "libkrunfw",
+    "downloads",
+    krunfwVersion,
+    archName,
+  );
+  fs.mkdirSync(releaseDir, { recursive: true });
+
+  const prebuiltName = `libkrunfw-prebuilt-${archName}.tgz`;
+  const prebuiltPath = path.join(releaseDir, prebuiltName);
+
+  if (fs.existsSync(prebuiltPath)) {
+    return { archivePath: prebuiltPath, kind: "prebuilt" };
+  }
+
+  const prebuiltUrl = `${LIBKRUNFW_RELEASE_BASE_URL}/${krunfwVersion}/${prebuiltName}`;
+  try {
+    log(`Downloading ${prebuiltUrl}`);
+    await downloadFile(prebuiltUrl, prebuiltPath);
+    return { archivePath: prebuiltPath, kind: "prebuilt" };
+  } catch (err) {
+    if (!isNotFoundDownloadError(err)) {
+      throw err;
+    }
+    log(
+      `No prebuilt libkrunfw archive for ${archName} (${krunfwVersion}); falling back to shared archive`,
+    );
+  }
+
+  const sharedName = `libkrunfw-${archName}.tgz`;
+  const sharedPath = path.join(releaseDir, sharedName);
+  if (!fs.existsSync(sharedPath)) {
+    const sharedUrl = `${LIBKRUNFW_RELEASE_BASE_URL}/${krunfwVersion}/${sharedName}`;
+    log(`Downloading ${sharedUrl}`);
+    await downloadFile(sharedUrl, sharedPath);
+  }
+
+  return { archivePath: sharedPath, kind: "shared" };
+}
+
+async function extractKrunKernelFromArchive(
+  archive: KrunArchive,
+  archName: "aarch64" | "x86_64",
+  log: (msg: string) => void,
+): Promise<Buffer> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-krunfw-"));
+
+  try {
+    const extractDir = path.join(tmpDir, "extract");
+    fs.mkdirSync(extractDir, { recursive: true });
+    await extractTarGz(archive.archivePath, extractDir);
+
+    if (archive.kind === "prebuilt") {
+      log("Extracting kernel from libkrunfw prebuilt archive");
+      return extractKernelFromPrebuiltArchive(extractDir);
+    }
+
+    log("Extracting kernel from libkrunfw shared archive");
+    return extractKernelFromSharedArchive(extractDir, archName);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function extractKernelFromPrebuiltArchive(extractDir: string): Buffer {
+  const kernelCPath = path.join(extractDir, "libkrunfw", "kernel.c");
+  if (!fs.existsSync(kernelCPath)) {
+    throw new Error(
+      `libkrunfw prebuilt archive missing libkrunfw/kernel.c at ${kernelCPath}`,
+    );
+  }
+
+  const buildDir = path.join(extractDir, "build-prebuilt");
+  fs.mkdirSync(buildDir, { recursive: true });
+
+  const extractorPath = path.join(buildDir, "extract-kernel");
+  const sourcePath = path.join(buildDir, "extract-kernel.c");
+  fs.writeFileSync(
+    sourcePath,
+    [
+      "#include <stdio.h>",
+      "#include <stddef.h>",
+      "#ifndef ABI_VERSION",
+      "#define ABI_VERSION 0",
+      "#endif",
+      '#include "libkrunfw/kernel.c"',
+      "int main(void) {",
+      "  size_t load_addr = 0, entry_addr = 0, size = 0;",
+      "  char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);",
+      "  (void)load_addr;",
+      "  (void)entry_addr;",
+      "  if (!kernel || size == 0) {",
+      "    return 1;",
+      "  }",
+      "  return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(
+    "zig",
+    ["cc", "-O2", `-I${extractDir}`, sourcePath, "-o", extractorPath],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const kernel = execFileSync(extractorPath, [], {
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 512 * 1024 * 1024,
+  });
+
+  if (kernel.length === 0) {
+    throw new Error("libkrunfw prebuilt extractor produced an empty kernel");
+  }
+
+  return kernel;
+}
+
+function extractKernelFromSharedArchive(
+  extractDir: string,
+  archName: "aarch64" | "x86_64",
+): Buffer {
+  const hostArch = hostKrunArch();
+  if (hostArch !== archName) {
+    throw new Error(
+      `libkrunfw shared archive extraction for ${archName} requires a matching host architecture (current host: ${hostArch ?? process.arch})`,
+    );
+  }
+
+  const lib64Path = path.join(extractDir, "lib64", "libkrunfw.so");
+  const libPath = path.join(extractDir, "lib", "libkrunfw.so");
+  const sharedLibPath = fs.existsSync(lib64Path)
+    ? lib64Path
+    : fs.existsSync(libPath)
+      ? libPath
+      : null;
+
+  if (!sharedLibPath) {
+    throw new Error(
+      `libkrunfw shared archive does not contain libkrunfw.so for ${archName}`,
+    );
+  }
+
+  const libDir = path.dirname(sharedLibPath);
+  const buildDir = path.join(extractDir, "build-shared");
+  fs.mkdirSync(buildDir, { recursive: true });
+
+  const extractorPath = path.join(buildDir, "extract-kernel");
+  const sourcePath = path.join(buildDir, "extract-kernel.c");
+  fs.writeFileSync(
+    sourcePath,
+    [
+      "#include <stdio.h>",
+      "#include <stddef.h>",
+      "extern char *krunfw_get_kernel(size_t *load_addr, size_t *entry_addr, size_t *size);",
+      "int main(void) {",
+      "  size_t load_addr = 0, entry_addr = 0, size = 0;",
+      "  char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);",
+      "  (void)load_addr;",
+      "  (void)entry_addr;",
+      "  if (!kernel || size == 0) {",
+      "    return 1;",
+      "  }",
+      "  return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  try {
+    execFileSync(
+      "zig",
+      [
+        "cc",
+        "-O2",
+        sourcePath,
+        `-L${libDir}`,
+        `-Wl,-rpath,${libDir}`,
+        "-lkrunfw",
+        "-o",
+        extractorPath,
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch (err) {
+    throw new Error(
+      `failed to compile libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
+    );
+  }
+
+  try {
+    const kernel = execFileSync(extractorPath, [], {
+      env: {
+        ...process.env,
+        LD_LIBRARY_PATH: `${libDir}:${process.env.LD_LIBRARY_PATH ?? ""}`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 512 * 1024 * 1024,
+    });
+
+    if (kernel.length === 0) {
+      throw new Error("libkrunfw shared extractor produced an empty kernel");
+    }
+
+    return kernel;
+  } catch (err) {
+    throw new Error(
+      `failed to run libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
+    );
+  }
+}
+
+function formatExecError(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return String(err);
+  }
+
+  const execErr = err as Error & { stdout?: unknown; stderr?: unknown };
+  const stdout =
+    typeof execErr.stdout === "string"
+      ? execErr.stdout
+      : Buffer.isBuffer(execErr.stdout)
+        ? execErr.stdout.toString("utf8")
+        : "";
+  const stderr =
+    typeof execErr.stderr === "string"
+      ? execErr.stderr
+      : Buffer.isBuffer(execErr.stderr)
+        ? execErr.stderr.toString("utf8")
+        : "";
+
+  const output = `${stdout}${stderr}`.trim();
+  if (!output) {
+    return execErr.message;
+  }
+  return `${execErr.message}: ${output}`;
+}
+
+function mapKrunArch(arch: Architecture): "aarch64" | "x86_64" {
+  return arch === "aarch64" ? "aarch64" : "x86_64";
+}
+
+function hostKrunArch(): "aarch64" | "x86_64" | null {
+  if (process.arch === "arm64") return "aarch64";
+  if (process.arch === "x64") return "x86_64";
+  return null;
+}
+
+function isNotFoundDownloadError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  return err.message.includes("HTTP 404");
+}
+
+function sha256(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
 }

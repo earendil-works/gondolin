@@ -328,8 +328,6 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   return null;
 }
 
-const DEFAULT_LIBKRUNFW_VERSION = "v5.2.1";
-
 type KrunKernelOverride = {
   /** replacement kernel image path */
   kernelPath: string;
@@ -337,23 +335,8 @@ type KrunKernelOverride = {
   initrdPath: string;
 };
 
-function toKrunArch(hostArch: "arm64" | "x64") {
-  return hostArch === "arm64" ? "aarch64" : "x86_64";
-}
-
-function getDefaultKrunKernelPath(hostArch: "arm64" | "x64") {
-  const version =
-    process.env.GONDOLIN_KRUN_LIBKRUNFW_VERSION ?? DEFAULT_LIBKRUNFW_VERSION;
-  return path.join(
-    os.homedir(),
-    ".cache",
-    "gondolin",
-    "krun",
-    "libkrunfw",
-    version,
-    toKrunArch(hostArch),
-    "Image",
-  );
+function getDefaultKrunInitrdPath(): string {
+  return path.join(os.tmpdir(), "gondolin-krun-empty-initrd");
 }
 
 function ensureEmptyInitrdFile(initrdPath: string): boolean {
@@ -367,30 +350,80 @@ function ensureEmptyInitrdFile(initrdPath: string): boolean {
   }
 }
 
+function resolveManifestAssetPath(
+  imageDir: string,
+  relPath: string,
+  fieldName: string,
+): string {
+  if (path.isAbsolute(relPath)) {
+    throw new Error(
+      `${fieldName} must be relative to image dir, got ${relPath}`,
+    );
+  }
+
+  const resolved = path.resolve(imageDir, relPath);
+  const relative = path.relative(imageDir, resolved);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(`${fieldName} must stay within image dir, got ${relPath}`);
+  }
+
+  return resolved;
+}
+
+function resolveKrunInitrdPath(
+  imageManifest: ReturnType<typeof loadAssetManifest>,
+  imageDir: string,
+): string {
+  if (imageManifest?.assets?.krunInitrd) {
+    const initrdPath = resolveManifestAssetPath(
+      imageDir,
+      imageManifest.assets.krunInitrd,
+      "manifest.assets.krunInitrd",
+    );
+    if (!fs.existsSync(initrdPath)) {
+      throw new Error(
+        `manifest.assets.krunInitrd points to missing file: ${imageManifest.assets.krunInitrd}`,
+      );
+    }
+    return initrdPath;
+  }
+
+  const initrdPath = getDefaultKrunInitrdPath();
+  if (!ensureEmptyInitrdFile(initrdPath) && !fs.existsSync(initrdPath)) {
+    throw new Error(`failed to create default krun initrd at ${initrdPath}`);
+  }
+
+  return initrdPath;
+}
+
 function resolveKrunKernelOverride(
-  hostArch: "arm64" | "x64",
+  imageManifest: ReturnType<typeof loadAssetManifest>,
+  imageDir: string | null,
 ): KrunKernelOverride | null {
-  const envKernel = process.env.GONDOLIN_KRUN_KERNEL?.trim();
-  const kernelPath =
-    envKernel && envKernel.length > 0
-      ? envKernel
-      : getDefaultKrunKernelPath(hostArch);
+  if (!imageDir || !imageManifest?.assets?.krunKernel) {
+    return null;
+  }
+
+  const kernelPath = resolveManifestAssetPath(
+    imageDir,
+    imageManifest.assets.krunKernel,
+    "manifest.assets.krunKernel",
+  );
 
   if (!fs.existsSync(kernelPath)) {
-    return null;
+    throw new Error(
+      `manifest.assets.krunKernel points to missing file: ${imageManifest.assets.krunKernel}`,
+    );
   }
 
-  const envInitrd = process.env.GONDOLIN_KRUN_INITRD?.trim();
-  const initrdPath =
-    envInitrd && envInitrd.length > 0
-      ? envInitrd
-      : path.join(os.homedir(), ".cache", "gondolin", "krun", "empty-initrd");
-
-  if (!ensureEmptyInitrdFile(initrdPath) && !fs.existsSync(initrdPath)) {
-    return null;
-  }
-
-  return { kernelPath, initrdPath };
+  return {
+    kernelPath,
+    initrdPath: resolveKrunInitrdPath(imageManifest, imageDir),
+  };
 }
 
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
@@ -469,7 +502,6 @@ export function resolveSandboxServerOptions(
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
-  const normalizedHostArch = normalizeArch(hostArch) ?? "x64";
   const defaultQemu =
     hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultKrunRunner =
@@ -508,12 +540,17 @@ export function resolveSandboxServerOptions(
 
   const explicitImageObject =
     typeof options.imagePath === "object" && options.imagePath !== null;
+  const imageDir = explicitImageObject
+    ? null
+    : findCommonAssetDir(resolvedAssets);
+  const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
+  let krunKernelOverride: KrunKernelOverride | null = null;
 
   if (vmm === "krun" && !explicitImageObject) {
-    const krunKernelOverride = resolveKrunKernelOverride(normalizedHostArch);
+    krunKernelOverride = resolveKrunKernelOverride(imageManifest, imageDir);
     if (krunKernelOverride) {
       kernelPath = krunKernelOverride.kernelPath;
       initrdPath = krunKernelOverride.initrdPath;
@@ -561,6 +598,14 @@ export function resolveSandboxServerOptions(
           "Fix: select a guest image that matches the host architecture when using vmm=krun.",
       );
     }
+  }
+
+  if (vmm === "krun" && !explicitImageObject && !krunKernelOverride) {
+    throw new Error(
+      "Selected image does not provide krun boot assets.\n" +
+        "Expected manifest assets `krunKernel` (and optional `krunInitrd`).\n" +
+        "Fix: use an image built with `gondolin build` or choose a published image that includes krun assets.",
+    );
   }
 
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;

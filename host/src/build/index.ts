@@ -122,7 +122,7 @@ export function verifyAssets(assetDir: string): boolean {
     return false;
   }
 
-  const assets = [
+  const assets: Array<{ name: string; file: string; expected: string }> = [
     {
       name: "kernel",
       file: manifest.assets.kernel,
@@ -139,6 +139,28 @@ export function verifyAssets(assetDir: string): boolean {
       expected: manifest.checksums.rootfs,
     },
   ];
+
+  if (manifest.assets.krunKernel) {
+    if (!manifest.checksums.krunKernel) {
+      return false;
+    }
+    assets.push({
+      name: "krunKernel",
+      file: manifest.assets.krunKernel,
+      expected: manifest.checksums.krunKernel,
+    });
+  }
+
+  if (manifest.assets.krunInitrd) {
+    if (!manifest.checksums.krunInitrd) {
+      return false;
+    }
+    assets.push({
+      name: "krunInitrd",
+      file: manifest.assets.krunInitrd,
+      expected: manifest.checksums.krunInitrd,
+    });
+  }
 
   for (const { name, file, expected } of assets) {
     const filePath = path.join(assetDir, file);

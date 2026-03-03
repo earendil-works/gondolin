@@ -32,7 +32,7 @@ at the repo root or `pnpm -C host install`).
 
 ## Common tasks
 
-Mandatory build command (builds kernel, initramfs, and rootfs without booting):
+Mandatory build command (builds kernel, initramfs, rootfs, and krun boot assets without booting):
 
 ```sh
 make build

@@ -472,7 +472,7 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`
-  - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs)
+  - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets)
   - If set, Gondolin uses this directory instead of downloading cached assets
 
 - `GONDOLIN_IMAGE_STORE`

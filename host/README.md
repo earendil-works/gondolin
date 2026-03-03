@@ -18,13 +18,11 @@ You need QEMU installed to run the micro-VMs (default backend):
 Optional experimental backend:
 
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
-- `make krun-runner` from repo root stages dependencies locally, extracts a libkrunfw-compatible kernel, and builds the runner
+- `make krun-runner` from repo root stages dependencies locally and builds the runner
   - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
-  - if `libkrunfw-prebuilt-<arch>.tgz` is unavailable (for example `x86_64`), Gondolin falls back to `libkrunfw-<arch>.tgz` automatically
+- krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
 - `GONDOLIN_VMM=krun` selects it globally
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
-- `GONDOLIN_KRUN_KERNEL=/path/to/Image` overrides the krun kernel image
-- `GONDOLIN_KRUN_INITRD=/path/to/initrd` overrides the krun initrd (defaults to an auto-created empty file)
 - backend parity matrix: [docs/backends.md](../docs/backends.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):

@@ -67,10 +67,10 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
-Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
-first use via `builtin-image-registry.json` and cached locally. When no image
-is specified, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
-`alpine-base:latest`).
+Guest assets (kernel/initramfs/rootfs plus optional krun boot artifacts,
+~200MB+) are resolved automatically on first use via
+`builtin-image-registry.json` and cached locally. When no image is specified,
+Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default: `alpine-base:latest`).
 
 Requirements:
 
@@ -84,15 +84,10 @@ Optional experimental libkrun backend setup:
 make krun-runner
 ```
 
-This stages `libkrun` under `.cache/` (no global install), extracts a
-libkrunfw-compatible kernel to `~/.cache/gondolin/krun/libkrunfw/.../Image`,
-and builds the local runner helper at
-`host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+This stages `libkrun` under `.cache/` (no global install) and builds the local
+runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
 On macOS, the build ad-hoc signs the runner with the
 `com.apple.security.hypervisor` entitlement so Hypervisor.framework access is allowed.
-On architectures without `libkrunfw-prebuilt-<arch>.tgz` (currently `x86_64`),
-the build falls back to `libkrunfw-<arch>.tgz` and extracts the kernel from the
-shared library.
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 
@@ -108,8 +103,9 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 # install Zig 0.15.1 for your Linux architecture
 ```
 
-When `vmm=krun` is selected, Gondolin automatically prefers this cached kernel
-(and an empty initrd) unless you provide explicit asset paths.
+When `vmm=krun` is selected, Gondolin requires krun boot assets from the selected
+image manifest (`assets.krunKernel` and optional `assets.krunInitrd`).
+For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object.
 
 > Linux and macOS are supported. ARM64 is the most tested runtime path today.
 > Linux x86_64 `make krun-runner` is covered by CI smoke builds.

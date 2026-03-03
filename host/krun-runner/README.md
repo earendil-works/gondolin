@@ -10,15 +10,10 @@ Preferred (repo root):
 make krun-runner
 ```
 
-This stages `libkrun` under `.cache/libkrun-install/<version>`, extracts a
-libkrunfw-compatible kernel under `~/.cache/gondolin/krun/libkrunfw/`, and
-builds the runner with bundled shared libraries under
-`host/krun-runner/zig-out/lib/`.
+This stages `libkrun` under `.cache/libkrun-install/<version>` and builds the
+runner with bundled shared libraries under `host/krun-runner/zig-out/lib/`.
 On macOS, `make krun-runner` also ad-hoc signs the runner with
 `com.apple.security.hypervisor` (via `gondolin-krun-runner.entitlements`).
-If `libkrunfw-prebuilt-<arch>.tgz` is not available (for example `x86_64`),
-`make krun-runner` falls back to `libkrunfw-<arch>.tgz` and extracts the kernel
-via `libkrunfw.so`.
 
 Linux prerequisites (Ubuntu/Debian):
 
@@ -62,5 +57,5 @@ Use with Gondolin:
 ## Notes
 
 - Runner is linked against `libkrun` and uses an rpath that prefers bundled libs
-- The krun backend expects a libkrunfw-compatible kernel image (Gondolin auto-detects the cache populated by `make krun-runner`)
+- The krun backend expects image manifests to provide `assets.krunKernel` (and optional `assets.krunInitrd`)
 - Currently experimental

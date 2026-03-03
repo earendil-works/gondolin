@@ -36,16 +36,15 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
 - Guest architecture must match the **host** architecture
 - Requires a **libkrunfw-compatible kernel**
-- Gondolin auto-prefers cached libkrunfw kernel + empty initrd when:
-  - `vmm=krun`, and
-  - `sandbox.imagePath` is not an explicit object
-- Build/setup path: `make krun-runner`
+- Gondolin requires image manifest krun boot assets:
+  - `assets.krunKernel`
+  - `assets.krunInitrd` (optional; defaults to an empty initrd)
+- Build/setup path: `gondolin build` (or published image assets)
+- `make krun-runner` builds the runner binary; it does not provide kernel assets
 
 Override env vars:
 
 - `GONDOLIN_KRUN_RUNNER`
-- `GONDOLIN_KRUN_KERNEL`
-- `GONDOLIN_KRUN_INITRD`
 
 ## Runtime Caveats
 

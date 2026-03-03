@@ -260,7 +260,13 @@ function uuidv5(name: string, namespace: string): string {
 
 export type AssetBuildIdInput = {
   /** sha256 checksums (hex) */
-  checksums: { kernel: string; initramfs: string; rootfs: string };
+  checksums: {
+    kernel: string;
+    initramfs: string;
+    rootfs: string;
+    krunKernel?: string;
+    krunInitrd?: string;
+  };
   /** guest architecture identifier (e.g. "aarch64") */
   arch?: string;
 };
@@ -272,18 +278,24 @@ export type AssetBuildIdInput = {
  */
 export function computeAssetBuildId(input: AssetBuildIdInput): string {
   const arch = input.arch ?? "unknown";
-  const name =
-    "gondolin-asset-build" +
-    "\n" +
-    `kernel=${input.checksums.kernel}` +
-    "\n" +
-    `initramfs=${input.checksums.initramfs}` +
-    "\n" +
-    `rootfs=${input.checksums.rootfs}` +
-    "\n" +
-    `arch=${arch}`;
 
-  return uuidv5(name, GUEST_ASSET_BUILD_ID_NAMESPACE);
+  const parts = [
+    "gondolin-asset-build",
+    `kernel=${input.checksums.kernel}`,
+    `initramfs=${input.checksums.initramfs}`,
+    `rootfs=${input.checksums.rootfs}`,
+  ];
+
+  if (input.checksums.krunKernel !== undefined) {
+    parts.push(`krunKernel=${input.checksums.krunKernel}`);
+  }
+  if (input.checksums.krunInitrd !== undefined) {
+    parts.push(`krunInitrd=${input.checksums.krunInitrd}`);
+  }
+
+  parts.push(`arch=${arch}`);
+
+  return uuidv5(parts.join("\n"), GUEST_ASSET_BUILD_ID_NAMESPACE);
 }
 
 /**
@@ -332,6 +344,10 @@ export interface AssetManifest {
     initramfs: string;
     /** rootfs filename */
     rootfs: string;
+    /** krun-compatible kernel image filename */
+    krunKernel?: string;
+    /** krun initrd image filename */
+    krunInitrd?: string;
   };
 
   /** sha256 checksums (hex) */
@@ -342,6 +358,10 @@ export interface AssetManifest {
     initramfs: string;
     /** rootfs checksum */
     rootfs: string;
+    /** krun-compatible kernel checksum */
+    krunKernel?: string;
+    /** krun initrd checksum */
+    krunInitrd?: string;
   };
 }
 
@@ -416,6 +436,20 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
     missing.push(assetFiles.rootfs);
   }
 
+  if (assetFiles.krunKernel) {
+    const krunKernelPath = path.join(resolvedDir, assetFiles.krunKernel);
+    if (!fs.existsSync(krunKernelPath)) {
+      missing.push(assetFiles.krunKernel);
+    }
+  }
+
+  if (assetFiles.krunInitrd) {
+    const krunInitrdPath = path.join(resolvedDir, assetFiles.krunInitrd);
+    if (!fs.existsSync(krunInitrdPath)) {
+      missing.push(assetFiles.krunInitrd);
+    }
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Missing guest assets in ${resolvedDir}: ${missing.join(", ")}\n` +
@@ -441,11 +475,30 @@ function assetsExist(dir: string): boolean {
     rootfs: "rootfs.ext4",
   };
 
-  return (
+  const required =
     fs.existsSync(path.join(dir, assetFiles.kernel)) &&
     fs.existsSync(path.join(dir, assetFiles.initramfs)) &&
-    fs.existsSync(path.join(dir, assetFiles.rootfs))
-  );
+    fs.existsSync(path.join(dir, assetFiles.rootfs));
+
+  if (!required) {
+    return false;
+  }
+
+  if (
+    assetFiles.krunKernel &&
+    !fs.existsSync(path.join(dir, assetFiles.krunKernel))
+  ) {
+    return false;
+  }
+
+  if (
+    assetFiles.krunInitrd &&
+    !fs.existsSync(path.join(dir, assetFiles.krunInitrd))
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 /**

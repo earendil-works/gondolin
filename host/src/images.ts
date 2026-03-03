@@ -394,6 +394,22 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         manifest.assets?.rootfs,
         "manifest.assets.rootfs",
       );
+      const sourceKrunKernelPath =
+        manifest.assets?.krunKernel === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.krunKernel,
+              "manifest.assets.krunKernel",
+            );
+      const sourceKrunInitrdPath =
+        manifest.assets?.krunInitrd === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.krunInitrd,
+              "manifest.assets.krunInitrd",
+            );
 
       if (!fs.existsSync(sourceKernelPath)) {
         throw new Error(
@@ -408,6 +424,16 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       if (!fs.existsSync(sourceRootfsPath)) {
         throw new Error(
           `missing manifest.assets.rootfs file at ${sourceRootfsPath}`,
+        );
+      }
+      if (sourceKrunKernelPath && !fs.existsSync(sourceKrunKernelPath)) {
+        throw new Error(
+          `missing manifest.assets.krunKernel file at ${sourceKrunKernelPath}`,
+        );
+      }
+      if (sourceKrunInitrdPath && !fs.existsSync(sourceKrunInitrdPath)) {
+        throw new Error(
+          `missing manifest.assets.krunInitrd file at ${sourceKrunInitrdPath}`,
         );
       }
 
@@ -443,6 +469,23 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         "manifest.assets.rootfs",
       );
 
+      const targetKrunKernelPath =
+        sourceKrunKernelPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.krunKernel,
+              "manifest.assets.krunKernel",
+            );
+      const targetKrunInitrdPath =
+        sourceKrunInitrdPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.krunInitrd,
+              "manifest.assets.krunInitrd",
+            );
+
       fs.mkdirSync(path.dirname(targetKernelPath), {
         recursive: true,
       });
@@ -452,10 +495,32 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       fs.mkdirSync(path.dirname(targetRootfsPath), {
         recursive: true,
       });
+      if (targetKrunKernelPath) {
+        fs.mkdirSync(path.dirname(targetKrunKernelPath), { recursive: true });
+      }
+      if (targetKrunInitrdPath) {
+        fs.mkdirSync(path.dirname(targetKrunInitrdPath), { recursive: true });
+      }
 
       fs.copyFileSync(safeKernelPath, targetKernelPath);
       fs.copyFileSync(safeInitramfsPath, targetInitramfsPath);
       fs.copyFileSync(safeRootfsPath, targetRootfsPath);
+      if (targetKrunKernelPath && sourceKrunKernelPath) {
+        const safeKrunKernelPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceKrunKernelPath,
+          "manifest.assets.krunKernel",
+        );
+        fs.copyFileSync(safeKrunKernelPath, targetKrunKernelPath);
+      }
+      if (targetKrunInitrdPath && sourceKrunInitrdPath) {
+        const safeKrunInitrdPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceKrunInitrdPath,
+          "manifest.assets.krunInitrd",
+        );
+        fs.copyFileSync(safeKrunInitrdPath, targetKrunInitrdPath);
+      }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });
 

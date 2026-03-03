@@ -93,7 +93,8 @@ jobs:
         run: |
           cd guest/image/out
           tar -czvf ../../../${{ matrix.artifact }}.tar.gz \
-            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 \
+            krun-kernel krun-empty-initrd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -171,6 +172,8 @@ jobs:
           test -s ./tmp-container-assets/vmlinuz-virt
           test -s ./tmp-container-assets/initramfs.cpio.lz4
           test -s ./tmp-container-assets/rootfs.ext4
+          test -s ./tmp-container-assets/krun-kernel
+          test -f ./tmp-container-assets/krun-empty-initrd
 
   krun-linux-build:
     name: Build krun runner (Linux x86_64 smoke)
