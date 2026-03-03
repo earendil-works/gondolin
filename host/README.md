@@ -20,8 +20,10 @@ Optional experimental backend:
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
 - `make krun-runner` from repo root stages dependencies locally and builds the runner
   - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
+  - Gondolin auto-detects this local runner for `--vmm krun`
 - krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
-- `GONDOLIN_VMM=krun` selects it globally
+- `gondolin bash --vmm krun` selects the backend per-command
+- `GONDOLIN_VMM=krun` still works as a global default
 - `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
 - backend parity matrix: [docs/backends.md](../docs/backends.md)
 

@@ -88,6 +88,7 @@ This stages `libkrun` under `.cache/` (no global install) and builds the local
 runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
 On macOS, the build ad-hoc signs the runner with the
 `com.apple.security.hypervisor` entitlement so Hypervisor.framework access is allowed.
+When present, Gondolin auto-detects this runner for `--vmm krun`.
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 

@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { createRequire } from "module";
 
 import { getHostNodeArchCached } from "../host/arch.ts";
 import {
@@ -29,6 +30,8 @@ import {
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
+
+const require = createRequire(import.meta.url);
 
 /**
  * Path or selector for guest image assets
@@ -328,6 +331,147 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   return null;
 }
 
+function resolveLocalKrunRunnerPath(): string | null {
+  const directCandidates = [
+    path.resolve(
+      process.cwd(),
+      "host",
+      "krun-runner",
+      "zig-out",
+      "bin",
+      "gondolin-krun-runner",
+    ),
+    path.resolve(
+      process.cwd(),
+      "krun-runner",
+      "zig-out",
+      "bin",
+      "gondolin-krun-runner",
+    ),
+  ];
+
+  for (const candidate of directCandidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  const starts = [process.cwd(), import.meta.dirname];
+  const visited = new Set<string>();
+
+  for (const start of starts) {
+    let dir = path.resolve(start);
+
+    for (let i = 0; i < 10; i += 1) {
+      const candidate = path.join(
+        dir,
+        "krun-runner",
+        "zig-out",
+        "bin",
+        "gondolin-krun-runner",
+      );
+      if (!visited.has(candidate)) {
+        visited.add(candidate);
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
+      }
+
+      const hostCandidate = path.join(
+        dir,
+        "host",
+        "krun-runner",
+        "zig-out",
+        "bin",
+        "gondolin-krun-runner",
+      );
+      if (!visited.has(hostCandidate)) {
+        visited.add(hostCandidate);
+        if (fs.existsSync(hostCandidate)) {
+          return hostCandidate;
+        }
+      }
+
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  return null;
+}
+
+function resolvePackagedKrunRunnerPath(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (
+    (platform !== "darwin" && platform !== "linux") ||
+    (arch !== "arm64" && arch !== "x64")
+  ) {
+    return null;
+  }
+
+  const packageName = `@earendil-works/gondolin-krun-runner-${platform}-${arch}`;
+
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`);
+    const packageDir = path.dirname(packageJsonPath);
+    const packageJson = JSON.parse(
+      fs.readFileSync(packageJsonPath, "utf8"),
+    ) as {
+      bin?: string | Record<string, string>;
+    };
+
+    const binCandidates: string[] = [];
+    if (typeof packageJson.bin === "string") {
+      binCandidates.push(packageJson.bin);
+    } else if (packageJson.bin && typeof packageJson.bin === "object") {
+      const preferred = packageJson.bin["gondolin-krun-runner"];
+      if (typeof preferred === "string") {
+        binCandidates.push(preferred);
+      }
+      for (const value of Object.values(packageJson.bin)) {
+        if (typeof value === "string") {
+          binCandidates.push(value);
+        }
+      }
+    }
+
+    binCandidates.push("bin/gondolin-krun-runner", "gondolin-krun-runner");
+
+    for (const rel of binCandidates) {
+      const candidate = path.resolve(packageDir, rel);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function resolveDefaultKrunRunnerPath(): string {
+  const envPath = process.env.GONDOLIN_KRUN_RUNNER?.trim();
+  if (envPath) {
+    return envPath;
+  }
+
+  const local = resolveLocalKrunRunnerPath();
+  if (local) {
+    return local;
+  }
+
+  const packaged = resolvePackagedKrunRunnerPath();
+  if (packaged) {
+    return packaged;
+  }
+
+  return "gondolin-krun-runner";
+}
+
 type KrunKernelOverride = {
   /** replacement kernel image path */
   kernelPath: string;
@@ -504,8 +648,7 @@ export function resolveSandboxServerOptions(
   const hostArch = getHostNodeArchCached();
   const defaultQemu =
     hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
-  const defaultKrunRunner =
-    process.env.GONDOLIN_KRUN_RUNNER ?? "gondolin-krun-runner";
+  const defaultKrunRunner = resolveDefaultKrunRunnerPath();
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);

@@ -235,3 +235,45 @@ test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("resolveSandboxServerOptions auto-detects local krun runner path", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const tempRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-krun-runner-"),
+  );
+  const localRunner = path.join(
+    tempRoot,
+    "host",
+    "krun-runner",
+    "zig-out",
+    "bin",
+    "gondolin-krun-runner",
+  );
+  fs.mkdirSync(path.dirname(localRunner), { recursive: true });
+  fs.writeFileSync(localRunner, "");
+  fs.chmodSync(localRunner, 0o755);
+
+  const prevCwd = process.cwd();
+  const prevRunner = process.env.GONDOLIN_KRUN_RUNNER;
+  if (prevRunner !== undefined) delete process.env.GONDOLIN_KRUN_RUNNER;
+  process.chdir(tempRoot);
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      imagePath: dir,
+      vmm: "krun",
+    });
+
+    assert.equal(
+      fs.realpathSync(resolved.krunRunnerPath),
+      fs.realpathSync(localRunner),
+    );
+  } finally {
+    process.chdir(prevCwd);
+    if (prevRunner === undefined) delete process.env.GONDOLIN_KRUN_RUNNER;
+    else process.env.GONDOLIN_KRUN_RUNNER = prevRunner;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
