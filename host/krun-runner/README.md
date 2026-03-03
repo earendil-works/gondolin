@@ -1,19 +1,29 @@
 # gondolin-krun-runner
 
-Small host-side helper binary for running Gondolin guests with `libkrun`.
+Small host-side helper binary used by Gondolin's experimental `krun` backend.
 
-## Build
+## Distribution status
 
-Preferred (repo root):
+- The main npm package (`@earendil-works/gondolin`) does **not** bundle this binary
+- In this repo, build it locally with `make krun-runner`
+- Gondolin auto-detects the local build output at:
+  - `host/krun-runner/zig-out/bin/gondolin-krun-runner`
+- If you manage your own runner location, set `sandbox.krunRunnerPath`
+
+## Build (recommended)
+
+From repo root:
 
 ```bash
 make krun-runner
 ```
 
-This stages `libkrun` under `.cache/libkrun-install/<version>` and builds the
-runner with bundled shared libraries under `host/krun-runner/zig-out/lib/`.
-On macOS, `make krun-runner` also ad-hoc signs the runner with
-`com.apple.security.hypervisor` (via `gondolin-krun-runner.entitlements`).
+This will:
+
+- build and stage `libkrun` under `.cache/libkrun-install/<version>`
+- build `host/krun-runner`
+- bundle `libkrun` shared libraries under `host/krun-runner/zig-out/lib/`
+- on macOS, ad-hoc sign the runner with `com.apple.security.hypervisor`
 
 Linux prerequisites (Ubuntu/Debian):
 
@@ -22,14 +32,14 @@ sudo apt install \
   build-essential curl git make pkg-config clang lld xz-utils \
   libclang-dev llvm-dev libcap-ng-dev
 
-# libkrun currently needs a modern Rust toolchain (edition2024)
+# libkrun needs a modern Rust toolchain (edition2024 crates)
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-# install Zig 0.15.1 for your Linux architecture
+# install Zig 0.15.2 for your Linux architecture
 ```
 
-Manual build:
+## Manual build (advanced)
 
 ```bash
 cd host/krun-runner
@@ -40,21 +50,21 @@ Binary output:
 
 - `zig-out/bin/gondolin-krun-runner`
 
-## Usage
+## Using it with Gondolin
 
-The host controller spawns this binary with:
+CLI:
 
 ```bash
-gondolin-krun-runner --config /path/to/config.json
+gondolin bash --vmm krun
 ```
 
-Use with Gondolin:
+SDK:
 
 - `sandbox.vmm = "krun"`
 - optionally set `sandbox.krunRunnerPath`
 
 ## Notes
 
-- Runner is linked against `libkrun` and uses an rpath that prefers bundled libs
-- The krun backend expects image manifests to provide `assets.krunKernel` (and optional `assets.krunInitrd`)
-- Currently experimental
+- Runner is linked against `libkrun` and uses rpath to prefer bundled libs
+- `vmm=krun` requires image manifest krun assets (`assets.krunKernel`, optional `assets.krunInitrd`)
+- Backend is experimental and has lower parity than QEMU
