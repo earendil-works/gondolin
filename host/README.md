@@ -24,7 +24,6 @@ Optional experimental backend:
 - krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
 - `gondolin bash --vmm krun` selects the backend per-command
 - `GONDOLIN_VMM=krun` still works as a global default
-- `GONDOLIN_KRUN_RUNNER=/path/to/gondolin-krun-runner` overrides runner path
 - backend parity matrix: [docs/backends.md](../docs/backends.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):

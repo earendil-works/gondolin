@@ -52,7 +52,6 @@ Use with Gondolin:
 
 - `sandbox.vmm = "krun"`
 - optionally set `sandbox.krunRunnerPath`
-- or set `GONDOLIN_KRUN_RUNNER`
 
 ## Notes
 

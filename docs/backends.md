@@ -11,19 +11,19 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
 | Capability / setting | `qemu` | `krun` | Notes |
 | --- | --- | --- | --- |
-| `sandbox.vmm` | ✅ | ✅ | Select backend (`"qemu"` or `"krun"`) |
-| `sandbox.qemuPath` | ✅ | ❌ | Rejected when `vmm=krun` |
-| `sandbox.krunRunnerPath` | ➖ | ✅ | Used only with `vmm=krun` |
-| `sandbox.machineType` | ✅ | ❌ | Rejected when `vmm=krun` |
-| `sandbox.accel` | ✅ | ❌ | Rejected when `vmm=krun`; libkrun backend is implicit per OS |
-| `sandbox.cpu` | ✅ | ❌ | Rejected when `vmm=krun` |
-| `sandbox.cpus` | ✅ | ✅ | Shared high-level CPU count option |
-| `sandbox.memory` | ✅ | ✅ | `krun` parses memory and passes MiB to `libkrun` |
-| `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✅ | ✅ | Supported on both backends |
-| `sandbox.rootDiskSnapshot` | ✅ | ❌ | Rejected when `vmm=krun` |
-| `rootfs.mode = "memory"` | ✅ | ⚠️ | QEMU uses snapshot mode; krun uses a temporary qcow2 overlay (`qemu-img`) |
-| `vm.checkpoint()` / checkpoint resume | ✅ | ❌ | Currently `vmm=qemu` only |
-| Exec/VFS/network mediation/SSH/ingress APIs | ✅ | ✅ | Same host-side control plane and policy stack |
+| `sandbox.vmm` | ✓ | ✓ | Select backend (`"qemu"` or `"krun"`) |
+| `sandbox.qemuPath` | ✓ |  | Rejected when `vmm=krun` |
+| `sandbox.krunRunnerPath` |  | ✓ | Used only with `vmm=krun` |
+| `sandbox.machineType` | ✓ |  | Rejected when `vmm=krun` |
+| `sandbox.accel` | ✓ |  | Rejected when `vmm=krun`; libkrun backend is implicit per OS |
+| `sandbox.cpu` | ✓ |  | Rejected when `vmm=krun` |
+| `sandbox.cpus` | ✓ | ✓ | Shared high-level CPU count option |
+| `sandbox.memory` | ✓ | ✓ | `krun` parses memory and passes MiB to `libkrun` |
+| `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | Supported on both backends |
+| `sandbox.rootDiskSnapshot` | ✓ |  | Rejected when `vmm=krun` |
+| `rootfs.mode = "memory"` | ✓ | ✓ | QEMU uses snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `vm.checkpoint()` / checkpoint resume | ✓ |  | Currently `vmm=qemu` only |
+| Exec/VFS/network mediation/SSH/ingress APIs | ✓ | ✓ | Same host-side control plane and policy stack |
 
 ## Architecture and Kernel Constraints
 
@@ -42,9 +42,10 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 - Build/setup path: `gondolin build` (or published image assets)
 - `make krun-runner` builds the runner binary; it does not provide kernel assets
 
-Override env vars:
+Runner path resolution:
 
-- `GONDOLIN_KRUN_RUNNER`
+- Auto-detected from local `host/krun-runner/zig-out/bin/gondolin-krun-runner` when present
+- Auto-detected from installed platform runner package when available
 
 ## Runtime Caveats
 
