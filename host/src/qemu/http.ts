@@ -3,7 +3,10 @@ import dns from "dns";
 import { fetch as undiciFetch } from "undici";
 import type { ReadableStream as WebReadableStream } from "stream/web";
 
-import { ON_REQUEST_EARLY_POLICY_SAFE } from "./contracts.ts";
+import {
+  ON_REQUEST_EARLY_POLICY_SAFE,
+  isGuestClosedError,
+} from "./contracts.ts";
 import type {
   HttpIpAllowInfo,
   QemuNetworkBackend,
@@ -912,7 +915,10 @@ export async function handleHttpDataWithWriter(
 
           cleanupStreamingBodyState(backend, httpSession, error);
 
-          if (error instanceof HttpRequestBlockedError) {
+          if (isGuestClosedError(error)) {
+            // Guest-side disconnect/cancel is expected and should not be surfaced
+            // as an operational bridge error.
+          } else if (error instanceof HttpRequestBlockedError) {
             if (backend.options.debug) {
               backend.emitDebug(`http blocked ${error.message}`);
             }
@@ -1016,7 +1022,10 @@ export async function handleHttpDataWithWriter(
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
 
-      if (error instanceof HttpRequestBlockedError) {
+      if (isGuestClosedError(error)) {
+        // Guest-side disconnect/cancel is expected and should not be surfaced
+        // as an operational bridge error.
+      } else if (error instanceof HttpRequestBlockedError) {
         if (backend.options.debug) {
           backend.emitDebug(`http blocked ${error.message}`);
         }
@@ -1047,7 +1056,10 @@ export async function handleHttpDataWithWriter(
     const version: "HTTP/1.0" | "HTTP/1.1" =
       httpSession.head?.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
-    if (error instanceof HttpRequestBlockedError) {
+    if (isGuestClosedError(error)) {
+      // Guest-side disconnect/cancel is expected and should not be surfaced
+      // as an operational bridge error.
+    } else if (error instanceof HttpRequestBlockedError) {
       if (backend.options.debug) {
         backend.emitDebug(`http blocked ${error.message}`);
       }

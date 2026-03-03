@@ -4056,7 +4056,6 @@ test("qemu-net: guest close during streamed response settles and evicts dispatch
         isIpAllowed: () => true,
       },
     });
-    backend.on("error", () => {});
 
     const key = "TCP:1.1.1.1:50000:2.2.2.2:80";
     const session: any = {
@@ -4079,6 +4078,7 @@ test("qemu-net: guest close during streamed response settles and evicts dispatch
     backend.tcpSessions.set(key, session);
 
     let closed = false;
+    const streamWrites: Buffer[] = [];
     const streamed = qemuHttp.handleHttpDataWithWriter(
       backend,
       key,
@@ -4087,6 +4087,7 @@ test("qemu-net: guest close during streamed response settles and evicts dispatch
       {
         scheme: "http",
         write: (chunk: Buffer) => {
+          streamWrites.push(Buffer.from(chunk));
           if (!closed && chunk.length > 0) {
             closed = true;
             (backend as any).handleTcpClose({ key, destroy: true });
@@ -4106,6 +4107,12 @@ test("qemu-net: guest close during streamed response settles and evicts dispatch
         ),
       ),
     ]);
+
+    const streamOut = Buffer.concat(streamWrites).toString("ascii");
+    assert.ok(
+      !streamOut.includes("502 Bad Gateway"),
+      "expected guest-close cancellation to avoid synthetic 502 response",
+    );
 
     assert.equal(backend.http.sharedDispatchers.size, 0);
 

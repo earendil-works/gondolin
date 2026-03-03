@@ -10,6 +10,38 @@ export const ON_REQUEST_EARLY_POLICY_SAFE = Symbol.for(
   "gondolin.http.onRequestEarlyPolicySafe",
 );
 
+const GUEST_CLOSED_MARKER = Symbol.for("gondolin.net.guestClosed");
+
+type GuestClosedError = Error & {
+  [GUEST_CLOSED_MARKER]: true;
+};
+
+export function createGuestClosedError(): Error {
+  const error = new Error("guest closed") as GuestClosedError;
+  error.name = "GuestClosedError";
+  error[GUEST_CLOSED_MARKER] = true;
+  return error;
+}
+
+export function isGuestClosedError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    const candidate = current as Error & {
+      [GUEST_CLOSED_MARKER]?: boolean;
+      cause?: unknown;
+    };
+    if (
+      candidate[GUEST_CLOSED_MARKER] === true ||
+      candidate.name === "GuestClosedError" ||
+      candidate.message === "guest closed"
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
 export type HttpOnRequestHook = ((
   request: Request,
 ) => Promise<Request | Response | void> | Request | Response | void) & {

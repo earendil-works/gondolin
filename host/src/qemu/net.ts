@@ -60,16 +60,17 @@ import {
   type HttpSession,
 } from "./http.ts";
 import type { WebSocketState } from "./ws.ts";
-import type {
-  DnsMode,
-  DnsOptions,
-  HttpFetch,
-  HttpHooks,
-  SyntheticDnsHostMappingMode,
+import {
+  createGuestClosedError,
+  type DnsMode,
+  type DnsOptions,
+  type HttpFetch,
+  type HttpHooks,
+  type SyntheticDnsHostMappingMode,
 } from "./contracts.ts";
 import { QemuIcmpTracker, type IcmpTiming } from "./icmp.ts";
 
-const GUEST_CLOSED_ERR = new Error("guest closed");
+const GUEST_CLOSED_ERR = createGuestClosedError();
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -986,6 +987,7 @@ export class QemuNetworkBackend extends EventEmitter {
     if (session) {
       if (session.http) {
         session.http.upstreamTainted = true;
+        session.http.closed = true;
       }
 
       if (session.http?.streamingBody && !session.http.streamingBody.done) {
