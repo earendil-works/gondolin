@@ -1,4 +1,8 @@
 import fs from "fs";
+import os from "os";
+import path from "path";
+import { execFileSync } from "child_process";
+
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 
 /**
@@ -30,6 +34,121 @@ export function shouldSkipVmTests(): boolean {
     return false;
   }
   return !hasHardwareAccel();
+}
+
+/** Resolve a runnable krun helper binary path for integration tests. */
+export function resolveKrunRunnerPath(): string | null {
+  const envPath = process.env.GONDOLIN_KRUN_RUNNER?.trim();
+  const localRunnerPath = path.resolve(
+    process.cwd(),
+    "krun-runner",
+    "zig-out",
+    "bin",
+    "gondolin-krun-runner",
+  );
+
+  const candidates = [envPath, localRunnerPath, "gondolin-krun-runner"];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      execFileSync(candidate, ["--version"], { stdio: "ignore" });
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return null;
+}
+
+/** Resolve the libkrunfw-compatible kernel path used by krun test runs. */
+export function resolveKrunKernelPath(): string | null {
+  const envPath = process.env.GONDOLIN_KRUN_KERNEL?.trim();
+  if (envPath) {
+    return fs.existsSync(envPath) ? envPath : null;
+  }
+
+  const arch =
+    process.arch === "arm64"
+      ? "aarch64"
+      : process.arch === "x64"
+        ? "x86_64"
+        : null;
+  if (!arch) return null;
+
+  const version = process.env.GONDOLIN_KRUN_LIBKRUNFW_VERSION ?? "v5.2.1";
+  const defaultPath = path.join(
+    os.homedir(),
+    ".cache",
+    "gondolin",
+    "krun",
+    "libkrunfw",
+    version,
+    arch,
+    "Image",
+  );
+
+  return fs.existsSync(defaultPath) ? defaultPath : null;
+}
+
+/** Return a skip reason for krun VM integration tests or false when runnable. */
+export function shouldSkipKrunVmTests(): string | false {
+  if (shouldSkipVmTests()) {
+    return "hardware virtualization unavailable";
+  }
+
+  const runnerPath = resolveKrunRunnerPath();
+  if (!runnerPath) {
+    return "krun runner unavailable (build host/krun-runner or set GONDOLIN_KRUN_RUNNER)";
+  }
+
+  if (!resolveKrunKernelPath()) {
+    return "libkrunfw kernel missing (run make krun-runner or set GONDOLIN_KRUN_KERNEL)";
+  }
+
+  return false;
+}
+
+let krunRuntimeSkipCheck: Promise<string | false> | null = null;
+
+/** Probe whether krun can actually boot/exec on this host. */
+export async function getKrunRuntimeSkipReason(): Promise<string | false> {
+  const staticReason = shouldSkipKrunVmTests();
+  if (staticReason) {
+    return staticReason;
+  }
+
+  if (!krunRuntimeSkipCheck) {
+    krunRuntimeSkipCheck = (async () => {
+      const vm = await VM.create({
+        autoStart: false,
+        sandbox: {
+          vmm: "krun",
+          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+          console: "none",
+        },
+        rootfs: {
+          mode: "readonly",
+        },
+      });
+
+      try {
+        await vm.start();
+        const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
+        if (probe.exitCode !== 0) {
+          return `krun runtime preflight exec failed (exit ${probe.exitCode})`;
+        }
+        return false;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `krun runtime unavailable: ${message}`;
+      } finally {
+        await closeWithTimeout(vm);
+      }
+    })();
+  }
+
+  return await krunRuntimeSkipCheck;
 }
 
 class Semaphore {
