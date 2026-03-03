@@ -29,6 +29,7 @@ import {
   coalesceHeaderRecord,
   parseContentLength,
   applyRedirectRequest,
+  evictSharedDispatcher,
   getCheckedDispatcher,
   getRedirectUrl,
   normalizeLookupEntries,
@@ -66,6 +67,10 @@ export type HttpSession = {
   buffer: HttpReceiveBuffer;
   processing: boolean;
   closed: boolean;
+  /** whether the current upstream dispatcher is tainted */
+  upstreamTainted: boolean;
+  /** origin key for the current upstream dispatcher */
+  upstreamOriginKey: string | null;
 
   /** cached request head state (we only process one HTTP request per TCP session) */
   head?: {
@@ -111,6 +116,17 @@ export type HttpSession = {
   /** whether we already sent an interim 100-continue response */
   sentContinue?: boolean;
 };
+
+function resetTaintState(
+  backend: QemuNetworkBackend,
+  httpSession: HttpSession,
+) {
+  if (httpSession.upstreamTainted && httpSession.upstreamOriginKey) {
+    evictSharedDispatcher(backend, httpSession.upstreamOriginKey);
+  }
+  httpSession.upstreamTainted = false;
+  httpSession.upstreamOriginKey = null;
+}
 
 function getMaxHttpStreamingPendingBytes(backend: QemuNetworkBackend): number {
   let maxPending = 0;
@@ -306,6 +322,8 @@ export async function handleHttpDataWithWriter(
       buffer: new HttpReceiveBuffer(),
       processing: false,
       closed: false,
+      upstreamTainted: false,
+      upstreamOriginKey: null,
       sentContinue: false,
     } satisfies HttpSession);
   session.http = httpSession;
@@ -719,9 +737,11 @@ export async function handleHttpDataWithWriter(
           write: options.write,
           waitForWritable: options.waitForWritable,
           policyCheckedFirstHop: state.policyPrechecked,
+          httpSession,
         });
       } finally {
         releaseHttpConcurrency?.();
+        resetTaintState(backend, httpSession);
         httpSession.processing = false;
         httpSession.closed = true;
         options.finish();
@@ -885,6 +905,7 @@ export async function handleHttpDataWithWriter(
             policyCheckedFirstHop: state.policyPrechecked,
             initialBodyStream: bodyStream as any,
             initialBodyStreamHasBody: true,
+            httpSession,
           });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
@@ -908,6 +929,7 @@ export async function handleHttpDataWithWriter(
         } finally {
           releaseHttpConcurrency?.();
           cleanupStreamingBodyState(backend, httpSession);
+          resetTaintState(backend, httpSession);
           httpSession.processing = false;
           if (!httpSession.closed) {
             httpSession.closed = true;
@@ -989,6 +1011,7 @@ export async function handleHttpDataWithWriter(
         write: options.write,
         waitForWritable: options.waitForWritable,
         policyCheckedFirstHop: state.policyPrechecked,
+        httpSession,
       });
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -1009,6 +1032,7 @@ export async function handleHttpDataWithWriter(
       }
     } finally {
       releaseHttpConcurrency?.();
+      resetTaintState(backend, httpSession);
       httpSession.processing = false;
       if (!httpSession.closed) {
         httpSession.closed = true;
@@ -1035,6 +1059,7 @@ export async function handleHttpDataWithWriter(
 
     // Abort any active upstream body stream.
     cleanupStreamingBodyState(backend, httpSession, error);
+    resetTaintState(backend, httpSession);
 
     httpSession.closed = true;
     options.finish();
@@ -1207,6 +1232,8 @@ export async function fetchHookRequestAndRespond(
 
     /** whether the initial body stream carries a request body */
     initialBodyStreamHasBody?: boolean;
+    /** session state for dispatcher taint tracking */
+    httpSession: HttpSession;
   },
 ) {
   const {
@@ -1217,6 +1244,7 @@ export async function fetchHookRequestAndRespond(
     policyCheckedFirstHop = false,
     initialBodyStream = null,
     initialBodyStreamHasBody = Boolean(initialBodyStream),
+    httpSession,
   } = options;
 
   const fetcher = backend.options.fetch ?? undiciFetch;
@@ -1292,6 +1320,10 @@ export async function fetchHookRequestAndRespond(
     }
 
     const useDefaultFetch = backend.options.fetch === undefined;
+    const originKey = useDefaultFetch
+      ? `${protocol}://${currentUrl.hostname}:${port}`
+      : null;
+    httpSession.upstreamOriginKey = originKey;
     const dispatcher = useDefaultFetch
       ? getCheckedDispatcher(backend, {
           hostname: currentUrl.hostname,
@@ -1317,6 +1349,9 @@ export async function fetchHookRequestAndRespond(
         ...(dispatcher ? { dispatcher } : {}),
       } as any);
     } catch (err) {
+      if (originKey) {
+        evictSharedDispatcher(backend, originKey);
+      }
       if (backend.options.debug) {
         const message = err instanceof Error ? err.message : String(err);
         backend.emitDebug(
@@ -1474,26 +1509,45 @@ export async function fetchHookRequestAndRespond(
       const allowChunked = httpVersion === "HTTP/1.1";
       let streamedBytes = 0;
 
-      if (contentEncoding || !hasValidLength) {
-        delete responseHeaders["content-length"];
+      try {
+        if (contentEncoding || !hasValidLength) {
+          delete responseHeaders["content-length"];
 
-        if (allowChunked) {
-          responseHeaders["transfer-encoding"] = "chunked";
-          sendHttpResponseHead(
-            write,
-            {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            },
-            httpVersion,
-          );
-          streamedBytes = await sendChunkedBody(
-            responseBodyStream,
-            write,
-            waitForWritable,
-          );
+          if (allowChunked) {
+            responseHeaders["transfer-encoding"] = "chunked";
+            sendHttpResponseHead(
+              write,
+              {
+                status: response.status,
+                statusText: response.statusText || "OK",
+                headers: responseHeaders,
+              },
+              httpVersion,
+            );
+            streamedBytes = await sendChunkedBody(
+              responseBodyStream,
+              write,
+              waitForWritable,
+            );
+          } else {
+            delete responseHeaders["transfer-encoding"];
+            sendHttpResponseHead(
+              write,
+              {
+                status: response.status,
+                statusText: response.statusText || "OK",
+                headers: responseHeaders,
+              },
+              httpVersion,
+            );
+            streamedBytes = await sendStreamBody(
+              responseBodyStream,
+              write,
+              waitForWritable,
+            );
+          }
         } else {
+          responseHeaders["content-length"] = parsedLength!.toString();
           delete responseHeaders["transfer-encoding"];
           sendHttpResponseHead(
             write,
@@ -1510,23 +1564,16 @@ export async function fetchHookRequestAndRespond(
             waitForWritable,
           );
         }
-      } else {
-        responseHeaders["content-length"] = parsedLength!.toString();
-        delete responseHeaders["transfer-encoding"];
-        sendHttpResponseHead(
-          write,
-          {
-            status: response.status,
-            statusText: response.statusText || "OK",
-            headers: responseHeaders,
-          },
-          httpVersion,
-        );
-        streamedBytes = await sendStreamBody(
-          responseBodyStream,
-          write,
-          waitForWritable,
-        );
+      } catch (err) {
+        if (originKey) {
+          evictSharedDispatcher(backend, originKey);
+        }
+        try {
+          await responseBodyStream.cancel();
+        } catch {
+          // ignore cancellation failures
+        }
+        throw err;
       }
 
       if (backend.options.debug) {

@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import tls from "node:tls";
 import net from "node:net";
 import dns from "node:dns";
+import http from "node:http";
 
 import forge from "node-forge";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
@@ -14,6 +15,7 @@ import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
 import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu/ssh.ts";
 import {
+  HttpReceiveBuffer,
   HttpRequestBlockedError,
   closeSharedDispatchers,
   createLookupGuard,
@@ -110,11 +112,21 @@ async function fetchHookAndRespond(
   const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
     request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
+  const httpSession: qemuHttp.HttpSession = {
+    buffer: new HttpReceiveBuffer(),
+    processing: false,
+    closed: false,
+    upstreamTainted: false,
+    upstreamOriginKey: null,
+    sentContinue: false,
+  };
+
   await qemuHttp.fetchHookRequestAndRespond(backend, {
     request: toHookRequest(request, scheme),
     httpVersion,
     write,
     waitForWritable,
+    httpSession,
   });
 }
 
@@ -4001,6 +4013,141 @@ test("qemu-net: shared checked dispatcher is reused per origin", () => {
 
   closeSharedDispatchers(backend);
   assert.equal(backend.http.sharedDispatchers.size, 0);
+});
+
+test("qemu-net: guest close during streamed response settles and evicts dispatcher", async () => {
+  const server = http.createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+
+    if (pathname === "/probe") {
+      const body = Buffer.from("ok");
+      res.writeHead(200, {
+        "content-type": "text/plain",
+        "content-length": body.length.toString(),
+      });
+      res.end(body);
+      return;
+    }
+
+    if (pathname !== "/stream") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+      return;
+    }
+
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    const interval = setInterval(() => {
+      res.write(Buffer.alloc(16 * 1024, 0x41));
+    }, 5);
+
+    const stop = () => clearInterval(interval);
+    req.on("aborted", stop);
+    req.on("close", stop);
+    res.on("close", stop);
+    res.on("error", stop);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+
+  try {
+    const backend = makeBackend({
+      httpHooks: {
+        isIpAllowed: () => true,
+      },
+    });
+    backend.on("error", () => {});
+
+    const key = "TCP:1.1.1.1:50000:2.2.2.2:80";
+    const session: any = {
+      socket: null,
+      srcIP: "1.1.1.1",
+      srcPort: 50000,
+      dstIP: "2.2.2.2",
+      dstPort: 80,
+      connectIP: "2.2.2.2",
+      connectPort: 80,
+      syntheticHostname: null,
+      mappedTcp: null,
+      flowControlPaused: false,
+      protocol: "http",
+      connected: false,
+      pendingWrites: [],
+      pendingWriteBytes: 0,
+    };
+
+    backend.tcpSessions.set(key, session);
+
+    let closed = false;
+    const streamed = qemuHttp.handleHttpDataWithWriter(
+      backend,
+      key,
+      session,
+      Buffer.from(`GET /stream HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`),
+      {
+        scheme: "http",
+        write: (chunk: Buffer) => {
+          if (!closed && chunk.length > 0) {
+            closed = true;
+            (backend as any).handleTcpClose({ key, destroy: true });
+          }
+        },
+        finish: () => {},
+        waitForWritable: () => backend.waitForFlowResume(key),
+      },
+    );
+
+    await Promise.race([
+      streamed,
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("stream request did not settle")),
+          2000,
+        ),
+      ),
+    ]);
+
+    assert.equal(backend.http.sharedDispatchers.size, 0);
+
+    const probeKey = "TCP:1.1.1.1:50001:2.2.2.2:80";
+    const probeSession: any = {
+      socket: null,
+      srcIP: "1.1.1.1",
+      srcPort: 50001,
+      dstIP: "2.2.2.2",
+      dstPort: 80,
+      connectIP: "2.2.2.2",
+      connectPort: 80,
+      syntheticHostname: null,
+      mappedTcp: null,
+      flowControlPaused: false,
+      protocol: "http",
+      connected: false,
+      pendingWrites: [],
+      pendingWriteBytes: 0,
+    };
+    backend.tcpSessions.set(probeKey, probeSession);
+
+    const writes: Buffer[] = [];
+    await qemuHttp.handleHttpDataWithWriter(
+      backend,
+      probeKey,
+      probeSession,
+      Buffer.from(`GET /probe HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`),
+      {
+        scheme: "http",
+        write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+        finish: () => {},
+        waitForWritable: () => backend.waitForFlowResume(probeKey),
+      },
+    );
+
+    const responseText = Buffer.concat(writes).toString("ascii");
+    assert.match(responseText, /^HTTP\/1\.1 200 /);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 test("qemu-net: createLookupGuard invokes ip policy callback", async () => {

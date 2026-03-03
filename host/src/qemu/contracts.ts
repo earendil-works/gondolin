@@ -142,6 +142,6 @@ export type QemuNetworkBackend<
   emit(event: string | symbol, ...args: any[]): boolean;
   flush(): void;
   waitForFlowResume(key: string): Promise<void>;
-  resolveFlowResume(key: string): void;
+  settleFlowResume(key: string, err?: Error): void;
   abortTcpSession(key: string, session: TSession, reason: string): void;
 };
