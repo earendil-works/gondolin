@@ -1280,7 +1280,7 @@ test("network-stack: TCP flow control pauses when tx buffer grows and resumes wh
   assert.equal(resumes.length, 0);
 
   // Drive ACK progress until queued outbound bytes are flushed.
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < 64; i++) {
     const session = (stack as any).natTable.get(key);
     if (!session) break;
     if (session.pendingOutbound.length === 0) break;
@@ -1494,5 +1494,250 @@ test("network-stack: high-priority TX evicts low-priority frames when capped", (
   assert.ok(
     etherTypes.includes(0x0806),
     "expected ARP reply to be present despite low-priority queue being full",
+  );
+});
+
+function countTcpPayloadBytes(txBuf: Buffer): number {
+  if (txBuf.length === 0) return 0;
+  const frames = decodeFramesFromQemuData(txBuf);
+  let total = 0;
+
+  for (const frame of frames) {
+    if (frame.length < 14) continue;
+    const etherType = frame.readUInt16BE(12);
+    if (etherType !== 0x0800) continue;
+
+    const ipPayload = frame.subarray(14);
+    if (ipPayload.length < 20) continue;
+    if (ipPayload[9] !== 6) continue;
+
+    const ihl = (ipPayload[0] & 0x0f) * 4;
+    const ipTotalLen = ipPayload.readUInt16BE(2);
+    const tcpSegment = ipPayload.subarray(ihl, ipTotalLen);
+    if (tcpSegment.length < 20) continue;
+
+    const tcpDataOffset = (tcpSegment[12] >> 4) * 4;
+    const payloadLen = tcpSegment.length - tcpDataOffset;
+    if (payloadLen > 0) {
+      total += payloadLen;
+    }
+  }
+
+  return total;
+}
+
+test("network-stack: drainOutboundTcp respects per-tick burst limit", async () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  const burstLimit = 16 * 1024;
+  let key = "";
+
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    dnsServers: ["8.8.8.8"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => (key = m.key),
+      onTcpSend: () => {},
+      onTcpClose: () => {},
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([93, 184, 216, 34]);
+
+  stack.handleTCP(
+    buildTcpSegment({ srcPort: 50001, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    srcIP,
+    dstIP,
+  );
+  stack.handleTcpConnected({ key });
+  drainAllQemuTx(stack);
+
+  const session = (stack as any).natTable.get(key);
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort: 50001,
+      dstPort: 80,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+
+  stack.handleTcpData({ key, data: Buffer.alloc(48 * 1024, 0x42) });
+
+  const firstDrainBytes = countTcpPayloadBytes(drainAllQemuTx(stack));
+  assert.ok(firstDrainBytes > 0, `expected data, got ${firstDrainBytes}`);
+  assert.ok(
+    firstDrainBytes <= burstLimit,
+    `first drain should respect burst limit: ${firstDrainBytes} <= ${burstLimit}`,
+  );
+
+  const remaining = await new Promise<number>((resolve) => {
+    setImmediate(() => resolve(countTcpPayloadBytes(drainAllQemuTx(stack))));
+  });
+  assert.ok(
+    remaining > 0,
+    `continuation should drain remaining data (got ${remaining})`,
+  );
+});
+
+function fillTxQueueWithArpReplies(stack: NetworkStack, count = 256) {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+  for (let i = 0; i < count; i += 1) {
+    const arp = Buffer.alloc(28);
+    arp.writeUInt16BE(1, 0);
+    arp.writeUInt16BE(0x0800, 2);
+    arp[4] = 6;
+    arp[5] = 4;
+    arp.writeUInt16BE(1, 6);
+    vmMac.copy(arp, 8);
+    ip([192, 168, 127, 3]).copy(arp, 14);
+    ip([192, 168, 127, 1]).copy(arp, 24);
+
+    const frame = buildEthernetFrame({
+      dstMac: gatewayMac,
+      srcMac: vmMac,
+      etherType: 0x0806,
+      payload: arp,
+    });
+
+    stack.writeToNetwork(qemuPacketFromFrame(frame));
+  }
+}
+
+test("network-stack: dropped pure TCP ACK does not teardown session", () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  const closes: any[] = [];
+  let key = "";
+
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    txQueueMaxBytes: 1024,
+    dnsServers: ["8.8.8.8"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => {
+        key = m.key;
+        return { allowRawTcp: true };
+      },
+      onTcpSend: () => {},
+      onTcpClose: (m) => closes.push(m),
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([93, 184, 216, 34]);
+
+  stack.handleTCP(
+    buildTcpSegment({ srcPort: 50002, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    srcIP,
+    dstIP,
+  );
+  stack.handleTcpConnected({ key });
+  drainAllQemuTx(stack);
+
+  const session = (stack as any).natTable.get(key);
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort: 50002,
+      dstPort: 80,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+
+  fillTxQueueWithArpReplies(stack);
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort: 50002,
+      dstPort: 80,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x18,
+      payload: Buffer.from("x"),
+    }),
+    srcIP,
+    dstIP,
+  );
+
+  assert.equal(closes.length, 0);
+  assert.ok((stack as any).natTable.has(key));
+});
+
+test("network-stack: dropped outbound TCP payload tears down session", () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  const closes: any[] = [];
+  const pauses: any[] = [];
+  let key = "";
+
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    txQueueMaxBytes: 1024,
+    dnsServers: ["8.8.8.8"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => {
+        key = m.key;
+      },
+      onTcpSend: () => {},
+      onTcpClose: (m) => closes.push(m),
+      onTcpPause: (m) => pauses.push(m),
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([93, 184, 216, 34]);
+
+  stack.handleTCP(
+    buildTcpSegment({ srcPort: 50003, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    srcIP,
+    dstIP,
+  );
+  stack.handleTcpConnected({ key });
+  drainAllQemuTx(stack);
+
+  const session = (stack as any).natTable.get(key);
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort: 50003,
+      dstPort: 80,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+
+  fillTxQueueWithArpReplies(stack);
+  stack.handleTcpData({ key, data: Buffer.alloc(8 * 1024, 0x61) });
+
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0].destroy, true);
+  assert.ok(!(stack as any).natTable.has(key));
+  assert.equal(pauses.length, 0, "dead flow must not emit pause");
+  assert.equal(
+    (stack as any).txFlowPaused.has(key),
+    false,
+    "dead flow must not remain in txFlowPaused",
   );
 });

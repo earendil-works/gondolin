@@ -499,17 +499,26 @@ export function closeSharedDispatchers(backend: QemuNetworkBackend) {
   backend.http.sharedDispatchers.clear();
 }
 
+export function evictSharedDispatcher(
+  backend: QemuNetworkBackend,
+  originKey: string,
+) {
+  const entry = backend.http.sharedDispatchers.get(originKey);
+  if (!entry) return;
+  backend.http.sharedDispatchers.delete(originKey);
+  try {
+    entry.dispatcher.close();
+  } catch {
+    // ignore
+  }
+}
+
 function pruneSharedDispatchers(backend: QemuNetworkBackend, now = Date.now()) {
   if (backend.http.sharedDispatchers.size === 0) return;
 
   for (const [key, entry] of backend.http.sharedDispatchers) {
     if (now - entry.lastUsedAt <= DEFAULT_SHARED_UPSTREAM_IDLE_TTL_MS) continue;
-    backend.http.sharedDispatchers.delete(key);
-    try {
-      entry.dispatcher.close();
-    } catch {
-      // ignore
-    }
+    evictSharedDispatcher(backend, key);
   }
 }
 
@@ -521,13 +530,7 @@ function evictSharedDispatchersIfNeeded(backend: QemuNetworkBackend) {
       | string
       | undefined;
     if (!oldestKey) break;
-    const oldest = backend.http.sharedDispatchers.get(oldestKey);
-    backend.http.sharedDispatchers.delete(oldestKey);
-    try {
-      oldest?.dispatcher.close();
-    } catch {
-      // ignore
-    }
+    evictSharedDispatcher(backend, oldestKey);
   }
 }
 

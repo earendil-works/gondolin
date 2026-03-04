@@ -60,14 +60,17 @@ import {
   type HttpSession,
 } from "./http.ts";
 import type { WebSocketState } from "./ws.ts";
-import type {
-  DnsMode,
-  DnsOptions,
-  HttpFetch,
-  HttpHooks,
-  SyntheticDnsHostMappingMode,
+import {
+  createGuestClosedError,
+  type DnsMode,
+  type DnsOptions,
+  type HttpFetch,
+  type HttpHooks,
+  type SyntheticDnsHostMappingMode,
 } from "./contracts.ts";
 import { QemuIcmpTracker, type IcmpTiming } from "./icmp.ts";
+
+const GUEST_CLOSED_ERR = createGuestClosedError();
 
 export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 // Default cap for buffering upstream HTTP *responses* (not streaming).
@@ -338,7 +341,10 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
-  private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
+  private readonly flowResumeWaiters = new Map<
+    string,
+    Array<{ resolve: () => void; reject: (err: Error) => void }>
+  >();
 
   private readonly dnsMode: DnsMode;
   private readonly trustedDnsServers: string[];
@@ -601,6 +607,8 @@ export class QemuNetworkBackend extends EventEmitter {
               buffer: new HttpReceiveBuffer(),
               processing: false,
               closed: false,
+              upstreamTainted: false,
+              upstreamOriginKey: null,
               sentContinue: false,
             };
           }
@@ -903,7 +911,7 @@ export class QemuNetworkBackend extends EventEmitter {
     session.pendingWrites = [];
     session.pendingWriteBytes = 0;
     session.flowControlPaused = false;
-    this.resolveFlowResume(key);
+    this.settleFlowResume(key);
 
     this.stack?.handleTcpError({ key });
     this.tcpSessions.delete(key);
@@ -977,10 +985,15 @@ export class QemuNetworkBackend extends EventEmitter {
   private handleTcpClose(message: TcpCloseMessage) {
     const session = this.tcpSessions.get(message.key);
     if (session) {
+      if (session.http) {
+        session.http.upstreamTainted = true;
+        session.http.closed = true;
+      }
+
       if (session.http?.streamingBody && !session.http.streamingBody.done) {
         const controller = session.http.streamingBody.controller;
         try {
-          controller?.error(new Error("guest closed"));
+          controller?.error(GUEST_CLOSED_ERR);
         } catch {
           // ignore
         }
@@ -989,12 +1002,14 @@ export class QemuNetworkBackend extends EventEmitter {
         updateQemuRxPauseState(this);
       }
 
+      // fetchHookRequestAndRespond keeps its own HttpSession reference; mark taint
+      // above before clearing this pointer.
       session.http = undefined;
       session.ws = undefined;
       session.pendingWrites = [];
       session.pendingWriteBytes = 0;
       session.flowControlPaused = false;
-      this.resolveFlowResume(message.key);
+      this.settleFlowResume(message.key, GUEST_CLOSED_ERR);
       if (session.tls) {
         if (message.destroy) {
           session.tls.socket.destroy();
@@ -1033,29 +1048,36 @@ export class QemuNetworkBackend extends EventEmitter {
     if (session.socket) {
       session.socket.resume();
     }
-    this.resolveFlowResume(message.key);
+    this.settleFlowResume(message.key);
   }
 
   /** @internal */
   waitForFlowResume(key: string): Promise<void> {
     const session = this.tcpSessions.get(key);
-    if (!session || !session.flowControlPaused) {
+    if (!session) {
+      return Promise.reject(GUEST_CLOSED_ERR);
+    }
+    if (!session.flowControlPaused) {
       return Promise.resolve();
     }
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const waiters = this.flowResumeWaiters.get(key) ?? [];
-      waiters.push(resolve);
+      waiters.push({ resolve, reject });
       this.flowResumeWaiters.set(key, waiters);
     });
   }
 
   /** @internal */
-  resolveFlowResume(key: string) {
+  settleFlowResume(key: string, err?: Error) {
     const waiters = this.flowResumeWaiters.get(key);
     if (!waiters) return;
     this.flowResumeWaiters.delete(key);
-    for (const resolve of waiters) {
-      resolve();
+    for (const waiter of waiters) {
+      if (err) {
+        waiter.reject(err);
+      } else {
+        waiter.resolve();
+      }
     }
   }
 
@@ -1086,14 +1108,14 @@ export class QemuNetworkBackend extends EventEmitter {
 
     socket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
-      this.resolveFlowResume(key);
+      this.settleFlowResume(key);
       cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
 
     socket.on("error", () => {
       this.stack?.handleTcpError({ key });
-      this.resolveFlowResume(key);
+      this.settleFlowResume(key);
       cleanupSshTcpSession(this, session);
       this.tcpSessions.delete(key);
     });
@@ -1137,7 +1159,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
     tlsSocket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
-      this.resolveFlowResume(key);
+      this.settleFlowResume(key);
       this.tcpSessions.delete(key);
     });
 

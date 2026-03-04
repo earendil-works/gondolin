@@ -243,7 +243,7 @@ export async function bridgeWebSocketUpgrade(
       // If the session was already aborted/removed, do not emit a second close.
       if (!backend.tcpSessions.has(key)) return;
       backend.stack?.handleTcpClosed({ key });
-      backend.resolveFlowResume(key);
+      backend.settleFlowResume(key);
       backend.tcpSessions.delete(key);
     }
   });

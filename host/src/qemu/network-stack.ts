@@ -10,6 +10,15 @@ const IP_PROTO_TCP = 6;
 const IP_PROTO_UDP = 17;
 const IP_PROTO_ICMP = 1;
 
+function makeTcpNatKey(
+  srcIP: string,
+  srcPort: number,
+  dstIP: string,
+  dstPort: number,
+): string {
+  return `TCP:${srcIP}:${srcPort}:${dstIP}:${dstPort}`;
+}
+
 const HTTP_METHODS = [
   "GET",
   "POST",
@@ -157,6 +166,8 @@ type TcpSession = {
   allowRawTcp: boolean;
   pendingData: Buffer;
   httpMethod?: string;
+  /** whether the next-tick outbound drain continuation is scheduled */
+  drainScheduled: boolean;
 };
 
 export type NetworkStackOptions = {
@@ -225,6 +236,7 @@ export class NetworkStack extends EventEmitter {
   private readonly TX_BUFFER_HIGH_WATER = 512 * 1024;
   private readonly TX_BUFFER_LOW_WATER = 128 * 1024;
   private readonly TCP_MAX_IN_FLIGHT_BYTES = 48 * 1024;
+  private readonly TCP_MAX_BURST_BYTES = 16 * 1024;
   private readonly txQueuePaused = new Set<string>();
   private readonly txFlowPaused = new Set<string>();
 
@@ -339,7 +351,10 @@ export class NetworkStack extends EventEmitter {
     packet.writeUInt32BE(frame.length, 0);
     frame.copy(packet, 4);
 
-    this.enqueueTx(packet, this.classifyTxPriority(proto, payload));
+    const queued = this.enqueueTx(packet, this.classifyTxPriority(proto, payload));
+    if (!queued && proto === ETH_P_IP) {
+      this.teardownDroppedTcpSession(payload);
+    }
   }
 
   sendBroadcast(payload: Buffer, proto: number) {
@@ -380,8 +395,8 @@ export class NetworkStack extends EventEmitter {
    * - `"network-activity"` when something is queued
    * - `"tx-drop"` with {@link TxDropInfo} when a packet is dropped/evicted due to queue limits
    */
-  private enqueueTx(packet: Buffer, priority: TxPriority) {
-    if (packet.length === 0) return;
+  private enqueueTx(packet: Buffer, priority: TxPriority): boolean {
+    if (packet.length === 0) return true;
 
     if (packet.length > this.TX_QUEUE_MAX_BYTES) {
       const info: TxDropInfo = {
@@ -390,7 +405,7 @@ export class NetworkStack extends EventEmitter {
         reason: "packet-too-large",
       };
       this.emit("tx-drop", info);
-      return;
+      return false;
     }
 
     // Enforce a hard cap to avoid unbounded memory growth if QEMU stops draining.
@@ -402,7 +417,7 @@ export class NetworkStack extends EventEmitter {
           reason: "queue-full",
         };
         this.emit("tx-drop", info);
-        return;
+        return false;
       }
 
       // For high-priority packets (TCP/ARP), evict low-priority packets first.
@@ -433,7 +448,7 @@ export class NetworkStack extends EventEmitter {
           evictedBytes,
         };
         this.emit("tx-drop", info);
-        return;
+        return false;
       }
     }
 
@@ -446,6 +461,7 @@ export class NetworkStack extends EventEmitter {
 
     this.txQueueSize += packet.length;
     this.emit("network-activity");
+    return true;
   }
 
   receive(frame: Buffer) {
@@ -691,9 +707,7 @@ export class NetworkStack extends EventEmitter {
       ack,
       0x14,
     );
-    this.callbacks.onTcpClose({ key, destroy: true });
-    this.clearPauseState(key);
-    this.natTable.delete(key);
+    this.destroyTcpSession(key);
     this.emit("tcp-deny", { key, reason });
   }
 
@@ -711,14 +725,12 @@ export class NetworkStack extends EventEmitter {
     const FIN = (flags & 0x01) !== 0;
     const RST = (flags & 0x04) !== 0;
 
-    const key = `TCP:${srcIP.join(".")}:${srcPort}:${dstIP.join(".")}:${dstPort}`;
+    const key = makeTcpNatKey(srcIP.join("."), srcPort, dstIP.join("."), dstPort);
     let session = this.natTable.get(key);
 
     if (RST) {
       if (session) {
-        this.callbacks.onTcpClose({ key, destroy: true });
-        this.clearPauseState(key);
-        this.natTable.delete(key);
+        this.destroyTcpSession(key);
       }
       return;
     }
@@ -740,6 +752,7 @@ export class NetworkStack extends EventEmitter {
         flowProtocol: null,
         allowRawTcp: false,
         pendingData: Buffer.alloc(0),
+        drainScheduled: false,
       };
       this.natTable.set(key, session);
 
@@ -1231,6 +1244,58 @@ export class NetworkStack extends EventEmitter {
     this.txFlowPaused.delete(key);
   }
 
+  private destroyTcpSession(key: string) {
+    this.callbacks.onTcpClose({ key, destroy: true });
+    this.clearPauseState(key);
+    this.natTable.delete(key);
+  }
+
+  /**
+   * Tears down the NAT flow when a host->guest TCP packet with payload is dropped
+   *
+   * We cannot retransmit dropped payload from this userspace stack, so keeping
+   * the session open can deadlock on in-flight accounting. Pure control packets
+   * (ACK/FIN/RST without payload) are left to normal TCP recovery.
+   */
+  private teardownDroppedTcpSession(ipPayload: Buffer) {
+    if (ipPayload.length < 20) return;
+
+    const version = ipPayload[0] >> 4;
+    const ipProto = ipPayload[9];
+    const headerLen = (ipPayload[0] & 0x0f) * 4;
+    const totalLen = ipPayload.readUInt16BE(2);
+    if (
+      version !== 4 ||
+      ipProto !== IP_PROTO_TCP ||
+      headerLen < 20 ||
+      totalLen < headerLen + 20 ||
+      ipPayload.length < totalLen
+    ) {
+      return;
+    }
+
+    const tcpStart = headerLen;
+    const tcpHeaderLen = ((ipPayload[tcpStart + 12] >> 4) & 0x0f) * 4;
+    if (tcpHeaderLen < 20) {
+      return;
+    }
+
+    const tcpPayloadLen = totalLen - headerLen - tcpHeaderLen;
+    if (tcpPayloadLen <= 0) {
+      return;
+    }
+
+    const guestIP = ipPayload.subarray(16, 20).join(".");
+    const guestPort = ipPayload.readUInt16BE(tcpStart + 2);
+    const upstreamIP = ipPayload.subarray(12, 16).join(".");
+    const upstreamPort = ipPayload.readUInt16BE(tcpStart);
+    const key = makeTcpNatKey(guestIP, guestPort, upstreamIP, upstreamPort);
+
+    if (this.natTable.has(key)) {
+      this.destroyTcpSession(key);
+    }
+  }
+
   private pauseFlow(key: string) {
     if (this.txFlowPaused.has(key)) {
       return;
@@ -1266,24 +1331,36 @@ export class NetworkStack extends EventEmitter {
   }
 
   private drainOutboundTcp(key: string, session: TcpSession) {
+    const isLiveSession = () => this.natTable.get(key) === session;
+    if (!isLiveSession()) {
+      return;
+    }
+
     if (session.pendingOutbound.length === 0 && !session.endPending) {
       this.maybeResumeFlow(key);
       return;
     }
 
     const MSS = 1460;
+    let bytesBurstThisTick = 0;
     let inFlight = Math.max(0, session.mySeq - session.vmAck);
     const maxInFlight = Math.max(
       0,
       Math.min(session.peerWindow, this.TCP_MAX_IN_FLIGHT_BYTES),
     );
 
-    while (session.pendingOutbound.length > 0 && inFlight < maxInFlight) {
+    while (
+      session.pendingOutbound.length > 0 &&
+      inFlight < maxInFlight &&
+      bytesBurstThisTick < this.TCP_MAX_BURST_BYTES
+    ) {
       const allowance = maxInFlight - inFlight;
+      const burstAllowance = this.TCP_MAX_BURST_BYTES - bytesBurstThisTick;
       const chunkSize = Math.min(
         MSS,
         session.pendingOutbound.length,
         allowance,
+        burstAllowance,
       );
       if (chunkSize <= 0) {
         break;
@@ -1302,8 +1379,34 @@ export class NetworkStack extends EventEmitter {
         flags,
         chunk,
       );
+      if (!isLiveSession()) {
+        return;
+      }
+
       session.mySeq += chunk.length;
       inFlight += chunk.length;
+      bytesBurstThisTick += chunk.length;
+    }
+
+    if (!isLiveSession()) {
+      return;
+    }
+
+    if (
+      session.pendingOutbound.length > 0 &&
+      inFlight < maxInFlight &&
+      bytesBurstThisTick >= this.TCP_MAX_BURST_BYTES
+    ) {
+      if (!session.drainScheduled) {
+        session.drainScheduled = true;
+        setImmediate(() => {
+          session.drainScheduled = false;
+          if (this.natTable.get(key) === session) {
+            this.drainOutboundTcp(key, session);
+          }
+        });
+      }
+      return;
     }
 
     if (session.pendingOutbound.length === 0 && session.endPending) {
@@ -1317,11 +1420,19 @@ export class NetworkStack extends EventEmitter {
           session.myAck,
           0x11,
         );
+        if (!isLiveSession()) {
+          return;
+        }
+
         session.mySeq++;
         session.state = "FIN_WAIT";
         session.endPending = false;
         inFlight += 1;
       }
+    }
+
+    if (!isLiveSession()) {
+      return;
     }
 
     if (session.pendingOutbound.length > 0 || session.endPending) {
