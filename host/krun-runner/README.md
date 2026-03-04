@@ -4,9 +4,11 @@ Small host-side helper binary used by Gondolin's experimental `krun` backend.
 
 ## Distribution status
 
-- The main npm package (`@earendil-works/gondolin`) does **not** bundle this binary
-- In this repo, build it locally with `make krun-runner`
-- Gondolin auto-detects the local build output at:
+- `@earendil-works/gondolin` declares platform-specific optional dependencies:
+  - `@earendil-works/gondolin-krun-runner-darwin-arm64`
+  - `@earendil-works/gondolin-krun-runner-linux-x64`
+- In this repo, you can always build it locally with `make krun-runner`
+- Gondolin auto-detects local runner output at:
   - `host/krun-runner/zig-out/bin/gondolin-krun-runner`
 - If you manage your own runner location, set `sandbox.krunRunnerPath`
 

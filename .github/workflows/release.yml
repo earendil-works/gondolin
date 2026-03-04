@@ -48,11 +48,13 @@ jobs:
           body: |
             ## Gondolin ${{ steps.version.outputs.version }}
 
-            ### NPM Package
+            ### NPM Packages
 
             ```bash
             npm install @earendil-works/gondolin@${{ steps.npm_version.outputs.version }}
             ```
+
+            Platform runner packages are published as optional dependencies for supported krun targets.
 
             ### Guest Images
 
@@ -60,9 +62,97 @@ jobs:
 
             Runtime image resolution uses `builtin-image-registry.json` from the main branch.
 
-  publish-npm:
-    name: Publish to NPM
+  publish-krun-runner:
+    name: Publish krun runner (${{ matrix.package_name }})
     needs: [create-release]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            package_dir: packages/gondolin-krun-runner-linux-x64
+            package_name: '@earendil-works/gondolin-krun-runner-linux-x64'
+            zig_archive: zig-x86_64-linux-0.15.1.tar.xz
+            zig_url: https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz
+          - runner: macos-14
+            package_dir: packages/gondolin-krun-runner-darwin-arm64
+            package_name: '@earendil-works/gondolin-krun-runner-darwin-arm64'
+            zig_archive: zig-aarch64-macos-0.15.1.tar.xz
+            zig_url: https://ziglang.org/download/0.15.1/zig-aarch64-macos-0.15.1.tar.xz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install Zig
+        run: |
+          curl -L "${{ matrix.zig_url }}" | tar -xJ
+          echo "$PWD/${{ matrix.zig_archive%.tar.xz }}" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Prepare package payload
+        run: |
+          node scripts/prepare-krun-runner-package.mjs \
+            --package "${{ matrix.package_dir }}"
+
+      - name: Verify package version matches tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          TAG_VERSION="${VERSION#v}"
+          PKG_VERSION=$(node -p "require('./${{ matrix.package_dir }}/package.json').version")
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch for ${{ matrix.package_name }}: package.json has $PKG_VERSION but tag is v$TAG_VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches: $PKG_VERSION"
+
+      - name: Smoke test packed package
+        run: |
+          PKG_DIR="${{ matrix.package_dir }}"
+          PKG_TGZ=$(cd "$PKG_DIR" && npm pack --silent)
+          PKG_PATH="$PWD/$PKG_DIR/$PKG_TGZ"
+
+          TMP_DIR=$(mktemp -d)
+          cd "$TMP_DIR"
+          npm init -y >/dev/null
+          npm install "$PKG_PATH" >/dev/null
+          ./node_modules/.bin/gondolin-krun-runner --version
+
+      - name: Publish runner package (with provenance)
+        run: |
+          cd "${{ matrix.package_dir }}"
+          npm publish --access public --provenance
+
+  publish-npm:
+    name: Publish main package to NPM
+    needs: [create-release, publish-krun-runner]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -107,6 +197,11 @@ jobs:
             exit 1
           fi
           echo "✅ Version matches: $PKG_VERSION"
+
+      - name: Verify runner dependency versions
+        run: |
+          TAG_VERSION="${{ steps.tag_version.outputs.version }}"
+          node -e 'const pkg = require("./host/package.json"); const deps = pkg.optionalDependencies || {}; for (const [name, version] of Object.entries(deps)) { if (version !== process.argv[1]) { console.error(`❌ ${name} version ${version} does not match tag version ${process.argv[1]}`); process.exit(1); } } console.log("✅ Runner optional dependency versions match tag");' "$TAG_VERSION"
 
       - name: Build package artifacts
         run: pnpm --filter @earendil-works/gondolin run build

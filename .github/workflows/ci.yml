@@ -203,9 +203,55 @@ jobs:
       - name: Verify krun runner binary
         run: host/krun-runner/zig-out/bin/gondolin-krun-runner --version
 
+  krun-runner-package-smoke:
+    name: Package krun runner (Linux x86_64 smoke)
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Prepare linux runner package payload
+        run: |
+          node scripts/prepare-krun-runner-package.mjs \
+            --package packages/gondolin-krun-runner-linux-x64
+
+      - name: Smoke test packed linux runner package
+        run: |
+          PKG_DIR="packages/gondolin-krun-runner-linux-x64"
+          PKG_TGZ=$(cd "$PKG_DIR" && npm pack --silent)
+          PKG_PATH="$PWD/$PKG_DIR/$PKG_TGZ"
+
+          TMP_DIR=$(mktemp -d)
+          cd "$TMP_DIR"
+          npm init -y >/dev/null
+          npm install "$PKG_PATH" >/dev/null
+          ./node_modules/.bin/gondolin-krun-runner --version
+
   backend-parity:
     name: Backend parity (qemu + krun)
-    needs: [check, build-guest, krun-linux-build]
+    needs: [check, build-guest, krun-linux-build, krun-runner-package-smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

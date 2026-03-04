@@ -84,6 +84,9 @@ Optional experimental libkrun backend setup:
 make krun-runner
 ```
 
+Published installs of `@earendil-works/gondolin` also include platform-specific
+optional runner packages for supported targets.
+
 This stages `libkrun` under `.cache/` (no global install) and builds the local
 runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
 On macOS, the build ad-hoc signs the runner with the

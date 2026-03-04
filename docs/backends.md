@@ -45,7 +45,7 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 Runner path resolution:
 
 - Auto-detected from local `host/krun-runner/zig-out/bin/gondolin-krun-runner` when present
-- Auto-detected from installed platform runner package when available
+- Auto-detected from installed platform runner package when available (for example `@earendil-works/gondolin-krun-runner-darwin-arm64` or `@earendil-works/gondolin-krun-runner-linux-x64`)
 
 ## Runtime Caveats
 
