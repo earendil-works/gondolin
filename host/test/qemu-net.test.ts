@@ -13,6 +13,10 @@ import forge from "node-forge";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
+import {
+  createGuestClosedError,
+  isGuestClosedError,
+} from "../src/qemu/contracts.ts";
 import { bridgeSshExecChannel, isSshFlowAllowed } from "../src/qemu/ssh.ts";
 import {
   HttpReceiveBuffer,
@@ -4154,6 +4158,138 @@ test("qemu-net: guest close during streamed response settles and evicts dispatch
   } finally {
     server.closeAllConnections();
     server.close();
+  }
+});
+
+test("qemu-net: guest-close marker detection ignores string lookalikes", () => {
+  const markerError = createGuestClosedError();
+  assert.equal(isGuestClosedError(markerError), true);
+  assert.equal(
+    isGuestClosedError(new Error("outer", { cause: markerError })),
+    true,
+  );
+
+  const messageOnly = new Error("guest closed");
+  assert.equal(isGuestClosedError(messageOnly), false);
+
+  const nameOnly = new Error("anything");
+  nameOnly.name = "GuestClosedError";
+  assert.equal(isGuestClosedError(nameOnly), false);
+});
+
+test("qemu-net: marker guest-close wait errors are swallowed", async () => {
+  const backendErrors: Error[] = [];
+  const backend = makeBackend({
+    fetch: async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Buffer.from("hello"));
+          controller.close();
+        },
+      });
+      return new Response(stream as any, {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    },
+    httpHooks: {
+      isIpAllowed: () => true,
+    },
+  });
+  backend.options.dnsLookup = dnsLookupStub([
+    { address: "203.0.113.10", family: 4 },
+  ]);
+  backend.on("error", (err) => {
+    backendErrors.push(err instanceof Error ? err : new Error(String(err)));
+  });
+
+  const writes: Buffer[] = [];
+  let waitCalls = 0;
+
+  await qemuHttp.handleHttpDataWithWriter(
+    backend,
+    "marker-wait",
+    { http: undefined } as any,
+    Buffer.from("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+    {
+      scheme: "http",
+      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+      finish: () => {},
+      waitForWritable: () => {
+        waitCalls += 1;
+        if (waitCalls === 1) {
+          return Promise.reject(createGuestClosedError());
+        }
+        return Promise.resolve();
+      },
+    },
+  );
+
+  const out = Buffer.concat(writes).toString("ascii");
+  assert.match(out, /^HTTP\/1\.1 200 /);
+  assert.ok(!out.includes("502 Bad Gateway"));
+  assert.equal(backendErrors.length, 0);
+});
+
+test("qemu-net: unmarked guest-close lookalike errors are not swallowed", async () => {
+  for (const makeErr of [
+    () => new Error("guest closed"),
+    () => {
+      const err = new Error("boom");
+      err.name = "GuestClosedError";
+      return err;
+    },
+  ]) {
+    const backendErrors: Error[] = [];
+    const backend = makeBackend({
+      fetch: async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Buffer.from("hello"));
+            controller.close();
+          },
+        });
+        return new Response(stream as any, {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      },
+      httpHooks: {
+        isIpAllowed: () => true,
+      },
+    });
+    backend.options.dnsLookup = dnsLookupStub([
+      { address: "203.0.113.11", family: 4 },
+    ]);
+    backend.on("error", (err) => {
+      backendErrors.push(err instanceof Error ? err : new Error(String(err)));
+    });
+
+    const writes: Buffer[] = [];
+    let waitCalls = 0;
+
+    await qemuHttp.handleHttpDataWithWriter(
+      backend,
+      "lookalike-wait",
+      { http: undefined } as any,
+      Buffer.from("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+      {
+        scheme: "http",
+        write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+        finish: () => {},
+        waitForWritable: () => {
+          waitCalls += 1;
+          if (waitCalls === 1) {
+            return Promise.reject(makeErr());
+          }
+          return Promise.resolve();
+        },
+      },
+    );
+
+    const out = Buffer.concat(writes).toString("ascii");
+    assert.ok(out.includes("502 Bad Gateway"));
+    assert.equal(backendErrors.length, 1);
   }
 });
 

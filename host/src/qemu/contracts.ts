@@ -30,11 +30,7 @@ export function isGuestClosedError(error: unknown): boolean {
       [GUEST_CLOSED_MARKER]?: boolean;
       cause?: unknown;
     };
-    if (
-      candidate[GUEST_CLOSED_MARKER] === true ||
-      candidate.name === "GuestClosedError" ||
-      candidate.message === "guest closed"
-    ) {
+    if (candidate[GUEST_CLOSED_MARKER] === true) {
       return true;
     }
     current = candidate.cause;
