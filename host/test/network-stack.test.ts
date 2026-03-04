@@ -1684,6 +1684,7 @@ test("network-stack: dropped outbound TCP payload tears down session", () => {
   const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
   const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
   const closes: any[] = [];
+  const pauses: any[] = [];
   let key = "";
 
   const stack = new NetworkStack({
@@ -1698,7 +1699,7 @@ test("network-stack: dropped outbound TCP payload tears down session", () => {
       },
       onTcpSend: () => {},
       onTcpClose: (m) => closes.push(m),
-      onTcpPause: () => {},
+      onTcpPause: (m) => pauses.push(m),
       onTcpResume: () => {},
     },
   });
@@ -1728,9 +1729,15 @@ test("network-stack: dropped outbound TCP payload tears down session", () => {
   );
 
   fillTxQueueWithArpReplies(stack);
-  stack.handleTcpData({ key, data: Buffer.from("payload") });
+  stack.handleTcpData({ key, data: Buffer.alloc(8 * 1024, 0x61) });
 
   assert.equal(closes.length, 1);
   assert.equal(closes[0].destroy, true);
   assert.ok(!(stack as any).natTable.has(key));
+  assert.equal(pauses.length, 0, "dead flow must not emit pause");
+  assert.equal(
+    (stack as any).txFlowPaused.has(key),
+    false,
+    "dead flow must not remain in txFlowPaused",
+  );
 });

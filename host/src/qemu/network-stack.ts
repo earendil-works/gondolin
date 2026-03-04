@@ -1331,6 +1331,11 @@ export class NetworkStack extends EventEmitter {
   }
 
   private drainOutboundTcp(key: string, session: TcpSession) {
+    const isLiveSession = () => this.natTable.get(key) === session;
+    if (!isLiveSession()) {
+      return;
+    }
+
     if (session.pendingOutbound.length === 0 && !session.endPending) {
       this.maybeResumeFlow(key);
       return;
@@ -1374,9 +1379,17 @@ export class NetworkStack extends EventEmitter {
         flags,
         chunk,
       );
+      if (!isLiveSession()) {
+        return;
+      }
+
       session.mySeq += chunk.length;
       inFlight += chunk.length;
       bytesBurstThisTick += chunk.length;
+    }
+
+    if (!isLiveSession()) {
+      return;
     }
 
     if (
@@ -1407,11 +1420,19 @@ export class NetworkStack extends EventEmitter {
           session.myAck,
           0x11,
         );
+        if (!isLiveSession()) {
+          return;
+        }
+
         session.mySeq++;
         session.state = "FIN_WAIT";
         session.endPending = false;
         inFlight += 1;
       }
+    }
+
+    if (!isLiveSession()) {
+      return;
     }
 
     if (session.pendingOutbound.length > 0 || session.endPending) {
