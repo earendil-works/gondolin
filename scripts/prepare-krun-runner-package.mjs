@@ -55,6 +55,11 @@ function copyFile(src, dest, mode) {
   }
 }
 
+function copySymlink(src, dest) {
+  const linkTarget = fs.readlinkSync(src);
+  fs.symlinkSync(linkTarget, dest);
+}
+
 function main() {
   const { packageDir, runnerPath, libDir } = parseArgs(process.argv.slice(2));
 
@@ -82,16 +87,29 @@ function main() {
 
   const libEntries = fs
     .readdirSync(libDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.startsWith("libkrun"));
+    .filter(
+      (entry) =>
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        entry.name.startsWith("libkrun"),
+    );
 
   if (libEntries.length === 0) {
     throw new Error(`no libkrun files found in ${libDir}`);
   }
 
-  for (const entry of libEntries) {
+  const regularFiles = libEntries.filter((entry) => entry.isFile());
+  const symlinkFiles = libEntries.filter((entry) => entry.isSymbolicLink());
+
+  for (const entry of regularFiles) {
     const src = path.join(libDir, entry.name);
     const dest = path.join(outLibDir, entry.name);
     copyFile(src, dest);
+  }
+
+  for (const entry of symlinkFiles) {
+    const src = path.join(libDir, entry.name);
+    const dest = path.join(outLibDir, entry.name);
+    copySymlink(src, dest);
   }
 
   const repoLicense = path.resolve("LICENSE");

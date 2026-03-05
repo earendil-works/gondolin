@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { execFileSync } from "child_process";
 import { createRequire } from "module";
 
 import { getHostNodeArchCached } from "../host/arch.ts";
@@ -401,9 +402,29 @@ function resolveLocalKrunRunnerPath(): string | null {
   return null;
 }
 
-function resolvePackagedKrunRunnerPath(): string | null {
-  const platform = process.platform;
-  const arch = process.arch;
+type ResolvePackagedKrunRunnerPathDeps = {
+  platform?: NodeJS.Platform;
+  arch?: NodeJS.Architecture;
+  resolvePackageJson?: (specifier: string) => string;
+  readFileSync?: typeof fs.readFileSync;
+  existsSync?: typeof fs.existsSync;
+  probeRunner?: (candidatePath: string) => boolean;
+};
+
+function probeKrunRunnerCandidate(candidatePath: string): boolean {
+  try {
+    execFileSync(candidatePath, ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolvePackagedKrunRunnerPath(
+  deps: ResolvePackagedKrunRunnerPathDeps = {},
+): string | null {
+  const platform = deps.platform ?? process.platform;
+  const arch = deps.arch ?? process.arch;
 
   if (
     (platform !== "darwin" && platform !== "linux") ||
@@ -413,13 +434,17 @@ function resolvePackagedKrunRunnerPath(): string | null {
   }
 
   const packageName = `@earendil-works/gondolin-krun-runner-${platform}-${arch}`;
+  const resolvePackageJson =
+    deps.resolvePackageJson ??
+    ((specifier: string) => require.resolve(specifier));
+  const readFileSync = deps.readFileSync ?? fs.readFileSync;
+  const existsSync = deps.existsSync ?? fs.existsSync;
+  const probeRunner = deps.probeRunner ?? probeKrunRunnerCandidate;
 
   try {
-    const packageJsonPath = require.resolve(`${packageName}/package.json`);
+    const packageJsonPath = resolvePackageJson(`${packageName}/package.json`);
     const packageDir = path.dirname(packageJsonPath);
-    const packageJson = JSON.parse(
-      fs.readFileSync(packageJsonPath, "utf8"),
-    ) as {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
       bin?: string | Record<string, string>;
     };
 
@@ -440,9 +465,14 @@ function resolvePackagedKrunRunnerPath(): string | null {
 
     binCandidates.push("bin/gondolin-krun-runner", "gondolin-krun-runner");
 
+    const seen = new Set<string>();
     for (const rel of binCandidates) {
       const candidate = path.resolve(packageDir, rel);
-      if (fs.existsSync(candidate)) {
+      if (seen.has(candidate) || !existsSync(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
+      if (probeRunner(candidate)) {
         return candidate;
       }
     }
@@ -453,18 +483,32 @@ function resolvePackagedKrunRunnerPath(): string | null {
   return null;
 }
 
-function resolveDefaultKrunRunnerPath(): string {
-  const envPath = process.env.GONDOLIN_KRUN_RUNNER?.trim();
+type ResolveDefaultKrunRunnerPathDeps = {
+  envPath?: string;
+  resolveLocalPath?: () => string | null;
+  resolvePackagedPath?: () => string | null;
+};
+
+function resolveDefaultKrunRunnerPath(
+  deps: ResolveDefaultKrunRunnerPathDeps = {},
+): string {
+  const envValue = Object.prototype.hasOwnProperty.call(deps, "envPath")
+    ? deps.envPath
+    : process.env.GONDOLIN_KRUN_RUNNER;
+  const envPath = envValue?.trim();
   if (envPath) {
     return envPath;
   }
 
-  const local = resolveLocalKrunRunnerPath();
+  const resolveLocalPath = deps.resolveLocalPath ?? resolveLocalKrunRunnerPath;
+  const local = resolveLocalPath();
   if (local) {
     return local;
   }
 
-  const packaged = resolvePackagedKrunRunnerPath();
+  const resolvePackagedPath =
+    deps.resolvePackagedPath ?? resolvePackagedKrunRunnerPath;
+  const packaged = resolvePackagedPath();
   if (packaged) {
     return packaged;
   }
@@ -845,3 +889,9 @@ export async function resolveSandboxServerOptionsAsync(
   const assets = await ensureGuestAssets();
   return resolveSandboxServerOptions(options, assets);
 }
+
+export const __test = {
+  probeKrunRunnerCandidate,
+  resolvePackagedKrunRunnerPath,
+  resolveDefaultKrunRunnerPath,
+};
