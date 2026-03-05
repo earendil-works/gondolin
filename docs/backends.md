@@ -30,6 +30,7 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 ### QEMU
 
 - Guest architecture must match the selected QEMU binary (`qemu-system-aarch64` vs `qemu-system-x86_64`)
+- When `sandbox.qemuPath` is omitted, Gondolin auto-selects the default QEMU binary from the image manifest architecture
 - Kernel/initrd/rootfs come from selected guest assets
 
 ### krun

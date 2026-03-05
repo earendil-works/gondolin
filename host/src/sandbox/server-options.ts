@@ -829,8 +829,11 @@ export function resolveSandboxServerOptions(
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
-  const defaultQemu =
-    hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  const hostArchNormalized = normalizeArch(hostArch);
+  const defaultQemuForHostArch =
+    hostArchNormalized === "arm64"
+      ? "qemu-system-aarch64"
+      : "qemu-system-x86_64";
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
@@ -844,7 +847,7 @@ export function resolveSandboxServerOptions(
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
-  const qemuPath = options.qemuPath ?? defaultQemu;
+  let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
   const krunRunnerPath =
@@ -901,10 +904,21 @@ export function resolveSandboxServerOptions(
     rootfsPath,
   });
 
+  if (
+    vmm === "qemu" &&
+    options.qemuPath === undefined &&
+    guestFromManifest !== null
+  ) {
+    qemuPath =
+      guestFromManifest.arch === "arm64"
+        ? "qemu-system-aarch64"
+        : "qemu-system-x86_64";
+  }
+
   if (vmm === "qemu") {
     const qemuArch = detectQemuArch(qemuPath);
     if (guestFromManifest && qemuArch && guestFromManifest.arch !== qemuArch) {
-      const host = normalizeArch(hostArch) ?? hostArch;
+      const host = hostArchNormalized ?? hostArch;
       throw new Error(
         "Guest image architecture mismatch.\n" +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +

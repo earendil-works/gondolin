@@ -93,6 +93,25 @@ test("resolveSandboxServerOptions fails fast on guest/qemu arch mismatch", () =>
   }
 });
 
+test("resolveSandboxServerOptions auto-selects qemu binary from guest image arch", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const guestArch = hostArch === "aarch64" ? "x86_64" : "aarch64";
+  const dir = makeTempAssetsDir(guestArch);
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      imagePath: dir,
+    });
+
+    assert.equal(
+      resolved.qemuPath,
+      guestArch === "aarch64" ? "qemu-system-aarch64" : "qemu-system-x86_64",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {
   const dir = makeTempAssetsDir("aarch64");
   try {
