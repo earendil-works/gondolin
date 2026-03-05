@@ -8,18 +8,30 @@ import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
-  options: { includeKrunAssets?: boolean } = {},
+  options: { includeKrunAssets?: boolean; splitAssetDirs?: boolean } = {},
 ): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-arch-"));
   const includeKrunAssets = options.includeKrunAssets ?? true;
+  const splitAssetDirs = options.splitAssetDirs ?? false;
+
+  const kernelRel = splitAssetDirs ? "boot/vmlinuz-virt" : "vmlinuz-virt";
+  const initrdRel = splitAssetDirs
+    ? "boot/initramfs.cpio.lz4"
+    : "initramfs.cpio.lz4";
+  const rootfsRel = splitAssetDirs ? "img/rootfs.ext4" : "rootfs.ext4";
+  const krunKernelRel = splitAssetDirs ? "boot/krun-kernel" : "krun-kernel";
+  const krunInitrdRel = splitAssetDirs ? "boot/krun-initrd" : "krun-initrd";
 
   // Required asset files (can be empty for this test).
-  fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
-  fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
-  fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
+  fs.mkdirSync(path.dirname(path.join(dir, kernelRel)), { recursive: true });
+  fs.mkdirSync(path.dirname(path.join(dir, initrdRel)), { recursive: true });
+  fs.mkdirSync(path.dirname(path.join(dir, rootfsRel)), { recursive: true });
+  fs.writeFileSync(path.join(dir, kernelRel), "");
+  fs.writeFileSync(path.join(dir, initrdRel), "");
+  fs.writeFileSync(path.join(dir, rootfsRel), "");
   if (includeKrunAssets) {
-    fs.writeFileSync(path.join(dir, "krun-kernel"), "");
-    fs.writeFileSync(path.join(dir, "krun-initrd"), "");
+    fs.writeFileSync(path.join(dir, krunKernelRel), "");
+    fs.writeFileSync(path.join(dir, krunInitrdRel), "");
   }
 
   // Manifest is what we use to detect the guest architecture.
@@ -35,13 +47,13 @@ function makeTempAssetsDir(
         },
         buildTime: new Date().toISOString(),
         assets: {
-          kernel: "vmlinuz-virt",
-          initramfs: "initramfs.cpio.lz4",
-          rootfs: "rootfs.ext4",
+          kernel: kernelRel,
+          initramfs: initrdRel,
+          rootfs: rootfsRel,
           ...(includeKrunAssets
             ? {
-                krunKernel: "krun-kernel",
-                krunInitrd: "krun-initrd",
+                krunKernel: krunKernelRel,
+                krunInitrd: krunInitrdRel,
               }
             : {}),
         },
@@ -208,6 +220,24 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
 
     assert.equal(resolved.kernelPath, krunKernel);
     assert.equal(resolved.initrdPath, krunInitrd);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions supports split manifest asset directories for krun", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch, { splitAssetDirs: true });
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      imagePath: dir,
+      vmm: "krun",
+    });
+
+    assert.equal(resolved.kernelPath, path.join(dir, "boot", "krun-kernel"));
+    assert.equal(resolved.initrdPath, path.join(dir, "boot", "krun-initrd"));
+    assert.equal(resolved.rootfsPath, path.join(dir, "img", "rootfs.ext4"));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

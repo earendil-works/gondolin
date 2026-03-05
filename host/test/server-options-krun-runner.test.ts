@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { __test as serverOptionsTest } from "../src/sandbox/server-options.ts";
+import {
+  __test as serverOptionsTest,
+  resolveSandboxServerOptions,
+} from "../src/sandbox/server-options.ts";
 
 test("resolvePackagedKrunRunnerPath rejects non-runnable packaged candidate", () => {
   const tmp = fs.mkdtempSync(
@@ -74,4 +77,41 @@ test("resolveDefaultKrunRunnerPath falls back to PATH token", () => {
   });
 
   assert.equal(resolved, "gondolin-krun-runner");
+});
+
+test("resolveSandboxServerOptions does not resolve krun runner for qemu", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qemu-runner-"));
+
+  try {
+    const kernelPath = path.join(tmp, "vmlinuz-virt");
+    const initrdPath = path.join(tmp, "initramfs.cpio.lz4");
+    const rootfsPath = path.join(tmp, "rootfs.ext4");
+    fs.writeFileSync(kernelPath, "");
+    fs.writeFileSync(initrdPath, "");
+    fs.writeFileSync(rootfsPath, "");
+
+    let resolveCalls = 0;
+    const resolved = resolveSandboxServerOptions(
+      {
+        vmm: "qemu",
+        imagePath: {
+          kernelPath,
+          initrdPath,
+          rootfsPath,
+        },
+      },
+      undefined,
+      {
+        resolveDefaultKrunRunnerPath: () => {
+          resolveCalls += 1;
+          throw new Error("krun runner resolver should not be called for qemu");
+        },
+      },
+    );
+
+    assert.equal(resolved.vmm, "qemu");
+    assert.equal(resolveCalls, 0);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

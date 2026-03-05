@@ -290,15 +290,33 @@ export type GuestFileDeleteOptions = {
   signal?: AbortSignal;
 };
 
+type ResolvedImagePath = {
+  /** resolved guest asset paths */
+  assets: GuestAssets;
+  /** resolved image directory when available */
+  imageDir: string | null;
+  /** whether caller supplied explicit asset object */
+  explicitAssetObject: boolean;
+};
+
 /**
- * Resolve imagePath selector to GuestAssets.
+ * Resolve imagePath selector to guest assets and optional image directory.
  */
-function resolveImagePath(imagePath: ImagePath): GuestAssets {
+function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
   if (typeof imagePath === "string") {
     const resolved = resolveImageSelector(imagePath);
-    return loadGuestAssets(resolved.assetDir);
+    return {
+      assets: loadGuestAssets(resolved.assetDir),
+      imageDir: resolved.assetDir,
+      explicitAssetObject: false,
+    };
   }
-  return imagePath;
+
+  return {
+    assets: imagePath,
+    imageDir: null,
+    explicitAssetObject: true,
+  };
 }
 
 function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
@@ -624,11 +642,116 @@ function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
   return kernelDir;
 }
 
+function isPathWithinOrEqual(base: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(base), path.resolve(candidate));
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative))
+  );
+}
+
+function findSharedAssetAncestor(assets: Partial<GuestAssets>): string | null {
+  const assetPaths = [assets.kernelPath, assets.initrdPath, assets.rootfsPath];
+  if (assetPaths.some((value) => !value)) {
+    return null;
+  }
+
+  let candidate = path.dirname(path.resolve(assetPaths[0]!));
+
+  for (const rawPath of assetPaths.slice(1)) {
+    const current = path.dirname(path.resolve(rawPath!));
+
+    while (!isPathWithinOrEqual(candidate, current)) {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) {
+        break;
+      }
+      candidate = parent;
+    }
+  }
+
+  return candidate;
+}
+
+function manifestMatchesAssets(
+  manifestDir: string,
+  assets: Partial<GuestAssets>,
+): boolean {
+  if (!assets.kernelPath || !assets.initrdPath || !assets.rootfsPath) {
+    return false;
+  }
+
+  const manifest = loadAssetManifest(manifestDir);
+  if (!manifest) {
+    return false;
+  }
+
+  const assetFiles = manifest.assets ?? {
+    kernel: "vmlinuz-virt",
+    initramfs: "initramfs.cpio.lz4",
+    rootfs: "rootfs.ext4",
+  };
+
+  try {
+    const kernelPath = resolveManifestAssetPath(
+      manifestDir,
+      assetFiles.kernel,
+      "manifest.assets.kernel",
+    );
+    const initrdPath = resolveManifestAssetPath(
+      manifestDir,
+      assetFiles.initramfs,
+      "manifest.assets.initramfs",
+    );
+    const rootfsPath = resolveManifestAssetPath(
+      manifestDir,
+      assetFiles.rootfs,
+      "manifest.assets.rootfs",
+    );
+
+    return (
+      path.resolve(kernelPath) === path.resolve(assets.kernelPath) &&
+      path.resolve(initrdPath) === path.resolve(assets.initrdPath) &&
+      path.resolve(rootfsPath) === path.resolve(assets.rootfsPath)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveImageDirFromAssets(
+  assets: Partial<GuestAssets>,
+): string | null {
+  const sharedAncestor = findSharedAssetAncestor(assets);
+  if (sharedAncestor) {
+    let dir = sharedAncestor;
+    for (;;) {
+      if (manifestMatchesAssets(dir, assets)) {
+        return dir;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+  }
+
+  const commonDir = findCommonAssetDir(assets);
+  if (commonDir && manifestMatchesAssets(commonDir, assets)) {
+    return commonDir;
+  }
+
+  return null;
+}
+
 function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
   arch: "arm64" | "x64";
   manifestPath: string;
 } | null {
-  const dir = findCommonAssetDir(assets);
+  const dir = resolveImageDirFromAssets(assets);
   if (!dir) return null;
 
   const manifest = loadAssetManifest(dir);
@@ -647,18 +770,34 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
  * @param options User-provided options
  * @param assets Optional pre-resolved guest assets (from ensureGuestAssets)
  */
+type ResolveSandboxServerOptionsDeps = {
+  /** test-only override for default krun runner resolution */
+  resolveDefaultKrunRunnerPath?: () => string;
+};
+
 export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
   assets?: GuestAssets,
+  deps: ResolveSandboxServerOptionsDeps = {},
 ): ResolvedSandboxServerOptions {
   // Resolve image paths: explicit imagePath > assets parameter > local dev paths
   let resolvedAssets: Partial<GuestAssets>;
+  let explicitImageObject = false;
+  let imageDir: string | null = null;
+
   if (options.imagePath !== undefined) {
-    resolvedAssets = resolveImagePath(options.imagePath);
+    const resolvedImagePath = resolveImagePath(options.imagePath);
+    resolvedAssets = resolvedImagePath.assets;
+    explicitImageObject = resolvedImagePath.explicitAssetObject;
+    imageDir = resolvedImagePath.imageDir;
   } else if (assets) {
     resolvedAssets = assets;
   } else {
     resolvedAssets = resolveGuestAssetsSync() ?? {};
+  }
+
+  if (!imageDir) {
+    imageDir = resolveImageDirFromAssets(resolvedAssets);
   }
 
   const baseKernelPath = resolvedAssets.kernelPath;
@@ -692,7 +831,6 @@ export function resolveSandboxServerOptions(
   const hostArch = getHostNodeArchCached();
   const defaultQemu =
     hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
-  const defaultKrunRunner = resolveDefaultKrunRunnerPath();
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
@@ -707,7 +845,13 @@ export function resolveSandboxServerOptions(
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
   const qemuPath = options.qemuPath ?? defaultQemu;
-  const krunRunnerPath = options.krunRunnerPath ?? defaultKrunRunner;
+  const resolveDefaultKrunRunnerPathFn =
+    deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
+  const krunRunnerPath =
+    options.krunRunnerPath ??
+    (vmm === "krun"
+      ? resolveDefaultKrunRunnerPathFn()
+      : "gondolin-krun-runner");
 
   if (vmm === "krun") {
     const unsupported: string[] = [];
@@ -725,11 +869,6 @@ export function resolveSandboxServerOptions(
     }
   }
 
-  const explicitImageObject =
-    typeof options.imagePath === "object" && options.imagePath !== null;
-  const imageDir = explicitImageObject
-    ? null
-    : findCommonAssetDir(resolvedAssets);
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
