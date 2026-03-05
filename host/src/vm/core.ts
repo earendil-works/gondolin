@@ -33,6 +33,7 @@ import { SandboxServer } from "../sandbox/server.ts";
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
+  type SandboxVmm,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
@@ -1924,17 +1925,13 @@ fi
       );
     }
 
-    if ((this.resolvedSandboxOptions.vmm ?? "qemu") !== "qemu") {
-      throw new Error("checkpoint is currently only supported with vmm=qemu");
-    }
-
     const rootDisk = this.rootDisk;
     if (!rootDisk) {
       throw new Error("vm has no root disk");
     }
     if (rootDisk.snapshot) {
       throw new Error(
-        "cannot checkpoint: root disk is running in qemu snapshot mode",
+        "cannot checkpoint: root disk is running in ephemeral snapshot mode",
       );
     }
     if (rootDisk.format !== "qcow2") {
@@ -2001,6 +1998,12 @@ fi
       );
     }
 
+    const createdWithVmm = this.resolvedSandboxOptions.vmm;
+    const compatibleVmm: SandboxVmm[] =
+      manifest?.assets?.krunKernel || createdWithVmm === "krun"
+        ? ["qemu", "krun"]
+        : ["qemu"];
+
     const data: VmCheckpointData = {
       version: 1,
       name: checkpointName,
@@ -2008,6 +2011,9 @@ fi
       // Kept for schema compatibility (ignored for single-file checkpoints)
       diskFile: path.basename(resolvedCheckpointPath),
       guestAssetBuildId,
+      snapshotKind: "disk",
+      createdWithVmm,
+      compatibleVmm,
     };
 
     VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);

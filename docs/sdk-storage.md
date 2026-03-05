@@ -117,7 +117,8 @@ Gondolin supports **disk-only checkpoints** of the VM root filesystem.
 A checkpoint captures the VM's writable disk state and can be resumed cheaply
 using qcow2 backing files.
 
-> **Backend support:** checkpoints currently require `vmm=qemu`.
+> **Backend support:** checkpoints work with both `qemu` and `krun`.
+> Resume enforces checkpoint backend-compatibility metadata.
 > See [VM Backends (QEMU vs krun)](./backends.md).
 
 See also: [Snapshots](./snapshots.md).
@@ -154,6 +155,8 @@ Notes:
   (reload with `VmCheckpoint.load(checkpointPath)`)
 - Checkpoints require guest assets with a `manifest.json` that includes a
   deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
+- Cross-backend resume (`qemu` ↔ `krun`) requires guest assets with krun boot
+  artifacts (`manifest.assets.krunKernel`)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`); writes under those paths are not part of disk checkpoints
 
 ## Debug Logging

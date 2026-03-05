@@ -9,21 +9,21 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
 ## Feature Parity Matrix
 
-| Capability / setting | `qemu` | `krun` | Notes |
-| --- | --- | --- | --- |
-| `sandbox.vmm` | ✓ | ✓ | Select backend (`"qemu"` or `"krun"`) |
-| `sandbox.qemuPath` | ✓ |  | Rejected when `vmm=krun` |
-| `sandbox.krunRunnerPath` |  | ✓ | Used only with `vmm=krun` |
-| `sandbox.machineType` | ✓ |  | Rejected when `vmm=krun` |
-| `sandbox.accel` | ✓ |  | Rejected when `vmm=krun`; libkrun backend is implicit per OS |
-| `sandbox.cpu` | ✓ |  | Rejected when `vmm=krun` |
-| `sandbox.cpus` | ✓ | ✓ | Shared high-level CPU count option |
-| `sandbox.memory` | ✓ | ✓ | `krun` parses memory and passes MiB to `libkrun` |
-| `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | Supported on both backends |
-| `sandbox.rootDiskSnapshot` | ✓ |  | Rejected when `vmm=krun` |
-| `rootfs.mode = "memory"` | ✓ | ✓ | QEMU uses snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
-| `vm.checkpoint()` / checkpoint resume | ✓ |  | Currently `vmm=qemu` only |
-| Exec/VFS/network mediation/SSH/ingress APIs | ✓ | ✓ | Same host-side control plane and policy stack |
+| Capability / setting                                           | `qemu` | `krun` | Notes                                                                                                                        |
+| -------------------------------------------------------------- | ------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `sandbox.vmm`                                                  | ✓      | ✓      | Select backend (`"qemu"` or `"krun"`)                                                                                        |
+| `sandbox.qemuPath`                                             | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
+| `sandbox.krunRunnerPath`                                       |        | ✓      | Used only with `vmm=krun`                                                                                                    |
+| `sandbox.machineType`                                          | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
+| `sandbox.accel`                                                | ✓      |        | Rejected when `vmm=krun`; libkrun backend is implicit per OS                                                                 |
+| `sandbox.cpu`                                                  | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
+| `sandbox.cpus`                                                 | ✓      | ✓      | Shared high-level CPU count option                                                                                           |
+| `sandbox.memory`                                               | ✓      | ✓      | `krun` parses memory and passes MiB to `libkrun`                                                                             |
+| `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓      | ✓      | Supported on both backends                                                                                                   |
+| `sandbox.rootDiskSnapshot`                                     | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
+| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |
+| Exec/VFS/network mediation/SSH/ingress APIs                    | ✓      | ✓      | Same host-side control plane and policy stack                                                                                |
 
 ## Architecture and Kernel Constraints
 
@@ -50,7 +50,7 @@ Runner path resolution:
 ## Runtime Caveats
 
 - `krun` backend is still experimental and has less runtime parity coverage than `qemu`
-- Disk checkpoints are currently qemu-only
+- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
 - Some krun networking edge cases are still under investigation
 - Host CA trust configuration can cause guest-visible HTTP `502` errors on both backends when upstream TLS validation fails
 

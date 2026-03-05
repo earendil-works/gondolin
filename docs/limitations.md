@@ -1,6 +1,6 @@
 # Current Limitations
 
-This page tracks the current limitations of Gondolin.  If you are evaluating
+This page tracks the current limitations of Gondolin. If you are evaluating
 Gondolin for a production workflow, treat this as a "known gaps" checklist.
 
 ## No Full VM Save/Restore (Memory Snapshots)
@@ -8,7 +8,7 @@ Gondolin for a production workflow, treat this as a "known gaps" checklist.
 Gondolin does not provide full VM save/restore (capturing in-VM process state +
 RAM) today.
 
-However, Gondolin *does* support **disk-only checkpoints** (qcow2-backed) via
+However, Gondolin _does_ support **disk-only checkpoints** (qcow2-backed) via
 `vm.checkpoint(<absolute qcow2 path>)` and `checkpoint.resume()`.
 
 See also: [Snapshots](./snapshots.md).
@@ -21,9 +21,9 @@ disk checkpoints.
 
 ## Adding Extra Packages Requires Building a New Image
 
-The default guest image is intentionally minimal.  If you need additional
+The default guest image is intentionally minimal. If you need additional
 packages (for example: compilers, language runtimes, or extra system tools), you
-currently need to build a custom guest image and point Gondolin at it.  This is
+currently need to build a custom guest image and point Gondolin at it. This is
 in some ways a consequence of the lack of snapshotting.
 
 See [Custom Images](./custom-images.md).
@@ -41,7 +41,7 @@ As a result, HTTP/2 and HTTP/3 are not supported today.
 
 ## No QUIC or WebRTC support
 
-Related to the lack of HTTP/3 support, QUIC is not supported.  Likewise WebRTC
+Related to the lack of HTTP/3 support, QUIC is not supported. Likewise WebRTC
 is not supported.
 
 This means software that relies on UDP-based application protocols (or generic
@@ -54,7 +54,7 @@ feature parity is not complete.
 
 Notable gaps today:
 
-- `vm.checkpoint(...)` is currently only supported with `vmm=qemu`
+- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
 - qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
   rejected when `vmm=krun`
 - `sandbox.rootDiskSnapshot` is rejected when `vmm=krun`
