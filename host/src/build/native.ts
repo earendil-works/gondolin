@@ -528,13 +528,6 @@ function extractKernelFromSharedArchive(
   extractDir: string,
   archName: "aarch64" | "x86_64",
 ): Buffer {
-  const hostArch = hostKrunArch();
-  if (hostArch !== archName) {
-    throw new Error(
-      `libkrunfw shared archive extraction for ${archName} requires a matching host architecture (current host: ${hostArch ?? process.arch})`,
-    );
-  }
-
   const lib64Path = path.join(extractDir, "lib64", "libkrunfw.so");
   const libPath = path.join(extractDir, "lib", "libkrunfw.so");
   const sharedLibPath = fs.existsSync(lib64Path)
@@ -549,8 +542,33 @@ function extractKernelFromSharedArchive(
     );
   }
 
+  const sharedLib = fs.readFileSync(sharedLibPath);
+
+  try {
+    return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
+  } catch (parseErr) {
+    const hostArch = hostKrunArch();
+    if (hostArch !== archName) {
+      throw new Error(
+        `failed to extract kernel bundle from libkrunfw shared archive for ${archName}: ${formatExecError(parseErr)}`,
+      );
+    }
+
+    return extractKernelFromSharedArchiveByExecution(
+      sharedLibPath,
+      archName,
+      parseErr,
+    );
+  }
+}
+
+function extractKernelFromSharedArchiveByExecution(
+  sharedLibPath: string,
+  archName: "aarch64" | "x86_64",
+  parseErr: unknown,
+): Buffer {
   const libDir = path.dirname(sharedLibPath);
-  const buildDir = path.join(extractDir, "build-shared");
+  const buildDir = path.join(path.dirname(sharedLibPath), "build-shared");
   fs.mkdirSync(buildDir, { recursive: true });
 
   const extractorPath = path.join(buildDir, "extract-kernel");
@@ -594,7 +612,7 @@ function extractKernelFromSharedArchive(
     );
   } catch (err) {
     throw new Error(
-      `failed to compile libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
+      `failed to compile libkrunfw kernel extractor for ${archName} after parser fallback (${formatExecError(parseErr)}): ${formatExecError(err)}`,
     );
   }
 
@@ -615,9 +633,275 @@ function extractKernelFromSharedArchive(
     return kernel;
   } catch (err) {
     throw new Error(
-      `failed to run libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
+      `failed to run libkrunfw kernel extractor for ${archName} after parser fallback (${formatExecError(parseErr)}): ${formatExecError(err)}`,
     );
   }
+}
+
+type ElfEndian = "le" | "be";
+
+type ParsedElfSection = {
+  /** section type code */
+  type: number;
+  /** section file offset in `bytes` */
+  offset: number;
+  /** section size in `bytes` */
+  size: number;
+  /** section virtual address */
+  address: number;
+  /** linked section index */
+  link: number;
+  /** table entry size in `bytes` */
+  entrySize: number;
+};
+
+function extractKernelBundleFromSharedLibraryBytes(
+  bytes: Buffer,
+  archName: "aarch64" | "x86_64",
+): Buffer {
+  if (bytes.length < 64) {
+    throw new Error("ELF header is truncated");
+  }
+
+  if (!bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+    throw new Error("file is not an ELF shared library");
+  }
+
+  const elfClass = bytes.readUInt8(4);
+  if (elfClass !== 2) {
+    throw new Error(`unsupported ELF class ${elfClass} (expected ELF64)`);
+  }
+
+  const endianTag = bytes.readUInt8(5);
+  const endian: ElfEndian =
+    endianTag === 1
+      ? "le"
+      : endianTag === 2
+        ? "be"
+        : (() => {
+            throw new Error(`unsupported ELF data encoding ${endianTag}`);
+          })();
+
+  const machine = readU16(bytes, 18, endian);
+  const expectedMachine = archName === "aarch64" ? 183 : 62;
+  if (machine !== expectedMachine) {
+    throw new Error(
+      `ELF machine ${machine} does not match expected ${expectedMachine} for ${archName}`,
+    );
+  }
+
+  const sections = parseElfSections(bytes, endian);
+  const dynsym = sections.find((section) => section.type === 11);
+  if (!dynsym) {
+    throw new Error("ELF does not contain .dynsym section");
+  }
+  if (dynsym.entrySize <= 0) {
+    throw new Error("ELF .dynsym has invalid entry size");
+  }
+  if (dynsym.entrySize < 24) {
+    throw new Error("ELF .dynsym entry size is too small for ELF64");
+  }
+
+  const dynstr = sections[dynsym.link];
+  if (!dynstr) {
+    throw new Error("ELF .dynsym string table link is out of range");
+  }
+
+  const dynstrBytes = sliceChecked(bytes, dynstr.offset, dynstr.size);
+
+  const symbolCount = Math.floor(dynsym.size / dynsym.entrySize);
+  let symbolValue = -1;
+  let symbolSize = -1;
+  let symbolSectionIndex = -1;
+
+  for (let i = 0; i < symbolCount; i += 1) {
+    const entryOffset = dynsym.offset + i * dynsym.entrySize;
+    const entry = sliceChecked(bytes, entryOffset, dynsym.entrySize);
+
+    const nameOffset = readU32(entry, 0, endian);
+    if (nameOffset >= dynstrBytes.length) {
+      continue;
+    }
+
+    const name = readCString(dynstrBytes, nameOffset);
+    if (name !== "KERNEL_BUNDLE") {
+      continue;
+    }
+
+    symbolSectionIndex = readU16(entry, 6, endian);
+    symbolValue = readU64(entry, 8, endian);
+    symbolSize = readU64(entry, 16, endian);
+    break;
+  }
+
+  if (symbolValue < 0 || symbolSize <= 0) {
+    throw new Error("ELF does not expose KERNEL_BUNDLE symbol");
+  }
+
+  const bySection = tryResolveSymbolOffsetFromSection(
+    sections,
+    symbolSectionIndex,
+    symbolValue,
+    symbolSize,
+  );
+  if (bySection !== null) {
+    return sliceChecked(bytes, bySection, symbolSize);
+  }
+
+  const byLoadSegment = tryResolveSymbolOffsetFromProgramHeaders(
+    bytes,
+    endian,
+    symbolValue,
+    symbolSize,
+  );
+  if (byLoadSegment !== null) {
+    return sliceChecked(bytes, byLoadSegment, symbolSize);
+  }
+
+  throw new Error("failed to map KERNEL_BUNDLE symbol to file bytes");
+}
+
+function parseElfSections(
+  bytes: Buffer,
+  endian: ElfEndian,
+): ParsedElfSection[] {
+  const sectionHeaderOffset = readU64(bytes, 40, endian);
+  const sectionHeaderEntrySize = readU16(bytes, 58, endian);
+  const sectionHeaderCount = readU16(bytes, 60, endian);
+
+  if (sectionHeaderEntrySize <= 0) {
+    throw new Error("ELF section header entry size is invalid");
+  }
+
+  const tableSize = sectionHeaderEntrySize * sectionHeaderCount;
+  sliceChecked(bytes, sectionHeaderOffset, tableSize);
+
+  const sections: ParsedElfSection[] = [];
+  for (let i = 0; i < sectionHeaderCount; i += 1) {
+    const off = sectionHeaderOffset + i * sectionHeaderEntrySize;
+    const entry = sliceChecked(bytes, off, sectionHeaderEntrySize);
+
+    sections.push({
+      type: readU32(entry, 4, endian),
+      offset: readU64(entry, 24, endian),
+      size: readU64(entry, 32, endian),
+      link: readU32(entry, 40, endian),
+      address: readU64(entry, 16, endian),
+      entrySize: readU64(entry, 56, endian),
+    });
+  }
+
+  return sections;
+}
+
+function tryResolveSymbolOffsetFromSection(
+  sections: ParsedElfSection[],
+  sectionIndex: number,
+  symbolValue: number,
+  symbolSize: number,
+): number | null {
+  if (sectionIndex < 0 || sectionIndex >= sections.length) {
+    return null;
+  }
+
+  // 0 and values >= 0xff00 are undefined/reserved in ELF
+  if (sectionIndex === 0 || sectionIndex >= 0xff00) {
+    return null;
+  }
+
+  const section = sections[sectionIndex]!;
+  const symbolEnd = symbolValue + symbolSize;
+  const sectionEnd = section.address + section.size;
+
+  if (symbolValue < section.address || symbolEnd > sectionEnd) {
+    return null;
+  }
+
+  return section.offset + (symbolValue - section.address);
+}
+
+function tryResolveSymbolOffsetFromProgramHeaders(
+  bytes: Buffer,
+  endian: ElfEndian,
+  symbolValue: number,
+  symbolSize: number,
+): number | null {
+  const programHeaderOffset = readU64(bytes, 32, endian);
+  const programHeaderEntrySize = readU16(bytes, 54, endian);
+  const programHeaderCount = readU16(bytes, 56, endian);
+
+  if (programHeaderEntrySize <= 0 || programHeaderCount <= 0) {
+    return null;
+  }
+
+  const tableSize = programHeaderEntrySize * programHeaderCount;
+  sliceChecked(bytes, programHeaderOffset, tableSize);
+
+  for (let i = 0; i < programHeaderCount; i += 1) {
+    const off = programHeaderOffset + i * programHeaderEntrySize;
+    const entry = sliceChecked(bytes, off, programHeaderEntrySize);
+
+    const type = readU32(entry, 0, endian);
+    if (type !== 1) {
+      continue;
+    }
+
+    const fileOffset = readU64(entry, 8, endian);
+    const virtualAddress = readU64(entry, 16, endian);
+    const fileSize = readU64(entry, 32, endian);
+
+    const segmentEnd = virtualAddress + fileSize;
+    const symbolEnd = symbolValue + symbolSize;
+
+    if (symbolValue < virtualAddress || symbolEnd > segmentEnd) {
+      continue;
+    }
+
+    return fileOffset + (symbolValue - virtualAddress);
+  }
+
+  return null;
+}
+
+function sliceChecked(bytes: Buffer, offset: number, size: number): Buffer {
+  if (offset < 0 || size < 0) {
+    throw new Error("ELF bounds are negative");
+  }
+  if (offset + size > bytes.length) {
+    throw new Error("ELF bounds exceed file length");
+  }
+  return bytes.subarray(offset, offset + size);
+}
+
+function readCString(bytes: Buffer, offset: number): string {
+  const end = bytes.indexOf(0, offset);
+  if (end === -1) {
+    throw new Error("unterminated string in ELF table");
+  }
+  return bytes.toString("utf8", offset, end);
+}
+
+function readU16(bytes: Buffer, offset: number, endian: ElfEndian): number {
+  return endian === "le"
+    ? bytes.readUInt16LE(offset)
+    : bytes.readUInt16BE(offset);
+}
+
+function readU32(bytes: Buffer, offset: number, endian: ElfEndian): number {
+  return endian === "le"
+    ? bytes.readUInt32LE(offset)
+    : bytes.readUInt32BE(offset);
+}
+
+function readU64(bytes: Buffer, offset: number, endian: ElfEndian): number {
+  const value =
+    endian === "le"
+      ? bytes.readBigUInt64LE(offset)
+      : bytes.readBigUInt64BE(offset);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("ELF value exceeds JavaScript safe integer range");
+  }
+  return Number(value);
 }
 
 function formatExecError(err: unknown): string {
@@ -666,3 +950,7 @@ function isNotFoundDownloadError(err: unknown): boolean {
 function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
+
+export const __test = {
+  extractKernelBundleFromSharedLibraryBytes,
+};
