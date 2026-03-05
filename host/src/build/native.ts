@@ -8,7 +8,7 @@ import { buildAlpineImages } from "./alpine.ts";
 import type { BuildConfig, Architecture } from "./config.ts";
 import { parseApkIndex } from "../alpine/packages.ts";
 import { decompressTarGz, extractTarGz, parseTar } from "../alpine/tar.ts";
-import { downloadFile } from "../alpine/utils.ts";
+import { downloadFile, DownloadFileError } from "../alpine/utils.ts";
 import {
   DEFAULT_ROOTFS_PACKAGES,
   INITRAMFS_FILENAME,
@@ -319,6 +319,8 @@ type KrunArchive = {
   kind: "prebuilt" | "shared";
 };
 
+type DownloadFileFn = (url: string, dest: string) => Promise<void>;
+
 async function fetchKrunBootAssets(
   outputDir: string,
   arch: Architecture,
@@ -402,6 +404,7 @@ async function downloadKrunArchive(
   archName: "aarch64" | "x86_64",
   cacheDir: string,
   log: (msg: string) => void,
+  download: DownloadFileFn = downloadFile,
 ): Promise<KrunArchive> {
   const releaseDir = path.join(
     cacheDir,
@@ -422,7 +425,7 @@ async function downloadKrunArchive(
   const prebuiltUrl = `${LIBKRUNFW_RELEASE_BASE_URL}/${krunfwVersion}/${prebuiltName}`;
   try {
     log(`Downloading ${prebuiltUrl}`);
-    await downloadFile(prebuiltUrl, prebuiltPath);
+    await download(prebuiltUrl, prebuiltPath);
     return { archivePath: prebuiltPath, kind: "prebuilt" };
   } catch (err) {
     if (!isNotFoundDownloadError(err)) {
@@ -438,7 +441,7 @@ async function downloadKrunArchive(
   if (!fs.existsSync(sharedPath)) {
     const sharedUrl = `${LIBKRUNFW_RELEASE_BASE_URL}/${krunfwVersion}/${sharedName}`;
     log(`Downloading ${sharedUrl}`);
-    await downloadFile(sharedUrl, sharedPath);
+    await download(sharedUrl, sharedPath);
   }
 
   return { archivePath: sharedPath, kind: "shared" };
@@ -941,10 +944,7 @@ function hostKrunArch(): "aarch64" | "x86_64" | null {
 }
 
 function isNotFoundDownloadError(err: unknown): boolean {
-  if (!(err instanceof Error)) {
-    return false;
-  }
-  return err.message.includes("HTTP 404");
+  return err instanceof DownloadFileError && err.status === 404;
 }
 
 function sha256(buf: Buffer): string {
@@ -952,5 +952,6 @@ function sha256(buf: Buffer): string {
 }
 
 export const __test = {
+  downloadKrunArchive,
   extractKernelBundleFromSharedLibraryBytes,
 };

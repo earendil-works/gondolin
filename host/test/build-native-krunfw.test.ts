@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import { DownloadFileError } from "../src/alpine/utils.ts";
 import { __test as nativeBuildTest } from "../src/build/native.ts";
 
 const ELF_HEADER_SIZE = 64;
@@ -183,4 +187,65 @@ test("extractKernelBundleFromSharedLibraryBytes rejects machine mismatch", () =>
       ),
     /does not match expected 183/,
   );
+});
+
+test("downloadKrunArchive falls back on structured 404 status", async () => {
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-krun-test-"),
+  );
+  const requestedUrls: string[] = [];
+
+  try {
+    const archive = await nativeBuildTest.downloadKrunArchive(
+      "v-test",
+      "x86_64",
+      cacheDir,
+      () => {},
+      async (url, dest) => {
+        requestedUrls.push(url);
+        if (url.endsWith("/libkrunfw-prebuilt-x86_64.tgz")) {
+          throw new DownloadFileError(url, { status: 404 });
+        }
+        fs.writeFileSync(dest, "shared");
+      },
+    );
+
+    assert.equal(archive.kind, "shared");
+    assert.equal(path.basename(archive.archivePath), "libkrunfw-x86_64.tgz");
+    assert.deepEqual(requestedUrls, [
+      "https://github.com/containers/libkrunfw/releases/download/v-test/libkrunfw-prebuilt-x86_64.tgz",
+      "https://github.com/containers/libkrunfw/releases/download/v-test/libkrunfw-x86_64.tgz",
+    ]);
+  } finally {
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("downloadKrunArchive does not fallback on message-only 404 text", async () => {
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-krun-test-"),
+  );
+  const requestedUrls: string[] = [];
+
+  try {
+    await assert.rejects(
+      nativeBuildTest.downloadKrunArchive(
+        "v-test",
+        "x86_64",
+        cacheDir,
+        () => {},
+        async (url) => {
+          requestedUrls.push(url);
+          throw new Error(`Failed to download ${url}: HTTP 404`);
+        },
+      ),
+      /HTTP 404/,
+    );
+
+    assert.deepEqual(requestedUrls, [
+      "https://github.com/containers/libkrunfw/releases/download/v-test/libkrunfw-prebuilt-x86_64.tgz",
+    ]);
+  } finally {
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
 });
