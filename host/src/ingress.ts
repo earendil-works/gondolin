@@ -185,6 +185,93 @@ function parseTransferEncoding(raw: string | string[] | undefined): string[] {
     .filter(Boolean);
 }
 
+function parseConnectionTokens(raw: string | string[] | undefined): string[] {
+  const joined = joinHeaderValue(raw);
+  if (!joined) return [];
+  return joined
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function hasUpgradeIntentHeaders(headers: IncomingHttpHeaders): boolean {
+  if (joinHeaderValue(headers["upgrade"]).trim().length > 0) {
+    return true;
+  }
+
+  if (parseConnectionTokens(headers["connection"]).includes("upgrade")) {
+    return true;
+  }
+
+  if (joinHeaderValue(headers["sec-websocket-key"]).trim().length > 0) {
+    return true;
+  }
+
+  return false;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+  timeoutMessage: string,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise;
+  }
+
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            onTimeout();
+          } catch {
+            // ignore
+          }
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function* withIterableReadTimeout(
+  iterable: AsyncIterable<Buffer>,
+  timeoutMs: number,
+  onTimeout: () => void,
+  timeoutMessage: string,
+): AsyncGenerator<Buffer> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    yield* iterable;
+    return;
+  }
+
+  const iterator = iterable[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      const next = await withTimeout(
+        iterator.next(),
+        timeoutMs,
+        onTimeout,
+        timeoutMessage,
+      );
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    if (typeof iterator.return === "function") {
+      await iterator.return();
+    }
+  }
+}
+
 function normalizeHeaderRecord(
   headers: Record<string, string | string[]>,
 ): IngressHeaders {
@@ -769,6 +856,12 @@ export type EnableIngressOptions = {
 
   /** max buffered upstream response body size in `bytes` (default: 2 MiB) */
   maxBufferedResponseBodyBytes?: number;
+
+  /** timeout waiting for upstream response headers in `ms` (default: 2000) */
+  upstreamHeaderTimeoutMs?: number;
+
+  /** timeout waiting between upstream response body chunks in `ms` (default: 15000) */
+  upstreamResponseTimeoutMs?: number;
 };
 
 export type IngressAccess = {
@@ -784,6 +877,8 @@ export class IngressGateway {
   private allowWebSockets: boolean;
   private bufferResponseBody: boolean;
   private maxBufferedResponseBodyBytes: number;
+  private upstreamHeaderTimeoutMs: number;
+  private upstreamResponseTimeoutMs: number;
   private readonly sandbox: SandboxServer;
   private readonly listeners: GondolinListeners;
 
@@ -796,6 +891,8 @@ export class IngressGateway {
       | "bufferResponseBody"
       | "maxBufferedResponseBodyBytes"
       | "allowWebSockets"
+      | "upstreamHeaderTimeoutMs"
+      | "upstreamResponseTimeoutMs"
     > = {},
   ) {
     this.sandbox = sandbox;
@@ -805,6 +902,8 @@ export class IngressGateway {
     this.bufferResponseBody = options.bufferResponseBody ?? false;
     this.maxBufferedResponseBodyBytes =
       options.maxBufferedResponseBodyBytes ?? 2 * 1024 * 1024;
+    this.upstreamHeaderTimeoutMs = options.upstreamHeaderTimeoutMs ?? 2000;
+    this.upstreamResponseTimeoutMs = options.upstreamResponseTimeoutMs ?? 15000;
   }
 
   async listen(options: EnableIngressOptions = {}): Promise<IngressAccess> {
@@ -823,6 +922,12 @@ export class IngressGateway {
     }
     if (options.maxBufferedResponseBodyBytes !== undefined) {
       this.maxBufferedResponseBodyBytes = options.maxBufferedResponseBodyBytes;
+    }
+    if (options.upstreamHeaderTimeoutMs !== undefined) {
+      this.upstreamHeaderTimeoutMs = options.upstreamHeaderTimeoutMs;
+    }
+    if (options.upstreamResponseTimeoutMs !== undefined) {
+      this.upstreamResponseTimeoutMs = options.upstreamResponseTimeoutMs;
     }
 
     const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1125,6 +1230,8 @@ export class IngressGateway {
   ): Promise<void> {
     let upstream: Duplex | null = null;
     let upstreamError: unknown = null;
+    let clientDisconnected = false;
+    let responseFinished = false;
 
     const onUpstreamError = (err: unknown) => {
       upstreamError = err;
@@ -1132,7 +1239,37 @@ export class IngressGateway {
       // The request handler will surface failures via awaited reads/writes.
     };
 
+    const onResponseFinished = () => {
+      responseFinished = true;
+    };
+
+    const onClientDisconnected = () => {
+      if (responseFinished) return;
+      clientDisconnected = true;
+      if (upstream) {
+        try {
+          upstream.destroy(new Error("client disconnected"));
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    req.once("aborted", onClientDisconnected);
+    res.once("finish", onResponseFinished);
+    res.once("close", onClientDisconnected);
+
     try {
+      if (hasUpgradeIntentHeaders(req.headers)) {
+        res.writeHead(426, "Upgrade Required", {
+          "content-type": "text/plain",
+          connection: "close",
+          upgrade: "websocket",
+        });
+        res.end("use websocket upgrade\n");
+        return;
+      }
+
       const url = new URL(req.url ?? "/", "http://gondolin.local");
       const route = this.pickRoute(url.pathname);
       if (!route) {
@@ -1220,7 +1357,18 @@ export class IngressGateway {
       }
 
       // Read response head
-      const head = await readHttpHead(upstream);
+      const head = await withTimeout(
+        readHttpHead(upstream),
+        this.upstreamHeaderTimeoutMs,
+        () => {
+          try {
+            upstream?.destroy(new Error("upstream response header timeout"));
+          } catch {
+            // ignore
+          }
+        },
+        "upstream response header timeout",
+      );
       let respHeaders = normalizeHeaderRecord(
         stripHopByHopHeaders(head.headers),
       );
@@ -1250,6 +1398,19 @@ export class IngressGateway {
         : contentLength !== null
           ? readFixedBody(upstream, head.rest, contentLength)
           : readToEnd(upstream, head.rest);
+
+      bodyIter = withIterableReadTimeout(
+        bodyIter,
+        this.upstreamResponseTimeoutMs,
+        () => {
+          try {
+            upstream?.destroy(new Error("upstream response timeout"));
+          } catch {
+            // ignore
+          }
+        },
+        "upstream response timeout",
+      );
 
       const shouldBufferResponseBody =
         bufferResponseBody && !!hooks?.onResponse;
@@ -1309,6 +1470,10 @@ export class IngressGateway {
       }
       res.end();
     } catch (err) {
+      if (clientDisconnected) {
+        return;
+      }
+
       if (err instanceof IngressRequestBlockedError) {
         try {
           if (res.headersSent) {
@@ -1350,6 +1515,10 @@ export class IngressGateway {
         // Swallow it to avoid turning this into an unhandled rejection.
       }
     } finally {
+      req.off("aborted", onClientDisconnected);
+      res.off("finish", onResponseFinished);
+      res.off("close", onClientDisconnected);
+
       if (upstream) {
         try {
           upstream.destroy(
@@ -1440,7 +1609,18 @@ export class IngressGateway {
       });
 
       // Read response head
-      const respHead = await readHttpHead(upstream);
+      const respHead = await withTimeout(
+        readHttpHead(upstream),
+        this.upstreamHeaderTimeoutMs,
+        () => {
+          try {
+            upstream?.destroy(new Error("upstream response header timeout"));
+          } catch {
+            // ignore
+          }
+        },
+        "upstream response header timeout",
+      );
       const upstreamStatusCode = respHead.statusCode;
 
       let responseForHook: IngressHookResponse = {

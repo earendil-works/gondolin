@@ -131,3 +131,113 @@ test("IngressGateway: ignores client Content-Length when transfer-encoding is pr
   // Body should be chunked (re-encoded)
   assert.match(body, /^4\r\nTEST\r\n0\r\n\r\n$/);
 });
+
+test("IngressGateway: rejects non-upgrade HTTP requests that carry upgrade intent headers", async () => {
+  const listeners = new GondolinListeners(new MemoryProvider());
+  listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
+
+  let opened = 0;
+  const sandbox = {
+    openIngressStream: async () => {
+      opened += 1;
+      return new CaptureDuplex();
+    },
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners);
+
+  const req = Readable.from([]) as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = {
+    host: "example",
+    connection: "upgrade",
+  };
+  req.socket = { remoteAddress: "203.0.113.1" };
+
+  const res = new CaptureResponse() as any;
+
+  await (gateway as any).handleRequest(req, res);
+  await once(res, "finish");
+
+  assert.equal(opened, 0);
+  assert.equal(res.statusCode, 426);
+  assert.equal(
+    Buffer.concat(res.bodyChunks).toString("utf8"),
+    "use websocket upgrade\n",
+  );
+});
+
+test("IngressGateway: returns 502 on upstream response header timeout", async () => {
+  const listeners = new GondolinListeners(new MemoryProvider());
+  listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
+
+  let upstream: CaptureDuplex | null = null;
+  const sandbox = {
+    openIngressStream: async () => {
+      upstream = new CaptureDuplex();
+      return upstream;
+    },
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners, {
+    upstreamHeaderTimeoutMs: 10,
+  });
+
+  const req = Readable.from([]) as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = { host: "example" };
+  req.socket = { remoteAddress: "203.0.113.1" };
+
+  const res = new CaptureResponse() as any;
+
+  await (gateway as any).handleRequest(req, res);
+  await once(res, "finish");
+
+  assert.equal(res.statusCode, 502);
+  assert.equal(Buffer.concat(res.bodyChunks).toString("utf8"), "bad gateway\n");
+  assert.equal(upstream?.destroyed, true);
+});
+
+test("IngressGateway: returns 502 on upstream response body timeout while buffering", async () => {
+  const listeners = new GondolinListeners(new MemoryProvider());
+  listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
+
+  const sandbox = {
+    openIngressStream: async () => {
+      const upstream = new CaptureDuplex();
+      upstream.once("finish", () => {
+        upstream.push(
+          "HTTP/1.1 200 OK\r\n" +
+            "Transfer-Encoding: chunked\r\n" +
+            "\r\n" +
+            "5\r\nhello\r\n",
+        );
+      });
+      return upstream;
+    },
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners, {
+    hooks: {
+      onRequest: () => ({ bufferResponseBody: true }),
+      onResponse: () => undefined,
+    },
+    upstreamResponseTimeoutMs: 10,
+  });
+
+  const req = Readable.from([]) as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = { host: "example" };
+  req.socket = { remoteAddress: "203.0.113.1" };
+
+  const res = new CaptureResponse() as any;
+
+  await (gateway as any).handleRequest(req, res);
+  await once(res, "finish");
+
+  assert.equal(res.statusCode, 502);
+  assert.equal(Buffer.concat(res.bodyChunks).toString("utf8"), "bad gateway\n");
+});
