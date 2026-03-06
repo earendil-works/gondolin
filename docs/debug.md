@@ -15,7 +15,8 @@ Set `GONDOLIN_DEBUG` to a comma-separated list of flags:
 - `net`: networking stack / HTTP bridge
 - `exec`: exec + stdin/pty control messages
 - `vfs`: VFS (FUSE/RPC) operations
-- `protocol`: virtio/control-protocol traffic and QEMU log forwarding
+- `protocol`: virtio/control-protocol traffic (including app channel) and QEMU
+  log forwarding
 - `all`: turns on everything
 
 Examples:

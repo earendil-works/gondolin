@@ -26,6 +26,7 @@ import {
   type GuestFileWriteOptions,
 } from "./server-options.ts";
 import {
+  AppStream,
   MAX_REQUEST_ID,
   TcpForwardStream,
   estimateBase64Bytes,
@@ -510,6 +511,32 @@ export class SandboxServerOps {
     }
   }
 
+  /**
+   * Open the dedicated application channel stream used by long-running guest daemons.
+   */
+  openAppStream(): AppStream {
+    const existing = this.appStream;
+    if (existing && !existing.destroyed) {
+      return existing;
+    }
+
+    const stream = new AppStream(
+      (m) => this.appBridge.send(m),
+      () => {
+        if (this.appStream === stream) {
+          this.appStream = null;
+        }
+      },
+    );
+    this.appStream = stream;
+
+    if (this.appBridge.isConnected()) {
+      stream.markConnected();
+    }
+
+    return stream;
+  }
+
   broadcastStatus(state: SandboxState) {
     for (const client of this.clients) {
       sendJson(client, { type: "status", state });
@@ -575,6 +602,7 @@ export class SandboxServerOps {
     this.fsBridge.connect();
     this.sshBridge.connect();
     this.ingressBridge.connect();
+    this.appBridge.connect();
   }
 
   async closeInternal() {
@@ -588,6 +616,7 @@ export class SandboxServerOps {
       this.fsBridge.disconnect(),
       this.sshBridge.disconnect(),
       this.ingressBridge.disconnect(),
+      this.appBridge.disconnect(),
     ]);
 
     // Tear down host-side network + streams promptly. QEMU may still be running
@@ -605,6 +634,11 @@ export class SandboxServerOps {
     }
     this.ingressTcpStreams.clear();
     this.ingressTcpOpenWaiters.clear();
+
+    if (this.appStream) {
+      this.appStream.destroy();
+      this.appStream = null;
+    }
 
     await this.controller.close();
     await this.fsService?.close();

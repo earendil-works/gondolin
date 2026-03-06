@@ -30,6 +30,10 @@ export class VirtioBridge {
     this.maxPendingBytes = maxPendingBytes;
   }
 
+  isConnected(): boolean {
+    return this.socket !== null;
+  }
+
   connect() {
     if (this.closed) return;
     if (this.server) return;
@@ -117,6 +121,8 @@ export class VirtioBridge {
 
   onMessage?: (message: IncomingMessage) => void;
   onError?: (error: unknown) => void;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
 
   /** Called when the bridge may be able to accept more queued messages */
   onWritable?: () => void;
@@ -167,6 +173,7 @@ export class VirtioBridge {
     }
     this.socket = socket;
     this.waitingDrain = false;
+    this.onConnected?.();
 
     socket.on("data", (chunk) => {
       try {
@@ -203,11 +210,15 @@ export class VirtioBridge {
   }
 
   private handleDisconnect() {
+    const hadSocket = this.socket !== null;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
     }
     this.waitingDrain = false;
+    if (hadSocket) {
+      this.onDisconnected?.();
+    }
   }
 
   private scheduleReconnect() {
@@ -309,6 +320,79 @@ export class TcpForwardStream extends Duplex {
   openFailed(message: string): void {
     this.closedByRemote = true;
     this.destroy(new Error(message));
+  }
+}
+
+export class AppStream extends Duplex {
+  private connected = false;
+  private readonly sendFrame: (message: object) => boolean;
+  private readonly onDispose: () => void;
+
+  constructor(
+    sendFrame: (message: object) => boolean,
+    onDispose: () => void,
+  ) {
+    super();
+    this.sendFrame = sendFrame;
+    this.onDispose = onDispose;
+    this.on("close", () => {
+      this.onDispose();
+    });
+  }
+
+  _read(_size: number): void {
+    // no-op; data is pushed from virtio handler
+  }
+
+  _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    const ok = this.sendFrame({
+      v: 1,
+      t: "app_data",
+      id: 1,
+      p: { data: chunk },
+    });
+
+    if (!ok) {
+      callback(new Error("virtio app queue exceeded"));
+      return;
+    }
+
+    callback();
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    callback();
+  }
+
+  _destroy(
+    _error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
+    callback();
+  }
+
+  pushRemote(data: Buffer): void {
+    this.push(data);
+  }
+
+  markConnected(): void {
+    if (this.connected) return;
+    this.connected = true;
+    this.emit("connected");
+  }
+
+  markDisconnected(): void {
+    if (!this.connected) return;
+    this.connected = false;
+    this.emit("disconnected");
+  }
+
+  isConnected(): boolean {
+    return this.connected;
   }
 }
 

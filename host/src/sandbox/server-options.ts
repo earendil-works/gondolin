@@ -69,6 +69,8 @@ export type SandboxServerOptions = {
 
   /** virtio-serial ingress socket path */
   virtioIngressSocketPath?: string;
+  /** virtio-serial application socket path */
+  virtioAppSocketPath?: string;
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
@@ -189,6 +191,8 @@ export type ResolvedSandboxServerOptions = {
 
   /** virtio-serial ingress socket path */
   virtioIngressSocketPath: string;
+  /** virtio-serial application socket path */
+  virtioAppSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
   /** guest mac address */
@@ -376,6 +380,10 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
   );
+  const defaultVirtioApp = path.resolve(
+    tmpDir,
+    `gondolin-virtio-app-${randomUUID().slice(0, 8)}.sock`,
+  );
   const defaultNetSock = path.resolve(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
@@ -456,6 +464,7 @@ export function resolveSandboxServerOptions(
     virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
     virtioIngressSocketPath:
       options.virtioIngressSocketPath ?? defaultVirtioIngress,
+    virtioAppSocketPath: options.virtioAppSocketPath ?? defaultVirtioApp,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
