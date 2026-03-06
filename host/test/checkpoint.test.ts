@@ -8,10 +8,24 @@ import { ensureGuestAssets, loadAssetManifest } from "../src/assets.ts";
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { getQcow2BackingFilename } from "../src/qemu/img.ts";
 import { VM } from "../src/vm/core.ts";
-import { shouldSkipVmTests, scheduleForceExit } from "./helpers/vm-fixture.ts";
+import {
+  shouldSkipVmTests,
+  scheduleForceExit,
+  getKrunRuntimeSkipReason,
+  resolveKrunRunnerPath,
+} from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
+
+async function skipIfKrunUnavailable(t: test.TestContext): Promise<boolean> {
+  const reason = await getKrunRuntimeSkipReason();
+  if (reason) {
+    t.skip(reason);
+    return true;
+  }
+  return false;
+}
 
 test.after(() => {
   scheduleForceExit();
@@ -51,6 +65,11 @@ test(
       );
       checkpoint = await base!.checkpoint(checkpointPath);
       base = null;
+
+      const metadata = checkpoint.toJSON();
+      assert.equal(metadata.snapshotKind, "disk");
+      assert.equal(metadata.createdWithVmm, "qemu");
+      assert.ok(metadata.compatibleVmm?.includes("qemu"));
 
       // Ensure checkpoints can be reloaded from disk.
       checkpoint = VmCheckpoint.load(checkpointPath);
@@ -152,6 +171,29 @@ test(
       fs.symlinkSync(assets.kernelPath, path.join(dir, kernelName));
       fs.symlinkSync(assets.initrdPath, path.join(dir, initrdName));
       fs.symlinkSync(assets.rootfsPath, path.join(dir, rootfsName));
+
+      if (sourceManifest.assets?.krunKernel) {
+        const sourceKrunKernel = path.join(
+          sourceDir,
+          sourceManifest.assets.krunKernel,
+        );
+        fs.symlinkSync(
+          sourceKrunKernel,
+          path.join(dir, sourceManifest.assets.krunKernel),
+        );
+      }
+
+      if (sourceManifest.assets?.krunInitrd) {
+        const sourceKrunInitrd = path.join(
+          sourceDir,
+          sourceManifest.assets.krunInitrd,
+        );
+        fs.symlinkSync(
+          sourceKrunInitrd,
+          path.join(dir, sourceManifest.assets.krunInitrd),
+        );
+      }
+
       fs.writeFileSync(
         path.join(dir, "manifest.json"),
         JSON.stringify(sourceManifest, null, 2),
@@ -217,6 +259,169 @@ test(
       }
       fs.rmSync(dirA, { recursive: true, force: true });
       fs.rmSync(dirB, { recursive: true, force: true });
+    }
+  },
+);
+
+test("checkpoint resume rejects incompatible backend metadata", async () => {
+  const checkpoint = new VmCheckpoint(
+    path.join(os.tmpdir(), "gondolin-missing-checkpoint.qcow2"),
+    {
+      version: 1,
+      name: "incompatible",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      diskFile: "incompatible.qcow2",
+      guestAssetBuildId: "15e98966-a559-55ee-8d57-9f4c3f0346c7",
+      snapshotKind: "disk",
+      createdWithVmm: "qemu",
+      compatibleVmm: ["qemu"],
+    },
+  );
+
+  await assert.rejects(
+    () => checkpoint.resume({ sandbox: { vmm: "krun" } }),
+    /checkpoint is not compatible with vmm=krun/,
+  );
+});
+
+test(
+  "checkpoint compatibility: qemu -> krun resume",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async (t) => {
+    if (await skipIfKrunUnavailable(t)) return;
+
+    let base: VM | null = null;
+    let resumed: VM | null = null;
+    let checkpoint: VmCheckpoint | null = null;
+
+    const checkpointPath = path.join(
+      os.tmpdir(),
+      `gondolin-checkpoint-qemu-to-krun-${Date.now()}.qcow2`,
+    );
+
+    try {
+      base = await VM.create({
+        vfs: null,
+        sandbox: {
+          vmm: "qemu",
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const write = await base.exec([
+        "/bin/sh",
+        "-c",
+        "echo qemu-to-krun > /etc/checkpoint-cross.txt",
+      ]);
+      assert.equal(write.exitCode, 0);
+
+      checkpoint = await base.checkpoint(checkpointPath);
+      base = null;
+
+      const metadata = checkpoint.toJSON();
+      if (!metadata.compatibleVmm?.includes("krun")) {
+        t.skip(
+          "current guest assets do not advertise krun-compatible checkpoint resume",
+        );
+        return;
+      }
+
+      resumed = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          vmm: "krun",
+          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const read = await resumed.exec([
+        "/bin/cat",
+        "/etc/checkpoint-cross.txt",
+      ]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      assert.equal(read.stdout.trim(), "qemu-to-krun");
+    } finally {
+      if (base) await base.close().catch(() => undefined);
+      if (resumed) await resumed.close().catch(() => undefined);
+      if (checkpoint) {
+        try {
+          checkpoint.delete();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  },
+);
+
+test(
+  "checkpoint compatibility: krun -> qemu resume",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async (t) => {
+    if (await skipIfKrunUnavailable(t)) return;
+
+    let base: VM | null = null;
+    let resumed: VM | null = null;
+    let checkpoint: VmCheckpoint | null = null;
+
+    const checkpointPath = path.join(
+      os.tmpdir(),
+      `gondolin-checkpoint-krun-to-qemu-${Date.now()}.qcow2`,
+    );
+
+    try {
+      base = await VM.create({
+        vfs: null,
+        sandbox: {
+          vmm: "krun",
+          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const write = await base.exec([
+        "/bin/sh",
+        "-c",
+        "echo krun-to-qemu > /etc/checkpoint-cross.txt",
+      ]);
+      assert.equal(write.exitCode, 0);
+
+      checkpoint = await base.checkpoint(checkpointPath);
+      base = null;
+
+      const metadata = checkpoint.toJSON();
+      assert.equal(metadata.createdWithVmm, "krun");
+      assert.ok(metadata.compatibleVmm?.includes("qemu"));
+
+      resumed = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          vmm: "qemu",
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const read = await resumed.exec([
+        "/bin/cat",
+        "/etc/checkpoint-cross.txt",
+      ]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      assert.equal(read.stdout.trim(), "krun-to-qemu");
+    } finally {
+      if (base) await base.close().catch(() => undefined);
+      if (resumed) await resumed.close().catch(() => undefined);
+      if (checkpoint) {
+        try {
+          checkpoint.delete();
+        } catch {
+          // ignore
+        }
+      }
     }
   },
 );

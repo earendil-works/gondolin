@@ -5,7 +5,8 @@
 AI agents increasingly run generated code without human review.  That code often
 needs network access and credentials, which creates exfiltration risk.
 
-Gondolin runs that code inside a fast local QEMU VM while keeping network and
+Gondolin runs that code inside a fast local Linux micro-VM (QEMU by default,
+with an optional experimental `krun` backend) while keeping network and
 filesystem access under host-side policy control.  That policy layer can be
 customized via JavaScript.
 
@@ -66,10 +67,10 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
-Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
-first use via `builtin-image-registry.json` and cached locally. When no image
-is specified, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
-`alpine-base:latest`).
+Guest assets (kernel/initramfs/rootfs plus optional krun boot artifacts,
+~200MB+) are resolved automatically on first use via
+`builtin-image-registry.json` and cached locally. When no image is specified,
+Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default: `alpine-base:latest`).
 
 Requirements:
 
@@ -77,7 +78,41 @@ Requirements:
 | ------------------------ | --------------------------------------------- |
 | `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
 
-> Linux and macOS are supported. ARM64 is the most tested path today.
+Optional experimental libkrun backend setup:
+
+```bash
+make krun-runner
+```
+
+Published installs of `@earendil-works/gondolin` also include platform-specific
+optional runner packages for supported targets.
+
+This stages `libkrun` under `.cache/` (no global install) and builds the local
+runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
+On macOS, the build ad-hoc signs the runner with the
+`com.apple.security.hypervisor` entitlement so Hypervisor.framework access is allowed.
+When present, Gondolin auto-detects this runner for `--vmm krun`.
+
+Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
+
+```bash
+sudo apt install \
+  build-essential curl git make pkg-config clang lld xz-utils \
+  libclang-dev llvm-dev libcap-ng-dev
+
+# libkrun requires a modern Rust toolchain (edition2024)
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# install Zig 0.15.2 for your Linux architecture
+```
+
+When `vmm=krun` is selected, Gondolin requires krun boot assets from the selected
+image manifest (`assets.krunKernel` and optional `assets.krunInitrd`).
+For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object.
+
+> Linux and macOS are supported. ARM64 is the most tested runtime path today.
+> Linux x86_64 `make krun-runner` is covered by CI smoke builds.
 
 ## Feature Highlights
 
@@ -103,6 +138,7 @@ Requirements:
 - [SSH](https://earendil-works.github.io/gondolin/ssh/)
 - [Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
 - [Architecture Overview](https://earendil-works.github.io/gondolin/architecture/)
+- [VM Backends (QEMU vs krun)](docs/backends.md)
 - [Security Design](https://earendil-works.github.io/gondolin/security/)
 - [Limitations](https://earendil-works.github.io/gondolin/limitations/)
 

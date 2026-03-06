@@ -93,7 +93,8 @@ jobs:
         run: |
           cd guest/image/out
           tar -czvf ../../../${{ matrix.artifact }}.tar.gz \
-            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 \
+            krun-kernel krun-empty-initrd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -171,6 +172,153 @@ jobs:
           test -s ./tmp-container-assets/vmlinuz-virt
           test -s ./tmp-container-assets/initramfs.cpio.lz4
           test -s ./tmp-container-assets/rootfs.ext4
+          test -s ./tmp-container-assets/krun-kernel
+          test -f ./tmp-container-assets/krun-empty-initrd
+
+  krun-linux-build:
+    name: Build krun runner (Linux x86_64 smoke)
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Verify krun runner binary
+        run: host/krun-runner/zig-out/bin/gondolin-krun-runner --version
+
+  krun-runner-package-smoke:
+    name: Package krun runner (Linux x86_64 smoke)
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Prepare linux runner package payload
+        run: |
+          node scripts/prepare-krun-runner-package.mjs \
+            --package packages/gondolin-krun-runner-linux-x64
+
+      - name: Smoke test packed linux runner package
+        run: |
+          PKG_DIR="packages/gondolin-krun-runner-linux-x64"
+          PKG_TGZ=$(cd "$PKG_DIR" && npm pack --silent)
+          PKG_PATH="$PWD/$PKG_DIR/$PKG_TGZ"
+
+          TMP_DIR=$(mktemp -d)
+          cd "$TMP_DIR"
+          npm init -y >/dev/null
+          npm install "$PKG_PATH" >/dev/null
+          ./node_modules/.bin/gondolin-krun-runner --version
+
+  backend-parity:
+    name: Backend parity (qemu + krun)
+    needs: [check, build-guest, krun-linux-build, krun-runner-package-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Download guest assets
+        uses: actions/download-artifact@v4
+        with:
+          name: gondolin-guest-x64
+          path: .
+
+      - name: Extract guest assets
+        run: |
+          mkdir -p guest/image/out
+          tar -xzvf gondolin-guest-x64.tar.gz -C guest/image/out
+          touch guest/image/out/*
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.1" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86 lz4 \
+            build-essential curl git make pkg-config clang lld xz-utils \
+            libclang-dev llvm-dev libcap-ng-dev
+
+      - name: Enable KVM
+        run: sudo chown $(id -u) /dev/kvm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build krun runner
+        run: make krun-runner
+
+      - name: Probe krun runtime availability
+        run: |
+          cd host
+          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); } else { console.log('krun precheck: available'); }"
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+
+      - name: Run backend parity tests
+        timeout-minutes: 15
+        run: |
+          cd host
+          pnpm run test:backend-parity
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          WS_TIMEOUT: "120000"
+          # krun runtime is best-effort on shared CI runners; tests self-skip when precheck fails
+          GONDOLIN_REQUIRE_KRUN: "0"
 
   test:
     name: Test

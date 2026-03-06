@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+console.error("gondolin-krun-runner binary is not staged in this workspace checkout. Build with 'make krun-runner' or use a published package.");
+process.exit(1);

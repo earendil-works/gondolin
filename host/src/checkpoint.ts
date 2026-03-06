@@ -18,6 +18,7 @@ import {
   getImageObjectDirectory,
   normalizeImageBuildId,
 } from "./images.ts";
+import type { SandboxVmm } from "./sandbox/server-options.ts";
 import type { VMOptions } from "./vm/types.ts";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
@@ -57,7 +58,7 @@ export type VmCheckpointData = {
   /** checkpoint name */
   name: string;
 
-  /** creation timestamp (iso 8601) */
+  /** creation timestamp (`iso 8601`) */
   createdAt: string;
 
   /** qcow2 disk filename (`basename` of checkpoint file path) */
@@ -65,7 +66,69 @@ export type VmCheckpointData = {
 
   /** deterministic guest asset build identifier (uuid) */
   guestAssetBuildId: string;
+
+  /** checkpoint payload kind */
+  snapshotKind?: "disk";
+
+  /** backend used when the checkpoint was created */
+  createdWithVmm?: SandboxVmm;
+
+  /** backends allowed for checkpoint resume */
+  compatibleVmm?: SandboxVmm[];
 };
+
+function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "qemu" || normalized === "krun") {
+    return normalized;
+  }
+  return null;
+}
+
+function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
+  const explicitRaw = options.sandbox?.vmm;
+  if (explicitRaw !== undefined) {
+    const explicit = normalizeSandboxVmm(explicitRaw);
+    if (!explicit) {
+      throw new Error(
+        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu" or "krun")`,
+      );
+    }
+    return explicit;
+  }
+
+  return normalizeSandboxVmm(process.env.GONDOLIN_VMM) ?? "qemu";
+}
+
+function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
+  let qemu = false;
+  let krun = false;
+
+  if (Array.isArray(data.compatibleVmm)) {
+    for (const entry of data.compatibleVmm) {
+      const normalized = normalizeSandboxVmm(entry);
+      if (normalized === "qemu") qemu = true;
+      if (normalized === "krun") krun = true;
+    }
+  }
+
+  if (!qemu && !krun) {
+    const createdWith = normalizeSandboxVmm(data.createdWithVmm);
+    if (createdWith === "qemu") qemu = true;
+    if (createdWith === "krun") krun = true;
+  }
+
+  // Legacy checkpoints were qemu-only.
+  if (!qemu && !krun) {
+    qemu = true;
+  }
+
+  const compatible: SandboxVmm[] = [];
+  if (qemu) compatible.push("qemu");
+  if (krun) compatible.push("krun");
+  return compatible;
+}
 
 function writeCheckpointTrailer(
   diskPath: string,
@@ -357,6 +420,24 @@ export class VmCheckpoint {
   async resume<TVm = any>(options: VMOptions = {}): Promise<TVm> {
     const createVm = getVmCreate();
 
+    const base = this.baseVmOptions ?? {};
+    const mergedForResume: VMOptions = {
+      ...base,
+      ...options,
+      sandbox: {
+        ...(base.sandbox ?? {}),
+        ...(options.sandbox ?? {}),
+      },
+    };
+
+    const requestedVmm = resolveRequestedResumeVmm(mergedForResume);
+    const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
+    if (!compatibleVmm.includes(requestedVmm)) {
+      throw new Error(
+        `checkpoint is not compatible with vmm=${requestedVmm} (compatible backends: ${compatibleVmm.join(", ")})`,
+      );
+    }
+
     ensureQemuImgAvailable();
 
     const checkpointDisk = this.diskPath;
@@ -366,7 +447,7 @@ export class VmCheckpoint {
 
     const resolved = await resolveGuestAssetsForResume(
       this.data.guestAssetBuildId,
-      options,
+      mergedForResume,
     );
 
     // Fix qcow2 backing filename portability by rebasing in-place on resume.
@@ -374,17 +455,13 @@ export class VmCheckpoint {
 
     const overlayPath = createTempQcow2Overlay(checkpointDisk, "qcow2");
 
-    const base = this.baseVmOptions ?? {};
     const merged: VMOptions = {
-      ...base,
-      ...options,
+      ...mergedForResume,
       sandbox: {
-        ...(base.sandbox ?? {}),
-        ...(options.sandbox ?? {}),
+        ...(mergedForResume.sandbox ?? {}),
         imagePath: resolved.imagePath,
         rootDiskPath: overlayPath,
         rootDiskFormat: "qcow2",
-        rootDiskSnapshot: false,
         rootDiskReadOnly: false,
         rootDiskDeleteOnClose: true,
       },
@@ -432,5 +509,8 @@ export class VmCheckpoint {
 
 /** @internal */
 export const __test = {
+  normalizeSandboxVmm,
+  resolveRequestedResumeVmm,
+  resolveCheckpointCompatibleVmm,
   resolveAssetDirByBuildId,
 };

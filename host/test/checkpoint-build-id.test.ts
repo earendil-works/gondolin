@@ -4,7 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { VmCheckpoint, __test as checkpointTest } from "../src/checkpoint.ts";
+import {
+  VmCheckpoint,
+  type VmCheckpointData,
+  __test as checkpointTest,
+} from "../src/checkpoint.ts";
+
+function makeCheckpointData(
+  overrides: Partial<VmCheckpointData> = {},
+): VmCheckpointData {
+  return {
+    version: 1,
+    name: "test-checkpoint",
+    createdAt: "2026-03-01T00:00:00.000Z",
+    diskFile: "test-checkpoint.qcow2",
+    guestAssetBuildId: "15e98966-a559-55ee-8d57-9f4c3f0346c7",
+    ...overrides,
+  };
+}
 
 test("checkpoint: resolveAssetDirByBuildId rejects traversal payloads", () => {
   assert.throws(
@@ -48,5 +65,60 @@ test("checkpoint: load rejects legacy checkpoint.json format", () => {
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint: legacy trailers default to qemu compatibility", () => {
+  const compatible =
+    checkpointTest.resolveCheckpointCompatibleVmm(makeCheckpointData());
+  assert.deepEqual(compatible, ["qemu"]);
+});
+
+test("checkpoint: compatibility list accepts qemu/krun and ignores unknowns", () => {
+  const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
+    makeCheckpointData({
+      compatibleVmm: ["krun", "qemu", "krun", "unknown" as any],
+    }),
+  );
+  assert.deepEqual(compatible, ["qemu", "krun"]);
+});
+
+test("checkpoint: createdWithVmm fallback is used when list is missing", () => {
+  const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
+    makeCheckpointData({ createdWithVmm: "krun" }),
+  );
+  assert.deepEqual(compatible, ["krun"]);
+});
+
+test("checkpoint: resume vmm selection defaults to qemu and honors overrides", () => {
+  const prev = process.env.GONDOLIN_VMM;
+  try {
+    delete process.env.GONDOLIN_VMM;
+    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "qemu");
+
+    process.env.GONDOLIN_VMM = "krun";
+    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "krun");
+
+    process.env.GONDOLIN_VMM = "krun";
+    assert.equal(
+      checkpointTest.resolveRequestedResumeVmm({
+        sandbox: { vmm: "qemu" },
+      }),
+      "qemu",
+    );
+
+    assert.throws(
+      () =>
+        checkpointTest.resolveRequestedResumeVmm({
+          sandbox: { vmm: "wat" } as any,
+        }),
+      /invalid sandbox vmm backend/,
+    );
+  } finally {
+    if (prev === undefined) {
+      delete process.env.GONDOLIN_VMM;
+    } else {
+      process.env.GONDOLIN_VMM = prev;
+    }
   }
 });

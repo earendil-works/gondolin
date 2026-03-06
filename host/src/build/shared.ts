@@ -14,6 +14,8 @@ import type { BuildConfig, Architecture } from "./config.ts";
 export const KERNEL_FILENAME = "vmlinuz-virt";
 export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
+export const KRUN_KERNEL_FILENAME = "krun-kernel";
+export const KRUN_INITRD_FILENAME = "krun-empty-initrd";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {
@@ -39,6 +41,8 @@ export type ResolvedAlpineConfig = {
   mirror?: string;
   kernelPackage?: string;
   kernelImage?: string;
+  /** libkrunfw release version (e.g. `v5.2.1`) */
+  krunfwVersion: string;
   rootfsPackages: string[];
   initramfsPackages: string[];
 };
@@ -421,22 +425,37 @@ export function writeAssetManifest(
   const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
   const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
 
-  const checksums = {
+  const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
+  const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
+
+  const checksums: AssetManifest["checksums"] = {
     kernel: computeFileHash(kernelDst),
     initramfs: computeFileHash(initramfsDst),
     rootfs: computeFileHash(rootfsDst),
   };
+
+  const assets: AssetManifest["assets"] = {
+    kernel: KERNEL_FILENAME,
+    initramfs: INITRAMFS_FILENAME,
+    rootfs: ROOTFS_FILENAME,
+  };
+
+  if (fs.existsSync(krunKernelDst)) {
+    assets.krunKernel = KRUN_KERNEL_FILENAME;
+    checksums.krunKernel = computeFileHash(krunKernelDst);
+  }
+
+  if (fs.existsSync(krunInitrdDst)) {
+    assets.krunInitrd = KRUN_INITRD_FILENAME;
+    checksums.krunInitrd = computeFileHash(krunInitrdDst);
+  }
 
   const manifest: AssetManifest = {
     version: 1,
     buildId: computeAssetBuildId({ checksums, arch: config.arch }),
     config,
     buildTime: new Date().toISOString(),
-    assets: {
-      kernel: KERNEL_FILENAME,
-      initramfs: INITRAMFS_FILENAME,
-      rootfs: ROOTFS_FILENAME,
-    },
+    assets,
     checksums,
   };
 

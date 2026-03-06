@@ -29,6 +29,7 @@ import {
   type SandboxState,
   type SandboxLogStream,
 } from "./controller.ts";
+import { KrunController, type KrunConfig } from "./krun-controller.ts";
 import { QemuNetworkBackend } from "../qemu/net.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
@@ -104,6 +105,32 @@ type BridgeWritableWaiter = {
   cleanup?: () => void;
 };
 
+type SandboxControllerLike = {
+  setAppend(append: string): void;
+  getState(): SandboxState;
+  start(): Promise<void>;
+  close(): Promise<void>;
+  restart(): Promise<void>;
+  on(event: "state", listener: (state: SandboxState) => void): unknown;
+  on(
+    event: "log",
+    listener: (chunkOrEntry: string | any, stream?: SandboxLogStream) => void,
+  ): unknown;
+  on(
+    event: "exit",
+    listener: (info: {
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      error?: Error;
+    }) => void,
+  ): unknown;
+};
+
+type SandboxServerInternalOptions = {
+  /** qemu root disk volatility mode */
+  qemuRootDiskVolatileMode?: "snapshot";
+};
+
 export class SandboxServer extends EventEmitter {
   private emitDebug(component: DebugComponent, message: string) {
     const normalized = stripTrailingNewline(message);
@@ -158,12 +185,13 @@ export class SandboxServer extends EventEmitter {
   }
 
   private readonly options: ResolvedSandboxServerOptions;
-  private readonly controller: SandboxController;
+  private readonly controller: SandboxControllerLike;
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
+  private readonly internalOptions: SandboxServerInternalOptions;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
   private tcpOpenWaiters = new Map<
@@ -228,6 +256,13 @@ export class SandboxServer extends EventEmitter {
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
 
+  /** @internal resolved VM backend binary path */
+  getVmmPath(): string {
+    return this.options.vmm === "krun"
+      ? this.options.krunRunnerPath
+      : this.options.qemuPath;
+  }
+
   /** @internal resolved qemu binary path */
   getQemuPath(): string {
     return this.options.qemuPath;
@@ -260,8 +295,14 @@ export class SandboxServer extends EventEmitter {
    */
   constructor(
     options: SandboxServerOptions | ResolvedSandboxServerOptions = {},
+    internalOptions: SandboxServerInternalOptions = {},
   ) {
     super();
+    if (Object.hasOwn(options as object, "rootDiskSnapshot")) {
+      throw new Error(
+        "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
+      );
+    }
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
       this.emitDebug("error", message);
@@ -280,6 +321,7 @@ export class SandboxServer extends EventEmitter {
       : resolveSandboxServerOptions(options as SandboxServerOptions);
 
     this.options = resolvedOptions;
+    this.internalOptions = internalOptions;
 
     this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
@@ -291,38 +333,65 @@ export class SandboxServer extends EventEmitter {
     const hostArch = getHostNodeArchCached();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
-    const baseAppend = (
-      this.options.append ?? `console=${consoleDevice} initramfs_async=1`
-    ).trim();
+    const defaultAppend =
+      this.options.vmm === "krun"
+        ? "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init"
+        : `console=${consoleDevice} initramfs_async=1`;
+
+    const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
 
-    const sandboxConfig: SandboxConfig = {
-      qemuPath: this.options.qemuPath,
-      kernelPath: this.options.kernelPath,
-      initrdPath: this.options.initrdPath,
-      rootDiskPath: this.options.rootDiskPath,
-      rootDiskFormat: this.options.rootDiskFormat,
-      rootDiskSnapshot: this.options.rootDiskSnapshot,
-      rootDiskReadOnly: this.options.rootDiskReadOnly,
-      memory: this.options.memory,
-      cpus: this.options.cpus,
-      virtioSocketPath: this.options.virtioSocketPath,
-      virtioFsSocketPath: this.options.virtioFsSocketPath,
-      virtioSshSocketPath: this.options.virtioSshSocketPath,
-      virtioIngressSocketPath: this.options.virtioIngressSocketPath,
-      netSocketPath: this.options.netEnabled
-        ? this.options.netSocketPath
-        : undefined,
-      netMac: this.options.netMac,
-      append: this.baseAppend,
-      machineType: this.options.machineType,
-      accel: this.options.accel,
-      cpu: this.options.cpu,
-      console: this.options.console,
-      autoRestart: this.options.autoRestart,
-    };
-
-    this.controller = new SandboxController(sandboxConfig);
+    if (this.options.vmm === "krun") {
+      const krunConfig: KrunConfig = {
+        krunRunnerPath: this.options.krunRunnerPath,
+        kernelPath: this.options.kernelPath,
+        initrdPath: this.options.initrdPath,
+        rootDiskPath: this.options.rootDiskPath,
+        rootDiskFormat: this.options.rootDiskFormat,
+        rootDiskReadOnly: this.options.rootDiskReadOnly,
+        memory: this.options.memory,
+        cpus: this.options.cpus,
+        virtioSocketPath: this.options.virtioSocketPath,
+        virtioFsSocketPath: this.options.virtioFsSocketPath,
+        virtioSshSocketPath: this.options.virtioSshSocketPath,
+        virtioIngressSocketPath: this.options.virtioIngressSocketPath,
+        netSocketPath: this.options.netEnabled
+          ? this.options.netSocketPath
+          : undefined,
+        netMac: this.options.netMac,
+        append: this.baseAppend,
+        console: this.options.console,
+        autoRestart: this.options.autoRestart,
+      };
+      this.controller = new KrunController(krunConfig);
+    } else {
+      const sandboxConfig: SandboxConfig = {
+        qemuPath: this.options.qemuPath,
+        kernelPath: this.options.kernelPath,
+        initrdPath: this.options.initrdPath,
+        rootDiskPath: this.options.rootDiskPath,
+        rootDiskFormat: this.options.rootDiskFormat,
+        rootDiskVolatileMode: this.internalOptions.qemuRootDiskVolatileMode,
+        rootDiskReadOnly: this.options.rootDiskReadOnly,
+        memory: this.options.memory,
+        cpus: this.options.cpus,
+        virtioSocketPath: this.options.virtioSocketPath,
+        virtioFsSocketPath: this.options.virtioFsSocketPath,
+        virtioSshSocketPath: this.options.virtioSshSocketPath,
+        virtioIngressSocketPath: this.options.virtioIngressSocketPath,
+        netSocketPath: this.options.netEnabled
+          ? this.options.netSocketPath
+          : undefined,
+        netMac: this.options.netMac,
+        append: this.baseAppend,
+        machineType: this.options.machineType,
+        accel: this.options.accel,
+        cpu: this.options.cpu,
+        console: this.options.console,
+        autoRestart: this.options.autoRestart,
+      };
+      this.controller = new SandboxController(sandboxConfig);
+    }
 
     // The virtio control channel can briefly accumulate a lot of data (notably
     // when streaming large stdin payloads). The default 8MiB buffer is too

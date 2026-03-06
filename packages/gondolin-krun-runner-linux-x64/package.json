@@ -1,0 +1,30 @@
+{
+  "name": "@earendil-works/gondolin-krun-runner-linux-x64",
+  "version": "0.6.0",
+  "description": "Prebuilt gondolin-krun-runner binary for Linux x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/earendil-works/gondolin.git",
+    "directory": "packages/gondolin-krun-runner-linux-x64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "bin": {
+    "gondolin-krun-runner": "bin/gondolin-krun-runner"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

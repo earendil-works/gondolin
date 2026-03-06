@@ -177,21 +177,27 @@ function renderCliError(err: unknown) {
   const code = (err as any)?.code;
   const binary = (err as any)?.path;
 
-  if (
-    code === "ENOENT" &&
-    typeof binary === "string" &&
-    binary.includes("qemu")
-  ) {
-    console.error(`Error: QEMU binary '${binary}' not found.`);
-    console.error("Please install QEMU to run the sandbox.");
-    if (process.platform === "darwin") {
-      console.error("  brew install qemu");
-    } else {
-      console.error(
-        "  sudo apt install qemu-system (or equivalent for your distro)",
-      );
+  if (code === "ENOENT" && typeof binary === "string") {
+    if (binary.includes("qemu")) {
+      console.error(`Error: QEMU binary '${binary}' not found.`);
+      console.error("Please install QEMU to run the sandbox.");
+      if (process.platform === "darwin") {
+        console.error("  brew install qemu");
+      } else {
+        console.error(
+          "  sudo apt install qemu-system (or equivalent for your distro)",
+        );
+      }
+      return;
     }
-    return;
+
+    if (binary.includes("krun-runner") || binary.includes("libkrun")) {
+      console.error(`Error: krun runner binary '${binary}' not found.`);
+      console.error(
+        "Build/install gondolin-krun-runner (auto-detected from local build or runner package) or set sandbox.krunRunnerPath / GONDOLIN_KRUN_RUNNER.",
+      );
+      return;
+    }
   }
 
   const message = err instanceof Error ? err.message : String(err);
@@ -241,6 +247,9 @@ function bashUsage() {
   );
   console.log(
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
+  );
+  console.log(
+    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
   );
   console.log();
   console.log("VFS Options:");
@@ -328,6 +337,7 @@ function bashUsage() {
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --resume 4a8f2b0c");
   console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
+  console.log("  gondolin bash --vmm krun");
   console.log("  gondolin bash --ssh");
 }
 
@@ -394,6 +404,9 @@ function execUsage() {
   );
   console.log(
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
+  );
+  console.log(
+    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
   );
   console.log();
   console.log("Network Options (VM mode only):");
@@ -465,6 +478,9 @@ type CommonOptions = {
 
   /** image selector (asset dir, build id, or name:tag) */
   image?: string;
+
+  /** vm backend selection */
+  vmm?: "qemu" | "krun";
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -708,6 +724,14 @@ function resolveSshAgent(explicit?: string): string {
   return sock;
 }
 
+function parseVmmOption(value: string): "qemu" | "krun" {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "qemu" || normalized === "krun") {
+    return normalized;
+  }
+  throw new Error("--vmm must be one of: qemu, krun");
+}
+
 function parseListenSpec(spec: string): { host: string; port: number } {
   const trimmed = spec.trim();
   if (!trimmed) {
@@ -912,10 +936,11 @@ function buildVmOptions(common: CommonOptions) {
     env,
   };
 
-  if (common.image) {
+  if (common.image || common.vmm) {
     vmOptions.sandbox = {
       ...(vmOptions.sandbox ?? {}),
-      imagePath: common.image,
+      ...(common.image ? { imagePath: common.image } : {}),
+      ...(common.vmm ? { vmm: common.vmm } : {}),
     };
   }
 
@@ -960,6 +985,13 @@ function parseExecArgs(argv: string[]): ExecArgs {
 
   const parseCommonOption = (optionArgs: string[], i: number): number => {
     const arg = optionArgs[i];
+
+    if (arg.startsWith("--vmm=")) {
+      const raw = arg.slice("--vmm=".length);
+      args.common.vmm = parseVmmOption(raw);
+      return i;
+    }
+
     switch (arg) {
       case "--mount-hostfs": {
         const spec = optionArgs[++i];
@@ -977,6 +1009,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const image = optionArgs[++i];
         if (!image) fail("--image requires an argument");
         args.common.image = image;
+        return i;
+      }
+      case "--vmm": {
+        const value = optionArgs[++i];
+        if (!value) fail("--vmm requires an argument");
+        args.common.vmm = parseVmmOption(value);
         return i;
       }
       case "--allow-host": {
@@ -1363,6 +1401,17 @@ function parseBashArgs(argv: string[]): BashArgs {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
 
+    if (arg.startsWith("--vmm=")) {
+      const raw = arg.slice("--vmm=".length);
+      try {
+        args.vmm = parseVmmOption(raw);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      continue;
+    }
+
     // Handle -- delimiter for command + args
     if (arg === "--") {
       if (i + 1 < argv.length) {
@@ -1397,6 +1446,20 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.image = image;
+        break;
+      }
+      case "--vmm": {
+        const value = argv[++i];
+        if (!value) {
+          console.error("--vmm requires an argument");
+          process.exit(1);
+        }
+        try {
+          args.vmm = parseVmmOption(value);
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
         break;
       }
       case "--allow-host": {

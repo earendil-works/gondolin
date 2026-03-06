@@ -50,8 +50,8 @@ export type SandboxConfig = {
   rootDiskPath?: string;
   /** root disk image format */
   rootDiskFormat?: "raw" | "qcow2";
-  /** qemu snapshot mode for the root disk (discard writes) */
-  rootDiskSnapshot?: boolean;
+  /** transient root disk mode */
+  rootDiskVolatileMode?: "snapshot";
   /** qemu readonly mode for the root disk */
   rootDiskReadOnly?: boolean;
 
@@ -319,7 +319,7 @@ function buildQemuArgs(config: SandboxConfig) {
 
   if (config.rootDiskPath) {
     const format = config.rootDiskFormat ?? "raw";
-    const snapshot = config.rootDiskSnapshot ?? false;
+    const snapshot = config.rootDiskVolatileMode === "snapshot";
     const readOnly = config.rootDiskReadOnly ?? false;
 
     args.push(

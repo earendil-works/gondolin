@@ -203,7 +203,7 @@ jobs:
         run: |
           ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
           cd guest/image/out
-          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4
+          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 krun-kernel krun-empty-initrd
 
       - name: Compute sha256 + metadata
         run: |

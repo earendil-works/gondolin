@@ -4,7 +4,8 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "gondolin": "pnpm --filter @earendil-works/gondolin gondolin",
-    "bash": "pnpm --filter @earendil-works/gondolin bash"
+    "bash": "pnpm --filter @earendil-works/gondolin bash",
+    "prepare:krun-runner-package": "node ./scripts/prepare-krun-runner-package.mjs"
   },
   "dependencies": {
     "@earendil-works/gondolin": "workspace:*"

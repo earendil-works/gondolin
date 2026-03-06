@@ -2,22 +2,49 @@
 
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
-Gondolin runs lightweight QEMU micro-VMs on your Mac or Linux machine. The
-network stack and virtual filesystem are implemented in TypeScript, giving you
-complete programmatic control over what the sandbox can access and what secrets
-it can use.
+Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
+default, optional `krun` backend). The network stack and virtual filesystem are
+implemented in TypeScript, giving you complete programmatic control over what
+the sandbox can access and what secrets it can use.
 
 ## Requirements
 
-You need QEMU installed to run the micro-VMs:
+You need QEMU installed to run the micro-VMs (default backend):
 
 | macOS               | Linux (Debian/Ubuntu)              |
 | ------------------- | ---------------------------------- |
 | `brew install qemu` | `sudo apt install qemu-system-arm` |
 
+Optional experimental backend:
+
+- `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
+- `make krun-runner` from repo root stages dependencies locally and builds the runner
+  - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
+  - Gondolin auto-detects this local runner for `--vmm krun`
+- `@earendil-works/gondolin` publishes platform-specific optional runner packages for supported targets (`darwin-arm64`, `linux-x64`)
+- krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
+- `gondolin bash --vmm krun` selects the backend per-command
+- `GONDOLIN_VMM=krun` still works as a global default
+- backend parity matrix: [docs/backends.md](../docs/backends.md)
+
+Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
+
+```bash
+sudo apt install \
+  build-essential curl git make pkg-config clang lld xz-utils \
+  libclang-dev llvm-dev libcap-ng-dev
+
+# libkrun needs current stable Rust (edition2024 crates)
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# install Zig 0.15.2 for your Linux architecture
+```
+
 - Node.js >= 23.6
 
-> **Note:** Only ARM64 (Apple Silicon, Linux aarch64) is currently tested.
+> **Note:** Runtime validation is currently strongest on ARM64 (Apple Silicon, Linux aarch64).
+> Linux x86_64 is currently smoke-tested for `make krun-runner` in CI.
 
 ## Installation
 

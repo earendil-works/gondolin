@@ -5,12 +5,35 @@ import { execFileSync } from "child_process";
 import { parseEnvEntry } from "../utils/env.ts";
 import { assertSafeWritePath } from "./rootfs.ts";
 
+export class DownloadFileError extends Error {
+  /** requested download URL */
+  readonly url: string;
+  /** upstream HTTP status code when available */
+  readonly status?: number;
+
+  constructor(
+    url: string,
+    options: { status?: number; message?: string; cause?: unknown } = {},
+  ) {
+    super(
+      options.message ??
+        (options.status !== undefined
+          ? `Failed to download ${url}: HTTP ${options.status}`
+          : `Failed to download ${url}`),
+      options.cause !== undefined ? { cause: options.cause } : undefined,
+    );
+    this.name = "DownloadFileError";
+    this.url = url;
+    this.status = options.status;
+  }
+}
+
 /** Download helper using Node's built-in fetch */
 export async function downloadFile(url: string, dest: string): Promise<void> {
   const res = await fetch(url, { redirect: "follow" });
 
   if (!res.ok) {
-    throw new Error(`Failed to download ${url}: HTTP ${res.status}`);
+    throw new DownloadFileError(url, { status: res.status });
   }
 
   const buf = Buffer.from(await res.arrayBuffer());

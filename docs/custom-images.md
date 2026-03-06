@@ -22,6 +22,10 @@ gondolin build --config build-config.json --output ./my-assets
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
+`gondolin build` produces both qemu boot assets and libkrun-compatible boot
+artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
+`manifest.json`.
+
 Prebuilt example config with `postBuild.commands` (installs `llm` + plugin via pip):
 
 ```bash
@@ -51,7 +55,7 @@ Building custom images requires the following tools:
 
 | Tool | Purpose |
 |------|---------|
-| **Zig 0.15.2+** | Cross-compiling sandboxd/sandboxfs binaries |
+| **Zig 0.15.2** | Cross-compiling sandboxd/sandboxfs binaries |
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating ext4 rootfs images (mke2fs) |
@@ -68,7 +72,7 @@ The build tries to locate `mke2fs` automatically (including common Homebrew loca
 ### Linux (Debian/Ubuntu)
 
 ```bash
-# Install Zig 0.15.2+ from https://ziglang.org/download/
+# Install Zig 0.15.2 from https://ziglang.org/download/
 sudo apt install lz4 cpio e2fsprogs
 ```
 
@@ -107,7 +111,8 @@ The file has the following structure:
       "python3",
       "openssh"
     ],
-    "initramfsPackages": []
+    "initramfsPackages": [],
+    "krunfwVersion": "v5.2.1"
   },
   "rootfs": {
     "label": "gondolin-root"
@@ -164,6 +169,7 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `kernelImage` | string | `"vmlinuz-virt"` | Kernel image filename |
 | `rootfsPackages` | string[] | see below | Packages for the root filesystem |
 | `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
+| `krunfwVersion` | string | `"v5.2.1"` | libkrunfw release tag used to fetch `krun-kernel` |
 
 ### OCI Support
 
@@ -289,6 +295,10 @@ gondolin build --arch aarch64 --config build-config.json --output ./arm64-assets
 Cross-architecture builds may use a container (Docker/Podman) automatically
 when native tools aren't available.
 
+Note: krun boot artifact extraction falls back to `libkrunfw-<arch>.tgz` when a
+prebuilt archive is unavailable; that fallback requires a host matching the
+target architecture.
+
 ## Verifying Built Assets
 
 After building, verify the assets are valid:
@@ -335,9 +345,11 @@ A successful build creates:
 ```
 my-assets/
   manifest.json        # Build metadata and checksums
-  vmlinuz-virt         # Linux kernel
+  vmlinuz-virt         # Linux kernel (qemu/default)
   initramfs.cpio.lz4   # Compressed initramfs
   rootfs.ext4          # Root filesystem image
+  krun-kernel          # libkrunfw-compatible kernel
+  krun-empty-initrd    # Empty initrd for krun boot
 ```
 
 The `manifest.json` contains the build configuration, timestamps, SHA-256

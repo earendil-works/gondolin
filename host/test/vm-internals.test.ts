@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -81,6 +82,15 @@ function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
   );
 }
 
+function hasQemuImg(): boolean {
+  try {
+    execFileSync("qemu-img", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function makeVm(options: VMOptions = {}) {
   const { dir, resolved } = makeTempResolvedServerOptions();
   const vm = new VM(options, resolved as any);
@@ -100,7 +110,6 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   try {
     const resolved = (vm as any).resolvedSandboxOptions;
     assert.equal(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskSnapshot, false);
     assert.equal(resolved.rootDiskReadOnly, true);
 
     const rootDisk = (vm as any).rootDisk;
@@ -120,8 +129,11 @@ test("vm internals: manifest runtimeDefaults.rootfsMode is used by default", asy
 
   try {
     const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskSnapshot, false);
     assert.equal(resolvedOptions.rootDiskReadOnly, true);
+
+    const rootDisk = (vm as any).rootDisk;
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.readOnly, true);
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -143,11 +155,42 @@ test("vm internals: rootfs option overrides manifest default", async () => {
 
   try {
     const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskSnapshot, true);
     assert.equal(resolvedOptions.rootDiskReadOnly, false);
+
+    const rootDisk = (vm as any).rootDisk;
+    assert.equal(rootDisk.snapshot, true);
+    assert.equal(rootDisk.readOnly, false);
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => {
+  if (!hasQemuImg()) {
+    t.skip("qemu-img unavailable");
+    return;
+  }
+
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "cow" },
+  });
+
+  try {
+    const resolved = (vm as any).resolvedSandboxOptions;
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
+    assert.equal(resolved.rootDiskFormat, "qcow2");
+    assert.equal(resolved.rootDiskReadOnly, false);
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.deleteOnClose, true);
+    assert.equal(fs.existsSync(rootDisk.path), true);
+  } finally {
+    await vm.close();
+    cleanup();
   }
 });
 
@@ -158,7 +201,7 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
     vfs: null,
   });
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
   (vm as any).ensureVfsReady = async () => new Promise<void>(() => {});
@@ -182,7 +225,7 @@ test("vm internals: start timeout also applies when ensureRunning stalls", async
     vfs: null,
   });
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};
@@ -208,7 +251,7 @@ test("vm internals: timed out startup does not run late session setup", async ()
 
   let ensureSessionIpcCalls = 0;
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
   (vm as any).ensureVfsReady = async () => {
@@ -241,7 +284,7 @@ test("vm internals: stale timeout cleanup does not close newer startup", async (
   let staleCloseCalls = 0;
   const originalClose = vm.close.bind(vm);
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};

@@ -33,6 +33,13 @@ importers:
       undici:
         specifier: ^6.21.0
         version: 6.23.0
+    optionalDependencies:
+      '@earendil-works/gondolin-krun-runner-darwin-arm64':
+        specifier: 0.6.0
+        version: link:../packages/gondolin-krun-runner-darwin-arm64
+      '@earendil-works/gondolin-krun-runner-linux-x64':
+        specifier: 0.6.0
+        version: link:../packages/gondolin-krun-runner-linux-x64
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
@@ -46,6 +53,10 @@ importers:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
+
+  packages/gondolin-krun-runner-darwin-arm64: {}
+
+  packages/gondolin-krun-runner-linux-x64: {}
 
 packages:
 

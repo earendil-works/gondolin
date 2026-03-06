@@ -6,7 +6,16 @@ In the TypeScript API these are called **checkpoints** to avoid confusion with
 QEMU's internal snapshot mode.
 
 A snapshot is stored as a single `.qcow2` file. The checkpoint metadata is
-stored as a JSON trailer appended to the end of the qcow2 file.
+stored as a JSON trailer appended to the end of the qcow2 file, including
+backend compatibility markers used during resume.
+
+> **Backend support:** checkpoints work with both `qemu` and `krun`.
+> Resume is allowed only when the checkpoint metadata declares the selected
+> backend as compatible.
+> See [VM Backends (QEMU vs krun)](./backends.md).
+
+Cross-backend resume (for example `qemu` → `krun`) requires guest assets that
+provide krun boot artifacts in `manifest.json` (`assets.krunKernel`).
 
 ## CLI Workflow
 
@@ -74,11 +83,11 @@ checkpoint.delete();
 ## Portability and Guest Assets
 
 Snapshots are **not self-contained**: a checkpoint qcow2 file is an overlay that
-still needs the *same guest assets* (kernel/initramfs/rootfs) to boot.
+still needs the _same guest assets_ (kernel/initramfs/rootfs) to boot.
 
 To make checkpoints portable across machines and filesystem layouts, checkpoint
 metadata does not store absolute host paths to the guest assets. Instead,
-checkpoints store a *build id* (`guestAssetBuildId`) from the guest asset
+checkpoints store a _build id_ (`guestAssetBuildId`) from the guest asset
 `manifest.json` (`buildId`, derived from checksums).
 
 If your guest assets do not have a `manifest.json` with a `buildId`, Gondolin
@@ -118,7 +127,7 @@ or provide `sandbox.imagePath` explicitly).
 
 ## qcow2 Backing File Rebasing
 
-qcow2 overlays embed the backing filename in the image metadata.  When you move
+qcow2 overlays embed the backing filename in the image metadata. When you move
 a checkpoint across machines (or even just move the rootfs), the backing path
 can become invalid.
 
@@ -135,29 +144,29 @@ This makes moved checkpoints "repair themselves" the first time you resume them.
 This snapshot support is intentionally narrow and has a number of limitations:
 
 - Disk-only snapshots
-    - No RAM or process state is captured
-    - Resuming starts a fresh boot from the captured disk state
+  - No RAM or process state is captured
+  - Resuming starts a fresh boot from the captured disk state
 
 - Root disk only
-    - Only the VM root disk is captured
-    - VFS mounts and tmpfs-backed paths are not part of the snapshot
+  - Only the VM root disk is captured
+  - VFS mounts and tmpfs-backed paths are not part of the snapshot
 
 - Some paths are tmpfs-backed by design
-    - For example: `/root`, `/tmp`, `/var/log`
-    - Writes under those paths are not included in disk snapshots
+  - For example: `/root`, `/tmp`, `/var/log`
+  - Writes under those paths are not included in disk snapshots
 
 - The VM is stopped to create a snapshot
-    - `vm.checkpoint(...)` closes the VM and the original VM object must not be
-      used after it returns
-    - The implementation uses a best-effort `sync` before shutdown, but does not
-      provide the same guarantees as full VM save/restore
+  - `vm.checkpoint(...)` closes the VM and the original VM object must not be
+    used after it returns
+  - The implementation uses a best-effort `sync` before shutdown, but does not
+    provide the same guarantees as full VM save/restore
 
 - Trailing metadata can be lost
-    - The metadata lives in trailing bytes at the end of the `.qcow2` file
-    - Tools like `qemu-img convert` typically rewrite the image and drop the
-      trailer, which will prevent `VmCheckpoint.load(...)` from working
+  - The metadata lives in trailing bytes at the end of the `.qcow2` file
+  - Tools like `qemu-img convert` typically rewrite the image and drop the
+    trailer, which will prevent `VmCheckpoint.load(...)` from working
 
 - Rebase is a mutation
-    - Resume may modify the checkpoint file in-place to update its backing path
-    - If you want immutable checkpoints, treat checkpoint files as read-write and
-      copy them yourself before resuming
+  - Resume may modify the checkpoint file in-place to update its backing path
+  - If you want immutable checkpoints, treat checkpoint files as read-write and
+    copy them yourself before resuming

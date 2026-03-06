@@ -28,8 +28,9 @@ const vm = await VM.create({
 
 ## Image Management
 
-Guest images (kernel, initramfs, rootfs) are resolved automatically from local
-overrides/store first, then from `builtin-image-registry.json` when needed.
+Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
+resolved automatically from local overrides/store first, then from
+`builtin-image-registry.json` when needed.
 The default cache location is `~/.cache/gondolin/images/`.
 
 Override image selection / source:
@@ -97,8 +98,13 @@ await vm.close();
 You can control rootfs write behavior per VM:
 
 - `readonly`: rootfs is read-only (`EROFS` on writes)
-- `memory`: writes are ephemeral (`qemu` snapshot mode)
+- `memory`: writable throwaway rootfs
+  - on `qemu`, this uses backend-native snapshot mode
+  - on `krun`, this is **not RAM-backed**; Gondolin creates a temporary qcow2 overlay on disk and deletes it on close
 - `cow`: writable qcow2 copy-on-write overlay (default)
+  - this does **not** write back into the original rootfs image
+  - by default it is a throwaway qcow2 overlay file that is deleted on close
+  - because it is a real qcow2 layer, it can be checkpointed
 
 ```ts
 const vm = await VM.create({
@@ -115,6 +121,10 @@ Gondolin supports **disk-only checkpoints** of the VM root filesystem.
 
 A checkpoint captures the VM's writable disk state and can be resumed cheaply
 using qcow2 backing files.
+
+> **Backend support:** checkpoints work with both `qemu` and `krun`.
+> Resume enforces checkpoint backend-compatibility metadata.
+> See [VM Backends (QEMU vs krun)](./backends.md).
 
 See also: [Snapshots](./snapshots.md).
 
@@ -150,6 +160,10 @@ Notes:
   (reload with `VmCheckpoint.load(checkpointPath)`)
 - Checkpoints require guest assets with a `manifest.json` that includes a
   deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
+- QEMU `rootfs.mode="memory"` uses backend snapshot mode and is not checkpointable;
+  use `rootfs.mode="cow"` when you need a writable qcow2 layer
+- Cross-backend resume (`qemu` ↔ `krun`) requires guest assets with krun boot
+  artifacts (`manifest.assets.krunKernel`)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`); writes under those paths are not part of disk checkpoints
 
 ## Debug Logging
