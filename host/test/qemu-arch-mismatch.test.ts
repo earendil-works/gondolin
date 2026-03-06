@@ -159,6 +159,24 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
   }
 });
 
+test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions({
+          imagePath: dir,
+          rootDiskSnapshot: true,
+        } as any),
+      /sandbox\.rootDiskSnapshot has been removed/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });

@@ -126,6 +126,11 @@ type SandboxControllerLike = {
   ): unknown;
 };
 
+type SandboxServerInternalOptions = {
+  /** qemu root disk volatility mode */
+  qemuRootDiskVolatileMode?: "snapshot";
+};
+
 export class SandboxServer extends EventEmitter {
   private emitDebug(component: DebugComponent, message: string) {
     const normalized = stripTrailingNewline(message);
@@ -186,6 +191,7 @@ export class SandboxServer extends EventEmitter {
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
+  private readonly internalOptions: SandboxServerInternalOptions;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
   private tcpOpenWaiters = new Map<
@@ -289,8 +295,14 @@ export class SandboxServer extends EventEmitter {
    */
   constructor(
     options: SandboxServerOptions | ResolvedSandboxServerOptions = {},
+    internalOptions: SandboxServerInternalOptions = {},
   ) {
     super();
+    if (Object.hasOwn(options as object, "rootDiskSnapshot")) {
+      throw new Error(
+        "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
+      );
+    }
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
       this.emitDebug("error", message);
@@ -309,6 +321,7 @@ export class SandboxServer extends EventEmitter {
       : resolveSandboxServerOptions(options as SandboxServerOptions);
 
     this.options = resolvedOptions;
+    this.internalOptions = internalOptions;
 
     this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
@@ -358,7 +371,7 @@ export class SandboxServer extends EventEmitter {
         initrdPath: this.options.initrdPath,
         rootDiskPath: this.options.rootDiskPath,
         rootDiskFormat: this.options.rootDiskFormat,
-        rootDiskSnapshot: this.options.rootDiskSnapshot,
+        rootDiskVolatileMode: this.internalOptions.qemuRootDiskVolatileMode,
         rootDiskReadOnly: this.options.rootDiskReadOnly,
         memory: this.options.memory,
         cpus: this.options.cpus,

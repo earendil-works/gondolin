@@ -462,7 +462,6 @@ export class VmCheckpoint {
         imagePath: resolved.imagePath,
         rootDiskPath: overlayPath,
         rootDiskFormat: "qcow2",
-        rootDiskSnapshot: false,
         rootDiskReadOnly: false,
         rootDiskDeleteOnClose: true,
       },

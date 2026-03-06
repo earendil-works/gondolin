@@ -103,6 +103,20 @@ test("SandboxController: start emits state transitions and forwards logs", async
   assert.deepEqual(exits[0], { code: 0, signal: null });
 });
 
+test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", () => {
+  const args = __test.buildQemuArgs(
+    makeConfig({
+      rootDiskPath: "/tmp/rootfs.ext4",
+      rootDiskFormat: "raw",
+      rootDiskVolatileMode: "snapshot",
+    }),
+  );
+
+  const driveIndex = args.indexOf("-drive");
+  assert.notEqual(driveIndex, -1);
+  assert.match(args[driveIndex + 1]!, /snapshot=on/);
+});
+
 test("SandboxController: start is idempotent while running", async () => {
   let spawnCalls = 0;
   const child = new FakeChildProcess();

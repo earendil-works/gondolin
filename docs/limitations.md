@@ -57,7 +57,8 @@ Notable gaps today:
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
 - qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
   rejected when `vmm=krun`
-- `sandbox.rootDiskSnapshot` is rejected when `vmm=krun`
+- `rootfs.mode="memory"` is not truly RAM-backed on `krun`; it is implemented
+  as a temporary qcow2 overlay file on disk that is deleted on close
 
 See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 

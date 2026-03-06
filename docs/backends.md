@@ -20,8 +20,8 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 | `sandbox.cpus`                                                 | ✓      | ✓      | Shared high-level CPU count option                                                                                           |
 | `sandbox.memory`                                               | ✓      | ✓      | `krun` parses memory and passes MiB to `libkrun`                                                                             |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓      | ✓      | Supported on both backends                                                                                                   |
-| `sandbox.rootDiskSnapshot`                                     | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
-| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses backend snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `rootfs.mode = "cow"`                                          | ✓      | ✓      | Writable qcow2 copy-on-write overlay on both backends; the overlay does not modify the original rootfs image                |
 | `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |
 | Exec/VFS/network mediation/SSH/ingress APIs                    | ✓      | ✓      | Same host-side control plane and policy stack                                                                                |
 

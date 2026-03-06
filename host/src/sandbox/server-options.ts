@@ -100,9 +100,6 @@ export type SandboxServerOptions = {
   /** root disk image format */
   rootDiskFormat?: "raw" | "qcow2";
 
-  /** qemu snapshot mode for the root disk (discard writes) */
-  rootDiskSnapshot?: boolean;
-
   /** qemu readonly mode for the root disk */
   rootDiskReadOnly?: boolean;
 
@@ -187,8 +184,6 @@ export type ResolvedSandboxServerOptions = {
   rootDiskPath: string;
   /** root disk image format */
   rootDiskFormat: "raw" | "qcow2";
-  /** qemu snapshot mode for the root disk (discard writes) */
-  rootDiskSnapshot: boolean;
   /** qemu readonly mode for the root disk */
   rootDiskReadOnly: boolean;
 
@@ -780,6 +775,12 @@ export function resolveSandboxServerOptions(
   assets?: GuestAssets,
   deps: ResolveSandboxServerOptionsDeps = {},
 ): ResolvedSandboxServerOptions {
+  if (Object.hasOwn(options as object, "rootDiskSnapshot")) {
+    throw new Error(
+      "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
+    );
+  }
+
   // Resolve image paths: explicit imagePath > assets parameter > local dev paths
   let resolvedAssets: Partial<GuestAssets>;
   let explicitImageObject = false;
@@ -951,15 +952,7 @@ export function resolveSandboxServerOptions(
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;
   const rootDiskFormat =
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
-  const defaultRootDiskSnapshot = options.rootDiskPath ? false : vmm === "qemu";
-  const rootDiskSnapshot = options.rootDiskSnapshot ?? defaultRootDiskSnapshot;
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
-
-  if (vmm === "krun" && rootDiskSnapshot) {
-    throw new Error(
-      "sandbox.rootDiskSnapshot is not supported with vmm=krun; use rootfs.mode='cow' or an explicit writable overlay disk",
-    );
-  }
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -980,7 +973,6 @@ export function resolveSandboxServerOptions(
     rootfsPath,
     rootDiskPath,
     rootDiskFormat,
-    rootDiskSnapshot,
     rootDiskReadOnly,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,

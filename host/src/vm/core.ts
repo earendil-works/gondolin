@@ -202,11 +202,11 @@ export type VMState = SandboxState | "unknown";
 type RootDiskState = {
   /** root disk image path */
   path: string;
-  /** qemu disk format */
+  /** root disk image format */
   format: "raw" | "qcow2";
-  /** qemu snapshot mode (discard writes) */
+  /** backend-native ephemeral snapshot mode */
   snapshot: boolean;
-  /** qemu readonly mode for the root disk */
+  /** readonly mode for the root disk */
   readOnly: boolean;
   /** delete the disk file on vm.close() */
   deleteOnClose: boolean;
@@ -479,7 +479,6 @@ export class VM {
     const hasUserRootDiskConfig =
       sandboxOptions.rootDiskPath !== undefined ||
       sandboxOptions.rootDiskFormat !== undefined ||
-      sandboxOptions.rootDiskSnapshot !== undefined ||
       sandboxOptions.rootDiskReadOnly !== undefined ||
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
@@ -496,8 +495,7 @@ export class VM {
         sandboxOptions.rootDiskFormat ??
         resolved.rootDiskFormat ??
         inferDiskFormatFromPath(rootDiskPath);
-      const snapshot =
-        sandboxOptions.rootDiskSnapshot ?? resolved.rootDiskSnapshot ?? false;
+      const snapshot = false;
       const readOnly =
         sandboxOptions.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false;
       const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
@@ -514,7 +512,6 @@ export class VM {
 
       resolved.rootDiskPath = rootDiskPath;
       resolved.rootDiskFormat = format;
-      resolved.rootDiskSnapshot = snapshot;
       resolved.rootDiskReadOnly = readOnly;
 
       this.rootDisk = {
@@ -529,7 +526,6 @@ export class VM {
 
       resolved.rootDiskPath = resolved.rootfsPath;
       resolved.rootDiskFormat = format;
-      resolved.rootDiskSnapshot = false;
       resolved.rootDiskReadOnly = true;
 
       this.rootDisk = {
@@ -545,7 +541,6 @@ export class VM {
 
         resolved.rootDiskPath = resolved.rootfsPath;
         resolved.rootDiskFormat = format;
-        resolved.rootDiskSnapshot = true;
         resolved.rootDiskReadOnly = false;
 
         this.rootDisk = {
@@ -565,7 +560,6 @@ export class VM {
 
         resolved.rootDiskPath = overlayPath;
         resolved.rootDiskFormat = "qcow2";
-        resolved.rootDiskSnapshot = false;
         resolved.rootDiskReadOnly = false;
 
         this.rootDisk = {
@@ -576,7 +570,7 @@ export class VM {
           deleteOnClose: true,
         };
       }
-    } else {
+    } else if (rootfsMode === "cow") {
       ensureQemuImgAvailable();
       const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
       const overlayPath = createTempQcow2Overlay(
@@ -586,7 +580,6 @@ export class VM {
 
       resolved.rootDiskPath = overlayPath;
       resolved.rootDiskFormat = "qcow2";
-      resolved.rootDiskSnapshot = false;
       resolved.rootDiskReadOnly = false;
 
       this.rootDisk = {
@@ -596,10 +589,16 @@ export class VM {
         readOnly: false,
         deleteOnClose: true,
       };
+    } else {
+      throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
     }
 
     this.resolvedSandboxOptions = resolved;
-    this.server = new SandboxServer(resolved);
+    this.server = new SandboxServer(resolved, {
+      qemuRootDiskVolatileMode: this.rootDisk?.snapshot
+        ? "snapshot"
+        : undefined,
+    });
     this.fs = new VmFsController({
       start: () => this.start(),
       exec: (command, fsOptions = {}) => this.exec(command, fsOptions),
