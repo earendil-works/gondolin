@@ -748,7 +748,9 @@ function extractKernelBundleFromSharedLibraryBytes(
     symbolSize,
   );
   if (bySection !== null) {
-    return sliceChecked(bytes, bySection, symbolSize);
+    return normalizeKrunKernelBundle(
+      sliceChecked(bytes, bySection, symbolSize),
+    );
   }
 
   const byLoadSegment = tryResolveSymbolOffsetFromProgramHeaders(
@@ -758,10 +760,21 @@ function extractKernelBundleFromSharedLibraryBytes(
     symbolSize,
   );
   if (byLoadSegment !== null) {
-    return sliceChecked(bytes, byLoadSegment, symbolSize);
+    return normalizeKrunKernelBundle(
+      sliceChecked(bytes, byLoadSegment, symbolSize),
+    );
   }
 
   throw new Error("failed to map KERNEL_BUNDLE symbol to file bytes");
+}
+
+function normalizeKrunKernelBundle(bytes: Buffer): Buffer {
+  // Shared libkrunfw archives expose KERNEL_BUNDLE with a trailing `\0`
+  // sentinel while `krunfw_get_kernel` reports `size - 1`
+  if (bytes.length > 0 && bytes[bytes.length - 1] === 0) {
+    return bytes.subarray(0, bytes.length - 1);
+  }
+  return bytes;
 }
 
 function parseElfSections(

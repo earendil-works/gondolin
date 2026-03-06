@@ -175,6 +175,21 @@ test("extractKernelBundleFromSharedLibraryBytes extracts aarch64 bundle", () => 
   assert.deepEqual(extracted, payload);
 });
 
+test("extractKernelBundleFromSharedLibraryBytes trims trailing NUL sentinel", () => {
+  const payloadWithSentinel = Buffer.concat([
+    Buffer.from("bundle", "utf8"),
+    Buffer.from([0]),
+  ]);
+  const fake = buildFakeSharedLib(62, payloadWithSentinel);
+
+  const extracted = nativeBuildTest.extractKernelBundleFromSharedLibraryBytes(
+    fake,
+    "x86_64",
+  );
+
+  assert.deepEqual(extracted, Buffer.from("bundle", "utf8"));
+});
+
 test("extractKernelBundleFromSharedLibraryBytes rejects machine mismatch", () => {
   const payload = Buffer.from("bundle", "utf8");
   const fake = buildFakeSharedLib(62, payload);
