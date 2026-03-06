@@ -201,7 +201,7 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
     vfs: null,
   });
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
   (vm as any).ensureVfsReady = async () => new Promise<void>(() => {});
@@ -225,7 +225,7 @@ test("vm internals: start timeout also applies when ensureRunning stalls", async
     vfs: null,
   });
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};
@@ -251,7 +251,7 @@ test("vm internals: timed out startup does not run late session setup", async ()
 
   let ensureSessionIpcCalls = 0;
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
   (vm as any).ensureVfsReady = async () => {
@@ -284,7 +284,7 @@ test("vm internals: stale timeout cleanup does not close newer startup", async (
   let staleCloseCalls = 0;
   const originalClose = vm.close.bind(vm);
 
-  (vm as any).ensureQemuAvailable = () => {};
+  (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};
