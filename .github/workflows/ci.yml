@@ -305,7 +305,7 @@ jobs:
       - name: Probe krun runtime availability
         run: |
           cd host
-          pnpm exec tsx -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; (async () => { const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); } else { console.log('krun precheck: available'); } })().catch((err) => { console.error(err); process.exit(1); });"
+          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); } else { console.log('krun precheck: available'); }"
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
 
