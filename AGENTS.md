@@ -18,18 +18,18 @@ make check      # Lint + typecheck (guest + host)
 make test       # Run all tests
 ```
 
-Host tests run with `tsx --test` (Node.js test runner):
+Host tests run with Node's built-in test runner in strip-only TypeScript mode:
 
 ```bash
 cd host && pnpm test              # All host tests
-cd host && pnpm exec tsx --test test/specific.test.ts  # Single test
+cd host && node --test test/specific.test.ts  # Single test
 ```
 
 Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build/alpine.ts`).
 
 ## Key Conventions
 
-- **TypeScript:** The host package uses `tsx` for running TypeScript directly. Tests use Node's built-in test runner (`node:test`).
+- **TypeScript:** The host package uses Node's strip-only TypeScript support for running `.ts` files directly; see `host/tsconfig.json` (`erasableSyntaxOnly`). Tests use Node's built-in test runner (`node:test`).
 - **Zig version:** 0.15.2 (see `guest/build.zig.zon`).
 - **Package manager:** pnpm (workspace root + `host/` package).
 
