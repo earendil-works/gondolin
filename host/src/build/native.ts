@@ -545,22 +545,28 @@ function extractKernelFromSharedArchive(
     );
   }
 
+  const hostArch = hostKrunArch();
   const sharedLib = fs.readFileSync(sharedLibPath);
+
+  if (hostArch === archName) {
+    try {
+      return extractKernelFromSharedArchiveByExecution(sharedLibPath, archName);
+    } catch (execErr) {
+      try {
+        return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
+      } catch (parseErr) {
+        throw new Error(
+          `failed to extract kernel bundle from libkrunfw shared archive for ${archName}; execution path failed (${formatExecError(execErr)}); parser fallback failed (${formatExecError(parseErr)})`,
+        );
+      }
+    }
+  }
 
   try {
     return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
   } catch (parseErr) {
-    const hostArch = hostKrunArch();
-    if (hostArch !== archName) {
-      throw new Error(
-        `failed to extract kernel bundle from libkrunfw shared archive for ${archName}: ${formatExecError(parseErr)}`,
-      );
-    }
-
-    return extractKernelFromSharedArchiveByExecution(
-      sharedLibPath,
-      archName,
-      parseErr,
+    throw new Error(
+      `failed to extract kernel bundle from libkrunfw shared archive for ${archName}: ${formatExecError(parseErr)}`,
     );
   }
 }
@@ -568,7 +574,6 @@ function extractKernelFromSharedArchive(
 function extractKernelFromSharedArchiveByExecution(
   sharedLibPath: string,
   archName: "aarch64" | "x86_64",
-  parseErr: unknown,
 ): Buffer {
   const libDir = path.dirname(sharedLibPath);
   const buildDir = path.join(path.dirname(sharedLibPath), "build-shared");
@@ -615,7 +620,7 @@ function extractKernelFromSharedArchiveByExecution(
     );
   } catch (err) {
     throw new Error(
-      `failed to compile libkrunfw kernel extractor for ${archName} after parser fallback (${formatExecError(parseErr)}): ${formatExecError(err)}`,
+      `failed to compile libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
     );
   }
 
@@ -636,7 +641,7 @@ function extractKernelFromSharedArchiveByExecution(
     return kernel;
   } catch (err) {
     throw new Error(
-      `failed to run libkrunfw kernel extractor for ${archName} after parser fallback (${formatExecError(parseErr)}): ${formatExecError(err)}`,
+      `failed to run libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
     );
   }
 }
