@@ -31,7 +31,7 @@ export async function buildInContainer(
   const guestDir = findGuestDir();
   if (!guestDir) {
     throw new Error(
-      "Could not find guest directory. Make sure you're running from a gondolin checkout.",
+      "Could not find guest directory. Use a gondolin checkout, reinstall a package version that bundles guest sources, or set GONDOLIN_GUEST_SRC.",
     );
   }
 

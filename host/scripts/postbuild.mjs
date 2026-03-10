@@ -1,20 +1,60 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
-const pkgRoot = path.resolve(import.meta.dirname, "..");
+import { findGuestDirFrom } from "../src/build/shared.ts";
 
-const vendoredSource = path.join(pkgRoot, "src", "vfs", "node", "vendored-node-vfs");
-const vendoredDest = path.join(pkgRoot, "dist", "src", "vfs", "node", "vendored-node-vfs");
+const GUEST_PAYLOAD = ["build.zig", "build.zig.zon", "src", "LICENSE"];
 
-if (!fs.existsSync(vendoredSource)) {
-  throw new Error(`missing vendored node-vfs source: ${vendoredSource}`);
+function copyVendoredNodeVfs(pkgRoot) {
+  const vendoredSource = path.join(
+    pkgRoot,
+    "src",
+    "vfs",
+    "node",
+    "vendored-node-vfs",
+  );
+  const vendoredDest = path.join(
+    pkgRoot,
+    "dist",
+    "src",
+    "vfs",
+    "node",
+    "vendored-node-vfs",
+  );
+
+  if (!fs.existsSync(vendoredSource)) {
+    throw new Error(`missing vendored node-vfs source: ${vendoredSource}`);
+  }
+
+  fs.rmSync(vendoredDest, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(vendoredDest), { recursive: true });
+  fs.cpSync(vendoredSource, vendoredDest, { recursive: true });
 }
 
-fs.rmSync(vendoredDest, { recursive: true, force: true });
-fs.mkdirSync(path.dirname(vendoredDest), { recursive: true });
-fs.cpSync(vendoredSource, vendoredDest, { recursive: true });
+export function findGuestSourceRoot(
+  pkgRoot,
+  cwd = process.cwd(),
+  env = process.env,
+) {
+  return findGuestDirFrom([pkgRoot, cwd], env);
+}
 
-const distRoot = path.join(pkgRoot, "dist");
+export function copyGuestSources(pkgRoot, guestSourceRoot) {
+  const guestDistRoot = path.join(pkgRoot, "dist", "guest");
+
+  fs.rmSync(guestDistRoot, { recursive: true, force: true });
+  fs.mkdirSync(guestDistRoot, { recursive: true });
+
+  for (const entry of GUEST_PAYLOAD) {
+    const src = path.join(guestSourceRoot, entry);
+    if (!fs.existsSync(src)) {
+      throw new Error(`missing guest build payload entry: ${src}`);
+    }
+    const dest = path.join(guestDistRoot, entry);
+    fs.cpSync(src, dest, { recursive: true });
+  }
+}
 
 function rewriteDeclarationsInDir(dirPath) {
   for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
@@ -44,6 +84,37 @@ function rewriteDeclarationsInDir(dirPath) {
   }
 }
 
-if (fs.existsSync(distRoot)) {
-  rewriteDeclarationsInDir(distRoot);
+export function runPostbuild({
+  pkgRoot = path.resolve(import.meta.dirname, ".."),
+  cwd = process.cwd(),
+  env = process.env,
+  stderr = process.stderr,
+} = {}) {
+  copyVendoredNodeVfs(pkgRoot);
+
+  const guestDistRoot = path.join(pkgRoot, "dist", "guest");
+  fs.rmSync(guestDistRoot, { recursive: true, force: true });
+
+  const guestSourceRoot = findGuestSourceRoot(pkgRoot, cwd, env);
+  if (guestSourceRoot) {
+    copyGuestSources(pkgRoot, guestSourceRoot);
+  } else {
+    stderr.write(
+      "Skipping guest source bundling: missing guest source directory\n",
+    );
+  }
+
+  const distRoot = path.join(pkgRoot, "dist");
+  if (fs.existsSync(distRoot)) {
+    rewriteDeclarationsInDir(distRoot);
+  }
+
+  return { guestSourceRoot };
+}
+
+if (process.argv[1]) {
+  const entryHref = pathToFileURL(path.resolve(process.argv[1])).href;
+  if (import.meta.url === entryHref) {
+    runPostbuild();
+  }
 }

@@ -26,6 +26,9 @@ GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
 `manifest.json`.
 
+Published `@earendil-works/gondolin` builds bundle guest Zig sources in the
+package, so custom image builds do not require a separate gondolin checkout.
+
 Prebuilt example config with `postBuild.commands` (installs `llm` + plugin via pip):
 
 ```bash
@@ -370,6 +373,12 @@ Install e2fsprogs:
 - Linux: `sudo apt install e2fsprogs`
 
 On macOS, ensure `mke2fs` is on your `PATH` (use `brew --prefix e2fsprogs` to find where it was installed).
+
+### `Could not find guest directory for Zig build`
+
+This usually means you are using an older package version that did not bundle
+guest build sources. Upgrade to a newer `@earendil-works/gondolin` release, or
+set `GONDOLIN_GUEST_SRC` to a local checkout `guest/` directory.
 
 ### Build Times Out / VM Doesn't Boot
 

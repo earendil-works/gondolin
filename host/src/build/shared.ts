@@ -140,16 +140,16 @@ export function resolveConfigPath(value: string, configDir?: string): string {
   return configDir ? path.resolve(configDir, value) : path.resolve(value);
 }
 
-/** Find the guest directory relative to this package */
-export function findGuestDir(): string | null {
-  if (process.env.GONDOLIN_GUEST_SRC) {
-    const envPath = process.env.GONDOLIN_GUEST_SRC;
-    if (fs.existsSync(path.join(envPath, "build.zig"))) {
-      return envPath;
-    }
+/** Find the guest directory from the provided search roots */
+export function findGuestDirFrom(
+  starts: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const envPath = env.GONDOLIN_GUEST_SRC;
+  if (envPath && fs.existsSync(path.join(envPath, "build.zig"))) {
+    return envPath;
   }
 
-  const starts = [import.meta.dirname, process.cwd()];
   const visited = new Set<string>();
 
   for (const start of starts) {
@@ -173,6 +173,11 @@ export function findGuestDir(): string | null {
   }
 
   return null;
+}
+
+/** Find the guest directory relative to this package */
+export function findGuestDir(): string | null {
+  return findGuestDirFrom([import.meta.dirname, process.cwd()]);
 }
 
 /** Find the host package root (directory containing package.json) */
@@ -318,7 +323,7 @@ export async function resolveSandboxBinaryPaths(
     if (!guestDir) {
       throw new Error(
         "Could not find guest directory for Zig build. Either:\n" +
-          "  1. Run from a gondolin checkout, or\n" +
+          "  1. Use a gondolin checkout or reinstall a package version that bundles guest sources, or\n" +
           "  2. Set GONDOLIN_GUEST_SRC to the guest directory, or\n" +
           "  3. Provide sandboxdPath and sandboxfsPath in the build config.",
       );

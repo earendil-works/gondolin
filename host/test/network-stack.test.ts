@@ -1550,7 +1550,13 @@ test("network-stack: drainOutboundTcp respects per-tick burst limit", async () =
   const dstIP = ip([93, 184, 216, 34]);
 
   stack.handleTCP(
-    buildTcpSegment({ srcPort: 50001, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    buildTcpSegment({
+      srcPort: 50001,
+      dstPort: 80,
+      seq: 1,
+      ack: 0,
+      flags: 0x02,
+    }),
     srcIP,
     dstIP,
   );
@@ -1642,7 +1648,13 @@ test("network-stack: dropped pure TCP ACK does not teardown session", () => {
   const dstIP = ip([93, 184, 216, 34]);
 
   stack.handleTCP(
-    buildTcpSegment({ srcPort: 50002, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    buildTcpSegment({
+      srcPort: 50002,
+      dstPort: 80,
+      seq: 1,
+      ack: 0,
+      flags: 0x02,
+    }),
     srcIP,
     dstIP,
   );
@@ -1708,7 +1720,13 @@ test("network-stack: dropped outbound TCP payload tears down session", () => {
   const dstIP = ip([93, 184, 216, 34]);
 
   stack.handleTCP(
-    buildTcpSegment({ srcPort: 50003, dstPort: 80, seq: 1, ack: 0, flags: 0x02 }),
+    buildTcpSegment({
+      srcPort: 50003,
+      dstPort: 80,
+      seq: 1,
+      ack: 0,
+      flags: 0x02,
+    }),
     srcIP,
     dstIP,
   );

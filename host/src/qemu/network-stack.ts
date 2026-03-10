@@ -351,7 +351,10 @@ export class NetworkStack extends EventEmitter {
     packet.writeUInt32BE(frame.length, 0);
     frame.copy(packet, 4);
 
-    const queued = this.enqueueTx(packet, this.classifyTxPriority(proto, payload));
+    const queued = this.enqueueTx(
+      packet,
+      this.classifyTxPriority(proto, payload),
+    );
     if (!queued && proto === ETH_P_IP) {
       this.teardownDroppedTcpSession(payload);
     }
@@ -725,7 +728,12 @@ export class NetworkStack extends EventEmitter {
     const FIN = (flags & 0x01) !== 0;
     const RST = (flags & 0x04) !== 0;
 
-    const key = makeTcpNatKey(srcIP.join("."), srcPort, dstIP.join("."), dstPort);
+    const key = makeTcpNatKey(
+      srcIP.join("."),
+      srcPort,
+      dstIP.join("."),
+      dstPort,
+    );
     let session = this.natTable.get(key);
 
     if (RST) {
