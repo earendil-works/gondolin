@@ -112,6 +112,11 @@ jobs:
             build-essential curl git make pkg-config clang lld xz-utils \
             libclang-dev llvm-dev libcap-ng-dev
 
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm lld xz
+
       - name: Build krun runner
         run: make krun-runner
 
@@ -148,9 +153,16 @@ jobs:
           ./node_modules/.bin/gondolin-krun-runner --version
 
       - name: Publish runner package (with provenance)
+        id: publish_runner
+        continue-on-error: true
         run: |
           cd "${{ matrix.package_dir }}"
           npm publish --access public --provenance
+
+      - name: Warn when runner package publish fails
+        if: steps.publish_runner.outcome != 'success'
+        run: |
+          echo "::warning::Runner package publish failed for ${{ matrix.package_name }}; continuing so main package release is not blocked"
 
   publish-npm:
     name: Publish main package to NPM
