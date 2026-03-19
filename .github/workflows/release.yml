@@ -97,7 +97,9 @@ jobs:
       - name: Install Zig
         run: |
           curl -L "${{ matrix.zig_url }}" | tar -xJ
-          echo "$PWD/${{ matrix.zig_archive%.tar.xz }}" >> $GITHUB_PATH
+          ZIG_DIR="${{ matrix.zig_archive }}"
+          ZIG_DIR="${ZIG_DIR%.tar.xz}"
+          echo "$PWD/$ZIG_DIR" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
