@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.7.0
+
 - Add experimental `krun` backend support (`--vmm krun` / `sandbox.vmm = "krun"`) with packaged runner binaries and krun boot assets in build manifests #70
 - Add `postBuild.copy` for custom image builds, allowing host files/directories to be copied into the guest rootfs before `postBuild.commands`
 - Improve custom image build reliability by preserving APK PAX long-path entries and zero-byte files during extraction
