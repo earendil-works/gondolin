@@ -4,8 +4,9 @@ import path from "path";
 import {
   createTempQcow2Overlay,
   ensureQemuImgAvailable,
-  getQcow2BackingFilename,
+  inferDiskFormatFromPath,
   rebaseQcow2InPlace,
+  resolveQcow2BackingPath,
 } from "./qemu/img.ts";
 
 import {
@@ -266,17 +267,25 @@ function ensureCheckpointBackedByRootfs(
   checkpointDiskPath: string,
   rootfsPath: string,
 ): void {
-  const backing = getQcow2BackingFilename(checkpointDiskPath);
-  if (!backing) return;
+  const checkpointAbs = path.resolve(checkpointDiskPath);
+  const backingAbs = resolveQcow2BackingPath(checkpointDiskPath);
+  if (!backingAbs) return;
 
-  const backingAbs = path.isAbsolute(backing)
-    ? path.resolve(backing)
-    : path.resolve(path.dirname(checkpointDiskPath), backing);
+  if (backingAbs === checkpointAbs) {
+    throw new Error(
+      `checkpoint is corrupt: qcow2 backing file points to itself (${checkpointAbs})`,
+    );
+  }
+
   const desired = path.resolve(rootfsPath);
 
   if (backingAbs === desired) return;
 
-  rebaseQcow2InPlace(checkpointDiskPath, desired, "raw");
+  rebaseQcow2InPlace(
+    checkpointDiskPath,
+    desired,
+    inferDiskFormatFromPath(desired),
+  );
 }
 
 async function resolveGuestAssetsForResume(

@@ -263,6 +263,108 @@ test(
   },
 );
 
+test(
+  "checkpoint overwrite after resume preserves canonical backing and data",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    let base: VM | null = null;
+    let resumed: VM | null = null;
+    let resumedAgain: VM | null = null;
+    let checkpoint: VmCheckpoint | null = null;
+
+    const checkpointPath = path.join(
+      os.tmpdir(),
+      `gondolin-checkpoint-overwrite-${Date.now()}.qcow2`,
+    );
+
+    try {
+      base = await VM.create({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const writeBase = await base.exec([
+        "/bin/sh",
+        "-c",
+        "echo hello > /etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(writeBase.exitCode, 0);
+
+      checkpoint = await base.checkpoint(checkpointPath);
+      base = null;
+
+      const initialBacking = getQcow2BackingFilename(checkpointPath);
+      assert.ok(
+        initialBacking,
+        "expected first checkpoint to preserve a qcow2 backing file",
+      );
+      const initialBackingAbs = path.isAbsolute(initialBacking)
+        ? path.resolve(initialBacking)
+        : path.resolve(path.dirname(checkpointPath), initialBacking);
+
+      resumed = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+      checkpoint = null;
+
+      const writeResumed = await resumed.exec([
+        "/bin/sh",
+        "-c",
+        "echo world >> /etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(writeResumed.exitCode, 0);
+
+      checkpoint = await resumed.checkpoint(checkpointPath);
+      resumed = null;
+
+      const backing = getQcow2BackingFilename(checkpointPath);
+      assert.ok(
+        backing,
+        "expected overwritten checkpoint to preserve a qcow2 backing file",
+      );
+
+      const backingAbs = path.isAbsolute(backing)
+        ? path.resolve(backing)
+        : path.resolve(path.dirname(checkpointPath), backing);
+      assert.equal(backingAbs, initialBackingAbs);
+      assert.notEqual(backingAbs, path.resolve(checkpointPath));
+
+      resumedAgain = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const read = await resumedAgain.exec([
+        "/bin/cat",
+        "/etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(read.exitCode, 0);
+      assert.equal(read.stdout, "hello\nworld\n");
+    } finally {
+      if (base) await base.close().catch(() => undefined);
+      if (resumed) await resumed.close().catch(() => undefined);
+      if (resumedAgain) await resumedAgain.close().catch(() => undefined);
+      if (checkpoint) {
+        try {
+          checkpoint.delete();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  },
+);
+
 test("checkpoint resume rejects incompatible backend metadata", async () => {
   const checkpoint = new VmCheckpoint(
     path.join(os.tmpdir(), "gondolin-missing-checkpoint.qcow2"),

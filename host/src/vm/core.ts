@@ -13,6 +13,8 @@ import {
   ensureQemuImgAvailable,
   inferDiskFormatFromPath,
   moveFile,
+  rebaseQcow2InPlace,
+  resolveQcow2BackingPath,
 } from "../qemu/img.ts";
 import {
   VmCheckpoint,
@@ -1964,6 +1966,28 @@ fi
     }
 
     const resolvedCheckpointPath = path.resolve(checkpointPath);
+
+    const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
+    const backingPath = resolveQcow2BackingPath(rootDisk.path);
+    if (backingPath && backingPath !== rootfsPath) {
+      // Collapse resume-generated checkpoint ancestry before we publish this
+      // overlay as the new checkpoint file.
+      ensureQemuImgAvailable();
+      rebaseQcow2InPlace(
+        rootDisk.path,
+        rootfsPath,
+        inferDiskFormatFromPath(rootfsPath),
+        "safe",
+      );
+
+      const rebasedBackingPath = resolveQcow2BackingPath(rootDisk.path);
+      if (rebasedBackingPath === resolvedCheckpointPath) {
+        throw new Error(
+          `cannot checkpoint: rebased overlay still points to destination checkpoint path (${resolvedCheckpointPath})`,
+        );
+      }
+    }
+
     fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
     fs.rmSync(resolvedCheckpointPath, { force: true });
 
