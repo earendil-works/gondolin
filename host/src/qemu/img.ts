@@ -115,17 +115,31 @@ export function getQcow2BackingFilename(imagePath: string): string | null {
   return extractBackingFilename(info);
 }
 
+/** Resolve the qcow2 backing filename to an absolute host path when present. */
+export function resolveQcow2BackingPath(imagePath: string): string | null {
+  const backing = getQcow2BackingFilename(imagePath);
+  if (!backing) return null;
+  return path.isAbsolute(backing)
+    ? path.resolve(backing)
+    : path.resolve(path.dirname(imagePath), backing);
+}
+
 /**
- * Rebase a qcow2 image to a new backing file path (in-place, unsafe mode).
+ * Rebase a qcow2 image to a new backing file path in-place.
+ *
+ * Unsafe mode only rewrites the qcow2 backing metadata. Safe mode also copies
+ * any clusters that are only present in the old backing chain.
  */
 export function rebaseQcow2InPlace(
   imagePath: string,
   backingPath: string,
   backingFormat: "raw" | "qcow2",
+  mode: "safe" | "unsafe" = "unsafe",
 ): void {
-  execFileSync(
-    "qemu-img",
-    ["rebase", "-u", "-F", backingFormat, "-b", backingPath, imagePath],
-    { stdio: "ignore" },
-  );
+  const args = ["rebase"];
+  if (mode === "unsafe") {
+    args.push("-u");
+  }
+  args.push("-F", backingFormat, "-b", backingPath, imagePath);
+  execFileSync("qemu-img", args, { stdio: "ignore" });
 }

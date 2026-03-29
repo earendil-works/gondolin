@@ -141,6 +141,90 @@ test(
 );
 
 test(
+  "checkpoint overwrite after resume keeps direct rootfs backing and data",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    let base: VM | null = null;
+    let checkpoint: VmCheckpoint | null = null;
+    let resumed: VM | null = null;
+    let resumedAgain: VM | null = null;
+
+    const checkpointPath = path.join(
+      os.tmpdir(),
+      `gondolin-checkpoint-overwrite-${Date.now()}.qcow2`,
+    );
+
+    try {
+      base = await VM.create({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const writeBase = await base.exec([
+        "/bin/sh",
+        "-c",
+        "printf 'base\\n' > /etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(writeBase.exitCode, 0, writeBase.stderr);
+
+      checkpoint = await base.checkpoint(checkpointPath);
+      base = null;
+
+      resumed = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const append = await resumed.exec([
+        "/bin/sh",
+        "-c",
+        "printf 'resumed\\n' >> /etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(append.exitCode, 0, append.stderr);
+
+      checkpoint = await resumed.checkpoint(checkpointPath);
+      resumed = null;
+
+      const backing = getQcow2BackingFilename(checkpointPath);
+      assert.notEqual(backing, checkpointPath);
+      assert.equal(path.basename(backing ?? ""), "rootfs.ext4");
+
+      resumedAgain = await checkpoint.resume({
+        vfs: null,
+        sandbox: {
+          console: "none",
+          netEnabled: false,
+        },
+      });
+
+      const read = await resumedAgain.exec([
+        "/bin/cat",
+        "/etc/checkpoint-overwrite.txt",
+      ]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      assert.equal(read.stdout, "base\nresumed\n");
+    } finally {
+      if (base) await base.close().catch(() => undefined);
+      if (resumed) await resumed.close().catch(() => undefined);
+      if (resumedAgain) await resumedAgain.close().catch(() => undefined);
+      if (checkpoint) {
+        try {
+          checkpoint.delete();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  },
+);
+
+test(
   "checkpoint resume rebases qcow2 backing to resolved rootfs",
   { skip: skipVmTests, timeout: timeoutMs },
   async (t) => {

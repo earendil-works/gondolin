@@ -13,6 +13,8 @@ import {
   ensureQemuImgAvailable,
   inferDiskFormatFromPath,
   moveFile,
+  rebaseQcow2InPlace,
+  resolveQcow2BackingPath,
 } from "../qemu/img.ts";
 import {
   VmCheckpoint,
@@ -1961,6 +1963,17 @@ fi
       );
     } else {
       await this.close();
+    }
+
+    const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
+    const backingPath = resolveQcow2BackingPath(rootDisk.path);
+    if (backingPath && backingPath !== rootfsPath) {
+      rebaseQcow2InPlace(
+        rootDisk.path,
+        rootfsPath,
+        inferDiskFormatFromPath(rootfsPath),
+        "safe",
+      );
     }
 
     const resolvedCheckpointPath = path.resolve(checkpointPath);
