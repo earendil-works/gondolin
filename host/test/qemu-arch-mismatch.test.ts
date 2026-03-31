@@ -183,6 +183,26 @@ test("resolveSandboxServerOptions rejects qemu-specific options for vmm=wasm-nod
   );
 });
 
+test("resolveSandboxServerOptions selects wasi-stdio mode when wasmPath is provided", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-wasm-"));
+  const wasmPath = path.join(dir, "sandbox.wasm");
+  fs.writeFileSync(wasmPath, "");
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      vmm: "wasm-node",
+      wasmPath,
+      netEnabled: false,
+    });
+
+    assert.equal(resolved.vmm, "wasm-node");
+    assert.equal(resolved.wasmPath, wasmPath);
+    assert.equal(resolved.wasmRunnerMode, "wasi-stdio");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);

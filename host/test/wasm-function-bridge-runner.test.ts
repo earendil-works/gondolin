@@ -134,3 +134,18 @@ test("WasmFunctionBridgeRunner harness round-trips PTY exec control frames", asy
   await transport.disconnect();
   await runner.stop();
 });
+
+test("WasmFunctionBridgeRunner rejects wasi-stdio mode without wasmPath", async () => {
+  const runner = new WasmFunctionBridgeRunner({
+    mode: "wasi-stdio",
+    startupTimeoutMs: 500,
+  });
+  runner.on("error", () => {
+    // swallow expected startup error for this test
+  });
+
+  await assert.rejects(
+    () => runner.start(),
+    /--wasm is required when --mode wasi-stdio/,
+  );
+});

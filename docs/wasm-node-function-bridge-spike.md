@@ -57,6 +57,21 @@ This is intentionally a harness and not yet the final WASI sandboxd adapter, but
 
 This is intentionally protocol-level: it validates PTY control-message path without stdio envelope coupling.
 
+## Try it locally
+
+Harness mode (default when no wasm path is configured):
+
+```bash
+node host/bin/gondolin.ts bash --vmm wasm-node
+```
+
+Real wasm module mode (stdio adapter behind function-bridge transport):
+
+```bash
+GONDOLIN_WASM_PATH=/absolute/path/to/sandbox.wasm \
+node host/bin/gondolin.ts bash --vmm wasm-node
+```
+
 ## Run the spike tests
 
 ```bash

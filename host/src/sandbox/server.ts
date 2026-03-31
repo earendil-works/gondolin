@@ -392,6 +392,7 @@ export class SandboxServer extends EventEmitter {
         nodePath: this.options.wasmNodePath,
         entryPath: this.options.wasmRunnerPath,
         mode: this.options.wasmRunnerMode,
+        wasmPath: this.options.wasmPath,
       });
       this.controller = new WasmFunctionBridgeController({
         runner: wasmRunner,

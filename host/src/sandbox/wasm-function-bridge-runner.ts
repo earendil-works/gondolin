@@ -6,7 +6,7 @@ import path from "path";
 
 import { FunctionBridgeTransport } from "./server-transport.ts";
 
-export type WasmFunctionBridgeRunnerMode = "harness";
+export type WasmFunctionBridgeRunnerMode = "harness" | "wasi-stdio";
 
 type RunnerInboundMessage =
   | {
@@ -57,6 +57,8 @@ export type WasmFunctionBridgeRunnerConfig = {
   entryPath?: string;
   /** runner behavior mode */
   mode?: WasmFunctionBridgeRunnerMode;
+  /** guest wasm module path (required for `mode=wasi-stdio`) */
+  wasmPath?: string;
   /** startup timeout in `ms` */
   startupTimeoutMs?: number;
 };
@@ -79,6 +81,7 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       entryPath:
         config.entryPath ?? resolveDefaultWasmFunctionBridgeRunnerEntryPath(),
       mode: config.mode ?? "harness",
+      wasmPath: config.wasmPath ?? "",
       startupTimeoutMs: config.startupTimeoutMs ?? 5_000,
     };
   }
@@ -94,9 +97,14 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       );
     }
 
+    const childArgs = [this.config.entryPath, "--mode", this.config.mode];
+    if (this.config.wasmPath.length > 0) {
+      childArgs.push("--wasm", this.config.wasmPath);
+    }
+
     const child = child_process.spawn(
       this.config.nodePath,
-      [this.config.entryPath, "--mode", this.config.mode],
+      childArgs,
       {
         stdio: ["ignore", "ignore", "ignore", "ipc"],
       },
@@ -293,7 +301,13 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       return;
     }
 
-    this.emit("error", new Error(message.message));
+    const error = new Error(message.message);
+    if (this.rejectReady) {
+      this.rejectReady(error);
+      this.rejectReady = null;
+      this.resolveReady = null;
+    }
+    this.emit("error", error);
   }
 
   private normalizeRunnerMessage(raw: unknown): RunnerInboundMessage | null {

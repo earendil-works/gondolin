@@ -491,7 +491,21 @@ export class VM {
     // Prepare root disk:
     // - Explicit sandbox.rootDisk* options win.
     // - Otherwise, use rootfs mode from VM options/manifest/default.
-    if (hasUserRootDiskConfig) {
+    if ((resolved.vmm ?? "qemu") === "wasm-node") {
+      const format = inferDiskFormatFromPath(resolved.rootfsPath);
+
+      resolved.rootDiskPath = resolved.rootfsPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskReadOnly = true;
+
+      this.rootDisk = {
+        path: resolved.rootfsPath,
+        format,
+        snapshot: false,
+        readOnly: true,
+        deleteOnClose: false,
+      };
+    } else if (hasUserRootDiskConfig) {
       const rootDiskPath = sandboxOptions.rootDiskPath ?? resolved.rootDiskPath;
       const format =
         sandboxOptions.rootDiskFormat ??

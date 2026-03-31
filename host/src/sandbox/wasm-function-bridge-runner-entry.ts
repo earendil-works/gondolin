@@ -1,10 +1,14 @@
+import child_process from "child_process";
+import fs from "fs";
+import path from "path";
+import type { ChildProcess } from "child_process";
 import {
   FrameReader,
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol.ts";
 
-type RunnerMode = "harness";
+type RunnerMode = "harness" | "wasi-stdio";
 
 type RunnerOutboundMessage =
   | {
@@ -12,9 +16,9 @@ type RunnerOutboundMessage =
       t: "ready";
     }
   | {
-      /** framed guest payload encoded as base64 */
+      /** framed guest payload bytes encoded as base64 */
       t: "frame";
-      /** frame bytes encoded as base64 */
+      /** base64-encoded frame bytes */
       frame: string;
     }
   | {
@@ -40,7 +44,7 @@ type RunnerInboundMessage =
   | {
       /** outbound framed payload from host, encoded as base64 */
       t: "frame";
-      /** frame bytes encoded as base64 */
+      /** base64-encoded frame bytes */
       frame: string;
     }
   | {
@@ -51,6 +55,8 @@ type RunnerInboundMessage =
 type ParsedArgs = {
   /** runner mode */
   mode: RunnerMode;
+  /** guest wasm module path for wasi-stdio mode */
+  wasmPath?: string;
 };
 
 function sendToParent(message: RunnerOutboundMessage): void {
@@ -70,6 +76,7 @@ function sendFrame(message: object): void {
 
 function parseArgs(argv: string[]): ParsedArgs {
   let mode: RunnerMode = "harness";
+  let wasmPath: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -79,7 +86,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (!value) {
         throw new Error("--mode requires a value");
       }
-      if (value !== "harness") {
+      if (value !== "harness" && value !== "wasi-stdio") {
         throw new Error(`unsupported runner mode: ${value}`);
       }
       mode = value;
@@ -87,14 +94,35 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
+    if (arg === "--wasm") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--wasm requires a path");
+      }
+      wasmPath = value;
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--wasm=")) {
+      const value = arg.slice("--wasm=".length).trim();
+      if (!value) {
+        throw new Error("--wasm requires a path");
+      }
+      wasmPath = value;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
-      throw new Error("usage: node wasm-function-bridge-runner-entry.ts [--mode harness]");
+      throw new Error(
+        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH]",
+      );
     }
 
     throw new Error(`unknown argument: ${arg}`);
   }
 
-  return { mode };
+  return { mode, wasmPath };
 }
 
 function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
@@ -254,12 +282,15 @@ function handleHarnessFrame(message: unknown): void {
   });
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.mode !== "harness") {
-    throw new Error(`unsupported mode: ${args.mode}`);
+function resolveDefaultWasmModuleRunnerPath(): string {
+  const localJs = path.resolve(import.meta.dirname, "wasm-runner.js");
+  if (fs.existsSync(localJs)) {
+    return localJs;
   }
+  return path.resolve(import.meta.dirname, "wasm-runner.ts");
+}
 
+async function runHarnessMode(): Promise<void> {
   const reader = new FrameReader();
 
   process.on("message", (raw) => {
@@ -309,16 +340,157 @@ function main() {
   });
 }
 
-try {
-  main();
-} catch (err) {
+async function runWasiStdioMode(wasmPath: string): Promise<void> {
+  if (!fs.existsSync(wasmPath)) {
+    throw new Error(`wasm module not found: ${wasmPath}`);
+  }
+
+  const wasmRunnerPath = resolveDefaultWasmModuleRunnerPath();
+  if (!fs.existsSync(wasmRunnerPath)) {
+    throw new Error(`wasm-runner entrypoint not found: ${wasmRunnerPath}`);
+  }
+
+  const child = child_process.spawn(
+    process.execPath,
+    [wasmRunnerPath, "--wasm", wasmPath, "--", "--transport=stdio"],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    },
+  );
+
+  let closed = false;
+  let closing = false;
+
+  const closeChild = (signal: NodeJS.Signals): void => {
+    if (closing) return;
+    closing = true;
+    try {
+      child.kill(signal);
+    } catch {
+      // ignore
+    }
+  };
+
+  child.stdout?.on("data", (chunk: Buffer | string) => {
+    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (data.length === 0) return;
+    sendToParent({
+      t: "frame",
+      frame: data.toString("base64"),
+    });
+  });
+
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    sendToParent({
+      t: "log",
+      stream: "stderr",
+      chunk: data.toString("utf8"),
+    });
+  });
+
+  child.stdin?.on("drain", () => {
+    sendToParent({ t: "writable" });
+  });
+
+  child.on("error", (err) => {
+    sendToParent({
+      t: "error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  });
+
+  child.on("exit", (code, signal) => {
+    if (closed) return;
+    closed = true;
+
+    if (signal || (typeof code === "number" && code !== 0)) {
+      sendToParent({
+        t: "error",
+        message: `wasm guest exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+      });
+    }
+
+    process.exit(code ?? 0);
+  });
+
+  process.on("message", (raw) => {
+    const message = decodeRunnerInboundMessage(raw);
+    if (!message) {
+      sendToParent({
+        t: "error",
+        message: "received invalid runner message",
+      });
+      return;
+    }
+
+    if (message.t === "close") {
+      try {
+        child.stdin?.end();
+      } catch {
+        // ignore
+      }
+      const killTimer = setTimeout(() => {
+        closeChild("SIGKILL");
+      }, 2_000);
+      killTimer.unref?.();
+      closeChild("SIGTERM");
+      return;
+    }
+
+    let chunk: Buffer;
+    try {
+      chunk = Buffer.from(message.frame, "base64");
+    } catch {
+      sendToParent({
+        t: "error",
+        message: "received non-base64 frame payload",
+      });
+      return;
+    }
+
+    try {
+      const writable = child.stdin?.write(chunk) ?? false;
+      if (writable) {
+        sendToParent({ t: "writable" });
+      }
+    } catch (err) {
+      sendToParent({
+        t: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  sendToParent({ t: "ready" });
+  sendToParent({ t: "writable" });
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.mode === "harness") {
+    await runHarnessMode();
+    return;
+  }
+
+  if (!args.wasmPath) {
+    throw new Error("--wasm is required when --mode wasi-stdio");
+  }
+
+  await runWasiStdioMode(args.wasmPath);
+}
+
+void main().catch((err) => {
   sendToParent({
     t: "error",
     message: err instanceof Error ? err.message : String(err),
   });
   process.exitCode = 1;
-}
+});
 
 export const __test = {
   parseArgs,
+  resolveDefaultWasmModuleRunnerPath,
 };

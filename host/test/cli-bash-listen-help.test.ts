@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 
-test("cli: gondolin bash --help documents --listen, --resume, and --vmm", () => {
+test("cli: gondolin bash --help documents --listen, --resume, --vmm, and --wasm", () => {
   const hostDir = path.join(import.meta.dirname, "..");
 
   const result = spawnSync(
@@ -21,4 +21,5 @@ test("cli: gondolin bash --help documents --listen, --resume, and --vmm", () => 
   assert.match(result.stdout ?? "", /--listen/);
   assert.match(result.stdout ?? "", /--resume/);
   assert.match(result.stdout ?? "", /--vmm/);
+  assert.match(result.stdout ?? "", /--wasm/);
 });

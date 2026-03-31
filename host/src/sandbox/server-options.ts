@@ -72,7 +72,9 @@ export type SandboxServerOptions = {
   /** function-bridge runner entrypoint path for wasm-node backend */
   wasmRunnerPath?: string;
   /** function-bridge runner mode */
-  wasmRunnerMode?: "harness";
+  wasmRunnerMode?: "harness" | "wasi-stdio";
+  /** guest wasm module path for wasm-node backend */
+  wasmPath?: string;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -185,7 +187,9 @@ export type ResolvedSandboxServerOptions = {
   /** function-bridge runner entrypoint path for wasm-node backend */
   wasmRunnerPath?: string;
   /** function-bridge runner mode */
-  wasmRunnerMode?: "harness";
+  wasmRunnerMode?: "harness" | "wasi-stdio";
+  /** guest wasm module path for wasm-node backend */
+  wasmPath?: string;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -869,7 +873,9 @@ export function resolveSandboxServerOptions(
   const wasmNodePath = options.wasmNodePath ?? process.execPath;
   const wasmRunnerPath =
     options.wasmRunnerPath ?? resolveDefaultWasmFunctionBridgeRunnerEntryPath();
-  const wasmRunnerMode = options.wasmRunnerMode ?? "harness";
+  const wasmPath = options.wasmPath ?? process.env.GONDOLIN_WASM_PATH?.trim();
+  const wasmRunnerMode =
+    options.wasmRunnerMode ?? (wasmPath ? "wasi-stdio" : "harness");
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
   const krunRunnerPath =
@@ -909,14 +915,25 @@ export function resolveSandboxServerOptions(
       );
     }
 
-    if (wasmRunnerMode !== "harness") {
+    if (wasmRunnerMode !== "harness" && wasmRunnerMode !== "wasi-stdio") {
       throw new Error(
-        `invalid sandbox.wasmRunnerMode: ${String(wasmRunnerMode)} (expected "harness")`,
+        `invalid sandbox.wasmRunnerMode: ${String(wasmRunnerMode)} (expected "harness" or "wasi-stdio")`,
       );
     }
 
     if (!fs.existsSync(wasmRunnerPath)) {
       throw new Error(`wasm runner entrypoint not found: ${wasmRunnerPath}`);
+    }
+
+    if (wasmRunnerMode === "wasi-stdio") {
+      if (!wasmPath) {
+        throw new Error(
+          "vmm=wasm-node with wasmRunnerMode=wasi-stdio requires sandbox.wasmPath or GONDOLIN_WASM_PATH",
+        );
+      }
+      if (!fs.existsSync(wasmPath)) {
+        throw new Error(`wasm guest module not found: ${wasmPath}`);
+      }
     }
   }
 
@@ -1026,6 +1043,7 @@ export function resolveSandboxServerOptions(
     wasmNodePath,
     wasmRunnerPath,
     wasmRunnerMode,
+    wasmPath,
     kernelPath,
     initrdPath,
     rootfsPath: resolvedRootfsPath,
