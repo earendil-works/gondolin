@@ -4,6 +4,7 @@ import path from "path";
 import type { ChildProcess } from "child_process";
 import {
   FrameReader,
+  MAX_FRAME,
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol.ts";
@@ -58,6 +59,8 @@ type ParsedArgs = {
   /** guest wasm module path for wasi-stdio mode */
   wasmPath?: string;
 };
+
+const STDIO_ENVELOPE_CHUNK_BASE64 = 120;
 
 function sendToParent(message: RunnerOutboundMessage): void {
   if (typeof process.send !== "function") {
@@ -143,6 +146,26 @@ function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
   }
 
   return null;
+}
+
+function encodeStdioEnvelopePayload(payload: Buffer): Buffer[] {
+  const encoded = payload.toString("base64");
+  if (encoded.length <= STDIO_ENVELOPE_CHUNK_BASE64) {
+    return [Buffer.from(`@${encoded}\n`, "utf8")];
+  }
+
+  const lines: Buffer[] = [];
+  for (
+    let offset = 0;
+    offset < encoded.length;
+    offset += STDIO_ENVELOPE_CHUNK_BASE64
+  ) {
+    const chunk = encoded.slice(offset, offset + STDIO_ENVELOPE_CHUNK_BASE64);
+    const isLast = offset + STDIO_ENVELOPE_CHUNK_BASE64 >= encoded.length;
+    lines.push(Buffer.from(`@${isLast ? "." : "!"}${chunk}\n`, "utf8"));
+  }
+
+  return lines;
 }
 
 function asPayload(value: unknown): Record<string, unknown> {
@@ -352,10 +375,13 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
 
   const child = child_process.spawn(
     process.execPath,
-    [wasmRunnerPath, "--wasm", wasmPath, "--", "--transport=stdio"],
+    [wasmRunnerPath, "--wasm", wasmPath],
     {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: process.env.NODE_NO_WARNINGS ?? "1",
+      },
     },
   );
 
@@ -372,13 +398,61 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
     }
   };
 
+  let stdoutBuffer = Buffer.alloc(0);
+  let stdoutSynced = false;
+  let waitingDrain = false;
+  const outboundQueue: Buffer[] = [];
+
+  const flushOutboundQueue = () => {
+    if (!child.stdin || waitingDrain) {
+      return;
+    }
+
+    while (outboundQueue.length > 0) {
+      const part = outboundQueue.shift()!;
+      const ok = child.stdin.write(part);
+      if (!ok) {
+        waitingDrain = true;
+        return;
+      }
+    }
+
+    sendToParent({ t: "writable" });
+  };
+
+  const parseStdoutFrames = () => {
+    while (stdoutBuffer.length >= 4) {
+      const frameLength = stdoutBuffer.readUInt32BE(0);
+      if (frameLength === 0 || frameLength > MAX_FRAME) {
+        stdoutBuffer = stdoutBuffer.subarray(1);
+        continue;
+      }
+
+      const frameEnd = 4 + frameLength;
+      if (stdoutBuffer.length < frameEnd) {
+        break;
+      }
+
+      const frame = stdoutBuffer.subarray(0, frameEnd);
+      stdoutBuffer = stdoutBuffer.subarray(frameEnd);
+      stdoutSynced = true;
+
+      sendToParent({
+        t: "frame",
+        frame: frame.toString("base64"),
+      });
+    }
+
+    if (!stdoutSynced && stdoutBuffer.length > 64 * 1024) {
+      stdoutBuffer = stdoutBuffer.subarray(stdoutBuffer.length - 64 * 1024);
+    }
+  };
+
   child.stdout?.on("data", (chunk: Buffer | string) => {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     if (data.length === 0) return;
-    sendToParent({
-      t: "frame",
-      frame: data.toString("base64"),
-    });
+    stdoutBuffer = Buffer.concat([stdoutBuffer, data]);
+    parseStdoutFrames();
   });
 
   child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -391,7 +465,8 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
   });
 
   child.stdin?.on("drain", () => {
-    sendToParent({ t: "writable" });
+    waitingDrain = false;
+    flushOutboundQueue();
   });
 
   child.on("error", (err) => {
@@ -450,11 +525,29 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
       return;
     }
 
+    if (chunk.length < 4) {
+      sendToParent({
+        t: "error",
+        message: "received short framed payload from host",
+      });
+      return;
+    }
+
+    const payloadLength = chunk.readUInt32BE(0);
+    if (payloadLength + 4 > chunk.length) {
+      sendToParent({
+        t: "error",
+        message: "received truncated framed payload from host",
+      });
+      return;
+    }
+
+    const payload = chunk.subarray(4, 4 + payloadLength);
+
     try {
-      const writable = child.stdin?.write(chunk) ?? false;
-      if (writable) {
-        sendToParent({ t: "writable" });
-      }
+      const lines = encodeStdioEnvelopePayload(payload);
+      outboundQueue.push(...lines);
+      flushOutboundQueue();
     } catch (err) {
       sendToParent({
         t: "error",

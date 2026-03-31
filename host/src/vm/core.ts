@@ -1659,6 +1659,13 @@ fi
 
   private async ensureVfsReady() {
     if (!this.vfs) return;
+
+    const vmm = this.resolvedSandboxOptions?.vmm ?? "qemu";
+    if (vmm === "wasm-node") {
+      // wasm-node currently does not implement sandboxfs mount wiring.
+      return;
+    }
+
     if (!this.vfsReadyPromise) {
       this.vfsReadyPromise = this.waitForVfsReadyInternal().catch((error) => {
         this.vfsReadyPromise = null;

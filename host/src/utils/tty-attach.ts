@@ -1,4 +1,5 @@
 import type { Readable } from "node:stream";
+import { execFileSync } from "node:child_process";
 
 export type AttachEscape = {
   /** escape byte value */
@@ -13,6 +14,33 @@ export type AttachTtyHooks = {
   resize?: (rows: number, cols: number) => void;
   escape?: AttachEscape;
 };
+
+function disableOnlcrWhileAttached(
+  stdin: NodeJS.ReadStream,
+  stdout: NodeJS.WriteStream,
+): void {
+  if (process.platform === "win32") {
+    return;
+  }
+  if (!stdin.isTTY || !stdout.isTTY) {
+    return;
+  }
+
+  const fd = (stdin as NodeJS.ReadStream & { fd?: unknown }).fd;
+  if (typeof fd !== "number" || !Number.isInteger(fd) || fd < 0) {
+    return;
+  }
+
+  try {
+    // Node's `setRawMode(true)` does not disable NL -> CRNL output conversion.
+    // Keep PTY bytes lossless to avoid visual corruption in interactive shells.
+    execFileSync("stty", ["-onlcr"], {
+      stdio: [fd, "ignore", "ignore"],
+    });
+  } catch {
+    // ignore when stty is unavailable or unsupported
+  }
+}
 
 /**
  * Attach a PTY-like exec session to local stdio.
@@ -88,6 +116,7 @@ export function attachTty(
 
   if (stdin.isTTY) {
     stdin.setRawMode(true);
+    disableOnlcrWhileAttached(stdin, stdout);
   }
   stdin.resume();
 

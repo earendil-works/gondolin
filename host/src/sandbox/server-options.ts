@@ -873,9 +873,9 @@ export function resolveSandboxServerOptions(
   const wasmNodePath = options.wasmNodePath ?? process.execPath;
   const wasmRunnerPath =
     options.wasmRunnerPath ?? resolveDefaultWasmFunctionBridgeRunnerEntryPath();
-  const wasmPath = options.wasmPath ?? process.env.GONDOLIN_WASM_PATH?.trim();
-  const wasmRunnerMode =
-    options.wasmRunnerMode ?? (wasmPath ? "wasi-stdio" : "harness");
+  let resolvedWasmPath =
+    options.wasmPath?.trim() || process.env.GONDOLIN_WASM_PATH?.trim();
+  const explicitWasmRunnerMode = options.wasmRunnerMode;
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
   const krunRunnerPath =
@@ -915,25 +915,18 @@ export function resolveSandboxServerOptions(
       );
     }
 
-    if (wasmRunnerMode !== "harness" && wasmRunnerMode !== "wasi-stdio") {
+    if (
+      explicitWasmRunnerMode !== undefined &&
+      explicitWasmRunnerMode !== "harness" &&
+      explicitWasmRunnerMode !== "wasi-stdio"
+    ) {
       throw new Error(
-        `invalid sandbox.wasmRunnerMode: ${String(wasmRunnerMode)} (expected "harness" or "wasi-stdio")`,
+        `invalid sandbox.wasmRunnerMode: ${String(explicitWasmRunnerMode)} (expected "harness" or "wasi-stdio")`,
       );
     }
 
     if (!fs.existsSync(wasmRunnerPath)) {
       throw new Error(`wasm runner entrypoint not found: ${wasmRunnerPath}`);
-    }
-
-    if (wasmRunnerMode === "wasi-stdio") {
-      if (!wasmPath) {
-        throw new Error(
-          "vmm=wasm-node with wasmRunnerMode=wasi-stdio requires sandbox.wasmPath or GONDOLIN_WASM_PATH",
-        );
-      }
-      if (!fs.existsSync(wasmPath)) {
-        throw new Error(`wasm guest module not found: ${wasmPath}`);
-      }
     }
   }
 
@@ -949,6 +942,31 @@ export function resolveSandboxServerOptions(
     if (krunKernelOverride) {
       kernelPath = krunKernelOverride.kernelPath;
       initrdPath = krunKernelOverride.initrdPath;
+    }
+  }
+
+  const manifestWasmAsset = (imageManifest?.assets as any)?.wasm as
+    | string
+    | undefined;
+  if (vmm === "wasm-node" && !resolvedWasmPath && imageDir && manifestWasmAsset) {
+    resolvedWasmPath = resolveManifestAssetPath(
+      imageDir,
+      manifestWasmAsset,
+      "manifest.assets.wasm",
+    );
+  }
+
+  const wasmRunnerMode =
+    explicitWasmRunnerMode ?? (resolvedWasmPath ? "wasi-stdio" : "harness");
+
+  if (vmm === "wasm-node" && wasmRunnerMode === "wasi-stdio") {
+    if (!resolvedWasmPath) {
+      throw new Error(
+        "vmm=wasm-node with wasmRunnerMode=wasi-stdio requires sandbox.wasmPath, GONDOLIN_WASM_PATH, or manifest.assets.wasm",
+      );
+    }
+    if (!fs.existsSync(resolvedWasmPath)) {
+      throw new Error(`wasm guest module not found: ${resolvedWasmPath}`);
     }
   }
 
@@ -1043,7 +1061,7 @@ export function resolveSandboxServerOptions(
     wasmNodePath,
     wasmRunnerPath,
     wasmRunnerMode,
-    wasmPath,
+    wasmPath: resolvedWasmPath,
     kernelPath,
     initrdPath,
     rootfsPath: resolvedRootfsPath,

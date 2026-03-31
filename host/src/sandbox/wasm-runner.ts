@@ -8,6 +8,25 @@ type RunnerArgs = {
   wasmArgs: string[];
 };
 
+type WasiEnv = Record<string, string>;
+
+function buildWasiEnv(input: NodeJS.ProcessEnv): WasiEnv {
+  const env: WasiEnv = {
+    // Keep stdio mode explicit for gondolin wasm guest startup scripts.
+    GONDOLIN_SANDBOXD_TRANSPORT: "stdio",
+  };
+
+  const passthrough = ["TERM", "LANG", "LC_ALL", "TZ"] as const;
+  for (const key of passthrough) {
+    const value = input[key];
+    if (typeof value === "string" && value.length > 0) {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
 function parseArgs(argv: string[]): RunnerArgs {
   let wasmPath: string | null = null;
   const passthrough: string[] = [];
@@ -72,7 +91,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
   const wasi = new WASI({
     version: "preview1",
     args: [args.wasmPath, ...args.wasmArgs],
-    env: process.env as Record<string, string>,
+    env: buildWasiEnv(process.env),
     preopens: {
       "/": "/",
     },

@@ -195,6 +195,115 @@ export class SandboxServer extends EventEmitter {
     return ` (qemu: ${truncated})`;
   }
 
+  private readonly ptyLineEndingState = new Map<
+    number,
+    {
+      /** whether last processed byte was a carriage return */
+      pendingCR: boolean;
+      /** whether to drop a single trailing LF after synthesizing CRLF from CRCR */
+      dropNextLF: boolean;
+      /** whether newline repair is active for this exec id */
+      normalize: boolean;
+    }
+  >();
+
+  private shouldEnablePtyLineEndingRepair(data: Buffer): boolean {
+    if (data.length < 2) return false;
+    for (let i = 1; i < data.length; i += 1) {
+      if (data[i - 1] === 0x0d && data[i] === 0x0d) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private normalizePtyOutput(id: number, data: Buffer): Buffer {
+    if (!this.ptyExecIds.has(id)) {
+      this.ptyLineEndingState.delete(id);
+      return data;
+    }
+
+    const state =
+      this.ptyLineEndingState.get(id) ??
+      ({ pendingCR: false, dropNextLF: false, normalize: false } as {
+        pendingCR: boolean;
+        dropNextLF: boolean;
+        normalize: boolean;
+      });
+
+    if (!state.normalize && this.shouldEnablePtyLineEndingRepair(data)) {
+      state.normalize = true;
+    }
+
+    if (!state.normalize) {
+      this.ptyLineEndingState.set(id, state);
+      return data;
+    }
+
+    const out: number[] = [];
+
+    for (let i = 0; i < data.length; i += 1) {
+      const byte = data[i]!;
+
+      if (state.dropNextLF) {
+        state.dropNextLF = false;
+        if (byte === 0x0a) {
+          continue;
+        }
+      }
+
+      if (state.pendingCR) {
+        if (byte === 0x0a) {
+          out.push(0x0d, 0x0a);
+          state.pendingCR = false;
+          continue;
+        }
+        if (byte === 0x0d) {
+          out.push(0x0d, 0x0a);
+          state.pendingCR = false;
+          state.dropNextLF = true;
+          continue;
+        }
+
+        out.push(0x0d);
+        state.pendingCR = false;
+      }
+
+      if (byte === 0x0d) {
+        state.pendingCR = true;
+        continue;
+      }
+
+      out.push(byte);
+    }
+
+    this.ptyLineEndingState.set(id, state);
+    return out.length > 0 ? Buffer.from(out) : Buffer.alloc(0);
+  }
+
+  private flushPtyOutputNormalizer(id: number, client: SandboxClient | null): void {
+    if (!client) {
+      this.ptyLineEndingState.delete(id);
+      return;
+    }
+
+    const state = this.ptyLineEndingState.get(id);
+    if (!state || !state.normalize || !state.pendingCR) {
+      this.ptyLineEndingState.delete(id);
+      return;
+    }
+
+    state.pendingCR = false;
+    state.dropNextLF = false;
+    this.ptyLineEndingState.delete(id);
+
+    try {
+      sendBinary(client, encodeOutputFrame(id, "stdout", Buffer.from("\r")));
+    } catch {
+      // ignore trailing flush failures
+    }
+  }
+
   private readonly debugFlags: ReadonlySet<DebugFlag>;
 
   private hasDebug(flag: DebugFlag) {
@@ -249,6 +358,8 @@ export class SandboxServer extends EventEmitter {
   /** stdin credits available to send to sandboxd, tracked in `bytes` */
   private stdinCredits = new Map<number, number>();
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
+  /** exec ids requested with PTY enabled */
+  private ptyExecIds = new Set<number>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
   private pendingExecWindows = new Map<
@@ -679,7 +790,10 @@ export class SandboxServer extends EventEmitter {
       if (message.t === "exec_output") {
         const client = this.inflight.get(message.id);
         if (!client) return;
-        const data = message.p.data;
+        const data = this.normalizePtyOutput(message.id, message.p.data);
+        if (data.length === 0) {
+          return;
+        }
         try {
           if (
             !sendBinary(
@@ -687,14 +801,12 @@ export class SandboxServer extends EventEmitter {
               encodeOutputFrame(message.id, message.p.stream, data),
             )
           ) {
-            this.inflight.delete(message.id);
-            this.stdinAllowed.delete(message.id);
-            this.stdinCredits.delete(message.id);
+            this.flushPtyOutputNormalizer(message.id, client);
+            this.detachExecClient(message.id);
           }
         } catch {
-          this.inflight.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
+          this.flushPtyOutputNormalizer(message.id, client);
+          this.detachExecClient(message.id);
         }
       } else if (message.t === "exec_response") {
         if (this.hasDebug("exec")) {
@@ -704,6 +816,7 @@ export class SandboxServer extends EventEmitter {
           );
         }
         const client = this.inflight.get(message.id);
+        this.flushPtyOutputNormalizer(message.id, client ?? null);
         if (client) {
           sendJson(client, {
             type: "exec_response",
@@ -712,13 +825,7 @@ export class SandboxServer extends EventEmitter {
             signal: message.p.signal,
           });
         }
-        this.inflight.delete(message.id);
-        this.startedExecs.delete(message.id);
-        this.stdinAllowed.delete(message.id);
-        this.stdinCredits.delete(message.id);
-        this.pendingExecWindows.delete(message.id);
-        this.clearQueuedStdin(message.id);
-        this.queuedPtyResize.delete(message.id);
+        this.clearExecTracking(message.id);
       } else if (message.t === "stdin_window") {
         const stdin = (message as any).p?.stdin;
         const credits = Number(stdin);
@@ -778,13 +885,8 @@ export class SandboxServer extends EventEmitter {
         }
 
         if (client) {
-          this.inflight.delete(message.id);
-          this.startedExecs.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
-          this.pendingExecWindows.delete(message.id);
-          this.clearQueuedStdin(message.id);
-          this.queuedPtyResize.delete(message.id);
+          this.flushPtyOutputNormalizer(message.id, client);
+          this.clearExecTracking(message.id);
         } else if (this.fileOps.has(message.id)) {
           this.rejectFileOperation(
             message.id,
@@ -793,12 +895,7 @@ export class SandboxServer extends EventEmitter {
         } else if (this.startedExecs.has(message.id)) {
           // Orphaned exec (client disconnected): still clear guest-side lifecycle
           // tracking when sandboxd reports terminal failure.
-          this.startedExecs.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
-          this.pendingExecWindows.delete(message.id);
-          this.clearQueuedStdin(message.id);
-          this.queuedPtyResize.delete(message.id);
+          this.clearExecTracking(message.id);
         } else if (message.id === 0 && this.activeFileOpId !== null) {
           this.rejectFileOperation(
             this.activeFileOpId,
