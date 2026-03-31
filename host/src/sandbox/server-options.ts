@@ -31,6 +31,7 @@ import {
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
+import { resolveDefaultWasmFunctionBridgeRunnerEntryPath } from "./wasm-function-bridge-runner.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -45,7 +46,7 @@ const require = createRequire(import.meta.url);
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "qemu" | "krun";
+export type SandboxVmm = "qemu" | "krun" | "wasm-node";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
@@ -66,6 +67,12 @@ export type SandboxServerOptions = {
   qemuPath?: string;
   /** krun runner binary path */
   krunRunnerPath?: string;
+  /** node binary path for wasm-node backend */
+  wasmNodePath?: string;
+  /** function-bridge runner entrypoint path for wasm-node backend */
+  wasmRunnerPath?: string;
+  /** function-bridge runner mode */
+  wasmRunnerMode?: "harness";
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -173,6 +180,12 @@ export type ResolvedSandboxServerOptions = {
   qemuPath: string;
   /** krun runner binary path */
   krunRunnerPath: string;
+  /** node binary path for wasm-node backend */
+  wasmNodePath?: string;
+  /** function-bridge runner entrypoint path for wasm-node backend */
+  wasmRunnerPath?: string;
+  /** function-bridge runner mode */
+  wasmRunnerMode?: "harness";
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -317,7 +330,11 @@ function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
 function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "wasm-node"
+  ) {
     return normalized;
   }
   return null;
@@ -843,12 +860,16 @@ export function resolveSandboxServerOptions(
   const explicitVmm = normalizeVmm(options.vmm ?? null);
   if (options.vmm !== undefined && !explicitVmm) {
     throw new Error(
-      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu" or "krun")`,
+      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu", "krun", or "wasm-node")`,
     );
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
   let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
+  const wasmNodePath = options.wasmNodePath ?? process.execPath;
+  const wasmRunnerPath =
+    options.wasmRunnerPath ?? resolveDefaultWasmFunctionBridgeRunnerEntryPath();
+  const wasmRunnerMode = options.wasmRunnerMode ?? "harness";
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
   const krunRunnerPath =
@@ -871,12 +892,39 @@ export function resolveSandboxServerOptions(
           "These options are only supported with vmm=qemu.",
       );
     }
+  } else if (vmm === "wasm-node") {
+    const unsupported: string[] = [];
+    if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
+    if (options.krunRunnerPath !== undefined)
+      unsupported.push("sandbox.krunRunnerPath");
+    if (options.machineType !== undefined)
+      unsupported.push("sandbox.machineType");
+    if (options.accel !== undefined) unsupported.push("sandbox.accel");
+    if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
+
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=wasm-node: ${unsupported.join(", ")}. ` +
+          "These options are not supported by the experimental wasm-node backend.",
+      );
+    }
+
+    if (wasmRunnerMode !== "harness") {
+      throw new Error(
+        `invalid sandbox.wasmRunnerMode: ${String(wasmRunnerMode)} (expected "harness")`,
+      );
+    }
+
+    if (!fs.existsSync(wasmRunnerPath)) {
+      throw new Error(`wasm runner entrypoint not found: ${wasmRunnerPath}`);
+    }
   }
 
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
+  let resolvedRootfsPath = rootfsPath;
   let krunKernelOverride: KrunKernelOverride | null = null;
 
   if (vmm === "krun" && !explicitImageObject) {
@@ -887,14 +935,21 @@ export function resolveSandboxServerOptions(
     }
   }
 
-  if (!kernelPath || !initrdPath || !rootfsPath) {
-    throw new Error(
-      "Guest assets not found. Either:\n" +
-        "  1. Run from the gondolin repository with built guest images\n" +
-        "  2. Use SandboxServer.create() to auto-download assets\n" +
-        "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
-        "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
-    );
+  if (!kernelPath || !initrdPath || !resolvedRootfsPath) {
+    if (vmm === "wasm-node") {
+      const placeholderPath = process.execPath;
+      kernelPath = kernelPath ?? placeholderPath;
+      initrdPath = initrdPath ?? placeholderPath;
+      resolvedRootfsPath = resolvedRootfsPath ?? placeholderPath;
+    } else {
+      throw new Error(
+        "Guest assets not found. Either:\n" +
+          "  1. Run from the gondolin repository with built guest images\n" +
+          "  2. Use SandboxServer.create() to auto-download assets\n" +
+          "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
+          "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
+      );
+    }
   }
 
   // Fail fast if we can detect that the guest image doesn't match the selected backend target.
@@ -902,7 +957,7 @@ export function resolveSandboxServerOptions(
   const guestFromManifest = detectGuestArchFromManifest({
     kernelPath: baseKernelPath,
     initrdPath: baseInitrdPath,
-    rootfsPath,
+    rootfsPath: rootfsPath,
   });
 
   if (
@@ -929,7 +984,7 @@ export function resolveSandboxServerOptions(
           "or rebuild/download guest assets for the correct architecture.",
       );
     }
-  } else if (guestFromManifest) {
+  } else if (vmm === "krun" && guestFromManifest) {
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
       throw new Error(
@@ -949,7 +1004,7 @@ export function resolveSandboxServerOptions(
     );
   }
 
-  const rootDiskPath = options.rootDiskPath ?? rootfsPath;
+  const rootDiskPath = options.rootDiskPath ?? resolvedRootfsPath;
   const rootDiskFormat =
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
@@ -968,9 +1023,12 @@ export function resolveSandboxServerOptions(
     vmm,
     qemuPath,
     krunRunnerPath,
+    wasmNodePath,
+    wasmRunnerPath,
+    wasmRunnerMode,
     kernelPath,
     initrdPath,
-    rootfsPath,
+    rootfsPath: resolvedRootfsPath,
     rootDiskPath,
     rootDiskFormat,
     rootDiskReadOnly,
@@ -1017,6 +1075,16 @@ export function resolveSandboxServerOptions(
 export async function resolveSandboxServerOptionsAsync(
   options: SandboxServerOptions = {},
 ): Promise<ResolvedSandboxServerOptions> {
+  const explicitVmm = normalizeVmm(options.vmm ?? null);
+  const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
+  const selectedVmm = explicitVmm ?? envVmm ?? "qemu";
+
+  // wasm-node does not require kernel/initramfs/rootfs assets for the initial
+  // function-bridge runner spike.
+  if (selectedVmm === "wasm-node" && options.imagePath === undefined) {
+    return resolveSandboxServerOptions(options);
+  }
+
   // Explicit object imagePath is already fully resolved.
   if (options.imagePath && typeof options.imagePath === "object") {
     return resolveSandboxServerOptions(options);

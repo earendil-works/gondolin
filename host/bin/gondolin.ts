@@ -249,7 +249,7 @@ function bashUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|wasm-node (default: qemu)",
   );
   console.log();
   console.log("VFS Options:");
@@ -406,7 +406,7 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|wasm-node (default: qemu)",
   );
   console.log();
   console.log("Network Options (VM mode only):");
@@ -480,7 +480,7 @@ type CommonOptions = {
   image?: string;
 
   /** vm backend selection */
-  vmm?: "qemu" | "krun";
+  vmm?: "qemu" | "krun" | "wasm-node";
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -724,12 +724,16 @@ function resolveSshAgent(explicit?: string): string {
   return sock;
 }
 
-function parseVmmOption(value: string): "qemu" | "krun" {
+function parseVmmOption(value: string): "qemu" | "krun" | "wasm-node" {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "wasm-node"
+  ) {
     return normalized;
   }
-  throw new Error("--vmm must be one of: qemu, krun");
+  throw new Error("--vmm must be one of: qemu, krun, wasm-node");
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {

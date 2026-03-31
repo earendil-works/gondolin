@@ -45,6 +45,7 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { stripTrailingNewline } from "../debug.ts";
+import { getBackendCapabilities } from "./backend-capabilities.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;
@@ -343,6 +344,11 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    const backend = this.options?.vmm ?? "qemu";
+    if (!getBackendCapabilities(backend).tcpForwardChannels) {
+      throw new Error(`openTcpStream is not supported for vmm=${backend}`);
+    }
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -428,6 +434,11 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    const backend = this.options?.vmm ?? "qemu";
+    if (!getBackendCapabilities(backend).tcpForwardChannels) {
+      throw new Error(`openIngressStream is not supported for vmm=${backend}`);
+    }
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;

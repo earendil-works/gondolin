@@ -50,6 +50,7 @@ import {
 } from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
+  NoopTransport,
   type ServerTransport,
   TcpForwardStream,
   UnixSocketTransport,
@@ -72,6 +73,8 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
+import { WasmFunctionBridgeRunner } from "./wasm-function-bridge-runner.ts";
+import { WasmFunctionBridgeController } from "./wasm-function-bridge-controller.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 
@@ -272,9 +275,13 @@ export class SandboxServer extends EventEmitter {
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    return this.options.vmm === "krun"
-      ? this.options.krunRunnerPath
-      : this.options.qemuPath;
+    if (this.options.vmm === "krun") {
+      return this.options.krunRunnerPath;
+    }
+    if (this.options.vmm === "wasm-node") {
+      return this.options.wasmNodePath ?? process.execPath;
+    }
+    return this.options.qemuPath;
   }
 
   /** @internal resolved qemu binary path */
@@ -355,6 +362,8 @@ export class SandboxServer extends EventEmitter {
     const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
 
+    let wasmRunner: WasmFunctionBridgeRunner | null = null;
+
     if (this.options.vmm === "krun") {
       const krunConfig: KrunConfig = {
         krunRunnerPath: this.options.krunRunnerPath,
@@ -378,6 +387,17 @@ export class SandboxServer extends EventEmitter {
         autoRestart: this.options.autoRestart,
       };
       this.controller = new KrunController(krunConfig);
+    } else if (this.options.vmm === "wasm-node") {
+      wasmRunner = new WasmFunctionBridgeRunner({
+        nodePath: this.options.wasmNodePath,
+        entryPath: this.options.wasmRunnerPath,
+        mode: this.options.wasmRunnerMode,
+      });
+      this.controller = new WasmFunctionBridgeController({
+        runner: wasmRunner,
+        autoRestart: this.options.autoRestart,
+        append: this.baseAppend,
+      });
     } else {
       const sandboxConfig: SandboxConfig = {
         qemuPath: this.options.qemuPath,
@@ -429,6 +449,13 @@ export class SandboxServer extends EventEmitter {
         });
       }
 
+      if (wasmRunner) {
+        if (name === "control") {
+          return wasmRunner.createControlTransport(channelMaxPendingBytes);
+        }
+        return new NoopTransport();
+      }
+
       return new UnixSocketTransport(socketPath, channelMaxPendingBytes);
     };
 
@@ -469,7 +496,7 @@ export class SandboxServer extends EventEmitter {
     const mac =
       parseMac(this.options.netMac) ??
       Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    this.network = this.options.netEnabled
+    this.network = this.options.netEnabled && this.options.vmm !== "wasm-node"
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,
           vmMac: mac,

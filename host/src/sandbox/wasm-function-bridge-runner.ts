@@ -244,12 +244,6 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
         sendFrame: (frame) => this.sendFrame(frame),
         subscribeFrame: (listener) => this.subscribeFrame(listener),
         subscribeWritable: (listener) => this.subscribeWritable(listener),
-        connect: () => {
-          void this.start();
-        },
-        disconnect: async () => {
-          await this.stop();
-        },
       },
       maxPendingBytes,
     );

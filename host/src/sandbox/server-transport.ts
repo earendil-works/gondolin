@@ -584,6 +584,20 @@ export class FunctionBridgeTransport implements ServerTransport {
   }
 }
 
+export class NoopTransport implements ServerTransport {
+  onMessage?: (message: IncomingMessage) => void;
+  onError?: (error: unknown) => void;
+  onWritable?: () => void;
+
+  connect(): void {}
+
+  async disconnect(): Promise<void> {}
+
+  send(_message: object): boolean {
+    return true;
+  }
+}
+
 /**
  * Backwards-compatible alias for legacy call sites
  */

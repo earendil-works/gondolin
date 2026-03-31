@@ -26,7 +26,7 @@ No qemu/krun behavior is changed by default.
 
 ## Follow-up: runner harness spike
 
-This follow-up adds an explicit Node-side bridge runner skeleton:
+This follow-up adds an explicit Node-side bridge runner skeleton and wires it into an experimental backend path:
 
 - `host/src/sandbox/wasm-function-bridge-runner.ts`
   - starts a dedicated Node child with IPC only for control frames
@@ -34,8 +34,15 @@ This follow-up adds an explicit Node-side bridge runner skeleton:
 - `host/src/sandbox/wasm-function-bridge-runner-entry.ts`
   - harness-mode guest loop that consumes framed requests and emits framed responses
   - demonstrates `exec_request`, `stdin_data`, `pty_resize`, and `exec_response` flow over function bridge callbacks
+- `host/src/sandbox/wasm-function-bridge-controller.ts`
+  - controller shim that maps runner lifecycle to sandbox controller state/events
+- `host/src/sandbox/server.ts`
+  - `vmm=wasm-node` wiring for control channel via `FunctionBridgeTransport`
+  - non-control channels use no-op transports in this spike
 - `host/test/wasm-function-bridge-runner.test.ts`
   - round-trip PTY exec test using the harness runner
+- `host/test/wasm-node-sandbox-spike.test.ts`
+  - sandbox-level smoke for `vmm=wasm-node` exec over function bridge harness
 
 This is intentionally a harness and not yet the final WASI sandboxd adapter, but it removes stdio control coupling and validates the runner protocol surface we need for the real Node WASM runtime path.
 
@@ -54,7 +61,10 @@ This is intentionally protocol-level: it validates PTY control-message path with
 
 ```bash
 cd host
-node --test test/server-transport.test.ts test/wasm-function-bridge-runner.test.ts
+node --test \
+  test/server-transport.test.ts \
+  test/wasm-function-bridge-runner.test.ts \
+  test/wasm-node-sandbox-spike.test.ts
 ```
 
 ## Next step to turn this into a real Node WASM backend

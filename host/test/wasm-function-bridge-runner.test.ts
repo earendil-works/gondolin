@@ -38,6 +38,7 @@ test("WasmFunctionBridgeRunner harness round-trips PTY exec control frames", asy
     messages.push(message as Incoming);
   };
 
+  await runner.start();
   transport.connect();
 
   await waitFor(
