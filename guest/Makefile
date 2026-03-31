@@ -25,6 +25,25 @@ KRUN_INITRD ?= $(IMAGE_OUT)/krun-empty-initrd
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -s)
+
+# macOS-specific toolchain/path compatibility:
+# - Zig 0.15.x can fail to link build runners with newer Xcode SDKs
+# - Homebrew e2fsprogs is keg-only (mke2fs not on PATH by default)
+ifeq ($(HOST_OS),Darwin)
+ifeq ($(origin DEVELOPER_DIR), undefined)
+ifneq ($(wildcard /Library/Developer/CommandLineTools/usr/bin/clang),)
+export DEVELOPER_DIR := /Library/Developer/CommandLineTools
+endif
+endif
+
+ifneq ($(wildcard /opt/homebrew/opt/e2fsprogs/sbin/mke2fs),)
+PATH := /opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$(PATH)
+else ifneq ($(wildcard /usr/local/opt/e2fsprogs/sbin/mke2fs),)
+PATH := /usr/local/opt/e2fsprogs/sbin:/usr/local/opt/e2fsprogs/bin:$(PATH)
+endif
+export PATH
+endif
+
 ifeq ($(HOST_OS),Darwin)
   ifeq ($(HOST_ARCH),x86_64)
     ifeq ($(shell sysctl -n hw.optional.arm64 2>/dev/null),1)
