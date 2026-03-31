@@ -24,6 +24,21 @@ This spike adds transport plumbing that can be reused by all backends, including
 
 No qemu/krun behavior is changed by default.
 
+## Follow-up: runner harness spike
+
+This follow-up adds an explicit Node-side bridge runner skeleton:
+
+- `host/src/sandbox/wasm-function-bridge-runner.ts`
+  - starts a dedicated Node child with IPC only for control frames
+  - exposes `createControlTransport()` backed by `FunctionBridgeTransport`
+- `host/src/sandbox/wasm-function-bridge-runner-entry.ts`
+  - harness-mode guest loop that consumes framed requests and emits framed responses
+  - demonstrates `exec_request`, `stdin_data`, `pty_resize`, and `exec_response` flow over function bridge callbacks
+- `host/test/wasm-function-bridge-runner.test.ts`
+  - round-trip PTY exec test using the harness runner
+
+This is intentionally a harness and not yet the final WASI sandboxd adapter, but it removes stdio control coupling and validates the runner protocol surface we need for the real Node WASM runtime path.
+
 ## PTY-specific coverage in this spike
 
 `host/test/server-transport.test.ts` includes a PTY-focused frame round-trip using `FunctionBridgeTransport`:
@@ -39,7 +54,7 @@ This is intentionally protocol-level: it validates PTY control-message path with
 
 ```bash
 cd host
-node --test test/server-transport.test.ts
+node --test test/server-transport.test.ts test/wasm-function-bridge-runner.test.ts
 ```
 
 ## Next step to turn this into a real Node WASM backend
