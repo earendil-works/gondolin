@@ -50,8 +50,9 @@ import {
 } from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
+  type ServerTransport,
   TcpForwardStream,
-  VirtioBridge,
+  UnixSocketTransport,
   estimateBase64Bytes,
   isValidRequestId,
   parseMac,
@@ -126,9 +127,22 @@ type SandboxControllerLike = {
   ): unknown;
 };
 
+type SandboxServerTransportName = "control" | "fs" | "ssh" | "ingress";
+
+type SandboxServerTransportFactory = (options: {
+  /** transport channel identifier */
+  name: SandboxServerTransportName;
+  /** unix socket path for this channel */
+  socketPath: string;
+  /** maximum queued transport bytes */
+  maxPendingBytes: number;
+}) => ServerTransport;
+
 type SandboxServerInternalOptions = {
   /** qemu root disk volatility mode */
   qemuRootDiskVolatileMode?: "snapshot";
+  /** transport factory override for tests and alternate runtimes */
+  transportFactory?: SandboxServerTransportFactory;
 };
 
 export class SandboxServer extends EventEmitter {
@@ -186,10 +200,10 @@ export class SandboxServer extends EventEmitter {
 
   private readonly options: ResolvedSandboxServerOptions;
   private readonly controller: SandboxControllerLike;
-  private readonly bridge: VirtioBridge;
-  private readonly fsBridge: VirtioBridge;
-  private readonly sshBridge: VirtioBridge;
-  private readonly ingressBridge: VirtioBridge;
+  private readonly bridge: ServerTransport;
+  private readonly fsBridge: ServerTransport;
+  private readonly sshBridge: ServerTransport;
+  private readonly ingressBridge: ServerTransport;
   private readonly network: QemuNetworkBackend | null;
   private readonly internalOptions: SandboxServerInternalOptions;
 
@@ -402,7 +416,24 @@ export class SandboxServer extends EventEmitter {
       (this.options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES) * 2,
     );
 
-    this.bridge = new VirtioBridge(
+    const createTransport = (
+      name: SandboxServerTransportName,
+      socketPath: string,
+      channelMaxPendingBytes: number = maxPendingBytes,
+    ): ServerTransport => {
+      if (this.internalOptions.transportFactory) {
+        return this.internalOptions.transportFactory({
+          name,
+          socketPath,
+          maxPendingBytes: channelMaxPendingBytes,
+        });
+      }
+
+      return new UnixSocketTransport(socketPath, channelMaxPendingBytes);
+    };
+
+    this.bridge = createTransport(
+      "control",
       this.options.virtioSocketPath,
       maxPendingBytes,
     );
@@ -411,14 +442,19 @@ export class SandboxServer extends EventEmitter {
       this.scheduleExecIoFlush();
       this.flushBridgeWritableWaiters();
     };
-    this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
+
+    this.fsBridge = createTransport("fs", this.options.virtioFsSocketPath);
+
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
-    this.sshBridge = new VirtioBridge(
+    this.sshBridge = createTransport(
+      "ssh",
       this.options.virtioSshSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
+
     // Ingress proxy streams can also be long-lived and high-throughput.
-    this.ingressBridge = new VirtioBridge(
+    this.ingressBridge = createTransport(
+      "ingress",
       this.options.virtioIngressSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );

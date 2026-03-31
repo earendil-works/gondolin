@@ -2,6 +2,7 @@ import fs from "fs";
 import net from "net";
 import path from "path";
 import { Duplex } from "stream";
+import { EventEmitter } from "events";
 
 import {
   FrameReader,
@@ -12,28 +13,175 @@ import {
 
 export const MAX_REQUEST_ID = 0xffffffff;
 
-export class VirtioBridge {
+const DEFAULT_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+
+type FramedWritable = {
+  /** writable state flag when available */
+  writable?: boolean;
+  /** frame write entrypoint */
+  write(chunk: Buffer): boolean;
+  /** one-shot drain listener */
+  once(event: "drain", listener: () => void): unknown;
+};
+
+function isWritableStream(
+  writable: FramedWritable | null,
+): writable is FramedWritable {
+  if (!writable) return false;
+  return writable.writable !== false;
+}
+
+class FramedWriteQueue {
+  private writable: FramedWritable | null = null;
+  private pending: Buffer[] = [];
+  private pendingBytes = 0;
+  private waitingDrain = false;
+  private drainSource: FramedWritable | null = null;
+  private readonly maxPendingBytes: number;
+  private readonly onWritable: () => void;
+  private readonly handleDrain = () => {
+    if (!this.waitingDrain) return;
+    this.waitingDrain = false;
+    this.drainSource = null;
+    this.flush();
+  };
+
+  constructor(maxPendingBytes: number, onWritable: () => void) {
+    this.maxPendingBytes = maxPendingBytes;
+    this.onWritable = onWritable;
+  }
+
+  attachWritable(writable: FramedWritable): void {
+    this.writable = writable;
+    this.waitingDrain = false;
+    this.drainSource = null;
+    this.flush();
+  }
+
+  detachWritable(): void {
+    this.writable = null;
+    this.waitingDrain = false;
+    this.drainSource = null;
+  }
+
+  clearPending(): void {
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.waitingDrain = false;
+    this.drainSource = null;
+  }
+
+  send(message: object): boolean {
+    const frame = encodeFrame(message);
+    if (this.pending.length === 0 && !this.waitingDrain) {
+      return this.writeFrame(frame);
+    }
+
+    const queued = this.queueFrame(frame);
+    if (queued && isWritableStream(this.writable) && !this.waitingDrain) {
+      this.flush();
+    }
+    return queued;
+  }
+
+  private writeFrame(frame: Buffer): boolean {
+    if (!isWritableStream(this.writable)) {
+      return this.queueFrame(frame);
+    }
+
+    const writable = this.writable;
+    const ok = writable.write(frame);
+    if (!ok) {
+      this.waitingDrain = true;
+      this.drainSource = writable;
+      writable.once("drain", this.handleDrain);
+    }
+    return true;
+  }
+
+  private queueFrame(frame: Buffer): boolean {
+    if (this.pendingBytes + frame.length > this.maxPendingBytes) {
+      return false;
+    }
+    this.pending.push(frame);
+    this.pendingBytes += frame.length;
+    return true;
+  }
+
+  private flush(): void {
+    if (!isWritableStream(this.writable) || this.waitingDrain) return;
+
+    let freed = false;
+    while (this.pending.length > 0) {
+      const frame = this.pending.shift()!;
+      this.pendingBytes -= frame.length;
+      freed = true;
+
+      const ok = this.writeFrame(frame);
+      if (!ok || this.waitingDrain) {
+        if (freed) this.onWritable();
+        return;
+      }
+    }
+
+    if (freed) this.onWritable();
+  }
+}
+
+export interface ServerTransport {
+  /** connect transport endpoint */
+  connect(): void;
+  /** disconnect transport endpoint */
+  disconnect(): Promise<void>;
+  /** send framed message over transport */
+  send(message: object): boolean;
+  /** decoded inbound message callback */
+  onMessage?: (message: IncomingMessage) => void;
+  /** transport error callback */
+  onError?: (error: unknown) => void;
+  /** callback when queued writes may resume */
+  onWritable?: () => void;
+}
+
+function removeEventListenerCompat(
+  stream: NodeJS.EventEmitter,
+  event: string,
+  listener: (...args: any[]) => void,
+): void {
+  if (typeof (stream as any).off === "function") {
+    (stream as any).off(event, listener);
+    return;
+  }
+  if (typeof (stream as any).removeListener === "function") {
+    (stream as any).removeListener(event, listener);
+  }
+}
+
+export class UnixSocketTransport implements ServerTransport {
   private socket: net.Socket | null = null;
   private server: net.Server | null = null;
   private readonly reader = new FrameReader();
   private reconnectTimer: NodeJS.Timeout | null = null;
-  private pending: Buffer[] = [];
-  private pendingBytes = 0;
-  private waitingDrain = false;
   private allowReconnect = true;
   private closed = false;
   private readonly socketPath: string;
-  private readonly maxPendingBytes: number;
+  private readonly queue: FramedWriteQueue;
 
-  constructor(socketPath: string, maxPendingBytes: number = 8 * 1024 * 1024) {
+  constructor(
+    socketPath: string,
+    maxPendingBytes: number = DEFAULT_MAX_PENDING_BYTES,
+  ) {
     this.socketPath = socketPath;
-    this.maxPendingBytes = maxPendingBytes;
+    this.queue = new FramedWriteQueue(maxPendingBytes, () => {
+      this.onWritable?.();
+    });
   }
 
-  connect() {
+  connect(): void {
     if (this.closed) return;
     if (this.server) return;
     this.allowReconnect = true;
+
     if (!fs.existsSync(path.dirname(this.socketPath))) {
       fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
     }
@@ -66,9 +214,6 @@ export class VirtioBridge {
       this.reconnectTimer = null;
     }
 
-    // Always hard-destroy the active socket so `server.close()` can complete
-    // immediately. Using `.end()` can keep the connection (and therefore the
-    // net.Server handle) alive indefinitely if the peer never responds.
     if (this.socket) {
       try {
         this.socket.destroy();
@@ -90,83 +235,28 @@ export class VirtioBridge {
       });
     }
 
-    this.waitingDrain = false;
-
-    // Drop any queued frames; after disconnect the bridge is permanently closed.
-    this.pending = [];
-    this.pendingBytes = 0;
+    this.queue.clearPending();
   }
 
   send(message: object): boolean {
-    if (this.closed) {
-      return false;
-    }
+    if (this.closed) return false;
     if (!this.socket) {
       this.connect();
     }
-    const frame = encodeFrame(message);
-    if (this.pending.length === 0 && !this.waitingDrain) {
-      return this.writeFrame(frame);
-    }
-    const queued = this.queueFrame(frame);
-    if (queued && this.socket && this.socket.writable && !this.waitingDrain) {
-      this.flushPending();
-    }
-    return queued;
+    return this.queue.send(message);
   }
 
   onMessage?: (message: IncomingMessage) => void;
   onError?: (error: unknown) => void;
-
-  /** Called when the bridge may be able to accept more queued messages */
   onWritable?: () => void;
 
-  private writeFrame(frame: Buffer): boolean {
-    if (!this.socket || !this.socket.writable) {
-      return this.queueFrame(frame);
-    }
-    const ok = this.socket.write(frame);
-    if (!ok) {
-      this.waitingDrain = true;
-      this.socket.once("drain", () => {
-        this.waitingDrain = false;
-        this.flushPending();
-      });
-    }
-    return true;
-  }
-
-  private queueFrame(frame: Buffer): boolean {
-    if (this.pendingBytes + frame.length > this.maxPendingBytes) {
-      return false;
-    }
-    this.pending.push(frame);
-    this.pendingBytes += frame.length;
-    return true;
-  }
-
-  private flushPending() {
-    if (!this.socket || this.waitingDrain || !this.socket.writable) return;
-    let freed = false;
-    while (this.pending.length > 0) {
-      const frame = this.pending.shift()!;
-      this.pendingBytes -= frame.length;
-      freed = true;
-      const ok = this.writeFrame(frame);
-      if (!ok || this.waitingDrain) {
-        if (freed) this.onWritable?.();
-        return;
-      }
-    }
-    if (freed) this.onWritable?.();
-  }
-
-  private attachSocket(socket: net.Socket) {
+  private attachSocket(socket: net.Socket): void {
     if (this.socket) {
       this.socket.destroy();
     }
+
     this.socket = socket;
-    this.waitingDrain = false;
+    this.queue.attachWritable(socket);
 
     socket.on("data", (chunk) => {
       try {
@@ -180,7 +270,6 @@ export class VirtioBridge {
           }
         });
       } catch (err) {
-        // Malformed framing (e.g. oversized length prefix) should not crash the host.
         this.onError?.(err);
         this.handleDisconnect();
       }
@@ -198,19 +287,17 @@ export class VirtioBridge {
     socket.on("close", () => {
       this.handleDisconnect();
     });
-
-    this.flushPending();
   }
 
-  private handleDisconnect() {
+  private handleDisconnect(): void {
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
     }
-    this.waitingDrain = false;
+    this.queue.detachWritable();
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(): void {
     if (!this.allowReconnect || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -220,6 +307,287 @@ export class VirtioBridge {
     }, 500);
   }
 }
+
+export type StreamTransportOptions = {
+  /** stream that provides inbound framed bytes */
+  input: NodeJS.ReadableStream;
+  /** stream that receives outbound framed bytes */
+  output: NodeJS.WritableStream;
+};
+
+export class StreamTransport implements ServerTransport {
+  private readonly reader = new FrameReader();
+  private readonly queue: FramedWriteQueue;
+  private readonly input: NodeJS.ReadableStream;
+  private readonly output: NodeJS.WritableStream;
+  private connected = false;
+  private closed = false;
+
+  private readonly onInputData = (chunk: Buffer | string) => {
+    if (typeof chunk === "string") {
+      this.onError?.(new Error("stream transport expects binary input"));
+      return;
+    }
+
+    try {
+      this.reader.push(chunk, (frame) => {
+        try {
+          const message = decodeMessage(frame) as IncomingMessage;
+          this.onMessage?.(message);
+        } catch (err) {
+          this.onError?.(err);
+        }
+      });
+    } catch (err) {
+      this.onError?.(err);
+    }
+  };
+
+  private readonly onInputError = (err: unknown) => {
+    this.onError?.(err);
+  };
+
+  private readonly onInputEnd = () => {
+    this.handleDisconnect();
+  };
+
+  private readonly onOutputError = (err: unknown) => {
+    this.onError?.(err);
+  };
+
+  constructor(
+    options: StreamTransportOptions,
+    maxPendingBytes: number = DEFAULT_MAX_PENDING_BYTES,
+  ) {
+    this.input = options.input;
+    this.output = options.output;
+    this.queue = new FramedWriteQueue(maxPendingBytes, () => {
+      this.onWritable?.();
+    });
+  }
+
+  connect(): void {
+    if (this.closed || this.connected) return;
+    this.connected = true;
+
+    this.input.on("data", this.onInputData);
+    this.input.on("error", this.onInputError as (...args: any[]) => void);
+    this.input.on("end", this.onInputEnd);
+    this.input.on("close", this.onInputEnd);
+
+    this.output.on("error", this.onOutputError as (...args: any[]) => void);
+
+    this.queue.attachWritable(this.output as unknown as FramedWritable);
+  }
+
+  async disconnect(): Promise<void> {
+    this.closed = true;
+    this.handleDisconnect();
+    this.queue.clearPending();
+  }
+
+  send(message: object): boolean {
+    if (this.closed) return false;
+    if (!this.connected) {
+      this.connect();
+    }
+    return this.queue.send(message);
+  }
+
+  onMessage?: (message: IncomingMessage) => void;
+  onError?: (error: unknown) => void;
+  onWritable?: () => void;
+
+  private handleDisconnect(): void {
+    if (!this.connected) return;
+    this.connected = false;
+
+    removeEventListenerCompat(
+      this.input as unknown as NodeJS.EventEmitter,
+      "data",
+      this.onInputData as (...args: any[]) => void,
+    );
+    removeEventListenerCompat(
+      this.input as unknown as NodeJS.EventEmitter,
+      "error",
+      this.onInputError as (...args: any[]) => void,
+    );
+    removeEventListenerCompat(
+      this.input as unknown as NodeJS.EventEmitter,
+      "end",
+      this.onInputEnd,
+    );
+    removeEventListenerCompat(
+      this.input as unknown as NodeJS.EventEmitter,
+      "close",
+      this.onInputEnd,
+    );
+
+    removeEventListenerCompat(
+      this.output as unknown as NodeJS.EventEmitter,
+      "error",
+      this.onOutputError as (...args: any[]) => void,
+    );
+
+    this.queue.detachWritable();
+  }
+}
+
+export type FunctionBridgeTransportOptions = {
+  /** framed write callback to the runtime bridge */
+  sendFrame: (frame: Buffer) => boolean;
+  /** framed read subscription from the runtime bridge */
+  subscribeFrame: (listener: (frame: Buffer | Uint8Array) => void) =>
+    | (() => void)
+    | void;
+  /** writable subscription from the runtime bridge */
+  subscribeWritable?: (listener: () => void) => (() => void) | void;
+  /** connect hook for runtime bridge setup */
+  connect?: () => void;
+  /** disconnect hook for runtime bridge teardown */
+  disconnect?: () => void | Promise<void>;
+};
+
+class CallbackWritable extends EventEmitter implements FramedWritable {
+  writable = true;
+  private readonly sendFrame: (frame: Buffer) => boolean;
+
+  constructor(sendFrame: (frame: Buffer) => boolean) {
+    super();
+    this.sendFrame = sendFrame;
+  }
+
+  write(chunk: Buffer): boolean {
+    return this.sendFrame(chunk);
+  }
+
+  close(): void {
+    this.writable = false;
+  }
+
+  markWritable(): void {
+    this.emit("drain");
+  }
+}
+
+export class FunctionBridgeTransport implements ServerTransport {
+  private readonly reader = new FrameReader();
+  private readonly queue: FramedWriteQueue;
+  private readonly options: FunctionBridgeTransportOptions;
+  private readonly writableSink: CallbackWritable;
+  private connected = false;
+  private closed = false;
+  private unsubscribeFrame: (() => void) | null = null;
+  private unsubscribeWritable: (() => void) | null = null;
+
+  onMessage?: (message: IncomingMessage) => void;
+  onError?: (error: unknown) => void;
+  onWritable?: () => void;
+
+  constructor(
+    options: FunctionBridgeTransportOptions,
+    maxPendingBytes: number = DEFAULT_MAX_PENDING_BYTES,
+  ) {
+    this.options = options;
+    this.writableSink = new CallbackWritable((frame) =>
+      this.options.sendFrame(frame),
+    );
+    this.queue = new FramedWriteQueue(maxPendingBytes, () => {
+      this.onWritable?.();
+    });
+  }
+
+  connect(): void {
+    if (this.closed || this.connected) return;
+    this.connected = true;
+
+    try {
+      this.options.connect?.();
+    } catch (err) {
+      this.onError?.(err);
+    }
+
+    const unsubscribeFrame = this.options.subscribeFrame((frame) => {
+      this.handleIncomingFrame(frame);
+    });
+    this.unsubscribeFrame =
+      typeof unsubscribeFrame === "function" ? unsubscribeFrame : null;
+
+    if (this.options.subscribeWritable) {
+      const unsubscribeWritable = this.options.subscribeWritable(() => {
+        this.writableSink.markWritable();
+      });
+      this.unsubscribeWritable =
+        typeof unsubscribeWritable === "function" ? unsubscribeWritable : null;
+    }
+
+    this.queue.attachWritable(this.writableSink);
+  }
+
+  async disconnect(): Promise<void> {
+    this.closed = true;
+    this.handleDisconnect();
+    this.queue.clearPending();
+
+    try {
+      await this.options.disconnect?.();
+    } catch (err) {
+      this.onError?.(err);
+    }
+  }
+
+  send(message: object): boolean {
+    if (this.closed) return false;
+    if (!this.connected) {
+      this.connect();
+    }
+    return this.queue.send(message);
+  }
+
+  private handleIncomingFrame(frame: Buffer | Uint8Array): void {
+    const chunk = Buffer.isBuffer(frame) ? frame : Buffer.from(frame);
+
+    try {
+      this.reader.push(chunk, (payload) => {
+        try {
+          const message = decodeMessage(payload) as IncomingMessage;
+          this.onMessage?.(message);
+        } catch (err) {
+          this.onError?.(err);
+        }
+      });
+    } catch (err) {
+      this.onError?.(err);
+    }
+  }
+
+  private handleDisconnect(): void {
+    if (!this.connected) return;
+    this.connected = false;
+
+    try {
+      this.unsubscribeFrame?.();
+    } catch {
+      // ignore
+    }
+    this.unsubscribeFrame = null;
+
+    try {
+      this.unsubscribeWritable?.();
+    } catch {
+      // ignore
+    }
+    this.unsubscribeWritable = null;
+
+    this.writableSink.close();
+    this.queue.detachWritable();
+  }
+}
+
+/**
+ * Backwards-compatible alias for legacy call sites
+ */
+export class VirtioBridge extends UnixSocketTransport {}
 
 export class TcpForwardStream extends Duplex {
   private closedByRemote = false;
