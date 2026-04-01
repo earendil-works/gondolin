@@ -11,6 +11,7 @@ import {
   KRUN_INITRD_FILENAME,
   KRUN_KERNEL_FILENAME,
   ROOTFS_FILENAME,
+  WASM_FILENAME,
   writeAssetManifest,
 } from "../src/build/shared.ts";
 import type { BuildConfig } from "../src/build/config.ts";
@@ -51,6 +52,24 @@ test("builder: writeAssetManifest includes krun checksums when krun assets exist
   }
 });
 
+test("builder: writeAssetManifest includes wasm checksum when wasm asset exists", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-manifest-"));
+
+  try {
+    fs.writeFileSync(path.join(dir, KERNEL_FILENAME), "kernel");
+    fs.writeFileSync(path.join(dir, INITRAMFS_FILENAME), "initramfs");
+    fs.writeFileSync(path.join(dir, ROOTFS_FILENAME), "rootfs");
+    fs.writeFileSync(path.join(dir, WASM_FILENAME), "wasm");
+
+    const { manifest } = writeAssetManifest(dir, makeConfig());
+
+    assert.equal(manifest.assets.wasm, WASM_FILENAME);
+    assert.ok(manifest.checksums.wasm);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("builder: writeAssetManifest omits krun checksums when krun assets are absent", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-manifest-"));
 
@@ -63,8 +82,10 @@ test("builder: writeAssetManifest omits krun checksums when krun assets are abse
 
     assert.equal(manifest.assets.krunKernel, undefined);
     assert.equal(manifest.assets.krunInitrd, undefined);
+    assert.equal(manifest.assets.wasm, undefined);
     assert.equal(manifest.checksums.krunKernel, undefined);
     assert.equal(manifest.checksums.krunInitrd, undefined);
+    assert.equal(manifest.checksums.wasm, undefined);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

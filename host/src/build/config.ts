@@ -131,6 +131,13 @@ export interface RuntimeDefaultsConfig {
   rootfsMode?: RootfsMode;
 }
 
+export interface WasmBuildConfig {
+  /** whether to emit a wasm artifact */
+  enabled?: boolean;
+  /** container2wasm c2w binary path */
+  c2wPath?: string;
+}
+
 /**
  * Build configuration for generating custom VM assets.
  */
@@ -167,6 +174,9 @@ export interface BuildConfig {
 
   /** runtime defaults baked into the asset manifest */
   runtimeDefaults?: RuntimeDefaultsConfig;
+
+  /** optional container2wasm conversion stage */
+  wasm?: WasmBuildConfig;
 
   /** custom sandboxd binary path (built-in when undefined) */
   sandboxdPath?: string;
@@ -387,6 +397,19 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       runtimeDefaults.rootfsMode !== undefined &&
       !isRootfsMode(runtimeDefaults.rootfsMode)
     ) {
+      return false;
+    }
+  }
+
+  if (cfg.wasm !== undefined) {
+    if (!isRecord(cfg.wasm)) {
+      return false;
+    }
+    const wasm = cfg.wasm as Record<string, unknown>;
+    if (!isOptionalBoolean(wasm.enabled)) {
+      return false;
+    }
+    if (!isOptionalString(wasm.c2wPath)) {
       return false;
     }
   }

@@ -129,6 +129,41 @@ test("build-config: rejects invalid runtimeDefaults.rootfsMode", () => {
   );
 });
 
+test("build-config: accepts wasm conversion configuration", () => {
+  const cfg = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    wasm: {
+      enabled: true,
+      c2wPath: "./bin/c2w",
+    },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.equal(parsed.wasm?.enabled, true);
+  assert.equal(parsed.wasm?.c2wPath, "./bin/c2w");
+});
+
+test("build-config: rejects invalid wasm conversion configuration", () => {
+  const invalid = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    wasm: {
+      enabled: "yes",
+    },
+  };
+
+  assert.equal(validateBuildConfig(invalid), false);
+  assert.throws(
+    () => parseBuildConfig(JSON.stringify(invalid)),
+    /Invalid build configuration/,
+  );
+});
+
 test("build-config: accepts oci rootfs configuration", () => {
   const cfg = {
     arch: "x86_64",

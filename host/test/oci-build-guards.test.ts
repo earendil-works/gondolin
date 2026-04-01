@@ -41,3 +41,34 @@ test("builder: oci rootfs rejects container.force", async () => {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
 });
+
+test("builder: wasm build requires oci rootfs source", async () => {
+  const outputDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-assets-out-"),
+  );
+
+  try {
+    const config: BuildConfig = {
+      arch: "x86_64",
+      distro: "alpine",
+      alpine: {
+        version: "3.23.0",
+      },
+      wasm: {
+        enabled: true,
+      },
+    };
+
+    await assert.rejects(
+      () =>
+        buildAssets(config, {
+          outputDir,
+          verbose: false,
+          skipBinaries: true,
+        }),
+      /WASM builds currently require oci\.image in build config/,
+    );
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});

@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 
 import { buildAlpineImages } from "./alpine.ts";
@@ -16,6 +16,8 @@ import {
   ROOTFS_FILENAME,
   KRUN_KERNEL_FILENAME,
   KRUN_INITRD_FILENAME,
+  WASM_FILENAME,
+  detectContainerRuntime,
   resolveConfigPath,
   resolveSandboxBinaryPaths,
   writeAssetManifest,
@@ -62,6 +64,203 @@ function resolveAlpineConfig(config: BuildConfig): ResolvedAlpineConfig {
       : (alpine.rootfsPackages ?? defaultRootfsPackages),
     initramfsPackages,
   };
+}
+
+function shouldBuildWasmAsset(config: BuildConfig): boolean {
+  return config.wasm?.enabled === true;
+}
+
+function mapContainer2WasmArch(arch: Architecture): "amd64" | "aarch64" {
+  return arch === "x86_64" ? "amd64" : "aarch64";
+}
+
+function mapContainerPlatform(arch: Architecture): "linux/amd64" | "linux/arm64" {
+  return arch === "x86_64" ? "linux/amd64" : "linux/arm64";
+}
+
+function formatExecSyncError(err: unknown): string {
+  const execErr = err as Error & { stdout?: unknown; stderr?: unknown };
+  const stdout =
+    typeof execErr.stdout === "string"
+      ? execErr.stdout
+      : Buffer.isBuffer(execErr.stdout)
+        ? execErr.stdout.toString("utf8")
+        : "";
+  const stderr =
+    typeof execErr.stderr === "string"
+      ? execErr.stderr
+      : Buffer.isBuffer(execErr.stderr)
+        ? execErr.stderr.toString("utf8")
+        : "";
+
+  const output = `${stdout}${stderr}`.trim();
+  if (!output) {
+    return execErr.message;
+  }
+  return `${execErr.message}: ${output}`;
+}
+
+function resolveC2wPath(config: BuildConfig, configDir?: string): string {
+  const configured = config.wasm?.c2wPath?.trim();
+  if (configured) {
+    return resolveConfigPath(configured, configDir);
+  }
+
+  const env =
+    process.env.GONDOLIN_C2W_PATH?.trim() ||
+    process.env.GONDOLIN_CONTAINER2WASM_PATH?.trim();
+  if (env) {
+    return env;
+  }
+
+  return "c2w";
+}
+
+function buildWasmSourceImage(params: {
+  runtime: "docker" | "podman";
+  rootfsDir: string;
+  platform: string;
+  workDir: string;
+  log: (msg: string) => void;
+}): { image: string; cleanup: () => void } {
+  const image = `gondolin-wasm-source:${randomUUID().slice(0, 12)}`;
+  const dockerfilePath = path.join(
+    params.workDir,
+    `.gondolin-wasm-source-${randomUUID().slice(0, 8)}.Dockerfile`,
+  );
+
+  fs.writeFileSync(
+    dockerfilePath,
+    [
+      "FROM scratch",
+      "COPY . /",
+      "ENV SSL_CERT_FILE=/etc/gondolin/mitm/ca.crt",
+      "ENV CURL_CA_BUNDLE=/etc/gondolin/mitm/ca.crt",
+      "ENV REQUESTS_CA_BUNDLE=/etc/gondolin/mitm/ca.crt",
+      "ENV NODE_EXTRA_CA_CERTS=/etc/gondolin/mitm/ca.crt",
+      'ENTRYPOINT ["/usr/bin/sandboxd"]',
+      'CMD ["--transport=stdio"]',
+      "",
+    ].join("\n"),
+  );
+
+  try {
+    params.log(
+      `Building temporary OCI image for wasm conversion (${params.platform})`,
+    );
+    execFileSync(
+      params.runtime,
+      [
+        "build",
+        "--platform",
+        params.platform,
+        "-f",
+        dockerfilePath,
+        "-t",
+        image,
+        params.rootfsDir,
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+      },
+    );
+  } catch (err) {
+    throw new Error(
+      "failed to build temporary OCI image for wasm conversion: " +
+        formatExecSyncError(err),
+    );
+  } finally {
+    fs.rmSync(dockerfilePath, { force: true });
+  }
+
+  return {
+    image,
+    cleanup: () => {
+      try {
+        execFileSync(params.runtime, ["rmi", "-f", image], {
+          stdio: ["ignore", "pipe", "pipe"],
+          encoding: "utf8",
+        });
+      } catch {
+        // ignore cleanup errors
+      }
+    },
+  };
+}
+
+function maybeBuildWasmAsset(params: {
+  config: BuildConfig;
+  outputDir: string;
+  workDir: string;
+  configDir?: string;
+  rootfsDir: string;
+  runtime?: "docker" | "podman";
+  platform?: string;
+  log: (msg: string) => void;
+}): void {
+  if (!shouldBuildWasmAsset(params.config)) {
+    return;
+  }
+
+  if (!params.config.oci) {
+    throw new Error("WASM builds currently require oci.image in build config.");
+  }
+
+  if (!fs.existsSync(params.rootfsDir)) {
+    throw new Error(`rootfs staging directory not found: ${params.rootfsDir}`);
+  }
+
+  const c2wPath = resolveC2wPath(params.config, params.configDir);
+  try {
+    execFileSync(c2wPath, ["--version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+  } catch (err) {
+    throw new Error(
+      `container2wasm c2w binary not found or unusable: ${c2wPath} (${formatExecSyncError(err)})`,
+    );
+  }
+
+  const runtime =
+    params.runtime ?? detectContainerRuntime(params.config.oci.runtime);
+  const platform = params.platform ?? mapContainerPlatform(params.config.arch);
+  const wasmDst = path.join(params.outputDir, WASM_FILENAME);
+  const targetArch = mapContainer2WasmArch(params.config.arch);
+
+  const sourceImage = buildWasmSourceImage({
+    runtime,
+    rootfsDir: params.rootfsDir,
+    platform,
+    workDir: params.workDir,
+    log: params.log,
+  });
+
+  try {
+    params.log(`Building wasm artifact via container2wasm (${targetArch})`);
+    execFileSync(
+      c2wPath,
+      [
+        "--builder",
+        runtime,
+        "--target-arch",
+        targetArch,
+        sourceImage.image,
+        wasmDst,
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+      },
+    );
+  } catch (err) {
+    throw new Error(
+      `failed to build wasm artifact with ${c2wPath}: ${formatExecSyncError(err)}`,
+    );
+  } finally {
+    sourceImage.cleanup();
+  }
 }
 
 /** Build assets natively (Linux or macOS with appropriate tools) */
@@ -186,6 +385,17 @@ export async function buildNative(
   fs.copyFileSync(rootfsSrc, rootfsDst);
   fs.copyFileSync(krunKernelSrc, krunKernelDst);
   fs.copyFileSync(krunInitrdSrc, krunInitrdDst);
+
+  maybeBuildWasmAsset({
+    config,
+    outputDir,
+    workDir,
+    configDir,
+    rootfsDir: alpineBuild.rootfsDir,
+    runtime: alpineBuild.ociSource?.runtime,
+    platform: alpineBuild.ociSource?.platform,
+    log,
+  });
 
   log("Generating manifest...");
   const { manifestPath, manifest } = writeAssetManifest(

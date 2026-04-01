@@ -16,6 +16,7 @@ export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
 export const KRUN_KERNEL_FILENAME = "krun-kernel";
 export const KRUN_INITRD_FILENAME = "krun-empty-initrd";
+export const WASM_FILENAME = "sandbox.wasm";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {
@@ -432,6 +433,7 @@ export function writeAssetManifest(
 
   const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
   const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
+  const wasmDst = path.join(outputDir, WASM_FILENAME);
 
   const checksums: AssetManifest["checksums"] = {
     kernel: computeFileHash(kernelDst),
@@ -453,6 +455,11 @@ export function writeAssetManifest(
   if (fs.existsSync(krunInitrdDst)) {
     assets.krunInitrd = KRUN_INITRD_FILENAME;
     checksums.krunInitrd = computeFileHash(krunInitrdDst);
+  }
+
+  if (fs.existsSync(wasmDst)) {
+    assets.wasm = WASM_FILENAME;
+    checksums.wasm = computeFileHash(wasmDst);
   }
 
   const manifest: AssetManifest = {

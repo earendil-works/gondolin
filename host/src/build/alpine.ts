@@ -226,6 +226,7 @@ export async function buildAlpineImages(
 
   return {
     rootfsImage,
+    rootfsDir,
     initramfs: initramfsOut,
     ociSource,
   };

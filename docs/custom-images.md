@@ -26,6 +26,10 @@ GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
 `manifest.json`.
 
+When `wasm.enabled=true` is set in build config (with `oci.image`), the build
+also emits `sandbox.wasm` and adds `assets.wasm` / `checksums.wasm` to
+`manifest.json`.
+
 Published `@earendil-works/gondolin` builds bundle guest Zig sources in the
 package, so custom image builds do not require a separate gondolin checkout.
 
@@ -63,6 +67,7 @@ Building custom images requires the following tools:
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating/extending ext4 rootfs images (mke2fs, debugfs) |
 | **Docker or Podman** *(optional)* | Pull/export OCI rootfs images (`oci.image`) |
+| **container2wasm (`c2w`)** *(optional)* | Build wasm guest module when `wasm.enabled=true` |
 
 ### macOS
 
@@ -148,6 +153,7 @@ The file has the following structure:
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
 | `postBuild` | object | Host file copies + post-package commands executed in the rootfs |
+| `wasm` | object | Optional container2wasm conversion stage (requires `oci.image`) |
 | `container` | object | Container build settings (for cross-platform) |
 | `sandboxdPath` | string | Path to custom sandboxd binary |
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
@@ -237,6 +243,34 @@ Example:
 {
   "runtimeDefaults": {
     "rootfsMode": "readonly"
+  }
+}
+```
+
+### WASM Conversion
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Build `sandbox.wasm` via container2wasm |
+| `c2wPath` | string | `"c2w"` | Path to the `c2w` binary (or set `GONDOLIN_C2W_PATH`) |
+
+Notes:
+
+- `wasm.enabled=true` currently requires `oci.image`
+- The build creates a temporary OCI image from the prepared rootfs and converts it to `sandbox.wasm`
+- `sandbox.wasm` is recorded as `manifest.assets.wasm`
+
+Example:
+
+```json
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "oci": {
+    "image": "docker.io/library/debian:bookworm-slim"
+  },
+  "wasm": {
+    "enabled": true
   }
 }
 ```
