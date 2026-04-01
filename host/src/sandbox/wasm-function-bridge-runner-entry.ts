@@ -543,6 +543,8 @@ async function runWasiStdioMode(
     number,
     { channel: BridgeChannel; hostId: number }
   >();
+  const fsHostToGuest = new Map<number, BridgeChannel>();
+  const fsGuestToHost = new Map<number, BridgeChannel>();
   let nextGuestTcpId = 1;
 
   const makeTcpKey = (channel: BridgeChannel, hostId: number) =>
@@ -577,8 +579,8 @@ async function runWasiStdioMode(
     type === "tcp_opened" ||
     type === "tcp_closed";
 
-  const isFsType = (type: string): boolean =>
-    type === "fs_request" || type === "fs_response";
+  const isFsRequestType = (type: string): boolean => type === "fs_request";
+  const isFsResponseType = (type: string): boolean => type === "fs_response";
 
   const encodePayload = (decoded: Record<string, unknown>): Buffer =>
     encodeFrame(decoded).subarray(4);
@@ -644,8 +646,17 @@ async function runWasiStdioMode(
               }
             }
           }
-        } else if (isFsType(type)) {
-          outboundChannel = "fs";
+        } else if (isFsRequestType(type)) {
+          outboundChannel = "control";
+          fsGuestToHost.set(id, outboundChannel);
+        } else if (isFsResponseType(type)) {
+          const route = fsHostToGuest.get(id);
+          if (route) {
+            outboundChannel = route;
+            fsHostToGuest.delete(id);
+          } else {
+            outboundChannel = "control";
+          }
         }
       } catch {
         // keep the raw frame on the default control channel
@@ -795,6 +806,10 @@ async function runWasiStdioMode(
             // Keep mapping until the corresponding tcp_closed is observed.
           }
         }
+      } else if (isFsRequestType(type)) {
+        fsHostToGuest.set(hostId, channel);
+      } else if (isFsResponseType(type)) {
+        fsGuestToHost.delete(hostId);
       }
     } catch {
       // Preserve forward-compatibility: if decoding fails, relay the raw payload
