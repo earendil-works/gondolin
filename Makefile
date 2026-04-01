@@ -133,11 +133,26 @@ krun-runner: libkrun
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required to build host/krun-runner" && exit 1)
 	@echo "Building host krun runner"
 	@cd host/krun-runner && \
-		PKG_CONFIG_PATH="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
-		PKG_CONFIG_LIBDIR="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
-		C_INCLUDE_PATH="$(LIBKRUN_PREFIX)/include:$$C_INCLUDE_PATH" \
-		LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib64:$(LIBKRUN_PREFIX)/lib:$$LIBRARY_PATH" \
-		zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix="$(LIBKRUN_PREFIX)"
+		if [ "$(UNAME_S)" = "Darwin" ]; then \
+			SDKROOT="$$(xcrun --sdk macosx --show-sdk-path)"; \
+			PREFIX_ABS="$$(cd "$(LIBKRUN_PREFIX)" && pwd)"; \
+			mkdir -p zig-out/bin; \
+			zig build-exe main.zig \
+				-O ReleaseSafe \
+				-target $(LIBKRUN_TARGET_ARCH)-macos \
+				-lc \
+				--sysroot "$$SDKROOT" \
+				-I "$$PREFIX_ABS/include" \
+				"$$PREFIX_ABS/lib/libkrun.dylib" \
+				-rpath '@loader_path/../lib' \
+				-femit-bin=zig-out/bin/gondolin-krun-runner; \
+		else \
+			PKG_CONFIG_PATH="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
+			PKG_CONFIG_LIBDIR="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
+			C_INCLUDE_PATH="$(LIBKRUN_PREFIX)/include:$$C_INCLUDE_PATH" \
+			LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib64:$(LIBKRUN_PREFIX)/lib:$$LIBRARY_PATH" \
+			zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix="$(LIBKRUN_PREFIX)"; \
+		fi
 	@mkdir -p host/krun-runner/zig-out/lib
 	@set -eu; \
 		copied=0; \
