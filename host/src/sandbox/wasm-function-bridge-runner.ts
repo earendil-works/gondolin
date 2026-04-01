@@ -8,6 +8,20 @@ import { FunctionBridgeTransport } from "./server-transport.ts";
 
 export type WasmFunctionBridgeRunnerMode = "harness" | "wasi-stdio";
 
+export type WasmFunctionBridgeChannel =
+  | "control"
+  | "fs"
+  | "ssh"
+  | "ingress";
+
+const DEFAULT_CHANNEL: WasmFunctionBridgeChannel = "control";
+const ALL_CHANNELS: readonly WasmFunctionBridgeChannel[] = [
+  "control",
+  "fs",
+  "ssh",
+  "ingress",
+];
+
 type RunnerInboundMessage =
   | {
       /** child runner readiness signal */
@@ -18,6 +32,8 @@ type RunnerInboundMessage =
       t: "frame";
       /** frame bytes encoded as base64 */
       frame: string;
+      /** logical bridge channel */
+      channel?: WasmFunctionBridgeChannel;
     }
   | {
       /** optional structured runner log */
@@ -44,6 +60,8 @@ type RunnerOutboundMessage =
       t: "frame";
       /** frame bytes encoded as base64 */
       frame: string;
+      /** logical bridge channel */
+      channel?: WasmFunctionBridgeChannel;
     }
   | {
       /** graceful runner shutdown */
@@ -59,6 +77,8 @@ export type WasmFunctionBridgeRunnerConfig = {
   mode?: WasmFunctionBridgeRunnerMode;
   /** guest wasm module path (required for `mode=wasi-stdio`) */
   wasmPath?: string;
+  /** qemu-network backend unix socket path for wasm guest networking */
+  netSocketPath?: string;
   /** startup timeout in `ms` */
   startupTimeoutMs?: number;
 };
@@ -66,7 +86,10 @@ export type WasmFunctionBridgeRunnerConfig = {
 export class WasmFunctionBridgeRunner extends EventEmitter {
   private readonly config: Required<WasmFunctionBridgeRunnerConfig>;
   private child: ChildProcess | null = null;
-  private readonly frameListeners = new Set<(frame: Buffer) => void>();
+  private readonly frameListeners = new Map<
+    WasmFunctionBridgeChannel,
+    Set<(frame: Buffer) => void>
+  >();
   private readonly writableListeners = new Set<() => void>();
   private readyPromise: Promise<void> | null = null;
   private resolveReady: (() => void) | null = null;
@@ -76,12 +99,17 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
   constructor(config: WasmFunctionBridgeRunnerConfig = {}) {
     super();
 
+    for (const channel of ALL_CHANNELS) {
+      this.frameListeners.set(channel, new Set());
+    }
+
     this.config = {
       nodePath: config.nodePath ?? process.execPath,
       entryPath:
         config.entryPath ?? resolveDefaultWasmFunctionBridgeRunnerEntryPath(),
       mode: config.mode ?? "harness",
       wasmPath: config.wasmPath ?? "",
+      netSocketPath: config.netSocketPath ?? "",
       startupTimeoutMs: config.startupTimeoutMs ?? 5_000,
     };
   }
@@ -100,6 +128,9 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     const childArgs = [this.config.entryPath, "--mode", this.config.mode];
     if (this.config.wasmPath.length > 0) {
       childArgs.push("--wasm", this.config.wasmPath);
+    }
+    if (this.config.netSocketPath.length > 0) {
+      childArgs.push("--net-socket", this.config.netSocketPath);
     }
 
     const child = child_process.spawn(
@@ -216,7 +247,10 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     this.rejectReady = null;
   }
 
-  sendFrame(frame: Buffer): boolean {
+  sendFrame(
+    frame: Buffer,
+    channel: WasmFunctionBridgeChannel = DEFAULT_CHANNEL,
+  ): boolean {
     const child = this.child;
     if (!child || !child.connected) {
       return false;
@@ -226,16 +260,24 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       return child.send({
         t: "frame",
         frame: frame.toString("base64"),
+        channel,
       } satisfies RunnerOutboundMessage);
     } catch {
       return false;
     }
   }
 
-  subscribeFrame(listener: (frame: Buffer) => void): () => void {
-    this.frameListeners.add(listener);
+  subscribeFrame(
+    channel: WasmFunctionBridgeChannel,
+    listener: (frame: Buffer) => void,
+  ): () => void {
+    const listeners = this.frameListeners.get(channel);
+    if (!listeners) {
+      throw new Error(`unsupported wasm bridge channel: ${channel}`);
+    }
+    listeners.add(listener);
     return () => {
-      this.frameListeners.delete(listener);
+      listeners.delete(listener);
     };
   }
 
@@ -246,15 +288,22 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     };
   }
 
-  createControlTransport(maxPendingBytes?: number): FunctionBridgeTransport {
+  createChannelTransport(
+    channel: WasmFunctionBridgeChannel,
+    maxPendingBytes?: number,
+  ): FunctionBridgeTransport {
     return new FunctionBridgeTransport(
       {
-        sendFrame: (frame) => this.sendFrame(frame),
-        subscribeFrame: (listener) => this.subscribeFrame(listener),
+        sendFrame: (frame) => this.sendFrame(frame, channel),
+        subscribeFrame: (listener) => this.subscribeFrame(channel, listener),
         subscribeWritable: (listener) => this.subscribeWritable(listener),
       },
       maxPendingBytes,
     );
+  }
+
+  createControlTransport(maxPendingBytes?: number): FunctionBridgeTransport {
+    return this.createChannelTransport("control", maxPendingBytes);
   }
 
   private handleRunnerMessage(raw: unknown): void {
@@ -283,7 +332,16 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
         this.emit("error", new Error("runner frame payload is not valid base64"));
         return;
       }
-      for (const listener of this.frameListeners) {
+      const channel = message.channel ?? DEFAULT_CHANNEL;
+      const listeners = this.frameListeners.get(channel);
+      if (!listeners) {
+        this.emit(
+          "error",
+          new Error(`runner frame payload used unknown channel: ${channel}`),
+        );
+        return;
+      }
+      for (const listener of listeners) {
         listener(frame);
       }
       return;
@@ -321,9 +379,16 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     }
 
     if (t === "frame" && typeof value.frame === "string") {
+      const channelRaw = value.channel;
+      const channel =
+        channelRaw === undefined
+          ? DEFAULT_CHANNEL
+          : this.normalizeChannel(channelRaw);
+      if (!channel) return null;
       return {
         t: "frame",
         frame: value.frame,
+        channel,
       };
     }
 
@@ -350,6 +415,14 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       };
     }
 
+    return null;
+  }
+
+  private normalizeChannel(value: unknown): WasmFunctionBridgeChannel | null {
+    if (typeof value !== "string") return null;
+    if ((ALL_CHANNELS as readonly string[]).includes(value)) {
+      return value as WasmFunctionBridgeChannel;
+    }
     return null;
   }
 }

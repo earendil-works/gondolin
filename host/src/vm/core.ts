@@ -1662,7 +1662,31 @@ fi
 
     const vmm = this.resolvedSandboxOptions?.vmm ?? "qemu";
     if (vmm === "wasm-node") {
-      // wasm-node currently does not implement sandboxfs mount wiring.
+      // wasm-node currently lacks full sandboxfs wiring. For now, ensure mount
+      // placeholders exist so configured mount paths are usable as writable
+      // in-guest directories.
+      const mountPoints = [this.fuseMount, ...this.fuseBinds].filter(
+        (mountPoint) => mountPoint !== "/",
+      );
+      if (mountPoints.length === 0) {
+        return;
+      }
+
+      const script = `for p in "$@"; do mkdir -p "$p"; done`;
+      const result = await this.execInternalNoVfsWait([
+        "/bin/sh",
+        "-c",
+        script,
+        "sh",
+        ...mountPoints,
+      ]);
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `vfs mount setup failed for wasm-node (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        );
+      }
+
+      await this.ensureWasmMitmCa();
       return;
     }
 
@@ -1673,6 +1697,49 @@ fi
       });
     }
     await this.vfsReadyPromise;
+  }
+
+  private async ensureWasmMitmCa() {
+    if (!this.vfs) return;
+
+    const caPath = "/etc/gondolin/mitm/ca.crt";
+    let caPem: string;
+
+    try {
+      const handle = await this.vfs.open(caPath, "r");
+      try {
+        const data = await handle.readFile();
+        caPem = Buffer.isBuffer(data) ? data.toString("utf8") : data;
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      return;
+    }
+
+    if (caPem.trim().length === 0) {
+      return;
+    }
+
+    const heredocTag = "__GONDOLIN_MITM_CA__";
+    const script = [
+      "mkdir -p /etc/gondolin/mitm",
+      `cat > ${caPath} <<'${heredocTag}'`,
+      caPem,
+      heredocTag,
+      `chmod 0644 ${caPath} || true`,
+      "if [ -f /etc/ssl/certs/ca-certificates.crt ]; then",
+      `  cat ${caPath} >> /etc/ssl/certs/ca-certificates.crt || true`,
+      "fi",
+    ].join("\n");
+
+    const writeResult = await this.execInternalNoVfsWait(["/bin/sh", "-lc", script]);
+    if (writeResult.exitCode !== 0) {
+      throw new Error(
+        `failed to materialize wasm mitm ca (exit ${writeResult.exitCode}): ${writeResult.stderr.trim()}`,
+      );
+    }
+
   }
 
   private async waitForVfsReadyInternal() {

@@ -11,6 +11,9 @@ import {
 
 type RunnerMode = "harness" | "wasi-stdio";
 
+type BridgeChannel = "control" | "fs" | "ssh" | "ingress";
+const DEFAULT_CHANNEL: BridgeChannel = "control";
+
 type RunnerOutboundMessage =
   | {
       /** runner readiness signal */
@@ -21,6 +24,8 @@ type RunnerOutboundMessage =
       t: "frame";
       /** base64-encoded frame bytes */
       frame: string;
+      /** logical bridge channel */
+      channel?: BridgeChannel;
     }
   | {
       /** optional structured log entry */
@@ -47,6 +52,8 @@ type RunnerInboundMessage =
       t: "frame";
       /** base64-encoded frame bytes */
       frame: string;
+      /** logical bridge channel */
+      channel?: BridgeChannel;
     }
   | {
       /** graceful runner shutdown */
@@ -58,6 +65,8 @@ type ParsedArgs = {
   mode: RunnerMode;
   /** guest wasm module path for wasi-stdio mode */
   wasmPath?: string;
+  /** qemu-network backend unix socket path */
+  netSocketPath?: string;
 };
 
 const STDIO_ENVELOPE_CHUNK_BASE64 = 120;
@@ -69,17 +78,32 @@ function sendToParent(message: RunnerOutboundMessage): void {
   process.send(message);
 }
 
-function sendFrame(message: object): void {
+function normalizeChannel(value: unknown): BridgeChannel | null {
+  if (value === undefined) return DEFAULT_CHANNEL;
+  if (
+    value === "control" ||
+    value === "fs" ||
+    value === "ssh" ||
+    value === "ingress"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function sendFrame(message: object, channel: BridgeChannel = DEFAULT_CHANNEL): void {
   const frame = encodeFrame(message);
   sendToParent({
     t: "frame",
     frame: frame.toString("base64"),
+    channel,
   });
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   let mode: RunnerMode = "harness";
   let wasmPath: string | undefined;
+  let netSocketPath: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -116,16 +140,35 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
+    if (arg === "--net-socket") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--net-socket requires a path");
+      }
+      netSocketPath = value;
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--net-socket=")) {
+      const value = arg.slice("--net-socket=".length).trim();
+      if (!value) {
+        throw new Error("--net-socket requires a path");
+      }
+      netSocketPath = value;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       throw new Error(
-        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH]",
+        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH] [--net-socket PATH]",
       );
     }
 
     throw new Error(`unknown argument: ${arg}`);
   }
 
-  return { mode, wasmPath };
+  return { mode, wasmPath, netSocketPath };
 }
 
 function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
@@ -139,9 +182,12 @@ function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
   }
 
   if (t === "frame" && typeof value.frame === "string") {
+    const channel = normalizeChannel(value.channel);
+    if (!channel) return null;
     return {
       t: "frame",
       frame: value.frame,
+      channel,
     };
   }
 
@@ -182,7 +228,7 @@ function asId(value: unknown): number {
   return Math.trunc(value);
 }
 
-function handleHarnessFrame(message: unknown): void {
+function handleHarnessFrame(channel: BridgeChannel, message: unknown): void {
   if (!message || typeof message !== "object") {
     return;
   }
@@ -197,38 +243,47 @@ function handleHarnessFrame(message: unknown): void {
     const pty = payload?.pty === true;
     const stdinEnabled = payload?.stdin === true;
 
-    sendFrame({
-      v: 1,
-      t: "exec_output",
-      id,
-      p: {
-        stream: "stdout",
+    sendFrame(
+      {
+        v: 1,
+        t: "exec_output",
+        id,
+        p: {
+          stream: "stdout",
         data: Buffer.from(
           `[wasm-harness] cmd=${cmd} pty=${pty ? 1 : 0}\n`,
           "utf8",
         ),
       },
-    });
+      },
+      channel,
+    );
 
     if (stdinEnabled) {
-      sendFrame({
-        v: 1,
-        t: "stdin_window",
-        id,
-        p: {
-          stdin: 64 * 1024,
+      sendFrame(
+        {
+          v: 1,
+          t: "stdin_window",
+          id,
+          p: {
+            stdin: 64 * 1024,
+          },
         },
-      });
+        channel,
+      );
     }
 
-    sendFrame({
-      v: 1,
-      t: "exec_response",
-      id,
-      p: {
-        exit_code: 0,
+    sendFrame(
+      {
+        v: 1,
+        t: "exec_response",
+        id,
+        p: {
+          exit_code: 0,
+        },
       },
-    });
+      channel,
+    );
     return;
   }
 
@@ -243,15 +298,82 @@ function handleHarnessFrame(message: unknown): void {
         ? Math.trunc(payload.cols)
         : 0;
 
-    sendFrame({
-      v: 1,
-      t: "exec_output",
-      id,
-      p: {
-        stream: "stdout",
-        data: Buffer.from(`[wasm-harness] resize=${rows}x${cols}\n`, "utf8"),
+    sendFrame(
+      {
+        v: 1,
+        t: "exec_output",
+        id,
+        p: {
+          stream: "stdout",
+          data: Buffer.from(`[wasm-harness] resize=${rows}x${cols}\n`, "utf8"),
+        },
       },
-    });
+      channel,
+    );
+    return;
+  }
+
+  if (type === "tcp_open") {
+    sendFrame(
+      {
+        v: 1,
+        t: "tcp_opened",
+        id,
+        p: {
+          ok: true,
+        },
+      },
+      channel,
+    );
+    return;
+  }
+
+  if (type === "tcp_data") {
+    const payload = asPayload(envelope.p);
+    const data = Buffer.isBuffer(payload?.data)
+      ? payload.data
+      : payload?.data instanceof Uint8Array
+        ? Buffer.from(payload.data)
+        : Buffer.alloc(0);
+    if (data.length > 0) {
+      sendFrame(
+        {
+          v: 1,
+          t: "tcp_data",
+          id,
+          p: {
+            data,
+          },
+        },
+        channel,
+      );
+    }
+    return;
+  }
+
+  if (type === "tcp_eof") {
+    sendFrame(
+      {
+        v: 1,
+        t: "tcp_closed",
+        id,
+        p: {},
+      },
+      channel,
+    );
+    return;
+  }
+
+  if (type === "tcp_close") {
+    sendFrame(
+      {
+        v: 1,
+        t: "tcp_closed",
+        id,
+        p: {},
+      },
+      channel,
+    );
     return;
   }
 
@@ -264,27 +386,33 @@ function handleHarnessFrame(message: unknown): void {
         : Buffer.alloc(0);
 
     if (data.length > 0) {
-      sendFrame({
-        v: 1,
-        t: "exec_output",
-        id,
-        p: {
-          stream: "stdout",
-          data,
+      sendFrame(
+        {
+          v: 1,
+          t: "exec_output",
+          id,
+          p: {
+            stream: "stdout",
+            data,
+          },
         },
-      });
+        channel,
+      );
     }
 
     if (payload?.eof === true) {
-      sendFrame({
-        v: 1,
-        t: "exec_output",
-        id,
-        p: {
-          stream: "stdout",
-          data: Buffer.from("[wasm-harness] stdin=eof\n", "utf8"),
+      sendFrame(
+        {
+          v: 1,
+          t: "exec_output",
+          id,
+          p: {
+            stream: "stdout",
+            data: Buffer.from("[wasm-harness] stdin=eof\n", "utf8"),
+          },
         },
-      });
+        channel,
+      );
     }
     return;
   }
@@ -294,15 +422,18 @@ function handleHarnessFrame(message: unknown): void {
     return;
   }
 
-  sendFrame({
-    v: 1,
-    t: "error",
-    id,
-    p: {
-      code: "unsupported_request",
-      message: `harness mode does not handle ${String(type ?? "unknown")}`,
+  sendFrame(
+    {
+      v: 1,
+      t: "error",
+      id,
+      p: {
+        code: "unsupported_request",
+        message: `harness mode does not handle ${String(type ?? "unknown")}`,
+      },
     },
-  });
+    channel,
+  );
 }
 
 function resolveDefaultWasmModuleRunnerPath(): string {
@@ -345,7 +476,7 @@ async function runHarnessMode(): Promise<void> {
     try {
       reader.push(chunk, (payload) => {
         const decoded = decodeMessage(payload);
-        handleHarnessFrame(decoded);
+        handleHarnessFrame(message.channel ?? DEFAULT_CHANNEL, decoded);
       });
       sendToParent({ t: "writable" });
     } catch (err) {
@@ -363,7 +494,10 @@ async function runHarnessMode(): Promise<void> {
   });
 }
 
-async function runWasiStdioMode(wasmPath: string): Promise<void> {
+async function runWasiStdioMode(
+  wasmPath: string,
+  netSocketPath?: string,
+): Promise<void> {
   if (!fs.existsSync(wasmPath)) {
     throw new Error(`wasm module not found: ${wasmPath}`);
   }
@@ -373,17 +507,18 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
     throw new Error(`wasm-runner entrypoint not found: ${wasmRunnerPath}`);
   }
 
-  const child = child_process.spawn(
-    process.execPath,
-    [wasmRunnerPath, "--wasm", wasmPath],
-    {
+  const childArgs = [wasmRunnerPath, "--wasm", wasmPath];
+  if (netSocketPath && netSocketPath.length > 0) {
+    childArgs.push("--net-socket", netSocketPath);
+  }
+
+  const child = child_process.spawn(process.execPath, childArgs, {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         NODE_NO_WARNINGS: process.env.NODE_NO_WARNINGS ?? "1",
       },
-    },
-  );
+    });
 
   let closed = false;
   let closing = false;
@@ -402,6 +537,51 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
   let stdoutSynced = false;
   let waitingDrain = false;
   const outboundQueue: Buffer[] = [];
+
+  const tcpHostToGuest = new Map<string, number>();
+  const tcpGuestToHost = new Map<
+    number,
+    { channel: BridgeChannel; hostId: number }
+  >();
+  let nextGuestTcpId = 1;
+
+  const makeTcpKey = (channel: BridgeChannel, hostId: number) =>
+    `${channel}:${hostId}`;
+
+  const releaseTcpGuestId = (guestId: number) => {
+    const route = tcpGuestToHost.get(guestId);
+    if (!route) return;
+    tcpGuestToHost.delete(guestId);
+    tcpHostToGuest.delete(makeTcpKey(route.channel, route.hostId));
+  };
+
+  const allocateGuestTcpId = (): number => {
+    for (let i = 0; i < 0xffffffff; i += 1) {
+      const candidate = nextGuestTcpId;
+      nextGuestTcpId += 1;
+      if (nextGuestTcpId > 0xffffffff) {
+        nextGuestTcpId = 1;
+      }
+      if (!tcpGuestToHost.has(candidate)) {
+        return candidate;
+      }
+    }
+    throw new Error("no available tcp stream ids for wasm bridge");
+  };
+
+  const isTcpType = (type: string): boolean =>
+    type === "tcp_open" ||
+    type === "tcp_data" ||
+    type === "tcp_eof" ||
+    type === "tcp_close" ||
+    type === "tcp_opened" ||
+    type === "tcp_closed";
+
+  const isFsType = (type: string): boolean =>
+    type === "fs_request" || type === "fs_response";
+
+  const encodePayload = (decoded: Record<string, unknown>): Buffer =>
+    encodeFrame(decoded).subarray(4);
 
   const flushOutboundQueue = () => {
     if (!child.stdin || waitingDrain) {
@@ -437,9 +617,44 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
       stdoutBuffer = stdoutBuffer.subarray(frameEnd);
       stdoutSynced = true;
 
+      let outboundFrame: Buffer = frame;
+      let outboundChannel: BridgeChannel = DEFAULT_CHANNEL;
+
+      try {
+        const payload = frame.subarray(4);
+        const decoded = decodeMessage(payload) as Record<string, unknown>;
+        const type = typeof decoded?.t === "string" ? decoded.t : "";
+        const id = asId(decoded?.id);
+
+        if (isTcpType(type)) {
+          const route = tcpGuestToHost.get(id);
+          if (route) {
+            decoded.id = route.hostId;
+            outboundChannel = route.channel;
+            outboundFrame = encodeFrame(decoded);
+
+            if (type === "tcp_closed") {
+              releaseTcpGuestId(id);
+            }
+
+            if (type === "tcp_opened") {
+              const payloadMap = asPayload(decoded.p);
+              if (payloadMap.ok === false) {
+                releaseTcpGuestId(id);
+              }
+            }
+          }
+        } else if (isFsType(type)) {
+          outboundChannel = "fs";
+        }
+      } catch {
+        // keep the raw frame on the default control channel
+      }
+
       sendToParent({
         t: "frame",
-        frame: frame.toString("base64"),
+        frame: outboundFrame.toString("base64"),
+        channel: outboundChannel,
       });
     }
 
@@ -542,7 +757,49 @@ async function runWasiStdioMode(wasmPath: string): Promise<void> {
       return;
     }
 
-    const payload = chunk.subarray(4, 4 + payloadLength);
+    let payload = chunk.subarray(4, 4 + payloadLength);
+    const channel = message.channel ?? DEFAULT_CHANNEL;
+
+    try {
+      const decoded = decodeMessage(payload) as Record<string, unknown>;
+      const type = typeof decoded?.t === "string" ? decoded.t : "";
+      const hostId = asId(decoded?.id);
+
+      if (isTcpType(type)) {
+        const key = makeTcpKey(channel, hostId);
+
+        if (type === "tcp_open") {
+          const prior = tcpHostToGuest.get(key);
+          if (prior !== undefined) {
+            releaseTcpGuestId(prior);
+          }
+
+          const guestId = allocateGuestTcpId();
+          tcpHostToGuest.set(key, guestId);
+          tcpGuestToHost.set(guestId, { channel, hostId });
+          decoded.id = guestId;
+          payload = encodePayload(decoded);
+        } else {
+          const guestId = tcpHostToGuest.get(key);
+          if (guestId === undefined) {
+            sendToParent({
+              t: "error",
+              message: `unknown tcp stream id on channel=${channel}: ${hostId}`,
+            });
+            return;
+          }
+          decoded.id = guestId;
+          payload = encodePayload(decoded);
+
+          if (type === "tcp_close") {
+            // Keep mapping until the corresponding tcp_closed is observed.
+          }
+        }
+      }
+    } catch {
+      // Preserve forward-compatibility: if decoding fails, relay the raw payload
+      // unchanged instead of rejecting host traffic.
+    }
 
     try {
       const lines = encodeStdioEnvelopePayload(payload);
@@ -572,7 +829,7 @@ async function main(): Promise<void> {
     throw new Error("--wasm is required when --mode wasi-stdio");
   }
 
-  await runWasiStdioMode(args.wasmPath);
+  await runWasiStdioMode(args.wasmPath, args.netSocketPath);
 }
 
 void main().catch((err) => {

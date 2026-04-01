@@ -135,6 +135,140 @@ test("WasmFunctionBridgeRunner harness round-trips PTY exec control frames", asy
   await runner.stop();
 });
 
+test("WasmFunctionBridgeRunner routes control and ssh channels independently", async () => {
+  const runner = new WasmFunctionBridgeRunner({
+    mode: "harness",
+    startupTimeoutMs: 1_000,
+  });
+
+  const control = runner.createControlTransport();
+  const ssh = runner.createChannelTransport("ssh");
+
+  const controlMessages: Incoming[] = [];
+  const sshMessages: Incoming[] = [];
+
+  control.onMessage = (message) => {
+    controlMessages.push(message as Incoming);
+  };
+  ssh.onMessage = (message) => {
+    sshMessages.push(message as Incoming);
+  };
+
+  await runner.start();
+  control.connect();
+  ssh.connect();
+
+  await waitFor(
+    () => controlMessages.some((message) => message.t === "vfs_ready"),
+    1_000,
+    "control vfs_ready",
+  );
+
+  assert.equal(
+    control.send({
+      v: 1,
+      t: "exec_request",
+      id: 5,
+      p: {
+        cmd: "/bin/sh",
+        argv: ["-lc", "echo hello"],
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    ssh.send({
+      v: 1,
+      t: "tcp_open",
+      id: 19,
+      p: {
+        host: "127.0.0.1",
+        port: 8080,
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    ssh.send({
+      v: 1,
+      t: "tcp_data",
+      id: 19,
+      p: {
+        data: Buffer.from("ping", "utf8"),
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    ssh.send({
+      v: 1,
+      t: "tcp_close",
+      id: 19,
+      p: {},
+    }),
+    true,
+  );
+
+  await waitFor(
+    () =>
+      controlMessages.some(
+        (message) =>
+          message.t === "exec_response" &&
+          message.id === 5 &&
+          message.p?.exit_code === 0,
+      ),
+    1_000,
+    "control exec_response",
+  );
+
+  await waitFor(
+    () =>
+      sshMessages.some(
+        (message) => message.t === "tcp_opened" && message.id === 19,
+      ),
+    1_000,
+    "ssh tcp_opened",
+  );
+
+  await waitFor(
+    () =>
+      sshMessages.some(
+        (message) =>
+          message.t === "tcp_data" &&
+          message.id === 19 &&
+          Buffer.isBuffer(message.p?.data) &&
+          message.p.data.toString("utf8") === "ping",
+      ),
+    1_000,
+    "ssh tcp_data",
+  );
+
+  await waitFor(
+    () =>
+      sshMessages.some(
+        (message) => message.t === "tcp_closed" && message.id === 19,
+      ),
+    1_000,
+    "ssh tcp_closed",
+  );
+
+  assert.equal(
+    controlMessages.some((message) => message.t.startsWith("tcp_")),
+    false,
+  );
+  assert.equal(
+    sshMessages.some((message) => message.t.startsWith("exec_")),
+    false,
+  );
+
+  await control.disconnect();
+  await ssh.disconnect();
+  await runner.stop();
+});
+
 test("WasmFunctionBridgeRunner rejects wasi-stdio mode without wasmPath", async () => {
   const runner = new WasmFunctionBridgeRunner({
     mode: "wasi-stdio",

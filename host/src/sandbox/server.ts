@@ -50,7 +50,6 @@ import {
 } from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
-  NoopTransport,
   type ServerTransport,
   TcpForwardStream,
   UnixSocketTransport,
@@ -504,6 +503,9 @@ export class SandboxServer extends EventEmitter {
         entryPath: this.options.wasmRunnerPath,
         mode: this.options.wasmRunnerMode,
         wasmPath: this.options.wasmPath,
+        netSocketPath: this.options.netEnabled
+          ? this.options.netSocketPath
+          : undefined,
       });
       this.controller = new WasmFunctionBridgeController({
         runner: wasmRunner,
@@ -562,10 +564,10 @@ export class SandboxServer extends EventEmitter {
       }
 
       if (wasmRunner) {
-        if (name === "control") {
-          return wasmRunner.createControlTransport(channelMaxPendingBytes);
-        }
-        return new NoopTransport();
+        return wasmRunner.createChannelTransport(
+          name,
+          channelMaxPendingBytes,
+        );
       }
 
       return new UnixSocketTransport(socketPath, channelMaxPendingBytes);
@@ -608,7 +610,7 @@ export class SandboxServer extends EventEmitter {
     const mac =
       parseMac(this.options.netMac) ??
       Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    this.network = this.options.netEnabled && this.options.vmm !== "wasm-node"
+    this.network = this.options.netEnabled
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,
           vmMac: mac,

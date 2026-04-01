@@ -47,20 +47,22 @@ is not supported.
 This means software that relies on UDP-based application protocols (or generic
 UDP connectivity) will not work in the default network model.
 
-## Backend parity gaps (QEMU vs krun)
+## Backend parity gaps
 
-Gondolin supports both `qemu` (default) and an experimental `krun` backend, but
-feature parity is not complete.
+Gondolin supports `qemu` (default), plus experimental `krun` and `wasm-node`
+backends. Feature parity is not complete.
 
 Notable gaps today:
 
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
 - qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
-  rejected when `vmm=krun`
+  rejected when `vmm=krun` or `vmm=wasm-node`
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun`; it is implemented
   as a temporary qcow2 overlay file on disk that is deleted on close
+- `wasm-node` does not yet provide full `sandboxfs` VFS parity (mount paths are materialized as in-guest directories, without live provider RPC semantics)
+- `wasm-node` now supports mediated egress networking (`httpHooks`, DNS/TLS policy path), but tcp-forward channels used by `vm.enableSsh()` / ingress remain unavailable
 
-See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
+See [VM Backends](./backends.md) for the maintained matrix.
 
 ## No Windows support
 

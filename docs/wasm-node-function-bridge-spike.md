@@ -38,7 +38,7 @@ This follow-up adds an explicit Node-side bridge runner skeleton and wires it in
   - controller shim that maps runner lifecycle to sandbox controller state/events
 - `host/src/sandbox/server.ts`
   - `vmm=wasm-node` wiring for control channel via `FunctionBridgeTransport`
-  - non-control channels use no-op transports in this spike
+  - fs/ssh/ingress channels now also route through channelized function-bridge transports
 - `host/test/wasm-function-bridge-runner.test.ts`
   - round-trip PTY exec test using the harness runner
 - `host/test/wasm-node-sandbox-spike.test.ts`
@@ -96,3 +96,99 @@ node --test \
    - assert prompt + echo output + clean exit
    - assert resize (`pty_resize`) is observed and applied
 5. Keep unsupported areas explicit behind capability gates instead of creating parallel server/VM semantics
+
+## VFS write-up (parity plan)
+
+### Current state
+
+- `vmm=wasm-node` now routes control/fs/ssh/ingress through channelized function bridge transports
+- full fs mount parity still depends on guest-side `sandboxfs` availability and mount wiring
+- `VM.ensureVfsReady()` now materializes configured mount paths as in-guest directories and seeds `/etc/gondolin/mitm/ca.crt`
+- backend capability remains `vfsMounts=false` until live provider parity is validated
+
+### Design principle
+
+Keep the host control plane unchanged:
+
+- same frame format (`virtio-protocol` framing)
+- same fs RPC message schema
+- same backpressure and queue semantics
+
+In other words: bridge the transport, not the protocol.
+
+### Plan
+
+1. **Promote runner IPC to multi-channel framing**
+   - add logical channel id/name (`control`, `fs`, `ssh`, `ingress`)
+   - continue using the same framed payload bytes per channel
+2. **Keep fs on channelized `FunctionBridgeTransport` and complete guest adapter**
+   - `SandboxServer` keeps existing `fsBridge` flow unchanged
+3. **Guest-side fs adapter for wasm runtime**
+   - provide a wasm-side endpoint that speaks the existing `fs_request`/`fs_response` messages
+   - keep mount readiness signal contract (`vfs_ready`/error semantics)
+4. **Flip capability gates once parity tests pass**
+   - set `vfsMounts=true` for wasm-node only when validated
+   - remove wasm-only VFS readiness bypass in `VM.ensureVfsReady()`
+
+### VFS acceptance checks
+
+- backend parity test for mounted provider read/write passes on `wasm-node`
+- bind-mount readiness checks behave the same as qemu/krun
+- no wasm-specific file protocol branch introduced in `SandboxServer`
+
+## Networking write-up (parity plan)
+
+### Current state
+
+- network backend is now enabled for `wasm-node` and wired through the same DHCP/DNS/HTTP/TLS mediation stack
+- TCP forward channels (`openTcpStream`, `openIngressStream`) remain capability-gated off
+- `ssh` / `ingress` bridge channels are transported via the function bridge and ready for guest-side forwarding hooks
+
+### Design principle
+
+Split networking parity into two layers:
+
+1. **Virtio-serial tcp-forward parity** (`virtio-ssh`, `virtio-ingress` equivalents)
+2. **Guest egress mediation parity** (HTTP/TLS hooks, DNS policy, secret injection)
+
+Both should reuse existing host logic and protocol contracts.
+
+### Plan A: tcp-forward channel parity (host↔guest loopback)
+
+1. Use the same multi-channel bridge shape as VFS (`ssh`, `ingress`)
+2. Wire `SandboxServer` `sshBridge` / `ingressBridge` to function bridge transports
+3. Ensure guest forwarders speak unchanged `tcp_open`/`tcp_data`/`tcp_closed`/`tcp_opened`
+4. Enable `tcpForwardChannels` capability only after parity tests pass
+
+This unlocks `enableSsh()` and ingress loopback paths without inventing wasm-only APIs.
+
+### Plan B: egress mediation parity (internet access)
+
+1. Introduce a runtime-agnostic guest network ingress/egress abstraction on host
+   - current QEMU socket backend becomes one implementation
+   - wasm runtime frame source/sink becomes another
+2. Keep existing policy stack unchanged
+   - DNS modes
+   - HTTP/TLS mediation
+   - request/response hooks
+   - secret placeholder substitution
+3. Add explicit gating for unsupported modes until fully wired
+
+### Networking acceptance checks
+
+- backend parity network hook smoke test passes on `wasm-node`
+- ingress parity smoke (`GONDOLIN_BACKEND_PARITY_INGRESS=1`) passes on `wasm-node`
+- no policy divergence in allowlist/DNS/secret handling between backends
+
+## Why this bridge scales
+
+If we keep transport as the only backend-specific layer, the function bridge is
+generic enough to carry any virtio-equivalent channel in code:
+
+- control
+- fs
+- ssh
+- ingress
+- (optionally) network frame ingress/egress
+
+That preserves a single host protocol and avoids wasm-specific control-plane forks.

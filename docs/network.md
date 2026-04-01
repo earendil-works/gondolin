@@ -14,6 +14,11 @@ The main idea is:
 
 The guest should be treated as adversarial: the host is the enforcement point.
 
+> Backend note: the network mediation stack described here is wired for `qemu`
+> and `krun`, and is now also connected for `wasm-node` guest egress. The
+> `wasm-node` backend still lacks tcp-forward parity (`openTcpStream` /
+> ingress/ssh forwarding).
+
 ## Network Design Goals
 
 - Constrain egress to intended destinations (host allowlist + internal-range blocking)
