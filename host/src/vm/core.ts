@@ -36,6 +36,7 @@ import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
   type SandboxVmm,
+  type WasmPreopen,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
@@ -72,7 +73,12 @@ import {
   createGondolinEtcHooks,
   createGondolinEtcMount,
 } from "../ingress.ts";
-import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
+import {
+  MemoryProvider,
+  RealFSProvider,
+  type VirtualProvider,
+} from "../vfs/node/index.ts";
+import { ReadonlyProvider } from "../vfs/readonly.ts";
 import {
   SandboxVfsProvider,
   type VfsHooks,
@@ -476,11 +482,27 @@ export class VM {
 
     const backend = (resolved.vmm ?? "qemu") as SandboxVmm;
     const backendCapabilities = getBackendCapabilities(backend);
-    const explicitVfsMounts = listMountPaths(options.vfs?.mounts);
-    if (!backendCapabilities.vfsMounts && explicitVfsMounts.length > 0) {
-      throw new Error(
-        `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
+    const explicitMounts = options.vfs?.mounts;
+    const explicitVfsMounts = listMountPaths(explicitMounts);
+
+    if (backend === "wasm-node" && explicitVfsMounts.length > 0) {
+      const { preopens, unsupportedMounts } = resolveWasmNodePreopens(
+        explicitMounts,
       );
+      if (unsupportedMounts.length > 0) {
+        throw new Error(
+          `vmm=wasm-node currently supports only hostfs mounts (${unsupportedMounts.join(", ")})`,
+        );
+      }
+      resolved.wasmPreopens = preopens;
+    }
+
+    if (!backendCapabilities.vfsMounts && explicitVfsMounts.length > 0) {
+      if (backend !== "wasm-node" || !resolved.wasmPreopens?.length) {
+        throw new Error(
+          `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
+        );
+      }
     }
 
     // Merge VFS provider into resolved options
@@ -1672,7 +1694,8 @@ fi
 
     const vmm = this.resolvedSandboxOptions?.vmm ?? "qemu";
     if (vmm === "wasm-node") {
-      // wasm-node does not provide full sandboxfs mount wiring yet.
+      // wasm-node uses WASI preopens for hostfs-style mounts and does not rely
+      // on guest-side sandboxfs readiness signals.
       // Keep startup behavior explicit: skip mount wait, but still materialize
       // MITM CA trust when the internal cert provider is available.
       await this.ensureWasmMitmCa();
@@ -2208,6 +2231,78 @@ function resolveFuseConfig(
   return { fuseMount, fuseBinds };
 }
 
+type WasmPreopenResolution = {
+  preopens: WasmPreopen[];
+  unsupportedMounts: string[];
+};
+
+function resolveWasmNodePreopens(
+  mounts?: Record<string, VirtualProvider>,
+): WasmPreopenResolution {
+  if (!mounts) {
+    return { preopens: [], unsupportedMounts: [] };
+  }
+
+  const preopens: WasmPreopen[] = [];
+  const unsupportedMounts: string[] = [];
+
+  for (const [mountPath, provider] of Object.entries(mounts)) {
+    let normalizedMountPath: string;
+    try {
+      normalizedMountPath = normalizeMountPath(mountPath);
+    } catch {
+      unsupportedMounts.push(mountPath);
+      continue;
+    }
+
+    if (normalizedMountPath === "/") {
+      unsupportedMounts.push(normalizedMountPath);
+      continue;
+    }
+
+    const hostMount = resolveWasmHostMount(provider);
+    if (!hostMount) {
+      unsupportedMounts.push(normalizedMountPath);
+      continue;
+    }
+
+    preopens.push({
+      hostPath: path.resolve(hostMount.hostPath),
+      guestPath: normalizedMountPath,
+      readOnly: hostMount.readOnly,
+    });
+  }
+
+  return {
+    preopens,
+    unsupportedMounts,
+  };
+}
+
+function resolveWasmHostMount(
+  provider: VirtualProvider,
+): { hostPath: string; readOnly: boolean } | null {
+  if (provider instanceof ReadonlyProvider) {
+    const backend = (provider as any).backend as VirtualProvider | undefined;
+    if (!backend) return null;
+    const nested = resolveWasmHostMount(backend);
+    if (!nested) return null;
+    return {
+      hostPath: nested.hostPath,
+      readOnly: true,
+    };
+  }
+
+  if (provider instanceof RealFSProvider) {
+    return {
+      hostPath: provider.rootPath,
+      readOnly: provider.readonly,
+    };
+  }
+
+  return null;
+}
+
 /** @internal */
 // Expose internal helpers for unit tests. Not part of the public API.
 export const __test = {
@@ -2223,4 +2318,5 @@ export const __test = {
   parseEnvEntry,
   mapToEnvArray,
   normalizeStartTimeoutMs,
+  resolveWasmNodePreopens,
 };

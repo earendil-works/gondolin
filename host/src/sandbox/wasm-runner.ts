@@ -1,21 +1,37 @@
 import fs from "fs";
 import net from "net";
+import path from "path";
 import { WASI } from "node:wasi";
 import { Worker } from "node:worker_threads";
+
+type RunnerPreopen = {
+  /** host directory path */
+  hostPath: string;
+  /** guest-visible mount path */
+  guestPath: string;
+  /** whether writes must be denied */
+  readOnly: boolean;
+};
 
 type RunnerArgs = {
   /** wasm module path */
   wasmPath: string;
   /** optional unix socket path for qemu-network backend framing */
   netSocketPath?: string;
+  /** wasi preopened host directories */
+  preopens: RunnerPreopen[];
   /** argv forwarded to the wasm module */
   wasmArgs: string[];
 };
 
 type WasiEnv = Record<string, string>;
 
-const NET_LISTEN_FD = 3;
-const NET_CONN_FD = 4;
+const NET_LISTEN_FD = 1024;
+const NET_CONN_FD = 1025;
+
+const WASI_RIGHT_FD_WRITE = 1n << 6n;
+const WASI_OFLAGS_CREAT = 1;
+const WASI_OFLAGS_TRUNC = 8;
 
 const DEBUG_NET = process.env.GONDOLIN_WASM_NET_DEBUG === "1";
 function debugNet(message: string): void {
@@ -26,6 +42,7 @@ function debugNet(message: string): void {
 const WASI_ERRNO_SUCCESS = 0;
 const WASI_ERRNO_AGAIN = 6;
 const WASI_ERRNO_BADF = 8;
+const WASI_ERRNO_ROFS = 69;
 
 type NetBridge = {
   socket: net.Socket;
@@ -272,9 +289,62 @@ function buildWasiEnv(
   return env;
 }
 
+function parsePreopenSpec(raw: string, readOnly: boolean): RunnerPreopen {
+  const separator = raw.indexOf("::");
+  if (separator <= 0 || separator + 2 >= raw.length) {
+    throw new Error("preopen value must be HOST::GUEST");
+  }
+
+  const hostPathInput = raw.slice(0, separator).trim();
+  const guestPathInput = raw.slice(separator + 2).trim();
+
+  if (!hostPathInput) {
+    throw new Error("preopen host path is empty");
+  }
+  if (!guestPathInput.startsWith("/")) {
+    throw new Error(`preopen guest path must be absolute: ${guestPathInput}`);
+  }
+
+  const hostPath = path.resolve(hostPathInput);
+  const stat = fs.statSync(hostPath, { throwIfNoEntry: false });
+  if (!stat) {
+    throw new Error(`preopen host path does not exist: ${hostPath}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`preopen host path is not a directory: ${hostPath}`);
+  }
+
+  const guestPath =
+    guestPathInput.length > 1
+      ? guestPathInput.replace(/\/+$/, "") || "/"
+      : "/";
+
+  if (guestPath === "/") {
+    throw new Error("preopen guest path / is reserved");
+  }
+
+  return {
+    hostPath,
+    guestPath,
+    readOnly,
+  };
+}
+
+function asBigInt(value: number | bigint): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
+}
+
+function hasWriteIntent(oflags: number, fsRightsBase: number | bigint): boolean {
+  if ((oflags & WASI_OFLAGS_CREAT) !== 0 || (oflags & WASI_OFLAGS_TRUNC) !== 0) {
+    return true;
+  }
+  return (asBigInt(fsRightsBase) & WASI_RIGHT_FD_WRITE) !== 0n;
+}
+
 function parseArgs(argv: string[]): RunnerArgs {
   let wasmPath: string | null = null;
   let netSocketPath: string | undefined;
+  const preopens: RunnerPreopen[] = [];
   const passthrough: string[] = [];
   let afterDoubleDash = false;
 
@@ -293,7 +363,7 @@ function parseArgs(argv: string[]): RunnerArgs {
 
     if (arg === "--help" || arg === "-h") {
       throw new Error(
-        "usage: node wasm-runner.ts --wasm PATH [--net-socket PATH] [-- ARG ...]\n" +
+        "usage: node wasm-runner.ts --wasm PATH [--net-socket PATH] [--preopen HOST::GUEST] [--preopen-ro HOST::GUEST] [-- ARG ...]\n" +
           "runs a wasi module and wires stdin/stdout/stderr directly",
       );
     }
@@ -332,6 +402,34 @@ function parseArgs(argv: string[]): RunnerArgs {
       continue;
     }
 
+    if (arg === "--preopen" || arg === "--preopen-ro") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error(`${arg} requires a HOST::GUEST value`);
+      }
+      preopens.push(parsePreopenSpec(value, arg === "--preopen-ro"));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--preopen=")) {
+      const value = arg.slice("--preopen=".length).trim();
+      if (!value) {
+        throw new Error("--preopen requires a HOST::GUEST value");
+      }
+      preopens.push(parsePreopenSpec(value, false));
+      continue;
+    }
+
+    if (arg.startsWith("--preopen-ro=")) {
+      const value = arg.slice("--preopen-ro=".length).trim();
+      if (!value) {
+        throw new Error("--preopen-ro requires a HOST::GUEST value");
+      }
+      preopens.push(parsePreopenSpec(value, true));
+      continue;
+    }
+
     throw new Error(`unknown wasm-runner argument: ${arg}`);
   }
 
@@ -342,6 +440,7 @@ function parseArgs(argv: string[]): RunnerArgs {
   return {
     wasmPath: wasmPath,
     netSocketPath,
+    preopens,
     wasmArgs: passthrough,
   };
 }
@@ -359,16 +458,37 @@ async function runWasi(args: RunnerArgs): Promise<void> {
 
   const moduleArgs =
     enableNetwork && !args.wasmArgs.includes("-net")
-      ? ["-net", "socket", ...args.wasmArgs]
+      ? ["-net", `socket=listenfd=${NET_LISTEN_FD}`, ...args.wasmArgs]
       : args.wasmArgs;
+
+  const preopenEntries: Array<[string, string]> = [["/", "/"]];
+  const readOnlyGuestPaths = new Set<string>();
+  for (const preopen of args.preopens) {
+    if (preopen.guestPath === "/") {
+      throw new Error("preopen guest path / is reserved");
+    }
+    if (preopenEntries.some(([guestPath]) => guestPath === preopen.guestPath)) {
+      throw new Error(`duplicate preopen guest path: ${preopen.guestPath}`);
+    }
+    preopenEntries.push([preopen.guestPath, preopen.hostPath]);
+    if (preopen.readOnly) {
+      readOnlyGuestPaths.add(preopen.guestPath);
+    }
+  }
+
+  const readOnlyFds = new Set<number>();
+  for (let i = 0; i < preopenEntries.length; i += 1) {
+    const guestPath = preopenEntries[i]![0];
+    if (readOnlyGuestPaths.has(guestPath)) {
+      readOnlyFds.add(3 + i);
+    }
+  }
 
   const wasi = new WASI({
     version: "preview1",
     args: [args.wasmPath, ...moduleArgs],
     env: buildWasiEnv(process.env, { enableNetwork }),
-    preopens: {
-      "/": "/",
-    },
+    preopens: Object.fromEntries(preopenEntries),
   });
 
   const wasiImport = wasi.wasiImport as Record<string, any>;
@@ -385,6 +505,225 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     if (!(memory instanceof WebAssembly.Memory)) return null;
     return new DataView(memory.buffer);
   };
+
+  if (readOnlyFds.size > 0) {
+    const originalPathOpen = wasiImport.path_open;
+    wasiImport.path_open = (
+      fd: number,
+      dirflags: number,
+      pathPtr: number,
+      pathLen: number,
+      oflags: number,
+      fsRightsBase: number | bigint,
+      fsRightsInheriting: number | bigint,
+      fdflags: number,
+      openedFdPtr: number,
+    ) => {
+      if (readOnlyFds.has(fd) && hasWriteIntent(oflags, fsRightsBase)) {
+        return WASI_ERRNO_ROFS;
+      }
+
+      const result = originalPathOpen(
+        fd,
+        dirflags,
+        pathPtr,
+        pathLen,
+        oflags,
+        fsRightsBase,
+        fsRightsInheriting,
+        fdflags,
+        openedFdPtr,
+      );
+
+      if (result === WASI_ERRNO_SUCCESS && readOnlyFds.has(fd)) {
+        const view = getView();
+        if (view) {
+          const openedFd = view.getUint32(openedFdPtr, true);
+          readOnlyFds.add(openedFd);
+        }
+      }
+
+      return result;
+    };
+
+    const originalPathCreateDirectory = wasiImport.path_create_directory;
+    wasiImport.path_create_directory = (
+      fd: number,
+      pathPtr: number,
+      pathLen: number,
+    ) => {
+      if (readOnlyFds.has(fd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathCreateDirectory(fd, pathPtr, pathLen);
+    };
+
+    const originalPathUnlinkFile = wasiImport.path_unlink_file;
+    wasiImport.path_unlink_file = (
+      fd: number,
+      pathPtr: number,
+      pathLen: number,
+    ) => {
+      if (readOnlyFds.has(fd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathUnlinkFile(fd, pathPtr, pathLen);
+    };
+
+    const originalPathRemoveDirectory = wasiImport.path_remove_directory;
+    wasiImport.path_remove_directory = (
+      fd: number,
+      pathPtr: number,
+      pathLen: number,
+    ) => {
+      if (readOnlyFds.has(fd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathRemoveDirectory(fd, pathPtr, pathLen);
+    };
+
+    const originalPathRename = wasiImport.path_rename;
+    wasiImport.path_rename = (
+      oldFd: number,
+      oldPathPtr: number,
+      oldPathLen: number,
+      newFd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      if (readOnlyFds.has(oldFd) || readOnlyFds.has(newFd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathRename(
+        oldFd,
+        oldPathPtr,
+        oldPathLen,
+        newFd,
+        newPathPtr,
+        newPathLen,
+      );
+    };
+
+    const originalPathLink = wasiImport.path_link;
+    wasiImport.path_link = (
+      oldFd: number,
+      oldFlags: number,
+      oldPathPtr: number,
+      oldPathLen: number,
+      newFd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      if (readOnlyFds.has(oldFd) || readOnlyFds.has(newFd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathLink(
+        oldFd,
+        oldFlags,
+        oldPathPtr,
+        oldPathLen,
+        newFd,
+        newPathPtr,
+        newPathLen,
+      );
+    };
+
+    const originalPathSymlink = wasiImport.path_symlink;
+    wasiImport.path_symlink = (
+      oldPathPtr: number,
+      oldPathLen: number,
+      fd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      if (readOnlyFds.has(fd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalPathSymlink(
+        oldPathPtr,
+        oldPathLen,
+        fd,
+        newPathPtr,
+        newPathLen,
+      );
+    };
+
+    const originalFdWrite = wasiImport.fd_write;
+    wasiImport.fd_write = (
+      fd: number,
+      iovsPtr: number,
+      iovsLen: number,
+      nwrittenPtr: number,
+    ) => {
+      if (readOnlyFds.has(fd)) {
+        return WASI_ERRNO_ROFS;
+      }
+      return originalFdWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
+    };
+
+    const originalFdPwrite = wasiImport.fd_pwrite;
+    if (typeof originalFdPwrite === "function") {
+      wasiImport.fd_pwrite = (
+        fd: number,
+        iovsPtr: number,
+        iovsLen: number,
+        offset: bigint,
+        nwrittenPtr: number,
+      ) => {
+        if (readOnlyFds.has(fd)) {
+          return WASI_ERRNO_ROFS;
+        }
+        return originalFdPwrite(fd, iovsPtr, iovsLen, offset, nwrittenPtr);
+      };
+    }
+
+    const originalFdFilestatSetSize = wasiImport.fd_filestat_set_size;
+    if (typeof originalFdFilestatSetSize === "function") {
+      wasiImport.fd_filestat_set_size = (fd: number, size: bigint) => {
+        if (readOnlyFds.has(fd)) {
+          return WASI_ERRNO_ROFS;
+        }
+        return originalFdFilestatSetSize(fd, size);
+      };
+    }
+
+    const originalFdFilestatSetTimes = wasiImport.fd_filestat_set_times;
+    if (typeof originalFdFilestatSetTimes === "function") {
+      wasiImport.fd_filestat_set_times = (
+        fd: number,
+        atim: bigint,
+        mtim: bigint,
+        fstFlags: number,
+      ) => {
+        if (readOnlyFds.has(fd)) {
+          return WASI_ERRNO_ROFS;
+        }
+        return originalFdFilestatSetTimes(fd, atim, mtim, fstFlags);
+      };
+    }
+
+    const originalFdClose = wasiImport.fd_close;
+    wasiImport.fd_close = (fd: number) => {
+      readOnlyFds.delete(fd);
+      return originalFdClose(fd);
+    };
+
+    const originalFdRenumber = wasiImport.fd_renumber;
+    if (typeof originalFdRenumber === "function") {
+      wasiImport.fd_renumber = (from: number, to: number) => {
+        const result = originalFdRenumber(from, to);
+        if (result === WASI_ERRNO_SUCCESS) {
+          if (readOnlyFds.has(from)) {
+            readOnlyFds.add(to);
+            readOnlyFds.delete(from);
+          } else {
+            readOnlyFds.delete(to);
+          }
+        }
+        return result;
+      };
+    }
+  }
 
   if (netBridge) {
     // `wasi.start()` runs synchronously, so the Node event loop does not pump

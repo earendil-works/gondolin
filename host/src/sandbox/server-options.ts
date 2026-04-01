@@ -48,6 +48,15 @@ export type ImagePath = string | GuestAssets;
 /** vm backend implementation */
 export type SandboxVmm = "qemu" | "krun" | "wasm-node";
 
+export type WasmPreopen = {
+  /** host directory path */
+  hostPath: string;
+  /** guest-visible mount path */
+  guestPath: string;
+  /** whether writes must be denied */
+  readOnly?: boolean;
+};
+
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
@@ -75,6 +84,8 @@ export type SandboxServerOptions = {
   wasmRunnerMode?: "harness" | "wasi-stdio";
   /** guest wasm module path for wasm-node backend */
   wasmPath?: string;
+  /** wasi preopened host directories for wasm-node backend */
+  wasmPreopens?: WasmPreopen[];
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -190,6 +201,8 @@ export type ResolvedSandboxServerOptions = {
   wasmRunnerMode?: "harness" | "wasi-stdio";
   /** guest wasm module path for wasm-node backend */
   wasmPath?: string;
+  /** wasi preopened host directories for wasm-node backend */
+  wasmPreopens?: WasmPreopen[];
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -1062,6 +1075,12 @@ export function resolveSandboxServerOptions(
     wasmRunnerPath,
     wasmRunnerMode,
     wasmPath: resolvedWasmPath,
+    wasmPreopens:
+      options.wasmPreopens?.map((entry) => ({
+        hostPath: entry.hostPath,
+        guestPath: entry.guestPath,
+        readOnly: entry.readOnly,
+      })) ?? [],
     kernelPath,
     initrdPath,
     rootfsPath: resolvedRootfsPath,

@@ -102,9 +102,10 @@ node --test \
 ### Current state
 
 - `vmm=wasm-node` now routes control/fs/ssh/ingress through channelized function bridge transports
-- full fs mount parity still depends on guest-side `sandboxfs` availability and mount wiring
+- hostfs-backed mounts (`RealFSProvider`, including readonly wrappers) are now mapped directly via WASI preopens
+- full fs mount parity for custom virtual providers still depends on guest-side `sandboxfs` availability and mount wiring
 - `VM.ensureVfsReady()` skips mount-waiting on `wasm-node` and only materializes MITM CA trust when available
-- backend capability remains `vfsMounts=false` until live provider parity is validated
+- backend capability remains `vfsMounts=false` until full provider parity is validated
 
 ### Design principle
 
@@ -132,8 +133,8 @@ In other words: bridge the transport, not the protocol.
 
 ### VFS acceptance checks
 
-- backend parity test for mounted provider read/write passes on `wasm-node`
-- bind-mount readiness checks behave the same as qemu/krun
+- hostfs mount smoke (`--mount-hostfs ...:/workspace`) shows real guest-visible directory contents on `wasm-node`
+- readonly hostfs mounts reject guest writes
 - no wasm-specific file protocol branch introduced in `SandboxServer`
 
 ## Networking write-up (parity plan)

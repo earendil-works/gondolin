@@ -8,6 +8,15 @@ import { FunctionBridgeTransport } from "./server-transport.ts";
 
 export type WasmFunctionBridgeRunnerMode = "harness" | "wasi-stdio";
 
+export type WasmFunctionBridgePreopen = {
+  /** host directory path */
+  hostPath: string;
+  /** guest-visible mount path */
+  guestPath: string;
+  /** whether writes must be denied */
+  readOnly?: boolean;
+};
+
 export type WasmFunctionBridgeChannel =
   | "control"
   | "fs"
@@ -79,6 +88,8 @@ export type WasmFunctionBridgeRunnerConfig = {
   wasmPath?: string;
   /** qemu-network backend unix socket path for wasm guest networking */
   netSocketPath?: string;
+  /** wasi preopened host directories */
+  preopens?: WasmFunctionBridgePreopen[];
   /** startup timeout in `ms` */
   startupTimeoutMs?: number;
 };
@@ -110,6 +121,7 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       mode: config.mode ?? "harness",
       wasmPath: config.wasmPath ?? "",
       netSocketPath: config.netSocketPath ?? "",
+      preopens: config.preopens ?? [],
       startupTimeoutMs: config.startupTimeoutMs ?? 5_000,
     };
   }
@@ -131,6 +143,13 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     }
     if (this.config.netSocketPath.length > 0) {
       childArgs.push("--net-socket", this.config.netSocketPath);
+    }
+    for (const preopen of this.config.preopens) {
+      const flag = preopen.readOnly ? "--preopen-ro" : "--preopen";
+      childArgs.push(
+        flag,
+        `${preopen.hostPath}::${preopen.guestPath}`,
+      );
     }
 
     const child = child_process.spawn(

@@ -560,6 +560,7 @@ export class SandboxServer extends EventEmitter {
         netSocketPath: this.options.netEnabled
           ? this.options.netSocketPath
           : undefined,
+        preopens: this.options.wasmPreopens,
       });
       this.controller = new WasmFunctionBridgeController({
         runner: wasmRunner,

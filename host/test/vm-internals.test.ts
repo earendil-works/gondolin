@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
+import {
+  MemoryProvider,
+  RealFSProvider,
+  type VirtualProvider,
+} from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createExecSession } from "../src/exec.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
@@ -121,7 +126,49 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   }
 });
 
-test("vm internals: wasm-node rejects explicit VFS mounts", () => {
+test("vm internals: wasm-node hostfs mounts become wasi preopens", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const mountRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-hostfs-"));
+
+  let vm: VM | null = null;
+  try {
+    vm = new VM(
+      {
+        autoStart: false,
+        vfs: {
+          mounts: {
+            "/workspace": new ReadonlyProvider(new RealFSProvider(mountRoot)),
+          },
+        },
+      },
+      {
+        ...(resolved as any),
+        vmm: "wasm-node",
+        wasmNodePath: process.execPath,
+        wasmRunnerPath: "/tmp/wasm-runner-entry.ts",
+        wasmRunnerMode: "harness",
+        wasmPath: undefined,
+      } as any,
+    );
+
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    assert.deepEqual(resolvedOptions.wasmPreopens, [
+      {
+        hostPath: fs.realpathSync(mountRoot),
+        guestPath: "/workspace",
+        readOnly: true,
+      },
+    ]);
+  } finally {
+    if (vm) {
+      await vm.close();
+    }
+    fs.rmSync(mountRoot, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: wasm-node rejects non-hostfs VFS mounts", () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
 
   try {
@@ -145,7 +192,7 @@ test("vm internals: wasm-node rejects explicit VFS mounts", () => {
             wasmPath: undefined,
           } as any,
         ),
-      /does not support VFS mounts yet/,
+      /currently supports only hostfs mounts/,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

@@ -67,6 +67,8 @@ type ParsedArgs = {
   wasmPath?: string;
   /** qemu-network backend unix socket path */
   netSocketPath?: string;
+  /** wasi preopened host directories */
+  preopens: Array<{ spec: string; readOnly: boolean }>;
 };
 
 const STDIO_ENVELOPE_CHUNK_BASE64 = 120;
@@ -104,6 +106,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let mode: RunnerMode = "harness";
   let wasmPath: string | undefined;
   let netSocketPath: string | undefined;
+  const preopens: Array<{ spec: string; readOnly: boolean }> = [];
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -161,14 +164,42 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (arg === "--help" || arg === "-h") {
       throw new Error(
-        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH] [--net-socket PATH]",
+        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH] [--net-socket PATH] [--preopen HOST::GUEST] [--preopen-ro HOST::GUEST]",
       );
+    }
+
+    if (arg === "--preopen" || arg === "--preopen-ro") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error(`${arg} requires a HOST::GUEST value`);
+      }
+      preopens.push({ spec: value, readOnly: arg === "--preopen-ro" });
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--preopen=")) {
+      const value = arg.slice("--preopen=".length).trim();
+      if (!value) {
+        throw new Error("--preopen requires a HOST::GUEST value");
+      }
+      preopens.push({ spec: value, readOnly: false });
+      continue;
+    }
+
+    if (arg.startsWith("--preopen-ro=")) {
+      const value = arg.slice("--preopen-ro=".length).trim();
+      if (!value) {
+        throw new Error("--preopen-ro requires a HOST::GUEST value");
+      }
+      preopens.push({ spec: value, readOnly: true });
+      continue;
     }
 
     throw new Error(`unknown argument: ${arg}`);
   }
 
-  return { mode, wasmPath, netSocketPath };
+  return { mode, wasmPath, netSocketPath, preopens };
 }
 
 function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
@@ -497,6 +528,7 @@ async function runHarnessMode(): Promise<void> {
 async function runWasiStdioMode(
   wasmPath: string,
   netSocketPath?: string,
+  preopens: Array<{ spec: string; readOnly: boolean }> = [],
 ): Promise<void> {
   if (!fs.existsSync(wasmPath)) {
     throw new Error(`wasm module not found: ${wasmPath}`);
@@ -510,6 +542,9 @@ async function runWasiStdioMode(
   const childArgs = [wasmRunnerPath, "--wasm", wasmPath];
   if (netSocketPath && netSocketPath.length > 0) {
     childArgs.push("--net-socket", netSocketPath);
+  }
+  for (const preopen of preopens) {
+    childArgs.push(preopen.readOnly ? "--preopen-ro" : "--preopen", preopen.spec);
   }
 
   const child = child_process.spawn(process.execPath, childArgs, {
@@ -844,7 +879,7 @@ async function main(): Promise<void> {
     throw new Error("--wasm is required when --mode wasi-stdio");
   }
 
-  await runWasiStdioMode(args.wasmPath, args.netSocketPath);
+  await runWasiStdioMode(args.wasmPath, args.netSocketPath, args.preopens);
 }
 
 void main().catch((err) => {
