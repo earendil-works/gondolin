@@ -496,3 +496,48 @@ test("allocateFileOpId does not reuse active guest exec ids", () => {
   const id = (server as any).allocateFileOpId();
   assert.equal(id, 2);
 });
+
+test("fs_request on control channel is served and replied on control transport", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const bridge = (server as any).bridge;
+  const fsBridge = (server as any).fsBridge;
+
+  const controlSent: any[] = [];
+  const fsSent: any[] = [];
+
+  bridge.send = (message: any) => {
+    controlSent.push(message);
+    return true;
+  };
+  fsBridge.send = (message: any) => {
+    fsSent.push(message);
+    return true;
+  };
+
+  (server as any).fsService = {
+    handleRequest: async (request: any) => ({
+      v: 1,
+      t: "fs_response",
+      id: request.id,
+      p: {
+        op: request.p.op,
+        err: 0,
+        res: {},
+      },
+    }),
+  };
+
+  bridge.onMessage({
+    v: 1,
+    t: "fs_request",
+    id: 41,
+    p: { op: "ping", req: {} },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(controlSent.length, 1);
+  assert.equal(controlSent[0]?.t, "fs_response");
+  assert.equal(controlSent[0]?.id, 41);
+  assert.equal(fsSent.length, 0);
+});

@@ -13,6 +13,7 @@ import {
   buildFileReadRequest,
   buildFileWriteData,
   buildFileWriteRequest,
+  type IncomingMessage,
 } from "./virtio-protocol.ts";
 import {
   type BootCommandMessage,
@@ -307,6 +308,59 @@ export class SandboxServer extends EventEmitter {
 
   private hasDebug(flag: DebugFlag) {
     return this.debugFlags.has(flag);
+  }
+
+  private handleFsRequestMessage(
+    message: IncomingMessage,
+    transport: ServerTransport,
+    source: "control" | "fs",
+  ) {
+    if (!isValidRequestId(message.id) || message.t !== "fs_request") {
+      return;
+    }
+
+    const respond = (response: IncomingMessage) => {
+      if (!transport.send(response)) {
+        this.emit(
+          "error",
+          new Error(`[fs/${source}] virtio bridge queue exceeded`),
+        );
+      }
+    };
+
+    if (!this.fsService) {
+      respond({
+        v: 1,
+        t: "fs_response",
+        id: message.id,
+        p: {
+          op: message.p.op,
+          err: LINUX_ERRNO.ENOSYS,
+          message: "filesystem service unavailable",
+        },
+      });
+      return;
+    }
+
+    void this.fsService
+      .handleRequest(message)
+      .then((response) => {
+        respond(response);
+      })
+      .catch((err) => {
+        const detail = err instanceof Error ? err.message : "fs handler error";
+        respond({
+          v: 1,
+          t: "fs_response",
+          id: message.id,
+          p: {
+            op: message.p.op,
+            err: LINUX_ERRNO.EIO,
+            message: detail,
+          },
+        });
+        this.emit("error", err instanceof Error ? err : new Error(detail));
+      });
   }
 
   private readonly options: ResolvedSandboxServerOptions;
@@ -908,6 +962,8 @@ export class SandboxServer extends EventEmitter {
         this.handleVfsReady();
       } else if (message.t === "vfs_error") {
         this.handleVfsError(message.p.message);
+      } else if (message.t === "fs_request") {
+        this.handleFsRequestMessage(message, this.bridge, "control");
       }
     };
 
@@ -921,48 +977,7 @@ export class SandboxServer extends EventEmitter {
           `virtiofs rx t=${message.t} id=${id}${extra}`,
         );
       }
-      if (!isValidRequestId(message.id)) {
-        return;
-      }
-      if (message.t !== "fs_request") {
-        return;
-      }
-      if (!this.fsService) {
-        this.fsBridge.send({
-          v: 1,
-          t: "fs_response",
-          id: message.id,
-          p: {
-            op: message.p.op,
-            err: LINUX_ERRNO.ENOSYS,
-            message: "filesystem service unavailable",
-          },
-        });
-        return;
-      }
-
-      void this.fsService
-        .handleRequest(message)
-        .then((response) => {
-          if (!this.fsBridge.send(response)) {
-            this.emit("error", new Error("[fs] virtio bridge queue exceeded"));
-          }
-        })
-        .catch((err) => {
-          const detail =
-            err instanceof Error ? err.message : "fs handler error";
-          this.fsBridge.send({
-            v: 1,
-            t: "fs_response",
-            id: message.id,
-            p: {
-              op: message.p.op,
-              err: LINUX_ERRNO.EIO,
-              message: detail,
-            },
-          });
-          this.emit("error", err instanceof Error ? err : new Error(detail));
-        });
+      this.handleFsRequestMessage(message, this.fsBridge, "fs");
     };
 
     this.sshBridge.onMessage = (message: any) => {
