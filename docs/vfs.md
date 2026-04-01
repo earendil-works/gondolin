@@ -14,10 +14,9 @@ guest via FUSE.
 This page documents the built-in providers shipped with the JavaScript SDK and
 common patterns for safely sharing a workspace with a sandboxed VM.
 
-> Backend note: full VFS mount/bind behavior documented here applies to `qemu`
-> and `krun`. The experimental `wasm-node` backend currently materializes mount
-> paths as writable in-guest directories (plus MITM cert seeding), but does not
-> yet provide full `sandboxfs` provider parity.
+> Backend note: VFS mount/bind behavior documented here currently applies to
+> `qemu` and `krun`. The experimental `wasm-node` backend does not yet provide
+> `sandboxfs` mount parity.
 
 ## Overview
 

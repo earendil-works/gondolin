@@ -39,6 +39,7 @@ import {
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
+import { getBackendCapabilities } from "../sandbox/backend-capabilities.ts";
 import type { SandboxConnection } from "../sandbox/client.ts";
 import type { SandboxState } from "../sandbox/controller.ts";
 import {
@@ -472,6 +473,15 @@ export class VM {
     const resolved = resolvedSandboxOptions
       ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(sandboxOptions);
+
+    const backend = (resolved.vmm ?? "qemu") as SandboxVmm;
+    const backendCapabilities = getBackendCapabilities(backend);
+    const explicitVfsMounts = listMountPaths(options.vfs?.mounts);
+    if (!backendCapabilities.vfsMounts && explicitVfsMounts.length > 0) {
+      throw new Error(
+        `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
+      );
+    }
 
     // Merge VFS provider into resolved options
     if (this.vfs) {
@@ -1662,30 +1672,9 @@ fi
 
     const vmm = this.resolvedSandboxOptions?.vmm ?? "qemu";
     if (vmm === "wasm-node") {
-      // wasm-node currently lacks full sandboxfs wiring. For now, ensure mount
-      // placeholders exist so configured mount paths are usable as writable
-      // in-guest directories.
-      const mountPoints = [this.fuseMount, ...this.fuseBinds].filter(
-        (mountPoint) => mountPoint !== "/",
-      );
-      if (mountPoints.length === 0) {
-        return;
-      }
-
-      const script = `for p in "$@"; do mkdir -p "$p"; done`;
-      const result = await this.execInternalNoVfsWait([
-        "/bin/sh",
-        "-c",
-        script,
-        "sh",
-        ...mountPoints,
-      ]);
-      if (result.exitCode !== 0) {
-        throw new Error(
-          `vfs mount setup failed for wasm-node (exit ${result.exitCode}): ${result.stderr.trim()}`,
-        );
-      }
-
+      // wasm-node does not provide full sandboxfs mount wiring yet.
+      // Keep startup behavior explicit: skip mount wait, but still materialize
+      // MITM CA trust when the internal cert provider is available.
       await this.ensureWasmMitmCa();
       return;
     }
@@ -1733,13 +1722,16 @@ fi
       "fi",
     ].join("\n");
 
-    const writeResult = await this.execInternalNoVfsWait(["/bin/sh", "-lc", script]);
+    const writeResult = await this.execInternalNoVfsWait([
+      "/bin/sh",
+      "-lc",
+      script,
+    ]);
     if (writeResult.exitCode !== 0) {
       throw new Error(
         `failed to materialize wasm mitm ca (exit ${writeResult.exitCode}): ${writeResult.stderr.trim()}`,
       );
     }
-
   }
 
   private async waitForVfsReadyInternal() {

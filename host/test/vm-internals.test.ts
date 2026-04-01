@@ -121,6 +121,37 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   }
 });
 
+test("vm internals: wasm-node rejects explicit VFS mounts", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: {
+              mounts: {
+                "/foo": new MemoryProvider(),
+              },
+            },
+          },
+          {
+            ...(resolved as any),
+            vmm: "wasm-node",
+            wasmNodePath: process.execPath,
+            wasmRunnerPath: "/tmp/wasm-runner-entry.ts",
+            wasmRunnerMode: "harness",
+            wasmPath: undefined,
+          } as any,
+        ),
+      /does not support VFS mounts yet/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("vm internals: manifest runtimeDefaults.rootfsMode is used by default", async () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
   writeAssetManifest(dir, "readonly");

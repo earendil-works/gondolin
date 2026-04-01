@@ -26,7 +26,7 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 | Exec (`vm.exec`) | ✓ | ✓ | ✓ | Shared protocol path |
 | Interactive PTY exec | ✓ | ✓ | ✓ | `wasm-node` path is still maturing |
 | Host→guest file read/write/delete RPC | ✓ | ✓ | ✓ | Control-plane file RPC works on `wasm-node` |
-| VFS mount/bind wiring (`sandboxfs`) | ✓ | ✓ | ⚠ | `wasm-node` currently creates mount placeholders and seeds MITM certs, but does not provide full live provider parity |
+| VFS mount/bind wiring (`sandboxfs`) | ✓ | ✓ |  | `wasm-node` is currently capability-gated off for VFS mounts |
 | Network mediation (`httpHooks`, DNS policy, TLS MITM) | ✓ | ✓ | ⚠ | `wasm-node` now wires guest egress through the same host policy stack; tcp-forward channels remain gated |
 | `openTcpStream` / `openIngressStream` | ✓ | ✓ |  | `wasm-node` currently capability-gated off |
 | `vm.enableSsh()` / ingress gateway | ✓ | ✓ |  | Blocked by missing tcp-forward channels on `wasm-node` |
@@ -70,7 +70,7 @@ See also: [WASM Node function-bridge spike](./wasm-node-function-bridge-spike.md
 
 - `krun` and `wasm-node` are both experimental relative to `qemu`
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets containing `manifest.assets.krunKernel`
-- `wasm-node` still has capability gaps in full VFS provider parity and tcp-forward channels (`openTcpStream`, ingress/ssh forwarding)
+- `wasm-node` still has capability gaps in VFS mount parity and tcp-forward channels (`openTcpStream`, ingress/ssh forwarding)
 - Host CA trust misconfiguration can still produce guest-visible HTTP `502` failures on backends that enable network mediation
 
 ## Recommendation

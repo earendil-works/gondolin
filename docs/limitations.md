@@ -59,7 +59,7 @@ Notable gaps today:
   rejected when `vmm=krun` or `vmm=wasm-node`
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun`; it is implemented
   as a temporary qcow2 overlay file on disk that is deleted on close
-- `wasm-node` does not yet provide full `sandboxfs` VFS parity (mount paths are materialized as in-guest directories, without live provider RPC semantics)
+- `wasm-node` currently does not provide `sandboxfs` VFS mount/bind parity
 - `wasm-node` now supports mediated egress networking (`httpHooks`, DNS/TLS policy path), but tcp-forward channels used by `vm.enableSsh()` / ingress remain unavailable
 
 See [VM Backends](./backends.md) for the maintained matrix.

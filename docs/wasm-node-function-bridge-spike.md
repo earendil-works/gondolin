@@ -103,7 +103,7 @@ node --test \
 
 - `vmm=wasm-node` now routes control/fs/ssh/ingress through channelized function bridge transports
 - full fs mount parity still depends on guest-side `sandboxfs` availability and mount wiring
-- `VM.ensureVfsReady()` now materializes configured mount paths as in-guest directories and seeds `/etc/gondolin/mitm/ca.crt`
+- `VM.ensureVfsReady()` skips mount-waiting on `wasm-node` and only materializes MITM CA trust when available
 - backend capability remains `vfsMounts=false` until live provider parity is validated
 
 ### Design principle
