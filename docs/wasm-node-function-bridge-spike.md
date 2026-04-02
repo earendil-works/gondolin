@@ -102,10 +102,9 @@ node --test \
 ### Current state
 
 - `vmm=wasm-node` now routes control/fs/ssh/ingress through channelized function bridge transports
-- hostfs-backed mounts (`RealFSProvider`, including readonly wrappers) are now mapped directly via WASI preopens
-- full fs mount parity for custom virtual providers still depends on guest-side `sandboxfs` availability and mount wiring
-- `VM.ensureVfsReady()` skips mount-waiting on `wasm-node` and only materializes MITM CA trust when available
-- backend capability remains `vfsMounts=false` until full provider parity is validated
+- VFS mounts now run through the shared file-RPC path used by other backends
+- dedicated parity coverage exists for memfs, hostfs, and custom virtual providers
+- backend capability is now `vfsMounts=true`
 
 ### Design principle
 

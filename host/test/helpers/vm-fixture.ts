@@ -60,6 +60,12 @@ export function resolveKrunRunnerPath(): string | null {
   return null;
 }
 
+/** Resolve a wasm module path for wasm-node integration tests. */
+export function resolveWasmTestPath(): string | null {
+  const wasmPath = process.env.GONDOLIN_TEST_WASM_PATH?.trim();
+  return wasmPath ? wasmPath : null;
+}
+
 /** Return a skip reason for krun VM integration tests or false when runnable. */
 export function shouldSkipKrunVmTests(): string | false {
   if (shouldSkipVmTests()) {
@@ -76,9 +82,16 @@ export function shouldSkipKrunVmTests(): string | false {
 
 let krunRuntimeSkipCheck: Promise<string | false> | null = null;
 
+let wasmRuntimeSkipCheck: Promise<string | false> | null = null;
+
 const krunPrecheckTimeoutMs = Math.max(
   1,
   Number(process.env.GONDOLIN_KRUN_PRECHECK_TIMEOUT_MS ?? 30000),
+);
+
+const wasmPrecheckTimeoutMs = Math.max(
+  1,
+  Number(process.env.GONDOLIN_WASM_PRECHECK_TIMEOUT_MS ?? 30000),
 );
 
 /** Probe whether krun can actually boot/exec on this host. */
@@ -119,6 +132,46 @@ export async function getKrunRuntimeSkipReason(): Promise<string | false> {
   }
 
   return await krunRuntimeSkipCheck;
+}
+
+/** Probe whether wasm-node can actually boot/exec with the configured wasm module. */
+export async function getWasmRuntimeSkipReason(): Promise<string | false> {
+  const wasmPath = resolveWasmTestPath();
+  if (!wasmPath) {
+    return "set GONDOLIN_TEST_WASM_PATH to run wasm-node parity tests";
+  }
+
+  if (!wasmRuntimeSkipCheck) {
+    wasmRuntimeSkipCheck = (async () => {
+      let vm: VM | null = null;
+      try {
+        vm = await VM.create({
+          startTimeoutMs: wasmPrecheckTimeoutMs,
+          sandbox: {
+            vmm: "wasm-node",
+            wasmPath,
+            console: "none",
+          },
+        });
+
+        await vm.start();
+        const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
+        if (probe.exitCode !== 0) {
+          return `wasm-node runtime preflight exec failed (exit ${probe.exitCode})`;
+        }
+        return false;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `wasm-node runtime unavailable: ${message}`;
+      } finally {
+        if (vm) {
+          await closeWithTimeout(vm);
+        }
+      }
+    })();
+  }
+
+  return await wasmRuntimeSkipCheck;
 }
 
 class Semaphore {
