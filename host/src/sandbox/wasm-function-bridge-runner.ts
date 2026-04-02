@@ -5,6 +5,9 @@ import fs from "fs";
 import path from "path";
 
 import { FunctionBridgeTransport } from "./server-transport.ts";
+import { getProcessProfiler } from "../utils/profile.ts";
+
+const profile = getProcessProfiler("wasm-host");
 
 export type WasmFunctionBridgeRunnerMode = "harness" | "wasi-stdio";
 
@@ -108,6 +111,7 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
   private resolveReady: (() => void) | null = null;
   private rejectReady: ((error: Error) => void) | null = null;
   private startupTimer: NodeJS.Timeout | null = null;
+  private startupSpanEnd: (() => void) | null = null;
 
   constructor(config: WasmFunctionBridgeRunnerConfig = {}) {
     super();
@@ -166,6 +170,7 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       },
     );
     this.child = child;
+    this.startupSpanEnd = profile.startSpan("bridge.runner.start");
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
@@ -219,6 +224,8 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       }
 
       this.readyPromise = null;
+      this.startupSpanEnd?.();
+      this.startupSpanEnd = null;
       this.emit("exit", { code, signal });
     });
 
@@ -286,11 +293,24 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     }
 
     try {
-      return child.send({
+      profile.observe("bridge.host.send_frame_bytes", frame.length);
+
+      const endEncode = profile.startSpan("bridge.host.send_frame.base64_encode", {
+        channel,
+      });
+      const encoded = frame.toString("base64");
+      endEncode();
+
+      const endSend = profile.startSpan("bridge.host.send_frame.ipc_send", {
+        channel,
+      });
+      const sent = child.send({
         t: "frame",
-        frame: frame.toString("base64"),
+        frame: encoded,
         channel,
       } satisfies RunnerOutboundMessage);
+      endSend();
+      return sent;
     } catch {
       return false;
     }
@@ -350,13 +370,20 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       this.resolveReady?.();
       this.resolveReady = null;
       this.rejectReady = null;
+      this.startupSpanEnd?.();
+      this.startupSpanEnd = null;
       return;
     }
 
     if (message.t === "frame") {
       let frame: Buffer;
       try {
+        const endDecode = profile.startSpan("bridge.host.recv_frame.base64_decode", {
+          channel: message.channel ?? DEFAULT_CHANNEL,
+        });
         frame = Buffer.from(message.frame, "base64");
+        endDecode();
+        profile.observe("bridge.host.recv_frame_bytes", frame.length);
       } catch {
         this.emit("error", new Error("runner frame payload is not valid base64"));
         return;

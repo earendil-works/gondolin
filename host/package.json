@@ -26,6 +26,7 @@
     "test:backend-parity": "node --test test/backend-parity.test.ts",
     "bash": "node bin/gondolin.ts bash",
     "gondolin": "node bin/gondolin.ts",
+    "profile:wasm-node": "node scripts/profile-wasm-node.ts",
     "fuzz": "node fuzz/cli.ts",
     "prepublishOnly": "pnpm run build",
     "dep:check": "pnpm dlx dependency-cruiser --config .dependency-cruiser.cjs src",

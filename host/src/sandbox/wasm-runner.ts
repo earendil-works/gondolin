@@ -3,6 +3,7 @@ import net from "net";
 import path from "path";
 import { WASI } from "node:wasi";
 import { Worker } from "node:worker_threads";
+import { getProcessProfiler } from "../utils/profile.ts";
 
 type RunnerPreopen = {
   /** host directory path */
@@ -34,6 +35,8 @@ const WASI_OFLAGS_CREAT = 1;
 const WASI_OFLAGS_TRUNC = 8;
 
 const DEBUG_NET = process.env.GONDOLIN_WASM_NET_DEBUG === "1";
+const profile = getProcessProfiler("wasm-runtime");
+
 function debugNet(message: string): void {
   if (!DEBUG_NET) return;
   process.stderr.write(`[wasm-net] ${message}\n`);
@@ -450,8 +453,14 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     throw new Error(`wasm module does not exist: ${args.wasmPath}`);
   }
 
+  const endRead = profile.startSpan("wasm_runtime.module.read");
   const moduleBytes = await fs.promises.readFile(args.wasmPath);
+  endRead();
+  profile.observe("wasm_runtime.module.bytes", moduleBytes.length);
+
+  const endCompile = profile.startSpan("wasm_runtime.module.compile");
   const module = await WebAssembly.compile(moduleBytes);
+  endCompile();
 
   const enableNetwork =
     typeof args.netSocketPath === "string" && args.netSocketPath.length > 0;
@@ -492,6 +501,15 @@ async function runWasi(args: RunnerArgs): Promise<void> {
   });
 
   const wasiImport = wasi.wasiImport as Record<string, any>;
+  const originalProcExit = wasiImport.proc_exit;
+  if (typeof originalProcExit === "function") {
+    wasiImport.proc_exit = (code: number) => {
+      profile.observe("wasm_runtime.proc_exit.code", code);
+      profile.flush();
+      return originalProcExit(code);
+    };
+  }
+
   const netBridge = enableNetwork
     ? await connectNetBridge(args.netSocketPath!)
     : null;
@@ -504,6 +522,23 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     const memory = (instance.exports as Record<string, unknown>).memory;
     if (!(memory instanceof WebAssembly.Memory)) return null;
     return new DataView(memory.buffer);
+  };
+
+  const snapshotTimer = profile.isEnabled()
+    ? setInterval(() => {
+        profile.snapshot();
+      }, 1000)
+    : null;
+  snapshotTimer?.unref?.();
+
+  const measureIovBytes = (iovsPtr: number, iovsLen: number): number => {
+    const view = getView();
+    if (!view) return 0;
+    let total = 0;
+    for (let i = 0; i < iovsLen; i += 1) {
+      total += view.getUint32(iovsPtr + i * 8 + 4, true);
+    }
+    return total;
   };
 
   if (readOnlyFds.size > 0) {
@@ -748,22 +783,28 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       nwrittenPtr: number,
     ) => {
       if (fd === NET_LISTEN_FD || fd === NET_CONN_FD) {
-        const view = getView();
-        if (!view) return WASI_ERRNO_SUCCESS;
+        const end = profile.startSpan("wasm_runtime.net.fd_write");
+        try {
+          const view = getView();
+          if (!view) return WASI_ERRNO_SUCCESS;
 
-        const buffers = readIOVs(view, iovsPtr, iovsLen);
-        let total = 0;
-        for (const chunk of buffers) {
-          const data = Buffer.from(chunk);
-          if (data.length === 0) continue;
-          total += data.length;
-          netBridge.socket.write(data);
+          const buffers = readIOVs(view, iovsPtr, iovsLen);
+          let total = 0;
+          for (const chunk of buffers) {
+            const data = Buffer.from(chunk);
+            if (data.length === 0) continue;
+            total += data.length;
+            netBridge.socket.write(data);
+          }
+          if (total > 0) {
+            debugNet(`fd_write fd=${fd} bytes=${total}`);
+            profile.observe("wasm_runtime.net.fd_write_bytes", total);
+          }
+          view.setUint32(nwrittenPtr, total, true);
+          return WASI_ERRNO_SUCCESS;
+        } finally {
+          end();
         }
-        if (total > 0) {
-          debugNet(`fd_write fd=${fd} bytes=${total}`);
-        }
-        view.setUint32(nwrittenPtr, total, true);
-        return WASI_ERRNO_SUCCESS;
       }
       return originalFdWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
     };
@@ -776,45 +817,57 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       nreadPtr: number,
     ) => {
       if (fd === 0 && stdinBridge) {
-        const view = getView();
-        if (!view) return WASI_ERRNO_SUCCESS;
+        const end = profile.startSpan("wasm_runtime.stdin.fd_read");
+        try {
+          const view = getView();
+          if (!view) return WASI_ERRNO_SUCCESS;
 
-        const bytesRead = readFromStdinBridge(
-          stdinBridge,
-          view,
-          iovsPtr,
-          iovsLen,
-        );
-        view.setUint32(nreadPtr, bytesRead, true);
-        if (bytesRead > 0) {
-          debugNet(`stdin fd_read bytes=${bytesRead}`);
+          const bytesRead = readFromStdinBridge(
+            stdinBridge,
+            view,
+            iovsPtr,
+            iovsLen,
+          );
+          view.setUint32(nreadPtr, bytesRead, true);
+          if (bytesRead > 0) {
+            debugNet(`stdin fd_read bytes=${bytesRead}`);
+            profile.observe("wasm_runtime.stdin.fd_read_bytes", bytesRead);
+          }
+          return WASI_ERRNO_SUCCESS;
+        } finally {
+          end();
         }
-        return WASI_ERRNO_SUCCESS;
       }
 
       if (fd === NET_LISTEN_FD || fd === NET_CONN_FD) {
-        const view = getView();
-        if (!view) return WASI_ERRNO_SUCCESS;
+        const end = profile.startSpan("wasm_runtime.net.fd_read");
+        try {
+          const view = getView();
+          if (!view) return WASI_ERRNO_SUCCESS;
 
-        pumpNetSocket(netBridge);
+          pumpNetSocket(netBridge);
 
-        if (netBridge.rxBuffer.length === 0) {
-          view.setUint32(nreadPtr, 0, true);
+          if (netBridge.rxBuffer.length === 0) {
+            view.setUint32(nreadPtr, 0, true);
+            return WASI_ERRNO_SUCCESS;
+          }
+
+          const bytesWritten = writeIOVs(
+            view,
+            iovsPtr,
+            iovsLen,
+            netBridge.rxBuffer,
+          );
+          netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
+          if (bytesWritten > 0) {
+            debugNet(`fd_read fd=${fd} bytes=${bytesWritten}`);
+            profile.observe("wasm_runtime.net.fd_read_bytes", bytesWritten);
+          }
+          view.setUint32(nreadPtr, bytesWritten, true);
           return WASI_ERRNO_SUCCESS;
+        } finally {
+          end();
         }
-
-        const bytesWritten = writeIOVs(
-          view,
-          iovsPtr,
-          iovsLen,
-          netBridge.rxBuffer,
-        );
-        netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
-        if (bytesWritten > 0) {
-          debugNet(`fd_read fd=${fd} bytes=${bytesWritten}`);
-        }
-        view.setUint32(nreadPtr, bytesWritten, true);
-        return WASI_ERRNO_SUCCESS;
       }
       return originalFdRead(fd, iovsPtr, iovsLen, nreadPtr);
     };
@@ -854,9 +907,14 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       nsubscriptions: number,
       neventsPtr: number,
     ) => {
+      const endPoll = profile.startSpan("wasm_runtime.poll_oneoff");
       const view = getView();
       if (!view) {
-        return originalPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr);
+        try {
+          return originalPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr);
+        } finally {
+          endPoll();
+        }
       }
 
       const clockSubs: Array<{ userdata: bigint }> = [];
@@ -932,11 +990,19 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       };
 
       let eventsWritten = emitEvents();
+      profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
 
       if (eventsWritten === 0 && stdinBridge) {
+        const waitStart = process.hrtime.bigint();
         const seq = Atomics.load(stdinBridge.state, STDIN_WAKE_SEQ);
         Atomics.wait(stdinBridge.state, STDIN_WAKE_SEQ, seq, 20);
+        profile.duration(
+          "wasm_runtime.poll_oneoff.stdin_wait",
+          process.hrtime.bigint() - waitStart,
+        );
+        profile.count("wasm_runtime.poll_oneoff.stdin_wait_count");
         eventsWritten = emitEvents();
+        profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
       }
 
       if (eventsWritten === 0) {
@@ -947,6 +1013,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       }
 
       view.setUint32(neventsPtr, eventsWritten, true);
+      endPoll();
       return WASI_ERRNO_SUCCESS;
     };
 
@@ -1046,13 +1113,41 @@ async function runWasi(args: RunnerArgs): Promise<void> {
   }
 
   try {
+    const originalFdWrite = wasiImport.fd_write;
+    wasiImport.fd_write = (
+      fd: number,
+      iovsPtr: number,
+      iovsLen: number,
+      nwrittenPtr: number,
+    ) => {
+      const bytes = measureIovBytes(iovsPtr, iovsLen);
+      profile.count("wasm_runtime.fd_write.calls");
+      profile.observe("wasm_runtime.fd_write.bytes", bytes);
+      profile.observe("wasm_runtime.fd_write.iovs", iovsLen);
+      if (fd === 1) {
+        profile.count("wasm_runtime.stdout.fd_write.calls");
+        profile.observe("wasm_runtime.stdout.fd_write.bytes", bytes);
+      } else if (fd === 2) {
+        profile.count("wasm_runtime.stderr.fd_write.calls");
+        profile.observe("wasm_runtime.stderr.fd_write.bytes", bytes);
+      }
+      return originalFdWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
+    };
+
+    const endInstantiate = profile.startSpan("wasm_runtime.instantiate");
     const instance = await WebAssembly.instantiate(module, {
       wasi_snapshot_preview1: wasiImport,
     });
+    endInstantiate();
     instanceRef = instance as WebAssembly.Instance;
 
+    const endStart = profile.startSpan("wasm_runtime.wasi_start");
     wasi.start(instanceRef);
+    endStart();
   } finally {
+    if (snapshotTimer) {
+      clearInterval(snapshotTimer);
+    }
     try {
       netBridge?.socket.destroy();
     } catch {
@@ -1063,6 +1158,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     } catch {
       // ignore
     }
+    profile.flush();
   }
 }
 
@@ -1074,6 +1170,8 @@ async function main() {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[wasm-runner] ${message}\n`);
     process.exitCode = 1;
+  } finally {
+    profile.flush();
   }
 }
 

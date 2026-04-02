@@ -8,6 +8,7 @@ import {
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol.ts";
+import { getProcessProfiler } from "../utils/profile.ts";
 
 type RunnerMode = "harness" | "wasi-stdio";
 
@@ -74,12 +75,17 @@ type ParsedArgs = {
 };
 
 const STDIO_ENVELOPE_CHUNK_BASE64 = 120;
+const profile = getProcessProfiler("wasm-bridge");
 
 function sendToParent(message: RunnerOutboundMessage): void {
   if (typeof process.send !== "function") {
     return;
   }
+  const end = profile.startSpan("bridge.runner.process_send", {
+    type: message.t,
+  });
   process.send(message);
+  end();
 }
 
 function normalizeChannel(value: unknown): BridgeChannel | null {
@@ -96,10 +102,22 @@ function normalizeChannel(value: unknown): BridgeChannel | null {
 }
 
 function sendFrame(message: object, channel: BridgeChannel = DEFAULT_CHANNEL): void {
+  const endEncode = profile.startSpan("bridge.runner.send_frame.encode", {
+    channel,
+  });
   const frame = encodeFrame(message);
+  endEncode();
+  profile.observe("bridge.runner.send_frame_bytes", frame.length);
+
+  const endBase64 = profile.startSpan("bridge.runner.send_frame.base64_encode", {
+    channel,
+  });
+  const encoded = frame.toString("base64");
+  endBase64();
+
   sendToParent({
     t: "frame",
-    frame: frame.toString("base64"),
+    frame: encoded,
     channel,
   });
 }
@@ -245,9 +263,14 @@ function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
 }
 
 function encodeStdioEnvelopePayload(payload: Buffer): Buffer[] {
+  const end = profile.startSpan("bridge.runner.stdio_envelope.encode");
   const encoded = payload.toString("base64");
   if (encoded.length <= STDIO_ENVELOPE_CHUNK_BASE64) {
-    return [Buffer.from(`@${encoded}\n`, "utf8")];
+    const lines = [Buffer.from(`@${encoded}\n`, "utf8")];
+    profile.observe("bridge.runner.stdio_envelope.payload_bytes", payload.length);
+    profile.observe("bridge.runner.stdio_envelope.line_count", lines.length);
+    end();
+    return lines;
   }
 
   const lines: Buffer[] = [];
@@ -261,6 +284,9 @@ function encodeStdioEnvelopePayload(payload: Buffer): Buffer[] {
     lines.push(Buffer.from(`@${isLast ? "." : "!"}${chunk}\n`, "utf8"));
   }
 
+  profile.observe("bridge.runner.stdio_envelope.payload_bytes", payload.length);
+  profile.observe("bridge.runner.stdio_envelope.line_count", lines.length);
+  end();
   return lines;
 }
 
@@ -498,6 +524,7 @@ async function runHarnessMode(): Promise<void> {
   const reader = new FrameReader();
 
   process.on("message", (raw) => {
+    profile.count("bridge.runner.harness.inbound_messages");
     const message = decodeRunnerInboundMessage(raw);
     if (!message) {
       sendToParent({
@@ -514,7 +541,12 @@ async function runHarnessMode(): Promise<void> {
 
     let chunk: Buffer;
     try {
+      const endDecode = profile.startSpan("bridge.runner.harness.recv_frame.base64_decode", {
+        channel: message.channel ?? DEFAULT_CHANNEL,
+      });
       chunk = Buffer.from(message.frame, "base64");
+      endDecode();
+      profile.observe("bridge.runner.harness.recv_frame_bytes", chunk.length);
     } catch {
       sendToParent({
         t: "error",
@@ -670,6 +702,7 @@ async function runWasiStdioMode(
 
   const forwardGuestFrame = (frame: Buffer): boolean => {
     stdoutSynced = true;
+    profile.observe("bridge.runner.wasi.forward_guest_frame_bytes", frame.length);
 
     const payload = frame.subarray(4);
     let decoded: Record<string, unknown>;
@@ -723,9 +756,15 @@ async function runWasiStdioMode(
       }
     }
 
+    const endBase64 = profile.startSpan("bridge.runner.wasi.forward_guest_frame.base64_encode", {
+      channel: outboundChannel,
+    });
+    const encodedFrame = outboundFrame.toString("base64");
+    endBase64();
+
     sendToParent({
       t: "frame",
-      frame: outboundFrame.toString("base64"),
+      frame: encodedFrame,
       channel: outboundChannel,
     });
 
@@ -880,7 +919,10 @@ async function runWasiStdioMode(
       return invalidEnvelope("base64_validation_failed", offset);
     }
 
+    const endDecode = profile.startSpan("bridge.runner.wasi.stdout_envelope.base64_decode");
     const payload = Buffer.from(encoded, "base64");
+    endDecode();
+    profile.observe("bridge.runner.wasi.stdout_envelope.payload_bytes", payload.length);
     if (payload.length === 0 || payload.length > MAX_FRAME) {
       return invalidEnvelope("payload_size_invalid", offset);
     }
@@ -987,6 +1029,7 @@ async function runWasiStdioMode(
   child.stdout?.on("data", (chunk: Buffer | string) => {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     if (data.length === 0) return;
+    profile.observe("bridge.runner.wasi.child_stdout_chunk_bytes", data.length);
     stdoutBuffer = Buffer.concat([stdoutBuffer, data]);
     parseStdoutFrames();
   });
@@ -1027,6 +1070,7 @@ async function runWasiStdioMode(
   });
 
   process.on("message", (raw) => {
+    profile.count("bridge.runner.wasi.inbound_messages");
     const message = decodeRunnerInboundMessage(raw);
     if (!message) {
       sendToParent({
@@ -1052,7 +1096,12 @@ async function runWasiStdioMode(
 
     let chunk: Buffer;
     try {
+      const endDecode = profile.startSpan("bridge.runner.wasi.recv_frame.base64_decode", {
+        channel: message.channel ?? DEFAULT_CHANNEL,
+      });
       chunk = Buffer.from(message.frame, "base64");
+      endDecode();
+      profile.observe("bridge.runner.wasi.recv_frame_bytes", chunk.length);
     } catch {
       sendToParent({
         t: "error",

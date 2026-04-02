@@ -10,10 +10,12 @@ import {
   decodeMessage,
   encodeFrame,
 } from "./virtio-protocol.ts";
+import { getProcessProfiler } from "../utils/profile.ts";
 
 export const MAX_REQUEST_ID = 0xffffffff;
 
 const DEFAULT_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+const profile = getProcessProfiler("wasm-host");
 
 type FramedWritable = {
   /** writable state flag when available */
@@ -541,16 +543,20 @@ export class FunctionBridgeTransport implements ServerTransport {
     if (!this.connected) {
       this.connect();
     }
+    profile.count("bridge.transport.send_calls");
     return this.queue.send(message);
   }
 
   private handleIncomingFrame(frame: Buffer | Uint8Array): void {
     const chunk = Buffer.isBuffer(frame) ? frame : Buffer.from(frame);
+    profile.observe("bridge.transport.recv_chunk_bytes", chunk.length);
 
     try {
       this.reader.push(chunk, (payload) => {
         try {
+          const endDecode = profile.startSpan("bridge.transport.decode_message");
           const message = decodeMessage(payload) as IncomingMessage;
+          endDecode();
           this.onMessage?.(message);
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
