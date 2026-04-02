@@ -69,6 +69,7 @@ const STDIN_WRITE_POS = 0;
 const STDIN_READ_POS = 1;
 const STDIN_CLOSED = 2;
 const STDIN_WAKE_SEQ = 3;
+const POLL_IDLE_WAIT_MS = 1;
 
 function readIOVs(
   view: DataView,
@@ -513,7 +514,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
   const netBridge = enableNetwork
     ? await connectNetBridge(args.netSocketPath!)
     : null;
-  const stdinBridge = netBridge ? createStdinBridge() : null;
+  const stdinBridge = createStdinBridge();
 
   let instanceRef: WebAssembly.Instance | null = null;
   const getView = (): DataView | null => {
@@ -760,11 +761,11 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     }
   }
 
+  // `wasi.start()` runs synchronously, so the Node event loop does not pump
+  // socket "data" callbacks while guest code executes. We therefore pull
+  // inbound network bytes synchronously via `fs.readSync` in socket-aware
+  // syscall handlers (`pumpNetSocket`).
   if (netBridge) {
-    // `wasi.start()` runs synchronously, so the Node event loop does not pump
-    // socket "data" callbacks while guest code executes. We therefore pull
-    // inbound network bytes synchronously via `fs.readSync` in socket-aware
-    // syscall handlers (`pumpNetSocket`).
     netBridge.socket.on("end", () => {
       netBridge.ended = true;
     });
@@ -774,343 +775,358 @@ async function runWasi(args: RunnerArgs): Promise<void> {
     netBridge.socket.on("error", () => {
       netBridge.ended = true;
     });
+  }
 
-    const originalFdWrite = wasiImport.fd_write;
-    wasiImport.fd_write = (
-      fd: number,
-      iovsPtr: number,
-      iovsLen: number,
-      nwrittenPtr: number,
-    ) => {
-      if (fd === NET_LISTEN_FD || fd === NET_CONN_FD) {
-        const end = profile.startSpan("wasm_runtime.net.fd_write");
-        try {
-          const view = getView();
-          if (!view) return WASI_ERRNO_SUCCESS;
-
-          const buffers = readIOVs(view, iovsPtr, iovsLen);
-          let total = 0;
-          for (const chunk of buffers) {
-            const data = Buffer.from(chunk);
-            if (data.length === 0) continue;
-            total += data.length;
-            netBridge.socket.write(data);
-          }
-          if (total > 0) {
-            debugNet(`fd_write fd=${fd} bytes=${total}`);
-            profile.observe("wasm_runtime.net.fd_write_bytes", total);
-          }
-          view.setUint32(nwrittenPtr, total, true);
-          return WASI_ERRNO_SUCCESS;
-        } finally {
-          end();
-        }
-      }
-      return originalFdWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
-    };
-
-    const originalFdRead = wasiImport.fd_read;
-    wasiImport.fd_read = (
-      fd: number,
-      iovsPtr: number,
-      iovsLen: number,
-      nreadPtr: number,
-    ) => {
-      if (fd === 0 && stdinBridge) {
-        const end = profile.startSpan("wasm_runtime.stdin.fd_read");
-        try {
-          const view = getView();
-          if (!view) return WASI_ERRNO_SUCCESS;
-
-          const bytesRead = readFromStdinBridge(
-            stdinBridge,
-            view,
-            iovsPtr,
-            iovsLen,
-          );
-          view.setUint32(nreadPtr, bytesRead, true);
-          if (bytesRead > 0) {
-            debugNet(`stdin fd_read bytes=${bytesRead}`);
-            profile.observe("wasm_runtime.stdin.fd_read_bytes", bytesRead);
-          }
-          return WASI_ERRNO_SUCCESS;
-        } finally {
-          end();
-        }
-      }
-
-      if (fd === NET_LISTEN_FD || fd === NET_CONN_FD) {
-        const end = profile.startSpan("wasm_runtime.net.fd_read");
-        try {
-          const view = getView();
-          if (!view) return WASI_ERRNO_SUCCESS;
-
-          pumpNetSocket(netBridge);
-
-          if (netBridge.rxBuffer.length === 0) {
-            view.setUint32(nreadPtr, 0, true);
-            return WASI_ERRNO_SUCCESS;
-          }
-
-          const bytesWritten = writeIOVs(
-            view,
-            iovsPtr,
-            iovsLen,
-            netBridge.rxBuffer,
-          );
-          netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
-          if (bytesWritten > 0) {
-            debugNet(`fd_read fd=${fd} bytes=${bytesWritten}`);
-            profile.observe("wasm_runtime.net.fd_read_bytes", bytesWritten);
-          }
-          view.setUint32(nreadPtr, bytesWritten, true);
-          return WASI_ERRNO_SUCCESS;
-        } finally {
-          end();
-        }
-      }
-      return originalFdRead(fd, iovsPtr, iovsLen, nreadPtr);
-    };
-
-    const originalFdClose = wasiImport.fd_close;
-    wasiImport.fd_close = (fd: number) => {
-      if (fd === NET_CONN_FD || fd === NET_LISTEN_FD) {
-        try {
-          netBridge.socket.end();
-        } catch {
-          // ignore
-        }
-        return WASI_ERRNO_SUCCESS;
-      }
-      return originalFdClose(fd);
-    };
-
-    const originalFdFdstatGet = wasiImport.fd_fdstat_get;
-    wasiImport.fd_fdstat_get = (fd: number, bufPtr: number) => {
-      if (fd === NET_LISTEN_FD || fd === NET_CONN_FD) {
+  const originalFdWrite = wasiImport.fd_write;
+  wasiImport.fd_write = (
+    fd: number,
+    iovsPtr: number,
+    iovsLen: number,
+    nwrittenPtr: number,
+  ) => {
+    if (netBridge && (fd === NET_LISTEN_FD || fd === NET_CONN_FD)) {
+      const end = profile.startSpan("wasm_runtime.net.fd_write");
+      try {
         const view = getView();
         if (!view) return WASI_ERRNO_SUCCESS;
 
-        view.setUint8(bufPtr, 6); // FILETYPE_SOCKET_STREAM
-        view.setUint16(bufPtr + 2, 0, true);
-        view.setBigUint64(bufPtr + 8, 0xffffffffffffffffn, true);
-        view.setBigUint64(bufPtr + 16, 0xffffffffffffffffn, true);
-        return WASI_ERRNO_SUCCESS;
-      }
-      return originalFdFdstatGet(fd, bufPtr);
-    };
-
-    const originalPollOneoff = wasiImport.poll_oneoff;
-    wasiImport.poll_oneoff = (
-      inPtr: number,
-      outPtr: number,
-      nsubscriptions: number,
-      neventsPtr: number,
-    ) => {
-      const endPoll = profile.startSpan("wasm_runtime.poll_oneoff");
-      const view = getView();
-      if (!view) {
-        try {
-          return originalPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr);
-        } finally {
-          endPoll();
+        const buffers = readIOVs(view, iovsPtr, iovsLen);
+        let total = 0;
+        for (const chunk of buffers) {
+          const data = Buffer.from(chunk);
+          if (data.length === 0) continue;
+          total += data.length;
+          netBridge.socket.write(data);
         }
+        if (total > 0) {
+          debugNet(`fd_write fd=${fd} bytes=${total}`);
+          profile.observe("wasm_runtime.net.fd_write_bytes", total);
+        }
+        view.setUint32(nwrittenPtr, total, true);
+        return WASI_ERRNO_SUCCESS;
+      } finally {
+        end();
       }
+    }
+    return originalFdWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
+  };
 
-      const clockSubs: Array<{ userdata: bigint }> = [];
+  const originalFdRead = wasiImport.fd_read;
+  wasiImport.fd_read = (
+    fd: number,
+    iovsPtr: number,
+    iovsLen: number,
+    nreadPtr: number,
+  ) => {
+    if (fd === 0) {
+      const end = profile.startSpan("wasm_runtime.stdin.fd_read");
+      try {
+        const view = getView();
+        if (!view) return WASI_ERRNO_SUCCESS;
 
-      const emitEvents = () => {
+        const bytesRead = readFromStdinBridge(stdinBridge, view, iovsPtr, iovsLen);
+        view.setUint32(nreadPtr, bytesRead, true);
+        if (bytesRead > 0) {
+          debugNet(`stdin fd_read bytes=${bytesRead}`);
+          profile.observe("wasm_runtime.stdin.fd_read_bytes", bytesRead);
+        }
+        return WASI_ERRNO_SUCCESS;
+      } finally {
+        end();
+      }
+    }
+
+    if (netBridge && (fd === NET_LISTEN_FD || fd === NET_CONN_FD)) {
+      const end = profile.startSpan("wasm_runtime.net.fd_read");
+      try {
+        const view = getView();
+        if (!view) return WASI_ERRNO_SUCCESS;
+
         pumpNetSocket(netBridge);
-        const stdinBytes = stdinBridge ? stdinAvailable(stdinBridge) : 0;
-        const stdinIsClosed = stdinBridge ? stdinClosed(stdinBridge) : false;
-        const netReadable =
-          netBridge.rxBuffer.length > 0 ||
-          netBridge.ended ||
-          !netBridge.accepted;
-        const netWritable = netBridge.accepted && !netBridge.ended;
 
-        let written = 0;
-        clockSubs.length = 0;
-
-        for (let i = 0; i < nsubscriptions; i += 1) {
-          const subBase = inPtr + i * 48;
-          const userdata = view.getBigUint64(subBase, true);
-          const type = view.getUint8(subBase + 8);
-
-          if (type === 0) {
-            clockSubs.push({ userdata });
-            continue;
-          }
-
-          if (type === 1) {
-            // FD_READ
-            const fd = view.getUint32(subBase + 16, true);
-            if (fd === 0 && (stdinBytes > 0 || stdinIsClosed)) {
-              writePollEvent(view, outPtr, written, userdata, 1, stdinBytes);
-              written += 1;
-              continue;
-            }
-            if (fd === NET_LISTEN_FD && !netBridge.accepted) {
-              writePollEvent(view, outPtr, written, userdata, 1, 1);
-              written += 1;
-              continue;
-            }
-            if (fd === NET_CONN_FD && netReadable) {
-              writePollEvent(
-                view,
-                outPtr,
-                written,
-                userdata,
-                1,
-                Math.max(1, netBridge.rxBuffer.length),
-              );
-              written += 1;
-              continue;
-            }
-            continue;
-          }
-
-          if (type === 2) {
-            // FD_WRITE
-            const fd = view.getUint32(subBase + 16, true);
-            if (fd === 1 || fd === 2) {
-              writePollEvent(view, outPtr, written, userdata, 2, 4096);
-              written += 1;
-              continue;
-            }
-            if (fd === NET_CONN_FD && netWritable) {
-              writePollEvent(view, outPtr, written, userdata, 2, 4096);
-              written += 1;
-              continue;
-            }
-          }
+        if (netBridge.rxBuffer.length === 0) {
+          view.setUint32(nreadPtr, 0, true);
+          return WASI_ERRNO_SUCCESS;
         }
 
-        return written;
-      };
-
-      let eventsWritten = emitEvents();
-      profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
-
-      if (eventsWritten === 0 && stdinBridge) {
-        const waitStart = process.hrtime.bigint();
-        const seq = Atomics.load(stdinBridge.state, STDIN_WAKE_SEQ);
-        Atomics.wait(stdinBridge.state, STDIN_WAKE_SEQ, seq, 20);
-        profile.duration(
-          "wasm_runtime.poll_oneoff.stdin_wait",
-          process.hrtime.bigint() - waitStart,
+        const bytesWritten = writeIOVs(
+          view,
+          iovsPtr,
+          iovsLen,
+          netBridge.rxBuffer,
         );
-        profile.count("wasm_runtime.poll_oneoff.stdin_wait_count");
-        eventsWritten = emitEvents();
-        profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
+        netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
+        if (bytesWritten > 0) {
+          debugNet(`fd_read fd=${fd} bytes=${bytesWritten}`);
+          profile.observe("wasm_runtime.net.fd_read_bytes", bytesWritten);
+        }
+        view.setUint32(nreadPtr, bytesWritten, true);
+        return WASI_ERRNO_SUCCESS;
+      } finally {
+        end();
       }
+    }
+    return originalFdRead(fd, iovsPtr, iovsLen, nreadPtr);
+  };
 
-      if (eventsWritten === 0) {
-        for (const clockSub of clockSubs) {
-          writePollEvent(view, outPtr, eventsWritten, clockSub.userdata, 0, 0);
-          eventsWritten += 1;
+  const originalFdClose = wasiImport.fd_close;
+  wasiImport.fd_close = (fd: number) => {
+    if (netBridge && (fd === NET_CONN_FD || fd === NET_LISTEN_FD)) {
+      try {
+        netBridge.socket.end();
+      } catch {
+        // ignore
+      }
+      return WASI_ERRNO_SUCCESS;
+    }
+    return originalFdClose(fd);
+  };
+
+  const originalFdFdstatGet = wasiImport.fd_fdstat_get;
+  wasiImport.fd_fdstat_get = (fd: number, bufPtr: number) => {
+    if (netBridge && (fd === NET_LISTEN_FD || fd === NET_CONN_FD)) {
+      const view = getView();
+      if (!view) return WASI_ERRNO_SUCCESS;
+
+      view.setUint8(bufPtr, 6); // FILETYPE_SOCKET_STREAM
+      view.setUint16(bufPtr + 2, 0, true);
+      view.setBigUint64(bufPtr + 8, 0xffffffffffffffffn, true);
+      view.setBigUint64(bufPtr + 16, 0xffffffffffffffffn, true);
+      return WASI_ERRNO_SUCCESS;
+    }
+    return originalFdFdstatGet(fd, bufPtr);
+  };
+
+  const originalPollOneoff = wasiImport.poll_oneoff;
+  wasiImport.poll_oneoff = (
+    inPtr: number,
+    outPtr: number,
+    nsubscriptions: number,
+    neventsPtr: number,
+  ) => {
+    const endPoll = profile.startSpan("wasm_runtime.poll_oneoff");
+    const view = getView();
+    if (!view) {
+      try {
+        return originalPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr);
+      } finally {
+        endPoll();
+      }
+    }
+
+    const clockSubs: Array<{ userdata: bigint }> = [];
+
+    const emitEvents = () => {
+      if (netBridge) {
+        pumpNetSocket(netBridge);
+      }
+      const stdinBytes = stdinAvailable(stdinBridge);
+      const stdinIsClosed = stdinClosed(stdinBridge);
+      const netReadable = netBridge
+        ? netBridge.rxBuffer.length > 0 || netBridge.ended || !netBridge.accepted
+        : false;
+      const netWritable = netBridge
+        ? netBridge.accepted && !netBridge.ended
+        : false;
+
+      let written = 0;
+      let shouldRetryWait = false;
+      clockSubs.length = 0;
+
+      for (let i = 0; i < nsubscriptions; i += 1) {
+        const subBase = inPtr + i * 48;
+        const userdata = view.getBigUint64(subBase, true);
+        const type = view.getUint8(subBase + 8);
+
+        if (type === 0) {
+          clockSubs.push({ userdata });
+          continue;
+        }
+
+        if (type === 1) {
+          // FD_READ
+          const fd = view.getUint32(subBase + 16, true);
+          if (fd === 0 && (stdinBytes > 0 || stdinIsClosed)) {
+            writePollEvent(view, outPtr, written, userdata, 1, stdinBytes);
+            written += 1;
+            continue;
+          }
+          if (fd === 0) {
+            shouldRetryWait = true;
+            continue;
+          }
+          if (netBridge && fd === NET_LISTEN_FD && !netBridge.accepted) {
+            writePollEvent(view, outPtr, written, userdata, 1, 1);
+            written += 1;
+            continue;
+          }
+          if (netBridge && fd === NET_CONN_FD && netReadable) {
+            writePollEvent(
+              view,
+              outPtr,
+              written,
+              userdata,
+              1,
+              Math.max(1, netBridge.rxBuffer.length),
+            );
+            written += 1;
+            continue;
+          }
+          if (netBridge && (fd === NET_LISTEN_FD || fd === NET_CONN_FD)) {
+            shouldRetryWait = true;
+          }
+          continue;
+        }
+
+        if (type === 2) {
+          // FD_WRITE
+          const fd = view.getUint32(subBase + 16, true);
+          if (fd === 1 || fd === 2) {
+            writePollEvent(view, outPtr, written, userdata, 2, 4096);
+            written += 1;
+            continue;
+          }
+          if (netBridge && fd === NET_CONN_FD && netWritable) {
+            writePollEvent(view, outPtr, written, userdata, 2, 4096);
+            written += 1;
+            continue;
+          }
+          if (netBridge && fd === NET_CONN_FD) {
+            shouldRetryWait = true;
+          }
         }
       }
 
-      view.setUint32(neventsPtr, eventsWritten, true);
-      endPoll();
-      return WASI_ERRNO_SUCCESS;
+      return { written, shouldRetryWait, hasClockSubscriptions: clockSubs.length > 0 };
     };
 
-    wasiImport.sock_accept = (
-      fd: number,
-      _flags: number,
-      resultFdPtr: number,
-    ) => {
-      if (fd !== NET_LISTEN_FD) {
-        return WASI_ERRNO_BADF;
-      }
-      const view = getView();
-      if (!view) return WASI_ERRNO_SUCCESS;
+    let pollState = emitEvents();
+    let eventsWritten = pollState.written;
+    profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
 
-      if (!netBridge.accepted) {
-        netBridge.accepted = true;
-        view.setUint32(resultFdPtr, NET_CONN_FD, true);
-        debugNet("sock_accept -> fd=4");
-        return WASI_ERRNO_SUCCESS;
-      }
-
-      return WASI_ERRNO_AGAIN;
-    };
-
-    wasiImport.sock_recv = (
-      fd: number,
-      riDataPtr: number,
-      riDataLen: number,
-      _riFlags: number,
-      roDataLenPtr: number,
-      roFlagsPtr: number,
-    ) => {
-      if (fd !== NET_CONN_FD) {
-        return WASI_ERRNO_BADF;
-      }
-
-      const view = getView();
-      if (!view) return WASI_ERRNO_SUCCESS;
-
-      pumpNetSocket(netBridge);
-
-      if (netBridge.rxBuffer.length === 0) {
-        view.setUint32(roDataLenPtr, 0, true);
-        view.setUint16(roFlagsPtr, 0, true);
-        return netBridge.ended ? WASI_ERRNO_SUCCESS : WASI_ERRNO_AGAIN;
-      }
-
-      const bytesWritten = writeIOVs(
-        view,
-        riDataPtr,
-        riDataLen,
-        netBridge.rxBuffer,
+    if (
+      eventsWritten === 0 &&
+      pollState.shouldRetryWait &&
+      !pollState.hasClockSubscriptions
+    ) {
+      const waitStart = process.hrtime.bigint();
+      const seq = Atomics.load(stdinBridge.state, STDIN_WAKE_SEQ);
+      Atomics.wait(stdinBridge.state, STDIN_WAKE_SEQ, seq, POLL_IDLE_WAIT_MS);
+      profile.duration(
+        "wasm_runtime.poll_oneoff.stdin_wait",
+        process.hrtime.bigint() - waitStart,
       );
-      netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
-      if (bytesWritten > 0) {
-        debugNet(`sock_recv bytes=${bytesWritten}`);
-      }
+      profile.count("wasm_runtime.poll_oneoff.stdin_wait_count");
+      pollState = emitEvents();
+      eventsWritten = pollState.written;
+      profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
+    }
 
-      view.setUint32(roDataLenPtr, bytesWritten, true);
+    if (eventsWritten === 0) {
+      for (const clockSub of clockSubs) {
+        writePollEvent(view, outPtr, eventsWritten, clockSub.userdata, 0, 0);
+        eventsWritten += 1;
+      }
+    }
+
+    view.setUint32(neventsPtr, eventsWritten, true);
+    endPoll();
+    return WASI_ERRNO_SUCCESS;
+  };
+
+  wasiImport.sock_accept = (
+    fd: number,
+    _flags: number,
+    resultFdPtr: number,
+  ) => {
+    if (!netBridge || fd !== NET_LISTEN_FD) {
+      return WASI_ERRNO_BADF;
+    }
+    const view = getView();
+    if (!view) return WASI_ERRNO_SUCCESS;
+
+    if (!netBridge.accepted) {
+      netBridge.accepted = true;
+      view.setUint32(resultFdPtr, NET_CONN_FD, true);
+      debugNet("sock_accept -> fd=4");
+      return WASI_ERRNO_SUCCESS;
+    }
+
+    return WASI_ERRNO_AGAIN;
+  };
+
+  wasiImport.sock_recv = (
+    fd: number,
+    riDataPtr: number,
+    riDataLen: number,
+    _riFlags: number,
+    roDataLenPtr: number,
+    roFlagsPtr: number,
+  ) => {
+    if (!netBridge || fd !== NET_CONN_FD) {
+      return WASI_ERRNO_BADF;
+    }
+
+    const view = getView();
+    if (!view) return WASI_ERRNO_SUCCESS;
+
+    pumpNetSocket(netBridge);
+
+    if (netBridge.rxBuffer.length === 0) {
+      view.setUint32(roDataLenPtr, 0, true);
       view.setUint16(roFlagsPtr, 0, true);
-      return WASI_ERRNO_SUCCESS;
-    };
+      return netBridge.ended ? WASI_ERRNO_SUCCESS : WASI_ERRNO_AGAIN;
+    }
 
-    wasiImport.sock_send = (
-      fd: number,
-      siDataPtr: number,
-      siDataLen: number,
-      _siFlags: number,
-      soDataLenPtr: number,
-    ) => {
-      if (fd !== NET_CONN_FD) {
-        return WASI_ERRNO_BADF;
-      }
+    const bytesWritten = writeIOVs(
+      view,
+      riDataPtr,
+      riDataLen,
+      netBridge.rxBuffer,
+    );
+    netBridge.rxBuffer = netBridge.rxBuffer.subarray(bytesWritten);
+    if (bytesWritten > 0) {
+      debugNet(`sock_recv bytes=${bytesWritten}`);
+    }
 
-      const view = getView();
-      if (!view) return WASI_ERRNO_SUCCESS;
+    view.setUint32(roDataLenPtr, bytesWritten, true);
+    view.setUint16(roFlagsPtr, 0, true);
+    return WASI_ERRNO_SUCCESS;
+  };
 
-      const buffers = readIOVs(view, siDataPtr, siDataLen);
-      let total = 0;
-      for (const chunk of buffers) {
-        const data = Buffer.from(chunk);
-        if (data.length === 0) continue;
-        total += data.length;
-        netBridge.socket.write(data);
-      }
-      if (total > 0) {
-        debugNet(`sock_send bytes=${total}`);
-      }
+  wasiImport.sock_send = (
+    fd: number,
+    siDataPtr: number,
+    siDataLen: number,
+    _siFlags: number,
+    soDataLenPtr: number,
+  ) => {
+    if (!netBridge || fd !== NET_CONN_FD) {
+      return WASI_ERRNO_BADF;
+    }
 
-      view.setUint32(soDataLenPtr, total, true);
-      return WASI_ERRNO_SUCCESS;
-    };
+    const view = getView();
+    if (!view) return WASI_ERRNO_SUCCESS;
 
-    wasiImport.sock_shutdown = (_fd: number, _how: number) => {
-      return WASI_ERRNO_SUCCESS;
-    };
-  }
+    const buffers = readIOVs(view, siDataPtr, siDataLen);
+    let total = 0;
+    for (const chunk of buffers) {
+      const data = Buffer.from(chunk);
+      if (data.length === 0) continue;
+      total += data.length;
+      netBridge.socket.write(data);
+    }
+    if (total > 0) {
+      debugNet(`sock_send bytes=${total}`);
+    }
+
+    view.setUint32(soDataLenPtr, total, true);
+    return WASI_ERRNO_SUCCESS;
+  };
+
+  wasiImport.sock_shutdown = (_fd: number, _how: number) => {
+    return WASI_ERRNO_SUCCESS;
+  };
 
   try {
     const originalFdWrite = wasiImport.fd_write;
