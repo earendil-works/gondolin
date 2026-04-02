@@ -1,5 +1,6 @@
 .husky/_
 .pi/todos
+.cache
 tmp/
 zig-cache/
 zig-out/
