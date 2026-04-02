@@ -4,13 +4,46 @@ const file_requests = @import("file_requests.zig");
 const c = @cImport({
     @cInclude("pty.h");
     @cInclude("unistd.h");
+    @cInclude("errno.h");
+    @cInclude("spawn.h");
+    @cInclude("fcntl.h");
     @cInclude("sys/ioctl.h");
 });
 
 const log = std.log.scoped(.sandboxd);
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 /// max buffered stdin per exec session in `bytes`
 const max_queued_stdin_bytes: usize = 4 * 1024 * 1024;
+/// fallback heap pool used when libc allocator is unavailable in constrained runtimes
+const fallback_allocator_pool_size: usize = 32 * 1024 * 1024;
+
+var fallback_allocator_pool: [fallback_allocator_pool_size]u8 = undefined;
+
+const TransportMode = enum {
+    virtio,
+    stdio,
+};
+
+const RuntimeConfig = struct {
+    transport: TransportMode = .virtio,
+};
+
+const TransportHandles = struct {
+    rx_fd: std.posix.fd_t,
+    tx_fd: std.posix.fd_t,
+    file: ?std.fs.File = null,
+
+    fn deinit(self: *TransportHandles) void {
+        if (self.file) |owned| {
+            owned.close();
+            self.file = null;
+        }
+    }
+};
 
 const Termination = struct {
     exit_code: i32,
@@ -51,38 +84,182 @@ const OwnedExecRequest = struct {
 
 const VirtioTx = struct {
     fd: std.posix.fd_t,
+    stdio_transport: bool = false,
     mutex: std.Thread.Mutex = .{},
 
     pub fn sendPayload(self: *VirtioTx, payload: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try protocol.writeFrame(self.fd, payload);
+        if (self.stdio_transport) {
+            try protocol.writeStdioEnvelopePayload(self.fd, payload);
+        } else {
+            try protocol.writeFrame(self.fd, payload);
+        }
     }
 
     fn sendError(self: *VirtioTx, allocator: std.mem.Allocator, id: u32, code: []const u8, message: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try protocol.sendError(allocator, self.fd, id, code, message);
+        const payload = try protocol.encodeError(allocator, id, code, message);
+        defer allocator.free(payload);
+        try self.sendPayload(payload);
     }
 
     fn sendStdinWindow(self: *VirtioTx, allocator: std.mem.Allocator, id: u32, stdin: u32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try protocol.sendStdinWindow(allocator, self.fd, id, stdin);
+        const payload = try protocol.encodeStdinWindow(allocator, id, stdin);
+        defer allocator.free(payload);
+        try self.sendPayload(payload);
     }
 
     fn sendVfsReady(self: *VirtioTx, allocator: std.mem.Allocator) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try protocol.sendVfsReady(allocator, self.fd);
+        const payload = try protocol.encodeVfsReady(allocator);
+        defer allocator.free(payload);
+        try self.sendPayload(payload);
     }
 
     fn sendVfsError(self: *VirtioTx, allocator: std.mem.Allocator, message: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try protocol.sendVfsError(allocator, self.fd, message);
+        const payload = try protocol.encodeVfsError(allocator, message);
+        defer allocator.free(payload);
+        try self.sendPayload(payload);
     }
 };
+
+const FsRpcProxy = struct {
+    allocator: std.mem.Allocator,
+    tx: *VirtioTx,
+    socket_path: []u8,
+    listener_fd: ?std.posix.fd_t = null,
+    client_fd: ?std.posix.fd_t = null,
+    mutex: std.Thread.Mutex = .{},
+    stop_requested: bool = false,
+    thread: ?std.Thread = null,
+
+    fn init(allocator: std.mem.Allocator, tx: *VirtioTx, socket_path: []const u8) !FsRpcProxy {
+        const owned_socket_path = try allocator.dupe(u8, socket_path);
+        errdefer allocator.free(owned_socket_path);
+
+        std.fs.deleteFileAbsolute(owned_socket_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+
+        const listener_fd = try std.posix.socket(
+            std.posix.AF.UNIX,
+            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
+            0,
+        );
+        errdefer std.posix.close(listener_fd);
+
+        const address = try std.net.Address.initUnix(owned_socket_path);
+        try std.posix.bind(listener_fd, &address.any, address.getOsSockLen());
+        errdefer std.fs.deleteFileAbsolute(owned_socket_path) catch {};
+
+        try std.posix.listen(listener_fd, 1);
+
+        return FsRpcProxy{
+            .allocator = allocator,
+            .tx = tx,
+            .socket_path = owned_socket_path,
+            .listener_fd = listener_fd,
+        };
+    }
+
+    fn start(self: *FsRpcProxy) !void {
+        self.thread = try std.Thread.spawn(.{}, fsRpcProxyMain, .{self});
+    }
+
+    fn deinit(self: *FsRpcProxy) void {
+        self.mutex.lock();
+        self.stop_requested = true;
+
+        const listener_fd = self.listener_fd;
+        self.listener_fd = null;
+
+        const client_fd = self.client_fd;
+        self.client_fd = null;
+        self.mutex.unlock();
+
+        if (client_fd) |fd| std.posix.close(fd);
+        if (listener_fd) |fd| std.posix.close(fd);
+
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+
+        std.fs.deleteFileAbsolute(self.socket_path) catch {};
+        self.allocator.free(self.socket_path);
+    }
+
+    fn sendResponse(self: *FsRpcProxy, frame: []const u8) bool {
+        self.mutex.lock();
+        const client_fd = self.client_fd;
+        self.mutex.unlock();
+
+        if (client_fd == null) return false;
+
+        protocol.writeFrame(client_fd.?, frame) catch {
+            self.closeClient(client_fd.?);
+            return false;
+        };
+
+        return true;
+    }
+
+    fn isStopping(self: *FsRpcProxy) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.stop_requested;
+    }
+
+    fn setClient(self: *FsRpcProxy, fd: std.posix.fd_t) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.client_fd) |current| std.posix.close(current);
+        self.client_fd = fd;
+    }
+
+    fn closeClient(self: *FsRpcProxy, fd: std.posix.fd_t) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.client_fd) |current| {
+            if (current == fd) {
+                std.posix.close(current);
+                self.client_fd = null;
+            }
+        }
+    }
+};
+
+fn fsRpcProxyMain(proxy: *FsRpcProxy) void {
+    while (!proxy.isStopping()) {
+        const listener_fd = blk: {
+            proxy.mutex.lock();
+            defer proxy.mutex.unlock();
+            break :blk proxy.listener_fd orelse return;
+        };
+
+        const client_fd = std.posix.accept(listener_fd, null, null, std.posix.SOCK.CLOEXEC) catch {
+            if (proxy.isStopping()) return;
+            continue;
+        };
+
+        proxy.setClient(client_fd);
+
+        while (!proxy.isStopping()) {
+            const frame = protocol.readFrame(std.heap.page_allocator, client_fd) catch {
+                break;
+            };
+            defer std.heap.page_allocator.free(frame);
+
+            proxy.tx.sendPayload(frame) catch {
+                break;
+            };
+        }
+
+        proxy.closeClient(client_fd);
+    }
+}
 
 const ExecSession = struct {
     allocator: std.mem.Allocator,
@@ -209,25 +386,228 @@ fn drainExecWakeFd(fd: std.posix.fd_t) void {
     }
 }
 
+fn parseTransportMode(value: []const u8) ?TransportMode {
+    if (std.mem.eql(u8, value, "virtio")) return .virtio;
+    if (std.mem.eql(u8, value, "stdio")) return .stdio;
+    return null;
+}
+
+fn writeUsage() void {
+    std.debug.print(
+        "usage: sandboxd [--transport=virtio|stdio]\n" ++
+            "\n" ++
+            "  --transport=virtio   use /dev/virtio-ports/virtio-port (default)\n" ++
+            "  --transport=stdio    use framed protocol over stdin/stdout\n",
+        .{},
+    );
+}
+
+const CliError = error{
+    ShowUsage,
+    InvalidArgument,
+    Overflow,
+};
+
+fn parseRuntimeConfig() CliError!RuntimeConfig {
+    var config = RuntimeConfig{};
+    var args = std.process.args();
+    _ = args.next(); // argv[0]
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            writeUsage();
+            return error.ShowUsage;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--transport=")) {
+            const mode_text = arg["--transport=".len..];
+            config.transport = parseTransportMode(mode_text) orelse {
+                log.err("invalid transport mode: {s}", .{mode_text});
+                return error.InvalidArgument;
+            };
+            continue;
+        }
+
+        log.err("unknown argument: {s}", .{arg});
+        return error.InvalidArgument;
+    }
+
+    return config;
+}
+
+fn parseEnvBool(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "1")) return true;
+    if (std.mem.eql(u8, value, "true")) return true;
+    if (std.mem.eql(u8, value, "TRUE")) return true;
+    if (std.mem.eql(u8, value, "yes")) return true;
+    if (std.mem.eql(u8, value, "YES")) return true;
+    if (std.mem.eql(u8, value, "on")) return true;
+    if (std.mem.eql(u8, value, "ON")) return true;
+    return false;
+}
+
+fn openTransport(mode: TransportMode) !TransportHandles {
+    return switch (mode) {
+        .virtio => blk: {
+            const virtio = try openVirtioPort();
+            break :blk .{
+                .rx_fd = virtio.handle,
+                .tx_fd = virtio.handle,
+                .file = virtio,
+            };
+        },
+        .stdio => .{
+            .rx_fd = std.posix.STDIN_FILENO,
+            .tx_fd = std.posix.STDOUT_FILENO,
+            .file = null,
+        },
+    };
+}
+
+const StdioTerminalState = struct {
+    original: ?std.posix.termios = null,
+
+    fn enableRawMode() !StdioTerminalState {
+        if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
+            return .{};
+        }
+
+        const original = std.posix.tcgetattr(std.posix.STDIN_FILENO) catch |err| switch (err) {
+            error.NotATerminal => return .{},
+            else => return error.Unexpected,
+        };
+
+        var raw = original;
+
+        // cfmakeraw-style terminal settings for binary frame transport.
+        raw.iflag.BRKINT = false;
+        raw.iflag.PARMRK = false;
+        raw.iflag.ISTRIP = false;
+        raw.iflag.INLCR = false;
+        raw.iflag.IGNCR = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.IXON = false;
+        raw.iflag.IXOFF = false;
+        raw.iflag.IXANY = false;
+
+        raw.oflag.OPOST = false;
+
+        raw.lflag.ECHO = false;
+        raw.lflag.ECHONL = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.ISIG = false;
+        raw.lflag.IEXTEN = false;
+
+        raw.cflag.CSIZE = .CS8;
+        raw.cflag.PARENB = false;
+
+        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw);
+
+        return .{ .original = original };
+    }
+
+    fn restore(self: *StdioTerminalState) void {
+        if (self.original) |original| {
+            std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, original) catch {};
+            self.original = null;
+        }
+    }
+};
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&fallback_allocator_pool);
+    var fixed_threadsafe_allocator = std.heap.ThreadSafeAllocator{
+        .child_allocator = fixed_buffer_allocator.allocator(),
+    };
+
+    var allocator: std.mem.Allocator = std.heap.c_allocator;
+    const probe = allocator.alloc(u8, 64) catch |err| switch (err) {
+        error.OutOfMemory => blk: {
+            allocator = fixed_threadsafe_allocator.allocator();
+            const fallback_probe = try allocator.alloc(u8, 64);
+            allocator.free(fallback_probe);
+            log.warn("libc allocator unavailable; using fixed fallback allocator", .{});
+            break :blk null;
+        },
+    };
+    if (probe) |memory| {
+        allocator.free(memory);
+    }
+
+    const config = parseRuntimeConfig() catch |err| switch (err) {
+        error.ShowUsage => return,
+        else => return err,
+    };
+
+    // Keep an escape hatch for debugging stdio transport failures.
+    const stdio_debug_logs = std.posix.getenv("GONDOLIN_SANDBOXD_STDIO_DEBUG") != null;
+    @import("sandboxd").setRuntimeLogsEnabled(config.transport != .stdio or stdio_debug_logs);
 
     log.info("starting", .{});
 
-    var virtio = try openVirtioPort();
-    defer virtio.close();
-    const virtio_fd: std.posix.fd_t = virtio.handle;
+    var transport = try openTransport(config.transport);
+    defer transport.deinit();
 
-    var tx = VirtioTx{ .fd = virtio_fd };
+    var stdio_terminal_state = StdioTerminalState{};
+    if (config.transport == .stdio) {
+        stdio_terminal_state = StdioTerminalState.enableRawMode() catch |err| {
+            log.err("failed to configure stdio terminal mode: {s}", .{@errorName(err)});
+            return err;
+        };
+    }
+    defer stdio_terminal_state.restore();
 
-    log.info("opened virtio port", .{});
+    var tx = VirtioTx{
+        .fd = transport.tx_fd,
+        .stdio_transport = config.transport == .stdio,
+    };
 
-    sendVfsStatus(allocator, &tx) catch |err| {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    const wait_vfs_status = if (env_map.get("GONDOLIN_SANDBOXFS_STATUS_WAIT")) |value|
+        parseEnvBool(value)
+    else
+        false;
+
+    var fs_rpc_proxy: ?FsRpcProxy = null;
+    defer if (fs_rpc_proxy) |*proxy| {
+        proxy.deinit();
+    };
+
+    if (env_map.get("GONDOLIN_SANDBOXFS_RPC_SOCKET")) |socket_path| {
+        if (socket_path.len > 0) {
+            fs_rpc_proxy = try FsRpcProxy.init(allocator, &tx, socket_path);
+            if (fs_rpc_proxy) |*proxy| {
+                try proxy.start();
+            }
+        }
+    }
+
+    log.info("transport mode={s}", .{@tagName(config.transport)});
+    if (config.transport == .virtio) {
+        log.info("opened virtio port", .{});
+    }
+
+    sendVfsStatus(allocator, &tx, wait_vfs_status) catch |err| {
         log.err("failed to send vfs status: {s}", .{@errorName(err)});
     };
 
+    const fs_rpc_proxy_ptr: ?*FsRpcProxy = if (fs_rpc_proxy) |*proxy| proxy else null;
+    try runMessageLoop(allocator, transport.rx_fd, &tx, config.transport, fs_rpc_proxy_ptr);
+}
+
+fn runMessageLoop(
+    allocator: std.mem.Allocator,
+    rx_fd: std.posix.fd_t,
+    tx: *VirtioTx,
+    mode: TransportMode,
+    fs_rpc_proxy: ?*FsRpcProxy,
+) !void {
     var exec_sessions = std.AutoHashMap(u32, *ExecSession).init(allocator);
     defer cleanupAllExecSessions(allocator, &exec_sessions);
 
@@ -236,14 +616,25 @@ pub fn main() !void {
     while (true) {
         cleanupFinishedExecSessions(allocator, &exec_sessions);
 
-        const frame = protocol.readFrame(allocator, virtio_fd) catch |err| {
+        const frame = (switch (mode) {
+            .stdio => protocol.readStdioFramePayload(allocator, rx_fd),
+            .virtio => protocol.readFrame(allocator, rx_fd),
+        }) catch |err| {
             if (err == error.EndOfStream) {
-                if (!waiting_for_reconnect) {
-                    log.info("virtio port closed, waiting for reconnect", .{});
-                    waiting_for_reconnect = true;
+                switch (mode) {
+                    .virtio => {
+                        if (!waiting_for_reconnect) {
+                            log.info("virtio port closed, waiting for reconnect", .{});
+                            waiting_for_reconnect = true;
+                        }
+                        waitForVirtioData(rx_fd);
+                        continue;
+                    },
+                    .stdio => {
+                        log.info("stdio stream closed", .{});
+                        return;
+                    },
                 }
-                waitForVirtioData(virtio_fd);
-                continue;
             }
             log.err("failed to read frame: {s}", .{@errorName(err)});
             continue;
@@ -252,6 +643,16 @@ pub fn main() !void {
 
         waiting_for_reconnect = false;
         log.info("received frame ({} bytes)", .{frame.len});
+
+        if (fs_rpc_proxy) |proxy| {
+            const meta = protocol.decodeFrameMeta(allocator, frame) catch null;
+            if (meta) |decoded| {
+                if (std.mem.eql(u8, decoded.msg_type, "fs_response")) {
+                    _ = proxy.sendResponse(frame);
+                    continue;
+                }
+            }
+        }
 
         const exec_req = protocol.decodeExecRequest(allocator, frame) catch |err| switch (err) {
             protocol.ProtocolError.UnexpectedType => null,
@@ -269,9 +670,9 @@ pub fn main() !void {
                 allocator.free(req.env);
             }
 
-            startExecSession(&exec_sessions, &tx, req) catch |err| {
+            startExecSession(allocator, &exec_sessions, tx, req) catch |err| {
                 log.err("exec start failed: {s}", .{@errorName(err)});
-                _ = tx.sendError(allocator, req.id, "exec_failed", "failed to execute") catch {};
+                _ = tx.sendError(allocator, req.id, "exec_failed", @errorName(err)) catch {};
             };
             continue;
         }
@@ -315,7 +716,7 @@ pub fn main() !void {
         };
 
         if (file_read_req) |req| {
-            file_requests.handleFileRead(allocator, &tx, "/", req) catch |err| {
+            file_requests.handleFileRead(allocator, tx, "/", req) catch |err| {
                 log.err("file read failed: {s}", .{@errorName(err)});
                 _ = tx.sendError(allocator, req.id, "file_read_failed", @errorName(err)) catch {};
             };
@@ -332,7 +733,7 @@ pub fn main() !void {
         };
 
         if (file_write_req) |req| {
-            file_requests.handleFileWrite(allocator, virtio_fd, &tx, "/", req) catch |err| {
+            file_requests.handleFileWrite(allocator, rx_fd, tx, "/", req, mode == .stdio) catch |err| {
                 log.err("file write failed: {s}", .{@errorName(err)});
                 _ = tx.sendError(allocator, req.id, "file_write_failed", @errorName(err)) catch {};
             };
@@ -349,7 +750,7 @@ pub fn main() !void {
         };
 
         if (file_delete_req) |req| {
-            file_requests.handleFileDelete(allocator, &tx, "/", req) catch |err| {
+            file_requests.handleFileDelete(allocator, tx, "/", req) catch |err| {
                 log.err("file delete failed: {s}", .{@errorName(err)});
                 _ = tx.sendError(allocator, req.id, "file_delete_failed", @errorName(err)) catch {};
             };
@@ -361,6 +762,7 @@ pub fn main() !void {
 }
 
 fn startExecSession(
+    allocator: std.mem.Allocator,
     sessions: *std.AutoHashMap(u32, *ExecSession),
     tx: *VirtioTx,
     req: protocol.ExecRequest,
@@ -384,7 +786,6 @@ fn startExecSession(
         sess_alloc.destroy(existing);
     }
 
-    const allocator = std.heap.page_allocator;
     var owned_opt: ?OwnedExecRequest = try cloneExecRequest(allocator, req);
     errdefer if (owned_opt) |owned| {
         var temp = owned;
@@ -401,7 +802,15 @@ fn startExecSession(
     try sessions.put(req.id, session);
     errdefer _ = sessions.remove(req.id);
 
-    const thread = try std.Thread.spawn(.{}, execWorker, .{session});
+    const thread = std.Thread.spawn(.{}, execWorker, .{session}) catch |err| {
+        log.warn("thread spawn failed id={}: {s}; falling back to inline exec worker", .{ req.id, @errorName(err) });
+        runExecSession(session) catch |run_err| {
+            log.err("exec handling failed id={}: {s}", .{ req.id, @errorName(run_err) });
+            _ = tx.sendError(allocator, req.id, "exec_failed", @errorName(run_err)) catch {};
+        };
+        markSessionDone(session);
+        return;
+    };
     session.thread = thread;
 }
 
@@ -509,7 +918,11 @@ fn cleanupAllExecSessions(
     sessions.deinit();
 }
 
-fn sendVfsStatus(allocator: std.mem.Allocator, tx: *VirtioTx) !void {
+fn sendVfsStatus(allocator: std.mem.Allocator, tx: *VirtioTx, wait_status: bool) !void {
+    if (wait_status) {
+        try waitForVfsStatusSentinel();
+    }
+
     if (try readVfsErrorMessage(allocator)) |message| {
         defer allocator.free(message);
         const trimmed = std.mem.trim(u8, message, " \r\n\t");
@@ -518,7 +931,27 @@ fn sendVfsStatus(allocator: std.mem.Allocator, tx: *VirtioTx) !void {
         return;
     }
 
+    if (wait_status and !pathExists("/run/sandboxfs.ready")) {
+        try tx.sendVfsError(allocator, "vfs mount not ready");
+        return;
+    }
+
     try tx.sendVfsReady(allocator);
+}
+
+fn waitForVfsStatusSentinel() !void {
+    var attempts: usize = 0;
+    while (attempts < 300) : (attempts += 1) {
+        if (pathExists("/run/sandboxfs.ready")) return;
+        if (pathExists("/run/sandboxfs.failed")) return;
+        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+    }
+}
+
+fn pathExists(path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    file.close();
+    return true;
 }
 
 fn readVfsErrorMessage(allocator: std.mem.Allocator) !?[]u8 {
@@ -627,12 +1060,19 @@ fn execWorker(session: *ExecSession) void {
 
 fn runExecSession(session: *ExecSession) !void {
     const req = session.req;
+    var stage: []const u8 = "init";
+    errdefer |err| {
+        log.err("exec session failed id={} stage={s}: {s}", .{ req.id, stage, @errorName(err) });
+    }
 
+    stage = "arena";
     var arena = std.heap.ArenaAllocator.init(session.allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    stage = "argv";
     const argv = try buildArgv(arena_alloc, req.cmd, req.argv);
+    stage = "envp";
     const envp = try buildEnvp(arena_alloc, session.allocator, req.env);
 
     const use_pty = req.pty;
@@ -650,6 +1090,7 @@ fn runExecSession(session: *ExecSession) !void {
     var pid: std.posix.pid_t = 0;
 
     if (use_pty) {
+        stage = "forkpty";
         var master: c_int = 0;
         const forked = c.forkpty(&master, null, null, null);
         if (forked < 0) {
@@ -675,12 +1116,14 @@ fn runExecSession(session: *ExecSession) !void {
             if (pty_master) |fd| std.posix.close(fd);
         }
     } else {
+        stage = "pipe_stdout";
         stdout_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
         errdefer {
             std.posix.close(stdout_pipe.?[0]);
             std.posix.close(stdout_pipe.?[1]);
         }
 
+        stage = "pipe_stderr";
         stderr_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
         errdefer {
             std.posix.close(stderr_pipe.?[0]);
@@ -688,6 +1131,7 @@ fn runExecSession(session: *ExecSession) !void {
         }
 
         if (wants_stdin) {
+            stage = "pipe_stdin";
             stdin_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
             errdefer {
                 std.posix.close(stdin_pipe.?[0]);
@@ -699,7 +1143,50 @@ fn runExecSession(session: *ExecSession) !void {
         stderr_fd = stderr_pipe.?[0];
         if (wants_stdin) stdin_fd = stdin_pipe.?[1];
 
-        pid = try std.posix.fork();
+        stage = "fork";
+
+        var fork_attempts: usize = 0;
+        while (true) : (fork_attempts += 1) {
+            const raw_fork = c.fork();
+            if (raw_fork >= 0) {
+                pid = @intCast(raw_fork);
+                break;
+            }
+
+            const fork_errno: c_int = std.c._errno().*;
+            if (fork_errno == c.EAGAIN and fork_attempts < 10) {
+                std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
+                continue;
+            }
+
+            const raw_vfork = c.vfork();
+            if (raw_vfork >= 0) {
+                pid = @intCast(raw_vfork);
+                break;
+            }
+
+            var spawn_pid: c.pid_t = 0;
+            const spawn_rc = c.posix_spawnp(
+                &spawn_pid,
+                argv[0].?,
+                null,
+                null,
+                @constCast(@ptrCast(argv)),
+                @constCast(@ptrCast(envp)),
+            );
+            if (spawn_rc == 0) {
+                if (spawn_pid <= 0) return error.SpawnInvalidPid;
+                pid = @intCast(spawn_pid);
+                break;
+            }
+
+            if (spawn_rc == c.ENOSYS) return error.SpawnEnosys;
+            if (spawn_rc == c.EAGAIN) return error.SpawnEagain;
+            if (spawn_rc == c.ENOMEM) return error.SpawnEnomem;
+            if (spawn_rc == c.EPERM) return error.SpawnEperm;
+            return error.SpawnFailed;
+        }
+
         if (pid == 0) {
             if (wants_stdin) {
                 try std.posix.dup2(stdin_pipe.?[0], std.posix.STDIN_FILENO);
@@ -960,6 +1447,7 @@ fn runExecSession(session: *ExecSession) !void {
         }
 
         if (nfds > 0) {
+            stage = "poll_loop";
             _ = try std.posix.poll(pollfds[0..nfds], 100);
         } else {
             if (status == null) {
@@ -994,11 +1482,9 @@ fn runExecSession(session: *ExecSession) !void {
 
             if (stdout_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stdout_credit);
-                const n = std.posix.read(stdout_fd.?, buffer[0..max_read]) catch |err| blk: {
-                    if (use_pty and err == error.InputOutput) {
-                        break :blk 0;
-                    }
-                    return err;
+                const n = std.posix.read(stdout_fd.?, buffer[0..max_read]) catch |err| switch (err) {
+                    error.InputOutput => if (use_pty) 0 else return error.StdoutReadFailed,
+                    else => return error.StdoutReadFailed,
                 };
                 if (n == 0) {
                     stdout_open = false;
@@ -1048,6 +1534,7 @@ fn runExecSession(session: *ExecSession) !void {
 
             if (stderr_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stderr_credit);
+                stage = "read_stderr";
                 const n = try std.posix.read(stderr_fd.?, buffer[0..max_read]);
                 if (n == 0) {
                     stderr_open = false;
@@ -1212,4 +1699,172 @@ fn buildEnvp(
     }
 
     return envp_buf.ptr;
+}
+
+const HarnessEnvelope = struct {
+    msg_type: []const u8,
+    id: u32,
+    stdout_data: ?[]const u8 = null,
+    exit_code: ?i32 = null,
+};
+
+fn encodeExecRequestPayloadForHarness(
+    allocator: std.mem.Allocator,
+    id: u32,
+    cmd: []const u8,
+    argv: []const []const u8,
+) ![]u8 {
+    const cbor = @import("sandboxd").cbor;
+
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const w = buf.writer(allocator);
+    try cbor.writeMapStart(w, 4);
+    try cbor.writeText(w, "v");
+    try cbor.writeUInt(w, 1);
+    try cbor.writeText(w, "t");
+    try cbor.writeText(w, "exec_request");
+    try cbor.writeText(w, "id");
+    try cbor.writeUInt(w, id);
+    try cbor.writeText(w, "p");
+    try cbor.writeMapStart(w, 6);
+    try cbor.writeText(w, "cmd");
+    try cbor.writeText(w, cmd);
+    try cbor.writeText(w, "argv");
+    try cbor.writeArrayStart(w, argv.len);
+    for (argv) |arg| {
+        try cbor.writeText(w, arg);
+    }
+    try cbor.writeText(w, "env");
+    try cbor.writeArrayStart(w, 0);
+    try cbor.writeText(w, "stdin");
+    try cbor.writeBool(w, false);
+    try cbor.writeText(w, "pty");
+    try cbor.writeBool(w, false);
+    try cbor.writeText(w, "stdout_window");
+    try cbor.writeUInt(w, 4096);
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn decodeHarnessEnvelope(allocator: std.mem.Allocator, frame: []const u8) !HarnessEnvelope {
+    const cbor = @import("sandboxd").cbor;
+
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+
+    const map = switch (root) {
+        .Map => |entries| entries,
+        else => return error.InvalidType,
+    };
+
+    const msg_type = switch (cbor.getMapValue(map, "t") orelse return error.MissingField) {
+        .Text => |text| text,
+        else => return error.InvalidType,
+    };
+
+    const id = switch (cbor.getMapValue(map, "id") orelse return error.MissingField) {
+        .Int => |num| blk: {
+            if (num < 0 or num > std.math.maxInt(u32)) return error.InvalidValue;
+            break :blk @as(u32, @intCast(num));
+        },
+        else => return error.InvalidType,
+    };
+
+    var envelope = HarnessEnvelope{ .msg_type = msg_type, .id = id };
+
+    if (std.mem.eql(u8, msg_type, "exec_output")) {
+        const payload = switch (cbor.getMapValue(map, "p") orelse return error.MissingField) {
+            .Map => |entries| entries,
+            else => return error.InvalidType,
+        };
+
+        const stream = switch (cbor.getMapValue(payload, "stream") orelse return error.MissingField) {
+            .Text => |text| text,
+            else => return error.InvalidType,
+        };
+        if (!std.mem.eql(u8, stream, "stdout")) return error.InvalidValue;
+
+        envelope.stdout_data = switch (cbor.getMapValue(payload, "data") orelse return error.MissingField) {
+            .Bytes => |bytes| bytes,
+            else => return error.InvalidType,
+        };
+    }
+
+    if (std.mem.eql(u8, msg_type, "exec_response")) {
+        const payload = switch (cbor.getMapValue(map, "p") orelse return error.MissingField) {
+            .Map => |entries| entries,
+            else => return error.InvalidType,
+        };
+
+        envelope.exit_code = switch (cbor.getMapValue(payload, "exit_code") orelse return error.MissingField) {
+            .Int => |code| @as(i32, @intCast(code)),
+            else => return error.InvalidType,
+        };
+    }
+
+    return envelope;
+}
+
+test "stdio transport harness round-trips exec request" {
+    const allocator = std.testing.allocator;
+
+    const guest_in = try std.posix.pipe2(.{ .CLOEXEC = true });
+    const guest_in_read = guest_in[0];
+    var guest_in_write = guest_in[1];
+    defer if (guest_in_read >= 0) std.posix.close(guest_in_read);
+    defer if (guest_in_write >= 0) std.posix.close(guest_in_write);
+
+    const guest_out = try std.posix.pipe2(.{ .CLOEXEC = true });
+    const guest_out_read = guest_out[0];
+    var guest_out_write = guest_out[1];
+    defer if (guest_out_read >= 0) std.posix.close(guest_out_read);
+    defer if (guest_out_write >= 0) std.posix.close(guest_out_write);
+
+    const payload = try encodeExecRequestPayloadForHarness(
+        allocator,
+        77,
+        "/bin/sh",
+        &.{ "-lc", "printf hello" },
+    );
+    defer allocator.free(payload);
+
+    try protocol.writeFrame(guest_in_write, payload);
+    std.posix.close(guest_in_write);
+    guest_in_write = -1;
+
+    var tx = VirtioTx{ .fd = guest_out_write };
+    try runMessageLoop(allocator, guest_in_read, &tx, .stdio, null);
+
+    std.posix.close(guest_out_write);
+    guest_out_write = -1;
+
+    var saw_output = false;
+    var saw_response = false;
+
+    while (true) {
+        const frame = protocol.readFrame(allocator, guest_out_read) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        defer allocator.free(frame);
+
+        const envelope = try decodeHarnessEnvelope(allocator, frame);
+        try std.testing.expectEqual(@as(u32, 77), envelope.id);
+
+        if (std.mem.eql(u8, envelope.msg_type, "exec_output")) {
+            saw_output = true;
+            try std.testing.expectEqualStrings("hello", envelope.stdout_data.?);
+        }
+
+        if (std.mem.eql(u8, envelope.msg_type, "exec_response")) {
+            saw_response = true;
+            try std.testing.expectEqual(@as(i32, 0), envelope.exit_code.?);
+        }
+    }
+
+    try std.testing.expect(saw_output);
+    try std.testing.expect(saw_response);
 }

@@ -36,7 +36,6 @@ import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
   type SandboxVmm,
-  type WasmPreopen,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
@@ -75,10 +74,8 @@ import {
 } from "../ingress.ts";
 import {
   MemoryProvider,
-  RealFSProvider,
   type VirtualProvider,
 } from "../vfs/node/index.ts";
-import { ReadonlyProvider } from "../vfs/readonly.ts";
 import {
   SandboxVfsProvider,
   type VfsHooks,
@@ -485,24 +482,10 @@ export class VM {
     const explicitMounts = options.vfs?.mounts;
     const explicitVfsMounts = listMountPaths(explicitMounts);
 
-    if (backend === "wasm-node" && explicitVfsMounts.length > 0) {
-      const { preopens, unsupportedMounts } = resolveWasmNodePreopens(
-        explicitMounts,
-      );
-      if (unsupportedMounts.length > 0) {
-        throw new Error(
-          `vmm=wasm-node currently supports only hostfs mounts (${unsupportedMounts.join(", ")})`,
-        );
-      }
-      resolved.wasmPreopens = preopens;
-    }
-
     if (!backendCapabilities.vfsMounts && explicitVfsMounts.length > 0) {
-      if (backend !== "wasm-node" || !resolved.wasmPreopens?.length) {
-        throw new Error(
-          `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
-        );
-      }
+      throw new Error(
+        `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
+      );
     }
 
     // Merge VFS provider into resolved options
@@ -1692,16 +1675,6 @@ fi
   private async ensureVfsReady() {
     if (!this.vfs) return;
 
-    const vmm = this.resolvedSandboxOptions?.vmm ?? "qemu";
-    if (vmm === "wasm-node") {
-      // wasm-node uses WASI preopens for hostfs-style mounts and does not rely
-      // on guest-side sandboxfs readiness signals.
-      // Keep startup behavior explicit: skip mount wait, but still materialize
-      // MITM CA trust when the internal cert provider is available.
-      await this.ensureWasmMitmCa();
-      return;
-    }
-
     if (!this.vfsReadyPromise) {
       this.vfsReadyPromise = this.waitForVfsReadyInternal().catch((error) => {
         this.vfsReadyPromise = null;
@@ -1709,52 +1682,6 @@ fi
       });
     }
     await this.vfsReadyPromise;
-  }
-
-  private async ensureWasmMitmCa() {
-    if (!this.vfs) return;
-
-    const caPath = "/etc/gondolin/mitm/ca.crt";
-    let caPem: string;
-
-    try {
-      const handle = await this.vfs.open(caPath, "r");
-      try {
-        const data = await handle.readFile();
-        caPem = Buffer.isBuffer(data) ? data.toString("utf8") : data;
-      } finally {
-        await handle.close();
-      }
-    } catch {
-      return;
-    }
-
-    if (caPem.trim().length === 0) {
-      return;
-    }
-
-    const heredocTag = "__GONDOLIN_MITM_CA__";
-    const script = [
-      "mkdir -p /etc/gondolin/mitm",
-      `cat > ${caPath} <<'${heredocTag}'`,
-      caPem,
-      heredocTag,
-      `chmod 0644 ${caPath} || true`,
-      "if [ -f /etc/ssl/certs/ca-certificates.crt ]; then",
-      `  cat ${caPath} >> /etc/ssl/certs/ca-certificates.crt || true`,
-      "fi",
-    ].join("\n");
-
-    const writeResult = await this.execInternalNoVfsWait([
-      "/bin/sh",
-      "-lc",
-      script,
-    ]);
-    if (writeResult.exitCode !== 0) {
-      throw new Error(
-        `failed to materialize wasm mitm ca (exit ${writeResult.exitCode}): ${writeResult.stderr.trim()}`,
-      );
-    }
   }
 
   private async waitForVfsReadyInternal() {
@@ -1793,7 +1720,7 @@ fi
     }
 
     const source = `${this.fuseMount}${mountPoint}`;
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
+    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; if [ -e "$2" ] && [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then exit 0; fi; mkdir -p "$1"; if ! mount --bind "$2" "$1" > /dev/null 2>&1; then rm -rf "$1" > /dev/null 2>&1 || true; ln -s "$2" "$1" > /dev/null 2>&1 || true; fi; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     const result = await this.execInternalNoVfsWait([
       "/bin/sh",
@@ -2226,81 +2153,22 @@ function resolveFuseConfig(
   mounts?: Record<string, VirtualProvider>,
 ) {
   const fuseMount = normalizeMountPath(options?.fuseMount ?? "/data");
-  const mountPaths = listMountPaths(mounts ?? options?.mounts);
-  const fuseBinds = mountPaths.filter((mountPath) => mountPath !== "/");
+  const mountPaths = listMountPaths(mounts ?? options?.mounts)
+    .filter((mountPath) => mountPath !== "/")
+    .sort((a, b) => a.length - b.length || a.localeCompare(b));
+
+  const fuseBinds: string[] = [];
+  for (const mountPath of mountPaths) {
+    const covered = fuseBinds.some(
+      (parentMount) =>
+        mountPath === parentMount || mountPath.startsWith(`${parentMount}/`),
+    );
+    if (!covered) {
+      fuseBinds.push(mountPath);
+    }
+  }
+
   return { fuseMount, fuseBinds };
-}
-
-type WasmPreopenResolution = {
-  preopens: WasmPreopen[];
-  unsupportedMounts: string[];
-};
-
-function resolveWasmNodePreopens(
-  mounts?: Record<string, VirtualProvider>,
-): WasmPreopenResolution {
-  if (!mounts) {
-    return { preopens: [], unsupportedMounts: [] };
-  }
-
-  const preopens: WasmPreopen[] = [];
-  const unsupportedMounts: string[] = [];
-
-  for (const [mountPath, provider] of Object.entries(mounts)) {
-    let normalizedMountPath: string;
-    try {
-      normalizedMountPath = normalizeMountPath(mountPath);
-    } catch {
-      unsupportedMounts.push(mountPath);
-      continue;
-    }
-
-    if (normalizedMountPath === "/") {
-      unsupportedMounts.push(normalizedMountPath);
-      continue;
-    }
-
-    const hostMount = resolveWasmHostMount(provider);
-    if (!hostMount) {
-      unsupportedMounts.push(normalizedMountPath);
-      continue;
-    }
-
-    preopens.push({
-      hostPath: path.resolve(hostMount.hostPath),
-      guestPath: normalizedMountPath,
-      readOnly: hostMount.readOnly,
-    });
-  }
-
-  return {
-    preopens,
-    unsupportedMounts,
-  };
-}
-
-function resolveWasmHostMount(
-  provider: VirtualProvider,
-): { hostPath: string; readOnly: boolean } | null {
-  if (provider instanceof ReadonlyProvider) {
-    const backend = (provider as any).backend as VirtualProvider | undefined;
-    if (!backend) return null;
-    const nested = resolveWasmHostMount(backend);
-    if (!nested) return null;
-    return {
-      hostPath: nested.hostPath,
-      readOnly: true,
-    };
-  }
-
-  if (provider instanceof RealFSProvider) {
-    return {
-      hostPath: provider.rootPath,
-      readOnly: provider.readonly,
-    };
-  }
-
-  return null;
 }
 
 /** @internal */
@@ -2318,5 +2186,4 @@ export const __test = {
   parseEnvEntry,
   mapToEnvArray,
   normalizeStartTimeoutMs,
-  resolveWasmNodePreopens,
 };

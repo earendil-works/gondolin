@@ -1119,17 +1119,40 @@ fn makeZ(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
 }
 
 fn openRpcPort(path: []const u8) ?std.posix.fd_t {
+    const unix_path = if (std.mem.startsWith(u8, path, "unix:")) path["unix:".len..] else path;
     const expected = std.fs.path.basename(path);
+
     var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
+    while (attempts < 300) : (attempts += 1) {
+        if (connectUnixSocket(unix_path)) |fd| {
+            return fd;
+        }
+
         if (std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
             return fd;
         } else |_| {
             if (openVirtioPortByName(expected)) |fd| return fd;
         }
+
         std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
     return null;
+}
+
+fn connectUnixSocket(path: []const u8) ?std.posix.fd_t {
+    const address = std.net.Address.initUnix(path) catch return null;
+    const fd = std.posix.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
+        0,
+    ) catch return null;
+
+    std.posix.connect(fd, &address.any, address.getOsSockLen()) catch {
+        std.posix.close(fd);
+        return null;
+    };
+
+    return fd;
 }
 
 fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {

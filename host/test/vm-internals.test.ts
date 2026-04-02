@@ -126,7 +126,7 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   }
 });
 
-test("vm internals: wasm-node hostfs mounts become wasi preopens", async () => {
+test("vm internals: wasm-node keeps VFS mounts on shared fs-rpc path", async () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
   const mountRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-hostfs-"));
 
@@ -138,6 +138,7 @@ test("vm internals: wasm-node hostfs mounts become wasi preopens", async () => {
         vfs: {
           mounts: {
             "/workspace": new ReadonlyProvider(new RealFSProvider(mountRoot)),
+            "/mem": new MemoryProvider(),
           },
         },
       },
@@ -152,49 +153,12 @@ test("vm internals: wasm-node hostfs mounts become wasi preopens", async () => {
     );
 
     const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.deepEqual(resolvedOptions.wasmPreopens, [
-      {
-        hostPath: fs.realpathSync(mountRoot),
-        guestPath: "/workspace",
-        readOnly: true,
-      },
-    ]);
+    assert.deepEqual(resolvedOptions.wasmPreopens ?? [], []);
   } finally {
     if (vm) {
       await vm.close();
     }
     fs.rmSync(mountRoot, { recursive: true, force: true });
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("vm internals: wasm-node rejects non-hostfs VFS mounts", () => {
-  const { dir, resolved } = makeTempResolvedServerOptions();
-
-  try {
-    assert.throws(
-      () =>
-        new VM(
-          {
-            autoStart: false,
-            vfs: {
-              mounts: {
-                "/foo": new MemoryProvider(),
-              },
-            },
-          },
-          {
-            ...(resolved as any),
-            vmm: "wasm-node",
-            wasmNodePath: process.execPath,
-            wasmRunnerPath: "/tmp/wasm-runner-entry.ts",
-            wasmRunnerMode: "harness",
-            wasmPath: undefined,
-          } as any,
-        ),
-      /currently supports only hostfs mounts/,
-    );
-  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -446,13 +410,14 @@ test("vm internals: resolveFuseConfig normalizes fuseMount and binds", () => {
   const mounts: Record<string, VirtualProvider> = {
     "/": new MemoryProvider(),
     "/app": new MemoryProvider(),
+    "/deep": new MemoryProvider(),
     "/deep/nested": new MemoryProvider(),
   };
 
   const cfg = __test.resolveFuseConfig({ fuseMount: "/data" }, mounts);
   assert.equal(cfg.fuseMount, "/data");
-  // bind mounts exclude "/"
-  assert.deepEqual(cfg.fuseBinds.sort(), ["/app", "/deep/nested"].sort());
+  // bind mounts exclude "/" and skip nested paths covered by a parent bind
+  assert.deepEqual(cfg.fuseBinds.sort(), ["/app", "/deep"].sort());
 });
 
 test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", () => {

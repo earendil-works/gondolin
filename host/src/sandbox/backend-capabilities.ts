@@ -21,7 +21,7 @@ const BACKEND_CAPABILITIES: Record<SandboxVmm, BackendCapabilities> = {
     tcpForwardChannels: true,
   },
   "wasm-node": {
-    vfsMounts: false,
+    vfsMounts: true,
     pty: true,
     tcpForwardChannels: false,
   },

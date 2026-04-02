@@ -20,10 +20,14 @@
 //! Errors: error
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cbor = @import("cbor.zig");
-
 /// maximum frame size in `bytes`
 pub const max_frame_len: u32 = 4 * 1024 * 1024;
+/// max stdio line envelope size in `bytes`
+pub const max_stdio_envelope_len: usize = max_frame_len * 2;
+/// max base64 payload per stdio envelope line in `bytes`
+pub const stdio_envelope_chunk_base64: usize = 0x2000;
 
 pub const ProtocolError = error{
     InvalidType,
@@ -289,6 +293,32 @@ pub const FrameWriter = struct {
         }
     }
 };
+
+pub const FrameMeta = struct {
+    /// protocol envelope message type
+    msg_type: []const u8,
+    /// envelope correlation id when present
+    id: ?u32,
+};
+
+pub fn decodeFrameMeta(allocator: std.mem.Allocator, frame: []const u8) !FrameMeta {
+    var dec = cbor.Decoder.init(allocator, frame);
+    const root = try dec.decodeValue();
+    defer cbor.freeValue(allocator, root);
+
+    const map = try expectMap(root);
+    const msg_type = try expectText(cbor.getMapValue(map, "t") orelse return ProtocolError.MissingField);
+
+    var id: ?u32 = null;
+    if (cbor.getMapValue(map, "id")) |id_val| {
+        id = try expectU32(id_val);
+    }
+
+    return .{
+        .msg_type = msg_type,
+        .id = id,
+    };
+}
 
 pub fn decodeExecRequest(allocator: std.mem.Allocator, frame: []const u8) !ExecRequest {
     var dec = cbor.Decoder.init(allocator, frame);
@@ -730,6 +760,123 @@ pub fn readFrame(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
     return frame;
 }
 
+pub fn readStdioFramePayload(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
+    while (true) {
+        var first: [1]u8 = undefined;
+        try readExact(fd, &first);
+
+        // ignore empty lines / carriage returns from terminal-style transports
+        if (first[0] == '\n' or first[0] == '\r') continue;
+
+        // Ignore the historical stdio bootstrap marker (`=\n`) if it appears
+        // on the control stream.
+        if (first[0] == '=') continue;
+
+        if (first[0] == '@') {
+            return readStdioEnvelopePayload(allocator, fd);
+        }
+
+        // Raw framed messages begin with a 4-byte big-endian length. Since the
+        // maximum frame is 4 MiB, the first byte must be `0x00`.
+        if (first[0] != 0) {
+            continue;
+        }
+
+        // Backward-compatible raw frame path
+        var len_buf: [4]u8 = .{ first[0], 0, 0, 0 };
+        try readExact(fd, len_buf[1..]);
+
+        const len = (@as(u32, len_buf[0]) << 24) |
+            (@as(u32, len_buf[1]) << 16) |
+            (@as(u32, len_buf[2]) << 8) |
+            @as(u32, len_buf[3]);
+
+        if (len > max_frame_len) return error.FrameTooLarge;
+
+        const frame = try allocator.alloc(u8, len);
+        errdefer allocator.free(frame);
+        try readExact(fd, frame);
+        return frame;
+    }
+}
+
+fn readStdioEnvelopePayload(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
+    var encoded = std.ArrayList(u8).empty;
+    defer encoded.deinit(allocator);
+
+    var first: [1]u8 = undefined;
+    try readExact(fd, &first);
+
+    if (first[0] == '!' or first[0] == '.') {
+        var final_chunk = first[0] == '.';
+
+        while (true) {
+            while (true) {
+                var byte: [1]u8 = undefined;
+                try readExact(fd, &byte);
+
+                if (byte[0] == '\n' or byte[0] == '\r') break;
+
+                if (encoded.items.len >= max_stdio_envelope_len) {
+                    return error.FrameTooLarge;
+                }
+                try encoded.append(allocator, byte[0]);
+            }
+
+            if (final_chunk) break;
+
+            var at: [1]u8 = undefined;
+            while (true) {
+                try readExact(fd, &at);
+                if (at[0] == '\n' or at[0] == '\r') continue;
+                break;
+            }
+            if (at[0] != '@') return error.InvalidValue;
+
+            var marker: [1]u8 = undefined;
+            try readExact(fd, &marker);
+            if (marker[0] == '!') {
+                final_chunk = false;
+            } else if (marker[0] == '.') {
+                final_chunk = true;
+            } else {
+                return error.InvalidValue;
+            }
+        }
+    } else {
+        if (first[0] != '\n' and first[0] != '\r') {
+            try encoded.append(allocator, first[0]);
+        }
+
+        while (true) {
+            var byte: [1]u8 = undefined;
+            try readExact(fd, &byte);
+
+            if (byte[0] == '\n' or byte[0] == '\r') break;
+
+            if (encoded.items.len >= max_stdio_envelope_len) {
+                return error.FrameTooLarge;
+            }
+            try encoded.append(allocator, byte[0]);
+        }
+    }
+
+    const payload_len = std.base64.standard.Decoder.calcSizeForSlice(encoded.items) catch {
+        return error.InvalidValue;
+    };
+    if (payload_len > max_frame_len) {
+        return error.FrameTooLarge;
+    }
+
+    const payload = try allocator.alloc(u8, payload_len);
+    errdefer allocator.free(payload);
+    std.base64.standard.Decoder.decode(payload, encoded.items) catch {
+        return error.InvalidValue;
+    };
+
+    return payload;
+}
+
 pub fn writeFrame(fd: std.posix.fd_t, payload: []const u8) !void {
     if (payload.len > @as(usize, max_frame_len)) return error.FrameTooLarge;
 
@@ -745,10 +892,46 @@ pub fn writeFrame(fd: std.posix.fd_t, payload: []const u8) !void {
     try writeAll(fd, payload);
 }
 
+pub fn writeStdioEnvelopePayload(fd: std.posix.fd_t, payload: []const u8) !void {
+    if (payload.len > @as(usize, max_frame_len)) return error.FrameTooLarge;
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(payload.len);
+    if (encoded_len > max_stdio_envelope_len) return error.FrameTooLarge;
+
+    const allocator = std.heap.page_allocator;
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+
+    _ = std.base64.standard.Encoder.encode(encoded, payload);
+
+    if (encoded.len <= stdio_envelope_chunk_base64) {
+        try writeAll(fd, "@");
+        try writeAll(fd, encoded);
+        try writeAll(fd, "\n");
+        return;
+    }
+
+    var offset: usize = 0;
+    while (offset < encoded.len) {
+        const end = @min(offset + stdio_envelope_chunk_base64, encoded.len);
+        const is_last = end == encoded.len;
+
+        if (is_last) {
+            try writeAll(fd, "@.");
+        } else {
+            try writeAll(fd, "@!");
+        }
+
+        try writeAll(fd, encoded[offset..end]);
+        try writeAll(fd, "\n");
+        offset = end;
+    }
+}
+
 pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const n = try std.posix.read(fd, buf[offset..]);
+        const n = try readCompat(fd, buf[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
@@ -757,10 +940,68 @@ pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
 pub fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
     var offset: usize = 0;
     while (offset < data.len) {
-        const n = try std.posix.write(fd, data[offset..]);
+        const n = try writeCompat(fd, data[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
+}
+
+fn readCompat(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (builtin.os.tag != .linux) {
+        return std.posix.read(fd, buf);
+    }
+
+    while (true) {
+        const rc = std.os.linux.read(@intCast(fd), buf.ptr, buf.len);
+        const errno_num = decodeLinuxErrno(rc);
+        if (errno_num == 0) return @intCast(rc);
+
+        switch (errno_num) {
+            4, // EINTR
+            11, // EAGAIN
+            => continue,
+            32 => return error.BrokenPipe,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn writeCompat(fd: std.posix.fd_t, data: []const u8) !usize {
+    if (builtin.os.tag != .linux) {
+        return std.posix.write(fd, data);
+    }
+
+    while (true) {
+        const rc = std.os.linux.write(@intCast(fd), data.ptr, data.len);
+        const errno_num = decodeLinuxErrno(rc);
+        if (errno_num == 0) return @intCast(rc);
+
+        switch (errno_num) {
+            4, // EINTR
+            11, // EAGAIN
+            => continue,
+            32 => return error.BrokenPipe,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn decodeLinuxErrno(rc: usize) usize {
+    const signed: isize = @bitCast(rc);
+    if (signed < 0 and signed > -4096) {
+        return @intCast(-signed);
+    }
+
+    // Some runtimes report raw syscall errors without sign-extending to the
+    // native register width (e.g. `0x0000fffc` for `-EINTR`).
+    if (rc >= 0xffff - 4095 and rc <= 0xffff) {
+        return (0x1_0000 - rc);
+    }
+    if (rc >= 0xffff_ffff - 4095 and rc <= 0xffff_ffff) {
+        return (0x1_0000_0000 - rc);
+    }
+
+    return 0;
 }
 
 fn parseExecRequest(allocator: std.mem.Allocator, root: cbor.Value) !ExecRequest {

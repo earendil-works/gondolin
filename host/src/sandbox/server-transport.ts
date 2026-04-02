@@ -553,7 +553,8 @@ export class FunctionBridgeTransport implements ServerTransport {
           const message = decodeMessage(payload) as IncomingMessage;
           this.onMessage?.(message);
         } catch (err) {
-          this.onError?.(err);
+          const detail = err instanceof Error ? err.message : String(err);
+          this.onError?.(new Error(`decode failed: ${detail}`));
         }
       });
     } catch (err) {

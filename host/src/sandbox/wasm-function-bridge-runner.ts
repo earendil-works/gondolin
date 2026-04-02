@@ -90,6 +90,8 @@ export type WasmFunctionBridgeRunnerConfig = {
   netSocketPath?: string;
   /** wasi preopened host directories */
   preopens?: WasmFunctionBridgePreopen[];
+  /** extra argv entries forwarded to the wasm module */
+  wasmArgs?: string[];
   /** startup timeout in `ms` */
   startupTimeoutMs?: number;
 };
@@ -122,6 +124,7 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
       wasmPath: config.wasmPath ?? "",
       netSocketPath: config.netSocketPath ?? "",
       preopens: config.preopens ?? [],
+      wasmArgs: config.wasmArgs ?? [],
       startupTimeoutMs: config.startupTimeoutMs ?? 5_000,
     };
   }
@@ -150,6 +153,9 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
         flag,
         `${preopen.hostPath}::${preopen.guestPath}`,
       );
+    }
+    for (const wasmArg of this.config.wasmArgs) {
+      childArgs.push("--wasm-arg", wasmArg);
     }
 
     const child = child_process.spawn(
@@ -217,6 +223,10 @@ export class WasmFunctionBridgeRunner extends EventEmitter {
     });
 
     return this.readyPromise;
+  }
+
+  setWasmArgs(args: string[]): void {
+    this.config.wasmArgs = [...args];
   }
 
   async stop(): Promise<void> {

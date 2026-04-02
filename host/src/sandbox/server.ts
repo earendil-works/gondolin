@@ -564,6 +564,7 @@ export class SandboxServer extends EventEmitter {
       });
       this.controller = new WasmFunctionBridgeController({
         runner: wasmRunner,
+        mode: this.options.wasmRunnerMode,
         autoRestart: this.options.autoRestart,
         append: this.baseAppend,
       });

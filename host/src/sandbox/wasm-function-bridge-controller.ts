@@ -6,6 +6,37 @@ import {
   type WasmFunctionBridgeRunnerConfig,
 } from "./wasm-function-bridge-runner.ts";
 
+function parseSandboxfsAppend(append: string): {
+  mount: string;
+  binds: string[];
+} {
+  let mount = "/data";
+  let binds: string[] = [];
+
+  for (const token of append.split(/\s+/).filter((value) => value.length > 0)) {
+    if (token.startsWith("sandboxfs.mount=")) {
+      const value = token.slice("sandboxfs.mount=".length);
+      if (value.length > 0) {
+        mount = value;
+      }
+      continue;
+    }
+
+    if (token.startsWith("sandboxfs.bind=")) {
+      const value = token.slice("sandboxfs.bind=".length);
+      binds = value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+    }
+  }
+
+  return {
+    mount,
+    binds,
+  };
+}
+
 export type WasmFunctionBridgeControllerConfig = WasmFunctionBridgeRunnerConfig & {
   /** runner instance used for transport + lifecycle */
   runner: WasmFunctionBridgeRunner;
@@ -28,6 +59,8 @@ export class WasmFunctionBridgeController extends EventEmitter {
     this.config.runner.on("log", (chunk: string, stream: SandboxLogStream) => {
       this.emit("log", chunk, stream);
     });
+
+    this.updateRunnerWasmArgs();
 
     this.config.runner.on("error", (err: unknown) => {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -67,6 +100,7 @@ export class WasmFunctionBridgeController extends EventEmitter {
 
   setAppend(append: string): void {
     this.config.append = append;
+    this.updateRunnerWasmArgs();
   }
 
   getState(): SandboxState {
@@ -121,6 +155,26 @@ export class WasmFunctionBridgeController extends EventEmitter {
       void this.start();
     }, 1_000);
     this.restartTimer.unref?.();
+  }
+
+  private updateRunnerWasmArgs(): void {
+    const mode = this.config.mode ?? "harness";
+    if (mode !== "wasi-stdio") {
+      this.config.runner.setWasmArgs([]);
+      return;
+    }
+
+    const config = parseSandboxfsAppend(this.config.append);
+    if (config.mount === "/data" && config.binds.length === 0) {
+      this.config.runner.setWasmArgs([]);
+      return;
+    }
+
+    this.config.runner.setWasmArgs([
+      "gondolin-sandboxfs-config",
+      config.mount,
+      config.binds.join(","),
+    ]);
   }
 
   private setState(state: SandboxState): void {

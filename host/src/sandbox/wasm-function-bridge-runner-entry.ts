@@ -69,6 +69,8 @@ type ParsedArgs = {
   netSocketPath?: string;
   /** wasi preopened host directories */
   preopens: Array<{ spec: string; readOnly: boolean }>;
+  /** extra argv entries forwarded to the wasm module */
+  wasmArgs: string[];
 };
 
 const STDIO_ENVELOPE_CHUNK_BASE64 = 120;
@@ -107,6 +109,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let wasmPath: string | undefined;
   let netSocketPath: string | undefined;
   const preopens: Array<{ spec: string; readOnly: boolean }> = [];
+  const wasmArgs: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -164,7 +167,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (arg === "--help" || arg === "-h") {
       throw new Error(
-        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH] [--net-socket PATH] [--preopen HOST::GUEST] [--preopen-ro HOST::GUEST]",
+        "usage: node wasm-function-bridge-runner-entry.ts [--mode harness|wasi-stdio] [--wasm PATH] [--net-socket PATH] [--preopen HOST::GUEST] [--preopen-ro HOST::GUEST] [--wasm-arg ARG]",
       );
     }
 
@@ -196,10 +199,26 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
+    if (arg === "--wasm-arg") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--wasm-arg requires a value");
+      }
+      wasmArgs.push(value);
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--wasm-arg=")) {
+      const value = arg.slice("--wasm-arg=".length);
+      wasmArgs.push(value);
+      continue;
+    }
+
     throw new Error(`unknown argument: ${arg}`);
   }
 
-  return { mode, wasmPath, netSocketPath, preopens };
+  return { mode, wasmPath, netSocketPath, preopens, wasmArgs };
 }
 
 function decodeRunnerInboundMessage(raw: unknown): RunnerInboundMessage | null {
@@ -529,6 +548,7 @@ async function runWasiStdioMode(
   wasmPath: string,
   netSocketPath?: string,
   preopens: Array<{ spec: string; readOnly: boolean }> = [],
+  wasmArgs: string[] = [],
 ): Promise<void> {
   if (!fs.existsSync(wasmPath)) {
     throw new Error(`wasm module not found: ${wasmPath}`);
@@ -545,6 +565,9 @@ async function runWasiStdioMode(
   }
   for (const preopen of preopens) {
     childArgs.push(preopen.readOnly ? "--preopen-ro" : "--preopen", preopen.spec);
+  }
+  if (wasmArgs.length > 0) {
+    childArgs.push("--", ...wasmArgs);
   }
 
   const child = child_process.spawn(process.execPath, childArgs, {
@@ -570,6 +593,7 @@ async function runWasiStdioMode(
 
   let stdoutBuffer = Buffer.alloc(0);
   let stdoutSynced = false;
+  let malformedStdoutFrames = 0;
   let waitingDrain = false;
   const outboundQueue: Buffer[] = [];
 
@@ -637,8 +661,308 @@ async function runWasiStdioMode(
     sendToParent({ t: "writable" });
   };
 
+  const frameFromPayload = (payload: Buffer): Buffer => {
+    const framed = Buffer.allocUnsafe(4 + payload.length);
+    framed.writeUInt32BE(payload.length, 0);
+    payload.copy(framed, 4);
+    return framed;
+  };
+
+  const forwardGuestFrame = (frame: Buffer): boolean => {
+    stdoutSynced = true;
+
+    const payload = frame.subarray(4);
+    let decoded: Record<string, unknown>;
+    try {
+      decoded = decodeMessage(payload) as Record<string, unknown>;
+    } catch {
+      malformedStdoutFrames += 1;
+      if (malformedStdoutFrames <= 5) {
+        sendToParent({
+          t: "error",
+          message: "dropping malformed guest control frame",
+        });
+      }
+      return false;
+    }
+
+    let outboundFrame: Buffer = frame;
+    let outboundChannel: BridgeChannel = DEFAULT_CHANNEL;
+
+    const type = typeof decoded?.t === "string" ? decoded.t : "";
+    const id = asId(decoded?.id);
+
+    if (isTcpType(type)) {
+      const route = tcpGuestToHost.get(id);
+      if (route) {
+        decoded.id = route.hostId;
+        outboundChannel = route.channel;
+        outboundFrame = encodeFrame(decoded);
+
+        if (type === "tcp_closed") {
+          releaseTcpGuestId(id);
+        }
+
+        if (type === "tcp_opened") {
+          const payloadMap = asPayload(decoded.p);
+          if (payloadMap.ok === false) {
+            releaseTcpGuestId(id);
+          }
+        }
+      }
+    } else if (isFsRequestType(type)) {
+      outboundChannel = "control";
+      fsGuestToHost.set(id, outboundChannel);
+    } else if (isFsResponseType(type)) {
+      const route = fsHostToGuest.get(id);
+      if (route) {
+        outboundChannel = route;
+        fsHostToGuest.delete(id);
+      } else {
+        outboundChannel = "control";
+      }
+    }
+
+    sendToParent({
+      t: "frame",
+      frame: outboundFrame.toString("base64"),
+      channel: outboundChannel,
+    });
+
+    return true;
+  };
+
+  const readEnvelopeLineEnd = (start: number): number => {
+    for (let i = start; i < stdoutBuffer.length; i += 1) {
+      const byte = stdoutBuffer[i]!;
+      if (byte === 0x0a || byte === 0x0d) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  const skipLineEnd = (start: number): number => {
+    let offset = start;
+    while (offset < stdoutBuffer.length) {
+      const byte = stdoutBuffer[offset]!;
+      if (byte !== 0x0a && byte !== 0x0d) {
+        break;
+      }
+      offset += 1;
+    }
+    return offset;
+  };
+
+  const isStrictBase64 = (value: string): boolean => {
+    if (value.length === 0 || value.length % 4 !== 0) {
+      return false;
+    }
+    if (!/^[A-Za-z0-9+/=]+$/.test(value)) {
+      return false;
+    }
+
+    const firstPad = value.indexOf("=");
+    if (firstPad !== -1) {
+      for (let i = firstPad; i < value.length; i += 1) {
+        if (value[i] !== "=") {
+          return false;
+        }
+      }
+      const padLen = value.length - firstPad;
+      if (padLen > 2) {
+        return false;
+      }
+    }
+
+    try {
+      return Buffer.from(value, "base64").toString("base64") === value;
+    } catch {
+      return false;
+    }
+  };
+
+  type EnvelopeParseResult =
+    | { kind: "frame"; frame: Buffer }
+    | { kind: "need-more" }
+    | { kind: "invalid"; drop: number };
+
+  const invalidEnvelope = (
+    reason: string,
+    drop: number,
+  ): EnvelopeParseResult => {
+    malformedStdoutFrames += 1;
+    if (malformedStdoutFrames <= 5) {
+      sendToParent({
+        t: "error",
+        message: `invalid guest stdio envelope (${reason})`,
+      });
+    }
+    return {
+      kind: "invalid",
+      drop: Math.max(1, drop),
+    };
+  };
+
+  const parseStdoutEnvelopeFrame = (): EnvelopeParseResult => {
+    if (stdoutBuffer.length === 0 || stdoutBuffer[0] !== 0x40) {
+      return invalidEnvelope("missing_at_prefix", 1);
+    }
+
+    if (stdoutBuffer.length < 2) {
+      return { kind: "need-more" };
+    }
+
+    let offset = 1;
+    let marker = stdoutBuffer[offset]!;
+    let encoded = "";
+
+    const appendEncodedChunk = (start: number, end: number): boolean => {
+      const chunk = stdoutBuffer.subarray(start, end).toString("utf8");
+      if (chunk.length === 0) {
+        return false;
+      }
+      if (!/^[A-Za-z0-9+/=]+$/.test(chunk)) {
+        return false;
+      }
+      encoded += chunk;
+      return encoded.length <= MAX_FRAME * 2;
+    };
+
+    if (marker === 0x21 || marker === 0x2e) {
+      offset += 1;
+
+      while (true) {
+        const lineEnd = readEnvelopeLineEnd(offset);
+        if (lineEnd === -1) {
+          return { kind: "need-more" };
+        }
+
+        if (!appendEncodedChunk(offset, lineEnd)) {
+          return invalidEnvelope("invalid_chunk", skipLineEnd(lineEnd));
+        }
+
+        offset = skipLineEnd(lineEnd);
+
+        if (marker === 0x2e) {
+          break;
+        }
+
+        if (offset + 2 > stdoutBuffer.length) {
+          return { kind: "need-more" };
+        }
+
+        if (stdoutBuffer[offset] !== 0x40) {
+          return invalidEnvelope("missing_continuation_at", offset);
+        }
+
+        marker = stdoutBuffer[offset + 1]!;
+        if (marker !== 0x21 && marker !== 0x2e) {
+          return invalidEnvelope("invalid_continuation_marker", offset + 1);
+        }
+
+        offset += 2;
+      }
+    } else {
+      const lineEnd = readEnvelopeLineEnd(offset);
+      if (lineEnd === -1) {
+        return { kind: "need-more" };
+      }
+
+      if (!appendEncodedChunk(offset, lineEnd)) {
+        return invalidEnvelope("invalid_single_chunk", skipLineEnd(lineEnd));
+      }
+
+      offset = skipLineEnd(lineEnd);
+    }
+
+    if (!isStrictBase64(encoded)) {
+      return invalidEnvelope("base64_validation_failed", offset);
+    }
+
+    const payload = Buffer.from(encoded, "base64");
+    if (payload.length === 0 || payload.length > MAX_FRAME) {
+      return invalidEnvelope("payload_size_invalid", offset);
+    }
+
+    try {
+      decodeMessage(payload);
+    } catch {
+      return invalidEnvelope("payload_decode_failed", offset);
+    }
+
+    stdoutBuffer = stdoutBuffer.subarray(offset);
+    return { kind: "frame", frame: frameFromPayload(payload) };
+  };
+
   const parseStdoutFrames = () => {
-    while (stdoutBuffer.length >= 4) {
+    while (stdoutBuffer.length > 0) {
+      while (stdoutBuffer.length > 0) {
+        const lead = stdoutBuffer[0]!;
+        if (lead !== 0x0a && lead !== 0x0d && lead !== 0x3d) {
+          break;
+        }
+        stdoutBuffer = stdoutBuffer.subarray(1);
+      }
+
+      if (stdoutBuffer.length === 0) {
+        break;
+      }
+
+      if (stdoutBuffer[0] === 0x40) {
+        const parsed = parseStdoutEnvelopeFrame();
+        if (parsed.kind === "need-more") {
+          break;
+        }
+
+        if (parsed.kind === "invalid") {
+          const drop = Math.min(
+            stdoutBuffer.length,
+            Math.max(parsed.drop, 1),
+          );
+          stdoutBuffer = stdoutBuffer.subarray(drop);
+          continue;
+        }
+
+        forwardGuestFrame(parsed.frame);
+        continue;
+      }
+
+      // sandboxd can emit line-based logs on stdout; keep those away from the
+      // frame decoder and only attempt raw frame parsing when the first byte
+      // matches the 4-byte length-prefix format (`0x00`).
+      if (stdoutBuffer[0] !== 0x00) {
+        const lineEnd = readEnvelopeLineEnd(0);
+        if (lineEnd === -1) {
+          const nextEnvelope = stdoutBuffer.indexOf(0x40);
+          if (nextEnvelope > 0) {
+            const noise = stdoutBuffer.subarray(0, nextEnvelope);
+            sendToParent({
+              t: "log",
+              stream: "stdout",
+              chunk: noise.toString("utf8"),
+            });
+            stdoutBuffer = stdoutBuffer.subarray(nextEnvelope);
+            continue;
+          }
+          break;
+        }
+
+        const lineOffset = skipLineEnd(lineEnd);
+        const line = stdoutBuffer.subarray(0, lineOffset);
+        sendToParent({
+          t: "log",
+          stream: "stdout",
+          chunk: line.toString("utf8"),
+        });
+        stdoutBuffer = stdoutBuffer.subarray(lineOffset);
+        continue;
+      }
+
+      if (stdoutBuffer.length < 4) {
+        break;
+      }
+
       const frameLength = stdoutBuffer.readUInt32BE(0);
       if (frameLength === 0 || frameLength > MAX_FRAME) {
         stdoutBuffer = stdoutBuffer.subarray(1);
@@ -652,56 +976,7 @@ async function runWasiStdioMode(
 
       const frame = stdoutBuffer.subarray(0, frameEnd);
       stdoutBuffer = stdoutBuffer.subarray(frameEnd);
-      stdoutSynced = true;
-
-      let outboundFrame: Buffer = frame;
-      let outboundChannel: BridgeChannel = DEFAULT_CHANNEL;
-
-      try {
-        const payload = frame.subarray(4);
-        const decoded = decodeMessage(payload) as Record<string, unknown>;
-        const type = typeof decoded?.t === "string" ? decoded.t : "";
-        const id = asId(decoded?.id);
-
-        if (isTcpType(type)) {
-          const route = tcpGuestToHost.get(id);
-          if (route) {
-            decoded.id = route.hostId;
-            outboundChannel = route.channel;
-            outboundFrame = encodeFrame(decoded);
-
-            if (type === "tcp_closed") {
-              releaseTcpGuestId(id);
-            }
-
-            if (type === "tcp_opened") {
-              const payloadMap = asPayload(decoded.p);
-              if (payloadMap.ok === false) {
-                releaseTcpGuestId(id);
-              }
-            }
-          }
-        } else if (isFsRequestType(type)) {
-          outboundChannel = "control";
-          fsGuestToHost.set(id, outboundChannel);
-        } else if (isFsResponseType(type)) {
-          const route = fsHostToGuest.get(id);
-          if (route) {
-            outboundChannel = route;
-            fsHostToGuest.delete(id);
-          } else {
-            outboundChannel = "control";
-          }
-        }
-      } catch {
-        // keep the raw frame on the default control channel
-      }
-
-      sendToParent({
-        t: "frame",
-        frame: outboundFrame.toString("base64"),
-        channel: outboundChannel,
-      });
+      forwardGuestFrame(frame);
     }
 
     if (!stdoutSynced && stdoutBuffer.length > 64 * 1024) {
@@ -879,7 +1154,12 @@ async function main(): Promise<void> {
     throw new Error("--wasm is required when --mode wasi-stdio");
   }
 
-  await runWasiStdioMode(args.wasmPath, args.netSocketPath, args.preopens);
+  await runWasiStdioMode(
+    args.wasmPath,
+    args.netSocketPath,
+    args.preopens,
+    args.wasmArgs,
+  );
 }
 
 void main().catch((err) => {
