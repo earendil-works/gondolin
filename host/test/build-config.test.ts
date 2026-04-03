@@ -137,6 +137,7 @@ test("build-config: accepts wasm conversion configuration", () => {
     wasm: {
       enabled: true,
       c2wPath: "./bin/c2w",
+      targetArch: "riscv64",
     },
   };
 
@@ -145,6 +146,7 @@ test("build-config: accepts wasm conversion configuration", () => {
   const parsed = parseBuildConfig(JSON.stringify(cfg));
   assert.equal(parsed.wasm?.enabled, true);
   assert.equal(parsed.wasm?.c2wPath, "./bin/c2w");
+  assert.equal(parsed.wasm?.targetArch, "riscv64");
 });
 
 test("build-config: rejects invalid wasm conversion configuration", () => {

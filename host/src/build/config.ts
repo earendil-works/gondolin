@@ -136,6 +136,8 @@ export interface WasmBuildConfig {
   enabled?: boolean;
   /** container2wasm c2w binary path */
   c2wPath?: string;
+  /** guest userspace architecture used for wasm conversion */
+  targetArch?: "amd64" | "aarch64" | "riscv64";
 }
 
 /**
@@ -290,6 +292,12 @@ const isOciPullPolicy = (value: unknown): value is OciPullPolicy =>
 const isOptionalOciPullPolicy = (value: unknown): boolean =>
   value === undefined || isOciPullPolicy(value);
 
+const isWasmTargetArch = (value: unknown): value is WasmBuildConfig["targetArch"] =>
+  value === "amd64" || value === "aarch64" || value === "riscv64";
+
+const isOptionalWasmTargetArch = (value: unknown): boolean =>
+  value === undefined || isWasmTargetArch(value);
+
 export function validateBuildConfig(config: unknown): config is BuildConfig {
   if (!isRecord(config)) {
     return false;
@@ -410,6 +418,9 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       return false;
     }
     if (!isOptionalString(wasm.c2wPath)) {
+      return false;
+    }
+    if (!isOptionalWasmTargetArch(wasm.targetArch)) {
       return false;
     }
   }

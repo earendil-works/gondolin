@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 
 import { buildAlpineImages } from "./alpine.ts";
-import type { BuildConfig, Architecture } from "./config.ts";
+import type { BuildConfig, Architecture, WasmBuildConfig } from "./config.ts";
 import { parseApkIndex } from "../alpine/packages.ts";
 import { decompressTarGz, extractTarGz, parseTar } from "../alpine/tar.ts";
 import { downloadFile, DownloadFileError } from "../alpine/utils.ts";
@@ -70,6 +70,8 @@ function shouldBuildWasmAsset(config: BuildConfig): boolean {
   return config.wasm?.enabled === true;
 }
 
+type WasmTargetArch = NonNullable<WasmBuildConfig["targetArch"]>;
+
 function mapContainer2WasmArch(arch: Architecture): "amd64" | "aarch64" {
   return arch === "x86_64" ? "amd64" : "aarch64";
 }
@@ -100,6 +102,115 @@ function formatExecSyncError(err: unknown): string {
   return `${execErr.message}: ${output}`;
 }
 
+function resolveWasmTargetArch(config: BuildConfig): WasmTargetArch {
+  const configured = config.wasm?.targetArch;
+  if (configured) {
+    return configured;
+  }
+
+  const platform = config.oci?.platform?.trim();
+  if (platform === "linux/riscv64") {
+    return "riscv64";
+  }
+  if (platform === "linux/amd64") {
+    return "amd64";
+  }
+  if (platform === "linux/arm64") {
+    return "aarch64";
+  }
+
+  return mapContainer2WasmArch(config.arch);
+}
+
+function patchC2wDockerfileForFuse(dockerfile: string): string {
+  let patched = dockerfile;
+
+  const bundleWorkdirBlock =
+    'FROM golang-base AS bundle-dev\n' +
+    'ARG TARGETPLATFORM\n' +
+    'ARG INIT_DEBUG\n' +
+    'ARG OPTIMIZATION_MODE\n' +
+    'ARG NO_VMTOUCH\n' +
+    'ARG NO_BINFMT\n' +
+    'ARG EXTERNAL_BUNDLE\n' +
+    'COPY --link --from=assets / /work\n' +
+    'WORKDIR /work';
+  const bundleWorkdirPatchedBlock = `${bundleWorkdirBlock}\nRUN apt-get update && apt-get install -y jq`;
+  if (!patched.includes(bundleWorkdirBlock)) {
+    throw new Error("failed to patch container2wasm dockerfile: bundle workdir block not found");
+  }
+  patched = patched.replace(bundleWorkdirBlock, bundleWorkdirPatchedBlock);
+
+  const specMoveBlock =
+    'RUN if test -f image.json; then mv image.json /out/oci/ ; fi && \\\n' +
+    '    if test -f spec.json; then mv spec.json /out/oci/ ; fi';
+  const specPatchedBlock =
+    'RUN if test -f spec.json; then jq \'(.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"] | .process.capabilities.inheritable += ["CAP_SYS_ADMIN"] | .process.capabilities.ambient += ["CAP_SYS_ADMIN"] | .linux.devices += [{"path":"/dev/fuse","type":"c","major":10,"minor":229,"fileMode":438,"uid":0,"gid":0}] | .linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":229,"access":"rwm"}])\' spec.json > spec.json.new && mv spec.json.new spec.json; fi\n' +
+    specMoveBlock;
+  if (!patched.includes(specMoveBlock)) {
+    throw new Error("failed to patch container2wasm dockerfile: spec move block not found");
+  }
+  patched = patched.replace(specMoveBlock, specPatchedBlock);
+
+  const riscvKernelBlock =
+    'FROM linux-riscv64-dev-common AS linux-riscv64-dev\n' +
+    'WORKDIR /work-buildlinux/linux\n' +
+    'COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config\n' +
+    'RUN make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- -j$(nproc) all && \\\n' +
+    '    mkdir /out && \\\n' +
+    '    mv /work-buildlinux/linux/arch/riscv/boot/Image /out/Image && \\\n' +
+    '    make clean';
+  const riscvKernelPatchedBlock =
+    'FROM linux-riscv64-dev-common AS linux-riscv64-dev\n' +
+    'WORKDIR /work-buildlinux/linux\n' +
+    'COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config\n' +
+    'RUN printf \'\\nCONFIG_FUSE_FS=y\\nCONFIG_CUSE=y\\n\' >> .config && \\\n' +
+    '    make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- olddefconfig && \\\n' +
+    '    make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- -j$(nproc) all && \\\n' +
+    '    mkdir /out && \\\n' +
+    '    mv /work-buildlinux/linux/arch/riscv/boot/Image /out/Image && \\\n' +
+    '    make clean';
+  if (!patched.includes(riscvKernelBlock)) {
+    throw new Error("failed to patch container2wasm dockerfile: riscv kernel block not found");
+  }
+  patched = patched.replace(riscvKernelBlock, riscvKernelPatchedBlock);
+
+  const riscvConfigBlock =
+    'FROM linux-riscv64-dev-common AS linux-riscv64-config-dev\n' +
+    'WORKDIR /work-buildlinux/linux\n' +
+    'COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config\n' +
+    'RUN make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- olddefconfig';
+  const riscvConfigPatchedBlock =
+    'FROM linux-riscv64-dev-common AS linux-riscv64-config-dev\n' +
+    'WORKDIR /work-buildlinux/linux\n' +
+    'COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config\n' +
+    'RUN printf \'\\nCONFIG_FUSE_FS=y\\nCONFIG_CUSE=y\\n\' >> .config && \\\n' +
+    '    make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- olddefconfig';
+  if (!patched.includes(riscvConfigBlock)) {
+    throw new Error("failed to patch container2wasm dockerfile: riscv config block not found");
+  }
+  patched = patched.replace(riscvConfigBlock, riscvConfigPatchedBlock);
+
+  return patched;
+}
+
+function writePatchedC2wDockerfile(params: {
+  c2wPath: string;
+  workDir: string;
+}): string {
+  const dockerfile = execFileSync(params.c2wPath, ["--show-dockerfile"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  });
+  const patched = patchC2wDockerfileForFuse(dockerfile);
+  const dockerfilePath = path.join(
+    params.workDir,
+    `.gondolin-c2w-fuse-${randomUUID().slice(0, 8)}.Dockerfile`,
+  );
+  fs.writeFileSync(dockerfilePath, patched);
+  return dockerfilePath;
+}
+
 function resolveC2wPath(config: BuildConfig, configDir?: string): string {
   const configured = config.wasm?.c2wPath?.trim();
   if (configured) {
@@ -114,6 +225,119 @@ function resolveC2wPath(config: BuildConfig, configDir?: string): string {
   }
 
   return "c2w";
+}
+
+function generateWasmEntrypointScript(): string {
+  return [
+    "#!/bin/sh",
+    "set -eu",
+    "",
+    "export PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+    "",
+    "setup_mitm_ca() {",
+    '  system_ca_bundle=""',
+    "  for candidate in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/pki/tls/certs/ca-bundle.crt; do",
+    '    if [ -r "${candidate}" ]; then',
+    '      system_ca_bundle="${candidate}"',
+    "      break",
+    "    fi",
+    "  done",
+    "",
+    '  mitm_ca_cert="/etc/gondolin/mitm/ca.crt"',
+    '  runtime_ca_bundle="/run/gondolin/ca-certificates.crt"',
+    "  mkdir -p /run/gondolin",
+    '  : > "${runtime_ca_bundle}"',
+    "",
+    '  if [ -n "${system_ca_bundle}" ] && [ -r "${system_ca_bundle}" ]; then',
+    '    cat "${system_ca_bundle}" >> "${runtime_ca_bundle}" 2>/dev/null || true',
+    "  fi",
+    "",
+    '  if [ -r "${mitm_ca_cert}" ]; then',
+    '    printf "\\n" >> "${runtime_ca_bundle}"',
+    '    cat "${mitm_ca_cert}" >> "${runtime_ca_bundle}" 2>/dev/null || true',
+    "  fi",
+    "",
+    '  export SSL_CERT_FILE="${runtime_ca_bundle}"',
+    '  export CURL_CA_BUNDLE="${runtime_ca_bundle}"',
+    '  export REQUESTS_CA_BUNDLE="${runtime_ca_bundle}"',
+    '  if [ -r "${mitm_ca_cert}" ]; then',
+    '    export NODE_EXTRA_CA_CERTS="${mitm_ca_cert}"',
+    "  fi",
+    "}",
+    "",
+    'sandboxfs_mount="/data"',
+    'sandboxfs_binds=""',
+    'if [ "${1:-}" = "gondolin-sandboxfs-config" ]; then',
+    '  sandboxfs_mount="${2:-/data}"',
+    '  sandboxfs_binds="${3:-}"',
+    "fi",
+    'rpc_socket="/run/gondolin-sandboxfs-rpc.sock"',
+    "",
+    'mkdir -p /run "${sandboxfs_mount}"',
+    "rm -f /run/sandboxfs.ready /run/sandboxfs.failed",
+    'rm -f "${rpc_socket}" >/dev/null 2>&1 || true',
+    "",
+    "(",
+    "  if [ ! -e /dev/fuse ]; then",
+    "    mknod /dev/fuse c 10 229 >/dev/null 2>&1 || true",
+    "  fi",
+    "",
+    "  if [ -x /usr/bin/sandboxfs ]; then",
+    "    for _ in $(seq 1 300); do",
+    '      [ -S "${rpc_socket}" ] && break',
+    "      sleep 0.1",
+    "    done",
+    "",
+    '    /usr/bin/sandboxfs --mount "${sandboxfs_mount}" --rpc-path "unix:${rpc_socket}" >/dev/null 2>&1 &',
+    "",
+    "    mounted=0",
+    "    for _ in $(seq 1 300); do",
+    '      if grep -q " ${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then',
+    "        mounted=1",
+    "        break",
+    "      fi",
+    "      sleep 0.1",
+    "    done",
+    "",
+    '    if [ "${mounted}" -eq 1 ]; then',
+    '      if [ -n "${sandboxfs_binds}" ]; then',
+    '        OLD_IFS="${IFS}"',
+    "        IFS=','",
+    "        for bind in ${sandboxfs_binds}; do",
+    '          [ -z "${bind}" ] && continue',
+    '          if [ "${sandboxfs_mount}" = "/" ]; then',
+    '            bind_source="${bind}"',
+    "          else",
+    '            bind_source="${sandboxfs_mount}${bind}"',
+    "          fi",
+    '          mkdir -p "$(dirname "${bind}")"',
+    '          if ! mount --bind "${bind_source}" "${bind}" >/dev/null 2>&1; then',
+    '            rm -rf "${bind}" >/dev/null 2>&1 || true',
+    '            ln -s "${bind_source}" "${bind}" >/dev/null 2>&1 || true',
+    "          fi",
+    "        done",
+    '        IFS="${OLD_IFS}"',
+    "      fi",
+    "      setup_mitm_ca",
+    "      printf 'ok\\n' > /run/sandboxfs.ready",
+    "    else",
+    "      printf '%s\\n' 'sandboxfs mount not ready' > /run/sandboxfs.failed",
+    "    fi",
+    "  else",
+    "    printf '%s\\n' 'sandboxfs binary missing' > /run/sandboxfs.failed",
+    "  fi",
+    ") &",
+    "",
+    "setup_mitm_ca",
+    "",
+    "# Load image default environment (generated by gondolin build)",
+    "if [ -r /etc/profile.d/gondolin-image-env.sh ]; then",
+    "  . /etc/profile.d/gondolin-image-env.sh",
+    "fi",
+    "",
+    'exec env GONDOLIN_SANDBOXFS_RPC_SOCKET="${rpc_socket}" /usr/bin/sandboxd --transport="${GONDOLIN_SANDBOXD_TRANSPORT:-stdio}"',
+    "",
+  ].join("\n");
 }
 
 function buildWasmSourceImage(params: {
@@ -138,77 +362,7 @@ function buildWasmSourceImage(params: {
   fs.mkdirSync(path.dirname(entrypointPath), { recursive: true });
   fs.writeFileSync(
     entrypointPath,
-    [
-      "#!/bin/sh",
-      "set -eu",
-      "",
-      "export PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-      "",
-      'sandboxfs_mount="/data"',
-      'sandboxfs_binds=""',
-      'if [ "${1:-}" = "gondolin-sandboxfs-config" ]; then',
-      '  sandboxfs_mount="${2:-/data}"',
-      '  sandboxfs_binds="${3:-}"',
-      "fi",
-      'rpc_socket="/run/gondolin-sandboxfs-rpc.sock"',
-      "",
-      "mkdir -p /run \"${sandboxfs_mount}\"",
-      "rm -f /run/sandboxfs.ready /run/sandboxfs.failed",
-      "rm -f \"${rpc_socket}\" >/dev/null 2>&1 || true",
-      "",
-      "(",
-      "  if [ ! -e /dev/fuse ]; then",
-      "    mknod /dev/fuse c 10 229 >/dev/null 2>&1 || true",
-      "  fi",
-      "",
-      "  if [ -x /usr/bin/sandboxfs ]; then",
-      "    for _ in $(seq 1 300); do",
-      "      [ -S \"${rpc_socket}\" ] && break",
-      "      sleep 0.1",
-      "    done",
-      "",
-      "    /usr/bin/sandboxfs --mount \"${sandboxfs_mount}\" --rpc-path \"unix:${rpc_socket}\" >/dev/null 2>&1 &",
-      "",
-      "    mounted=0",
-      "    for _ in $(seq 1 300); do",
-      "      if grep -q \" ${sandboxfs_mount} fuse.sandboxfs \" /proc/mounts; then",
-      "        mounted=1",
-      "        break",
-      "      fi",
-      "      sleep 0.1",
-      "    done",
-      "",
-      "    if [ \"${mounted}\" -eq 1 ]; then",
-      "      if [ -n \"${sandboxfs_binds}\" ]; then",
-      "        OLD_IFS=\"${IFS}\"",
-      "        IFS=','",
-      "        for bind in ${sandboxfs_binds}; do",
-      "          [ -z \"${bind}\" ] && continue",
-      "          if [ \"${sandboxfs_mount}\" = \"/\" ]; then",
-      "            bind_source=\"${bind}\"",
-      "          else",
-      "            bind_source=\"${sandboxfs_mount}${bind}\"",
-      "          fi",
-      "          mkdir -p \"$(dirname \"${bind}\")\"",
-      "          if ! mount --bind \"${bind_source}\" \"${bind}\" >/dev/null 2>&1; then",
-      "            rm -rf \"${bind}\" >/dev/null 2>&1 || true",
-      "            ln -s \"${bind_source}\" \"${bind}\" >/dev/null 2>&1 || true",
-      "          fi",
-      "        done",
-      "        IFS=\"${OLD_IFS}\"",
-      "      fi",
-      "      printf 'ok\\n' > /run/sandboxfs.ready",
-      "    else",
-      "      printf '%s\\n' 'sandboxfs mount not ready' > /run/sandboxfs.failed",
-      "    fi",
-      "  else",
-      "    printf '%s\\n' 'sandboxfs binary missing' > /run/sandboxfs.failed",
-      "  fi",
-      ") &",
-      "",
-      "exec env GONDOLIN_SANDBOXFS_RPC_SOCKET=\"${rpc_socket}\" /usr/bin/sandboxd --transport=\"${GONDOLIN_SANDBOXD_TRANSPORT:-stdio}\"",
-      "",
-    ].join("\n"),
+    generateWasmEntrypointScript(),
     { mode: 0o755 },
   );
 
@@ -309,7 +463,11 @@ function maybeBuildWasmAsset(params: {
     params.runtime ?? detectContainerRuntime(params.config.oci.runtime);
   const platform = params.platform ?? mapContainerPlatform(params.config.arch);
   const wasmDst = path.join(params.outputDir, WASM_FILENAME);
-  const targetArch = mapContainer2WasmArch(params.config.arch);
+  const targetArch = resolveWasmTargetArch(params.config);
+  const dockerfilePath = writePatchedC2wDockerfile({
+    c2wPath,
+    workDir: params.workDir,
+  });
 
   const sourceImage = buildWasmSourceImage({
     runtime,
@@ -324,6 +482,8 @@ function maybeBuildWasmAsset(params: {
     execFileSync(
       c2wPath,
       [
+        "--dockerfile",
+        dockerfilePath,
         "--builder",
         runtime,
         "--target-arch",
@@ -341,6 +501,7 @@ function maybeBuildWasmAsset(params: {
       `failed to build wasm artifact with ${c2wPath}: ${formatExecSyncError(err)}`,
     );
   } finally {
+    fs.rmSync(dockerfilePath, { force: true });
     sourceImage.cleanup();
   }
 }
@@ -1264,4 +1425,7 @@ function sha256(buf: Buffer): string {
 export const __test = {
   downloadKrunArchive,
   extractKernelBundleFromSharedLibraryBytes,
+  generateWasmEntrypointScript,
+  patchC2wDockerfileForFuse,
+  resolveWasmTargetArch,
 };
