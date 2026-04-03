@@ -65,11 +65,24 @@ type StdinBridge = {
   data: Uint8Array;
 };
 
+type PollWaitState = {
+  /** ready events already written to the guest output buffer */
+  written: number;
+  /** whether poll can block waiting for stdin activity */
+  needsStdinWait: boolean;
+  /** whether poll must periodically re-check the synthetic network socket */
+  needsNetPoll: boolean;
+  /** earliest pending clock deadline in monotonic `ns` */
+  nextClockDeadlineNs: bigint | null;
+};
+
 const STDIN_WRITE_POS = 0;
 const STDIN_READ_POS = 1;
 const STDIN_CLOSED = 2;
 const STDIN_WAKE_SEQ = 3;
-const POLL_IDLE_WAIT_MS = 1;
+const POLL_NET_WAIT_SLICE_MS = 10;
+const WASI_CLOCKID_REALTIME = 0;
+const WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME = 1;
 
 function readIOVs(
   view: DataView,
@@ -267,6 +280,58 @@ function readFromStdinBridge(
   Atomics.notify(bridge.state, STDIN_WAKE_SEQ);
 
   return total;
+}
+
+function resolveClockDeadlineNs(
+  clockId: number,
+  timeoutNs: bigint,
+  flags: number,
+  nowMonoNs: bigint,
+  nowRealtimeNs: bigint,
+): bigint {
+  if ((flags & WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME) === 0) {
+    return nowMonoNs + timeoutNs;
+  }
+
+  if (clockId === WASI_CLOCKID_REALTIME) {
+    return nowMonoNs +
+      (timeoutNs > nowRealtimeNs ? timeoutNs - nowRealtimeNs : 0n);
+  }
+
+  return timeoutNs;
+}
+
+function nsToAtomicsWaitTimeoutMs(durationNs: bigint): number {
+  if (durationNs <= 0n) {
+    return 0;
+  }
+
+  const roundedUpMs = Number((durationNs + 999_999n) / 1_000_000n);
+  if (!Number.isFinite(roundedUpMs) || roundedUpMs > 0x7fffffff) {
+    return 0x7fffffff;
+  }
+
+  return Math.max(1, roundedUpMs);
+}
+
+function resolvePollWaitTimeoutMs(
+  state: Pick<PollWaitState, "needsNetPoll" | "nextClockDeadlineNs">,
+  nowMonoNs: bigint,
+): number | undefined {
+  let timeoutMs: number | undefined;
+
+  if (state.nextClockDeadlineNs !== null) {
+    timeoutMs = nsToAtomicsWaitTimeoutMs(state.nextClockDeadlineNs - nowMonoNs);
+  }
+
+  if (state.needsNetPoll) {
+    timeoutMs =
+      timeoutMs === undefined
+        ? POLL_NET_WAIT_SLICE_MS
+        : Math.min(timeoutMs, POLL_NET_WAIT_SLICE_MS);
+  }
+
+  return timeoutMs;
 }
 
 function buildWasiEnv(
@@ -914,9 +979,34 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       }
     }
 
-    const clockSubs: Array<{ userdata: bigint }> = [];
+    const pollStartMonoNs = process.hrtime.bigint();
+    const pollStartRealtimeNs = BigInt(Date.now()) * 1_000_000n;
+    // Relative clock subscriptions are anchored to the start of this poll call.
+    const clockDeadlines = new Map<
+      number,
+      { userdata: bigint; deadlineNs: bigint }
+    >();
 
-    const emitEvents = () => {
+    for (let i = 0; i < nsubscriptions; i += 1) {
+      const subBase = inPtr + i * 48;
+      const type = view.getUint8(subBase + 8);
+      if (type !== 0) {
+        continue;
+      }
+
+      clockDeadlines.set(i, {
+        userdata: view.getBigUint64(subBase, true),
+        deadlineNs: resolveClockDeadlineNs(
+          view.getUint32(subBase + 16, true),
+          view.getBigUint64(subBase + 24, true),
+          view.getUint16(subBase + 40, true),
+          pollStartMonoNs,
+          pollStartRealtimeNs,
+        ),
+      });
+    }
+
+    const emitEvents = (): PollWaitState => {
       if (netBridge) {
         pumpNetSocket(netBridge);
       }
@@ -928,10 +1018,12 @@ async function runWasi(args: RunnerArgs): Promise<void> {
       const netWritable = netBridge
         ? netBridge.accepted && !netBridge.ended
         : false;
+      const nowMonoNs = process.hrtime.bigint();
 
       let written = 0;
-      let shouldRetryWait = false;
-      clockSubs.length = 0;
+      let needsStdinWait = false;
+      let needsNetPoll = false;
+      let nextClockDeadlineNs: bigint | null = null;
 
       for (let i = 0; i < nsubscriptions; i += 1) {
         const subBase = inPtr + i * 48;
@@ -939,7 +1031,20 @@ async function runWasi(args: RunnerArgs): Promise<void> {
         const type = view.getUint8(subBase + 8);
 
         if (type === 0) {
-          clockSubs.push({ userdata });
+          const clockSub = clockDeadlines.get(i);
+          if (!clockSub) {
+            continue;
+          }
+
+          if (clockSub.deadlineNs <= nowMonoNs) {
+            writePollEvent(view, outPtr, written, clockSub.userdata, 0, 0);
+            written += 1;
+          } else if (
+            nextClockDeadlineNs === null ||
+            clockSub.deadlineNs < nextClockDeadlineNs
+          ) {
+            nextClockDeadlineNs = clockSub.deadlineNs;
+          }
           continue;
         }
 
@@ -952,7 +1057,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
             continue;
           }
           if (fd === 0) {
-            shouldRetryWait = true;
+            needsStdinWait = true;
             continue;
           }
           if (netBridge && fd === NET_LISTEN_FD && !netBridge.accepted) {
@@ -973,7 +1078,7 @@ async function runWasi(args: RunnerArgs): Promise<void> {
             continue;
           }
           if (netBridge && (fd === NET_LISTEN_FD || fd === NET_CONN_FD)) {
-            shouldRetryWait = true;
+            needsNetPoll = true;
           }
           continue;
         }
@@ -992,41 +1097,49 @@ async function runWasi(args: RunnerArgs): Promise<void> {
             continue;
           }
           if (netBridge && fd === NET_CONN_FD) {
-            shouldRetryWait = true;
+            needsNetPoll = true;
           }
         }
       }
 
-      return { written, shouldRetryWait, hasClockSubscriptions: clockSubs.length > 0 };
+      return {
+        written,
+        needsStdinWait,
+        needsNetPoll,
+        nextClockDeadlineNs,
+      };
     };
 
     let pollState = emitEvents();
     let eventsWritten = pollState.written;
     profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
 
-    if (
+    while (
       eventsWritten === 0 &&
-      pollState.shouldRetryWait &&
-      !pollState.hasClockSubscriptions
+      (pollState.needsStdinWait ||
+        pollState.needsNetPoll ||
+        pollState.nextClockDeadlineNs !== null)
     ) {
       const waitStart = process.hrtime.bigint();
+      const waitTimeoutMs = resolvePollWaitTimeoutMs(pollState, waitStart);
+
+      if (waitTimeoutMs === 0) {
+        pollState = emitEvents();
+        eventsWritten = pollState.written;
+        profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
+        continue;
+      }
+
       const seq = Atomics.load(stdinBridge.state, STDIN_WAKE_SEQ);
-      Atomics.wait(stdinBridge.state, STDIN_WAKE_SEQ, seq, POLL_IDLE_WAIT_MS);
+      Atomics.wait(stdinBridge.state, STDIN_WAKE_SEQ, seq, waitTimeoutMs);
       profile.duration(
-        "wasm_runtime.poll_oneoff.stdin_wait",
+        "wasm_runtime.poll_oneoff.wait",
         process.hrtime.bigint() - waitStart,
       );
-      profile.count("wasm_runtime.poll_oneoff.stdin_wait_count");
+      profile.count("wasm_runtime.poll_oneoff.wait_count");
       pollState = emitEvents();
       eventsWritten = pollState.written;
       profile.observe("wasm_runtime.poll_oneoff.events_written", eventsWritten);
-    }
-
-    if (eventsWritten === 0) {
-      for (const clockSub of clockSubs) {
-        writePollEvent(view, outPtr, eventsWritten, clockSub.userdata, 0, 0);
-        eventsWritten += 1;
-      }
     }
 
     view.setUint32(neventsPtr, eventsWritten, true);
@@ -1197,4 +1310,7 @@ if (import.meta.main) {
 
 export const __test = {
   parseArgs,
+  resolveClockDeadlineNs,
+  resolvePollWaitTimeoutMs,
+  POLL_NET_WAIT_SLICE_MS,
 };
