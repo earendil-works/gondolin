@@ -64,6 +64,21 @@ const HTTP_STREAMING_RX_PAUSE_LOW_WATER_BYTES = 256 * 1024;
 // Keep this bounded separately from maxHttpBodyBytes.
 const MAX_HTTP_CHUNKED_OVERHEAD_BYTES = 256 * 1024;
 
+/**
+ * WebSocket upgrade headers that the WHATWG Fetch spec's forbidden
+ * request-header name list silently strips from `new Request()`.
+ * These must be re-injected after `applyRequestHooks` so the
+ * upstream handshake succeeds.
+ */
+const WEBSOCKET_UPGRADE_HEADER_NAMES = [
+  "connection",
+  "upgrade",
+  "sec-websocket-key",
+  "sec-websocket-version",
+  "sec-websocket-protocol",
+  "sec-websocket-extensions",
+] as const;
+
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
 export type HttpSession = {
@@ -1720,6 +1735,15 @@ async function handleWebSocketUpgrade(
   }
 
   const hookRequest = requestHooked.request;
+
+  // Re-inject WebSocket headers stripped by the WHATWG Request constructor
+  // in applyRequestHooks (see WEBSOCKET_UPGRADE_HEADER_NAMES).
+  for (const h of WEBSOCKET_UPGRADE_HEADER_NAMES) {
+    if (baseRequest.headers[h] !== undefined && !(h in hookRequest.headers)) {
+      hookRequest.headers[h] = baseRequest.headers[h]!;
+    }
+  }
+
   const requestPolicyNeedsRecheck =
     !policyPrechecked ||
     hasPolicyRelevantRequestHeadChange(baseRequest, hookRequest);

@@ -2357,6 +2357,133 @@ test("qemu-net: websocket upgrade prechecked request policy runs once", async ()
   }
 });
 
+test("qemu-net: websocket upgrade preserves headers when onRequest hook is set", async () => {
+  // Regression test: createHttpHooks sets an onRequest hook which converts the
+  // request to a WHATWG Request object. The Fetch spec's forbidden-header-name
+  // list silently strips connection, upgrade, sec-websocket-* headers. Without
+  // the re-injection fix, the upstream server receives a plain GET and rejects
+  // the upgrade.
+
+  const receivedHeaders: Record<string, string> = {};
+  const server = net.createServer((sock) => {
+    let buf = Buffer.alloc(0);
+    sock.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const idx = buf.indexOf("\r\n\r\n");
+      if (idx === -1) return;
+
+      // Parse and record the headers the server actually received
+      const head = buf.subarray(0, idx).toString("latin1");
+      const lines = head.split("\r\n");
+      for (let i = 1; i < lines.length; i++) {
+        const colon = lines[i].indexOf(":");
+        if (colon === -1) continue;
+        const name = lines[i].slice(0, colon).trim().toLowerCase();
+        const value = lines[i].slice(colon + 1).trim();
+        receivedHeaders[name] = value;
+      }
+
+      // Validate WebSocket upgrade headers are present
+      if (
+        receivedHeaders["upgrade"]?.toLowerCase() === "websocket" &&
+        receivedHeaders["sec-websocket-key"]
+      ) {
+        sock.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "\r\n",
+        );
+        sock.write(Buffer.from("ws-ok"));
+      } else {
+        sock.write(
+          "HTTP/1.1 400 Bad Request\r\n" +
+            "Content-Length: 24\r\n" +
+            "\r\n" +
+            "missing upgrade headers\n",
+        );
+      }
+      sock.end();
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+
+  const { httpHooks } = createHttpHooks({
+    allowedHosts: ["example.com"],
+    blockInternalRanges: false,
+  });
+
+  const backend = makeBackend({
+    httpHooks,
+    allowWebSockets: true,
+  });
+
+  backend.options.dnsLookup = dnsLookupStub([
+    { address: "127.0.0.1", family: 4 },
+  ]);
+
+  const key = "TCP:1.1.1.1:1234:2.2.2.2:80";
+  const session: any = {
+    socket: null,
+    srcIP: "1.1.1.1",
+    srcPort: 1234,
+    dstIP: "2.2.2.2",
+    dstPort: 80,
+    connectIP: "2.2.2.2",
+    flowControlPaused: false,
+    protocol: "http",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  backend.tcpSessions.set(key, session);
+
+  const writes: Buffer[] = [];
+  const req = Buffer.from(
+    "GET /chat HTTP/1.1\r\n" +
+      `Host: example.com:${addr.port}\r\n` +
+      "Connection: Upgrade\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+      "Sec-WebSocket-Version: 13\r\n" +
+      "\r\n",
+  );
+
+  try {
+    await qemuHttp.handleHttpDataWithWriter(backend, key, session, req, {
+      scheme: "http",
+      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+      finish: () => {},
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const out = Buffer.concat(writes).toString("utf8");
+
+    // The server should receive the upgrade headers and respond with 101
+    assert.match(out, /^HTTP\/1\.1 101 /);
+    assert.ok(out.includes("ws-ok"));
+
+    // Verify the server actually received the critical WebSocket headers
+    assert.equal(receivedHeaders["upgrade"], "websocket");
+    assert.equal(receivedHeaders["connection"], "Upgrade");
+    assert.equal(
+      receivedHeaders["sec-websocket-key"],
+      "dGhlIHNhbXBsZSBub25jZQ==",
+    );
+    assert.equal(receivedHeaders["sec-websocket-version"], "13");
+  } finally {
+    try {
+      await backend.close();
+    } catch {}
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("qemu-net: websocket upstream connect timeout covers stalled tls handshake", async () => {
   const serverSockets: net.Socket[] = [];
   const server = net.createServer((sock) => {
