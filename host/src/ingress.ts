@@ -1331,7 +1331,16 @@ export class IngressGateway {
         onError: onUpstreamError,
       });
 
-      // Stream body
+      // Stream body.
+      // Do NOT call upstream.end() after writing. Ending the writable side
+      // sends tcp_eof to the guest, which translates to shutdown(SHUT_WR) /
+      // TCP FIN on the loopback socket. Some HTTP servers (Kestrel, Vite)
+      // interpret an incoming FIN during request processing as a client
+      // disconnect and close without responding, causing a 502. HTTP request
+      // completion is already signaled at the application layer (end of
+      // headers for bodyless requests, Content-Length, chunked terminator),
+      // so the TCP-level half-close is redundant and harmful. The stream is
+      // destroyed in the finally block after the response is fully read.
       if (hasBody) {
         if (useChunked) {
           for await (const chunk of req) {
@@ -1345,15 +1354,11 @@ export class IngressGateway {
             await writeStream(upstream, "\r\n");
           }
           await writeStream(upstream, "0\r\n\r\n");
-          upstream.end();
         } else {
           for await (const chunk of req) {
             await writeStream(upstream, Buffer.from(chunk as Buffer));
           }
-          upstream.end();
         }
-      } else {
-        upstream.end();
       }
 
       // Read response head

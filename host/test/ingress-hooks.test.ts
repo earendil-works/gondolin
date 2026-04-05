@@ -8,6 +8,7 @@ import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 class CaptureDuplex extends Duplex {
   readonly written: Buffer[] = [];
+  private firstWriteFired = false;
 
   _read(_size: number) {
     // driven by push() from the test
@@ -19,6 +20,10 @@ class CaptureDuplex extends Duplex {
     cb: (error?: Error | null) => void,
   ) {
     this.written.push(Buffer.from(chunk));
+    if (!this.firstWriteFired) {
+      this.firstWriteFired = true;
+      this.emit("first_write");
+    }
     cb();
   }
 }
@@ -101,7 +106,7 @@ test("IngressGateway hooks: onRequest can rewrite target and headers", async () 
   const sandbox = {
     openIngressStream: async () => {
       upstream = new CaptureDuplex();
-      upstream.once("finish", () => {
+      upstream.once("first_write", () => {
         upstream!.push("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         upstream!.push(null);
       });
@@ -152,7 +157,7 @@ test("IngressGateway hooks: onResponse can rewrite status and headers without bu
   const sandbox = {
     openIngressStream: async () => {
       const upstream = new CaptureDuplex();
-      upstream.once("finish", () => {
+      upstream.once("first_write", () => {
         upstream.push("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         upstream.push(null);
       });
@@ -196,7 +201,7 @@ test("IngressGateway hooks: bufferResponseBody enables body rewrites", async () 
   const sandbox = {
     openIngressStream: async () => {
       const upstream = new CaptureDuplex();
-      upstream.once("finish", () => {
+      upstream.once("first_write", () => {
         upstream.push(
           "HTTP/1.1 200 OK\r\n" +
             "Transfer-Encoding: chunked\r\n" +

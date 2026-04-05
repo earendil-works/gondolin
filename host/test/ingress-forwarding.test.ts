@@ -8,6 +8,7 @@ import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 class CaptureDuplex extends Duplex {
   readonly written: Buffer[] = [];
+  private firstWriteFired = false;
 
   _read(_size: number) {
     // driven by push() from the test
@@ -19,6 +20,10 @@ class CaptureDuplex extends Duplex {
     cb: (error?: Error | null) => void,
   ) {
     this.written.push(Buffer.from(chunk));
+    if (!this.firstWriteFired) {
+      this.firstWriteFired = true;
+      this.emit("first_write");
+    }
     cb();
   }
 }
@@ -68,7 +73,7 @@ test("IngressGateway: ignores client Content-Length when transfer-encoding is pr
   const sandbox = {
     openIngressStream: async () => {
       upstream = new CaptureDuplex();
-      upstream.once("finish", () => {
+      upstream.once("first_write", () => {
         // Duplicate TE header lines to ensure the gateway handles string[] values.
         const response =
           "HTTP/1.1 200 OK\r\n" +
