@@ -11,6 +11,12 @@ const protocol = @import("protocol.zig");
 const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
 const MAX_BUFFERED_TCP: usize = 256 * 1024;
 
+const BackendReadResult = enum {
+    would_block,
+    forwarded,
+    closed,
+};
+
 const Conn = struct {
     fd: std.posix.fd_t,
     /// pending bytes to write to tcp socket
@@ -180,34 +186,75 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                 }
             }
 
-            if ((revents & std.posix.POLL.IN) != 0) {
-                const n = std.posix.read(conn_ptr.fd, buffer[0..]) catch |err| blk: {
-                    if (err == error.WouldBlock) break :blk @as(usize, 0);
-                    closeConn(allocator, &conns, &writer, id);
-                    break :blk @as(usize, 0);
-                };
-                if (n == 0) {
-                    closeConn(allocator, &conns, &writer, id);
-                } else if (n > 0) {
-                    const payload = protocol.encodeTcpData(allocator, id, buffer[0..n]) catch |err| {
-                        log.err("encode tcp_data failed: {s}", .{@errorName(err)});
-                        continue;
-                    };
-                    defer allocator.free(payload);
-                    writer.enqueue(payload) catch |err| {
-                        log.err("virtio enqueue failed: {s}", .{@errorName(err)});
-                        closeConn(allocator, &conns, &writer, id);
-                        continue;
-                    };
-                    writer.flush(virtio_fd) catch {};
+            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                while (writer.pendingBytes() < MAX_BUFFERED_VIRTIO) {
+                    switch (forwardBackendReadChunk(
+                        allocator,
+                        &conns,
+                        &writer,
+                        virtio_fd,
+                        log,
+                        id,
+                        conn_ptr.fd,
+                        buffer[0..],
+                    )) {
+                        .forwarded => continue,
+                        .would_block, .closed => break,
+                    }
                 }
-            }
-
-            if ((revents & std.posix.POLL.HUP) != 0) {
-                closeConn(allocator, &conns, &writer, id);
             }
         }
     }
+}
+
+fn forwardBackendReadChunk(
+    allocator: std.mem.Allocator,
+    conns: *std.AutoHashMap(u32, Conn),
+    writer: *protocol.FrameWriter,
+    virtio_fd: std.posix.fd_t,
+    log: anytype,
+    id: u32,
+    backend_fd: std.posix.fd_t,
+    buffer: []u8,
+) BackendReadResult {
+    const n = std.posix.read(backend_fd, buffer) catch |err| {
+        if (err == error.WouldBlock) return .would_block;
+        closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    if (n == 0) {
+        closeConn(allocator, conns, writer, id);
+        return .closed;
+    }
+
+    return forwardBackendPayload(allocator, conns, writer, virtio_fd, log, id, buffer[0..n]);
+}
+
+fn forwardBackendPayload(
+    allocator: std.mem.Allocator,
+    conns: *std.AutoHashMap(u32, Conn),
+    writer: *protocol.FrameWriter,
+    virtio_fd: std.posix.fd_t,
+    log: anytype,
+    id: u32,
+    payload_bytes: []const u8,
+) BackendReadResult {
+    const payload = protocol.encodeTcpData(allocator, id, payload_bytes) catch |err| {
+        log.err("encode tcp_data failed: {s}", .{@errorName(err)});
+        closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    defer allocator.free(payload);
+
+    writer.enqueue(payload) catch |err| {
+        log.err("virtio enqueue failed: {s}", .{@errorName(err)});
+        closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    writer.flush(virtio_fd) catch |err| {
+        log.err("virtio flush failed for conn {d}: {s}", .{ id, @errorName(err) });
+    };
+    return .forwarded;
 }
 
 fn closeConn(
@@ -225,6 +272,49 @@ fn closeConn(
         defer allocator.free(payload);
         writer.enqueue(payload) catch return;
     }
+}
+
+test "forwardBackendPayload closes connection when encoding fails after read" {
+    var allocator_bytes: [1024]u8 = undefined;
+    var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&allocator_bytes);
+    const allocator = fixed_buffer_allocator.allocator();
+
+    var writer = protocol.FrameWriter.init(allocator);
+    defer writer.deinit();
+
+    var conns = std.AutoHashMap(u32, Conn).init(allocator);
+    defer {
+        var it = conns.iterator();
+        while (it.next()) |entry| {
+            std.posix.close(entry.value_ptr.fd);
+            entry.value_ptr.pending.deinit(allocator);
+        }
+        conns.deinit();
+    }
+
+    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(pipe_fds[1]);
+
+    try conns.put(7, .{
+        .fd = pipe_fds[0],
+        .pending = .empty,
+        .host_eof = false,
+        .backend_shutdown = false,
+    });
+
+    const payload = [_]u8{0xaa} ** 8192;
+    const result = forwardBackendPayload(
+        allocator,
+        &conns,
+        &writer,
+        pipe_fds[1],
+        std.log.scoped(.tcp_forwarder_test),
+        7,
+        payload[0..],
+    );
+
+    try std.testing.expectEqual(BackendReadResult.closed, result);
+    try std.testing.expect(conns.getPtr(7) == null);
 }
 
 fn handleOpen(
