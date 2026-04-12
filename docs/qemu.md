@@ -128,11 +128,11 @@ primary differences are in the acceleration backend and QEMU machine defaults.
 ### Acceleration
 
 - Linux: uses KVM when available.
-  - Requires access to /dev/kvm.
-  - Typically provides very good performance.
+    - Requires access to /dev/kvm.
+    - Typically provides very good performance.
 - macOS: uses HVF.
-  - Works on Apple Silicon and on Intel Macs with HVF support.
-  - Some QEMU features may differ slightly from KVM.
+    - Works on Apple Silicon and on Intel Macs with HVF support.
+    - Some QEMU features may differ slightly from KVM.
 
 If hardware acceleration is not available, QEMU can fall back to software
 emulation (TCG).  This is much slower and is not the recommended mode for regular

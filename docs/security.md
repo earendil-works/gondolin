@@ -69,17 +69,17 @@ This is a rough overview of the system today.
 ### High-Level Components
 
 - **Host (TypeScript)**
-  - `SandboxController` spawns and manages QEMU
-  - `SandboxServer` implements the virtio-serial control plane, VFS RPC service, and network backend
-  - `QemuNetworkBackend` implements an Ethernet/IP/TCP stack, HTTP/TLS mediation, optional SSH egress proxying, and optional explicit mapped TCP egress
-  - VFS providers implement programmable filesystem behavior (based on NodeJS's upcoming VFS)
+    - `SandboxController` spawns and manages QEMU
+    - `SandboxServer` implements the virtio-serial control plane, VFS RPC service, and network backend
+    - `QemuNetworkBackend` implements an Ethernet/IP/TCP stack, HTTP/TLS mediation, optional SSH egress proxying, and optional explicit mapped TCP egress
+    - VFS providers implement programmable filesystem behavior (based on NodeJS's upcoming VFS)
 
 - **Guest (Zig + init scripts)**
-  - `sandboxd` executes commands requested by the host over virtio-serial
-  - `sandboxfs` is a FUSE filesystem that proxies filesystem operations to the host over RPC
-  - `sandboxssh` is a dedicated virtio-serial TCP forwarder for *loopback-only* connections inside the guest
-  - `sandboxingress` is a dedicated virtio-serial TCP forwarder for *loopback-only* ingress connections (host-to-guest HTTP routing)
-  - `/init` sets up tmpfs mounts, networking, starts `sandboxfs`, `sandboxssh`, `sandboxingress`, then starts `sandboxd`
+    - `sandboxd` executes commands requested by the host over virtio-serial
+    - `sandboxfs` is a FUSE filesystem that proxies filesystem operations to the host over RPC
+    - `sandboxssh` is a dedicated virtio-serial TCP forwarder for *loopback-only* connections inside the guest
+    - `sandboxingress` is a dedicated virtio-serial TCP forwarder for *loopback-only* ingress connections (host-to-guest HTTP routing)
+    - `/init` sets up tmpfs mounts, networking, starts `sandboxfs`, `sandboxssh`, `sandboxingress`, then starts `sandboxd`
 
 ### Trust Boundaries
 
@@ -114,10 +114,10 @@ This is what Gondolin actually enforces.
 - Guest code runs inside a QEMU VM.
 - The QEMU invocation is intentionally minimal (see `host/src/sandbox/controller.ts`):
 
-  - `-nodefaults` (avoid unexpected devices)
-  - `-no-reboot`, `-nographic`
-  - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng)
-  - the root filesystem is attached as a copy-on-write disk (qcow2 overlay) so writes do not persist to the base image
+    - `-nodefaults` (avoid unexpected devices)
+    - `-no-reboot`, `-nographic`
+    - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng)
+    - the root filesystem is attached as a copy-on-write disk (qcow2 overlay) so writes do not persist to the base image
 
 **Guarantee:** absent a QEMU escape, guest processes cannot directly access the
 *host kernel, host memory, or host filesystem.
@@ -136,56 +136,56 @@ Key enforcement points:
 
 1. **Protocol allowlist + explicit TCP mappings**
 
-    - For each outgoing TCP flow, the host first checks whether an explicit `tcp.hosts` mapping matches the synthetic hostname (+ optional port)
-        - this requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
-        - if matched, the flow is marked as mapped `tcp` and forwarded to the configured upstream `HOST:PORT`
-    - Otherwise, the host sniffs first bytes and classifies as:
-        - `http` (HTTP/1.x request line)
-        - `tls` (TLS ClientHello record)
-        - `ssh` (SSH version banner on configured SSH ports, only when SSH egress is enabled)
-        - otherwise **denied** (`unknown-protocol`)
-    - HTTP `CONNECT` is explicitly denied (`connect-not-allowed`).
+        - For each outgoing TCP flow, the host first checks whether an explicit `tcp.hosts` mapping matches the synthetic hostname (+ optional port)
+            - this requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
+            - if matched, the flow is marked as mapped `tcp` and forwarded to the configured upstream `HOST:PORT`
+        - Otherwise, the host sniffs first bytes and classifies as:
+            - `http` (HTTP/1.x request line)
+            - `tls` (TLS ClientHello record)
+            - `ssh` (SSH version banner on configured SSH ports, only when SSH egress is enabled)
+            - otherwise **denied** (`unknown-protocol`)
+        - HTTP `CONNECT` is explicitly denied (`connect-not-allowed`).
 
     This prevents arbitrary guest-selected TCP tunneling while allowing narrow, explicit TCP exceptions.
 
 2. **UDP is blocked except for DNS**
-    - Only UDP destination port `53` is handled; other UDP is blocked.
-    - DNS handling is mode-dependent:
-      - `synthetic` (default): no upstream DNS; the host replies with synthetic `A`/`AAAA` answers (prevents using DNS as an egress channel)
-      - `trusted`: the host forwards *valid DNS queries* only to the host's trusted resolvers, and replies to the guest as if the response came from the originally targeted resolver IP
+        - Only UDP destination port `53` is handled; other UDP is blocked.
+        - DNS handling is mode-dependent:
+            - `synthetic` (default): no upstream DNS; the host replies with synthetic `A`/`AAAA` answers (prevents using DNS as an egress channel)
+            - `trusted`: the host forwards *valid DNS queries* only to the host's trusted resolvers, and replies to the guest as if the response came from the originally targeted resolver IP
 
-        - Prevents using UDP/53 as arbitrary UDP transport to arbitrary destination IPs
-        - Does **not** prevent classic DNS tunneling to attacker-controlled domains (it still performs real DNS lookups)
-        - Upstream resolvers are currently **IPv4-only** and must be explicitly provided or discoverable on the host
+                - Prevents using UDP/53 as arbitrary UDP transport to arbitrary destination IPs
+                - Does **not** prevent classic DNS tunneling to attacker-controlled domains (it still performs real DNS lookups)
+                - Upstream resolvers are currently **IPv4-only** and must be explicitly provided or discoverable on the host
 
-      - `open`: forwards UDP/53 to the destination IP the guest targeted; payloads are not validated as DNS (enables UDP/53 tunneling)
+            - `open`: forwards UDP/53 to the destination IP the guest targeted; payloads are not validated as DNS (enables UDP/53 tunneling)
 
 3. **HTTP/HTTPS is bridged by the host**
 
-    - For `http` flows, the host parses the request and replays it using `fetch` (undici).
-    - For `tls` flows, the host performs a **TLS MITM** (see below) to recover the HTTP request, then replays via `fetch`.
+        - For `http` flows, the host parses the request and replays it using `fetch` (undici).
+        - For `tls` flows, the host performs a **TLS MITM** (see below) to recover the HTTP request, then replays via `fetch`.
 
 4. **Host allowlist and internal-range blocking**
 
-    - `createHttpHooks()` (see `host/src/http/hooks.ts`) produces separate policy hooks:
-        - `httpHooks.isRequestAllowed(request)` for request-content policy
-        - `httpHooks.isIpAllowed({ hostname, ip, family, port, protocol })` for destination IP policy
-    - By default, `isIpAllowed` blocks internal ranges (`blockInternalRanges: true`), including:
-        - IPv4: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0/8, broadcast
-        - IPv6: loopback, link-local, ULA, and IPv4-mapped variants
-    - It can also require that the request hostname matches a configured allowlist (with `*` wildcards).
+        - `createHttpHooks()` (see `host/src/http/hooks.ts`) produces separate policy hooks:
+            - `httpHooks.isRequestAllowed(request)` for request-content policy
+            - `httpHooks.isIpAllowed({ hostname, ip, family, port, protocol })` for destination IP policy
+        - By default, `isIpAllowed` blocks internal ranges (`blockInternalRanges: true`), including:
+            - IPv4: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0/8, broadcast
+            - IPv6: loopback, link-local, ULA, and IPv4-mapped variants
+        - It can also require that the request hostname matches a configured allowlist (with `*` wildcards).
 
 5. **DNS rebinding protection**
     Gondolin checks policy in *two* places:
 
-    - Before each outbound request, Gondolin evaluates request policy (`isRequestAllowed`) and hostname->IP policy (`isIpAllowed`) after resolving the hostname.
-    - When using the default `fetch`, Gondolin installs a custom undici dispatcher with a guarded `lookup()` (`createLookupGuard()`), which re-checks `isIpAllowed()` against IPs selected during connection establishment.
-    - With pooled keep-alive connections, this connect-time IP check runs when a new upstream connection is opened, and reused connections do not trigger a fresh connect-time check.
+        - Before each outbound request, Gondolin evaluates request policy (`isRequestAllowed`) and hostname->IP policy (`isIpAllowed`) after resolving the hostname.
+        - When using the default `fetch`, Gondolin installs a custom undici dispatcher with a guarded `lookup()` (`createLookupGuard()`), which re-checks `isIpAllowed()` against IPs selected during connection establishment.
+        - With pooled keep-alive connections, this connect-time IP check runs when a new upstream connection is opened, and reused connections do not trigger a fresh connect-time check.
 
 6. **Redirect policy is enforced by the host**
 
-    - The host follows redirects itself (`redirect: "manual"` + explicit handling).
-    - Each redirect target is revalidated against policy before fetching.
+        - The host follows redirects itself (`redirect: "manual"` + explicit handling).
+        - Each redirect target is revalidated against policy before fetching.
 
 #### Egress Capability Matrix
 
@@ -225,10 +225,10 @@ Gondolin's secret strategy is:
   (`createHttpHooks().httpHooks.onRequest`) scans outbound headers and **replaces
   placeholders with real secret values** *only* if the destination hostname
   matches the secret's host allowlist.
-  - URL query parameter replacement is available only as an explicit opt-in
+    - URL query parameter replacement is available only as an explicit opt-in
     (`replaceSecretsInQuery: true`) because it increases reflection risk.
 
-  - This includes `Authorization: Basic …` / `Proxy-Authorization: Basic …`: the
+    - This includes `Authorization: Basic …` / `Proxy-Authorization: Basic …`: the
     base64 token is decoded as `username:password`, placeholders are substituted,
     and the token is re-encoded.
 - If a placeholder is found but the destination host is not allowed, the request
@@ -258,9 +258,9 @@ The programmable filesystem path is:
   operations to a `VirtualProvider`.
 - Providers can be:
 
-  - in-memory (`MemoryProvider`)
-  - real host filesystem (`RealFSProvider`)
-  - wrappers (`ReadonlyProvider`, mount routers, custom policy providers)
+    - in-memory (`MemoryProvider`)
+    - real host filesystem (`RealFSProvider`)
+    - wrappers (`ReadonlyProvider`, mount routers, custom policy providers)
 
 `FsRpcService` enforces basic protocol invariants:
 

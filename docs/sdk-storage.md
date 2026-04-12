@@ -99,12 +99,12 @@ You can control rootfs write behavior per VM:
 
 - `readonly`: rootfs is read-only (`EROFS` on writes)
 - `memory`: writable throwaway rootfs
-  - on `qemu`, this uses backend-native snapshot mode
-  - on `krun`, this is **not RAM-backed**; Gondolin creates a temporary qcow2 overlay on disk and deletes it on close
+    - on `qemu`, this uses backend-native snapshot mode
+    - on `krun`, this is **not RAM-backed**; Gondolin creates a temporary qcow2 overlay on disk and deletes it on close
 - `cow`: writable qcow2 copy-on-write overlay (default)
-  - this does **not** write back into the original rootfs image
-  - by default it is a throwaway qcow2 overlay file that is deleted on close
-  - because it is a real qcow2 layer, it can be checkpointed
+    - this does **not** write back into the original rootfs image
+    - by default it is a throwaway qcow2 overlay file that is deleted on close
+    - because it is a real qcow2 layer, it can be checkpointed
 
 ```ts
 const vm = await VM.create({

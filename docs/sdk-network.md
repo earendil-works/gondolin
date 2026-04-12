@@ -125,8 +125,8 @@ Safety model:
 - This mode requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
 - Hostname matching uses synthetic DNS host attribution (same model as SSH egress)
 - Mapped TCP flows are raw tunnels to the configured upstream target
-  - they do **not** use HTTP request/response hooks
-  - they do **not** use HTTP secret placeholder substitution
+    - they do **not** use HTTP request/response hooks
+    - they do **not** use HTTP secret placeholder substitution
 
 Use this as a narrow exception path, not a general-purpose network mode.
 

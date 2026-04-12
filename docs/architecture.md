@@ -99,14 +99,14 @@ It's useful to think of Gondolin as two planes:
 
 - **Control plane:** structured RPC over virtio-serial
 
-  - command execution (`vm.exec`)
-  - filesystem RPC for the programmable mounts
-  - a small set of host <-> guest utility channels
+    - command execution (`vm.exec`)
+    - filesystem RPC for the programmable mounts
+    - a small set of host <-> guest utility channels
 
 - **Data plane:** guest-visible "normal" Linux interfaces
 
-  - `eth0` exists, but egress is mediated by the host (no generic NAT)
-  - files under mounted VFS paths behave like normal paths, but operations are
+    - `eth0` exists, but egress is mediated by the host (no generic NAT)
+    - files under mounted VFS paths behave like normal paths, but operations are
     served by host providers
 
 ## What Happens When You Run `vm.exec(...)`

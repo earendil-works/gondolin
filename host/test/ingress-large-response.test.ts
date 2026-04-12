@@ -149,7 +149,7 @@ test.after(() => {
 });
 
 test(
-  "enableIngress forwards full large fixed-length responses",
+  "ingress forwards full large fixed-length responses (issue #86)",
   {
     skip: skipVmTests || missingRepoGuestAssetsReason,
     timeout: timeoutMs,

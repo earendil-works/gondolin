@@ -49,18 +49,18 @@ options for configuring filesystem mounts and mediated network egress policy.
 ### VFS (Filesystem) Options
 
 - `--mount-hostfs HOST_DIR:GUEST_PATH[:ro]`
-  - Mount a host directory into the guest at `GUEST_PATH`
-  - Add `:ro` to force read-only access
-  - Note: the host path must exist and must be a directory
+    - Mount a host directory into the guest at `GUEST_PATH`
+    - Add `:ro` to force read-only access
+    - Note: the host path must exist and must be a directory
 
 - `--mount-memfs GUEST_PATH`
-  - Create an in-memory mount at `GUEST_PATH` (ephemeral)
+    - Create an in-memory mount at `GUEST_PATH` (ephemeral)
 
 - `--image IMAGE`
-  - Select guest assets by path, build id, or local image ref (`name:tag`)
+    - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 - `--vmm BACKEND`
-  - Select backend per command: `qemu` or `krun`
+    - Select backend per command: `qemu` or `krun`
 
 Examples:
 
@@ -80,45 +80,45 @@ on the host side, which allows enforcing host allowlists and injecting secrets
 without exposing them inside the VM (for HTTP/TLS-mediated flows).
 
 - `--allow-host HOST_PATTERN`
-  - Allow outbound HTTP/HTTPS requests to this host
-  - May be repeated
-  - `HOST_PATTERN` supports `*` wildcards (for example `*.github.com`)
+    - Allow outbound HTTP/HTTPS requests to this host
+    - May be repeated
+    - `HOST_PATTERN` supports `*` wildcards (for example `*.github.com`)
 
 - `--host-secret NAME@HOST[,HOST...][=VALUE]`
-  - Make a secret available inside the VM as an environment variable named `NAME`
-  - The VM only sees a random placeholder value; the host replaces that
+    - Make a secret available inside the VM as an environment variable named `NAME`
+    - The VM only sees a random placeholder value; the host replaces that
     placeholder with the real secret **when it appears in an outgoing HTTP
     header** (including `Authorization: Basic …`, where the base64 token is
     decoded and placeholders inside `username:password` are substituted)
-  - The secret is only permitted for the listed host(s)
-  - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
+    - The secret is only permitted for the listed host(s)
+    - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
 - `--disable-websockets`
-  - Disable WebSocket upgrades through the bridge
-  - Affects both:
-    - egress (guest -> upstream)
-    - ingress (host -> guest) when using `gondolin bash --listen`
+    - Disable WebSocket upgrades through the bridge
+    - Affects both:
+        - egress (guest -> upstream)
+        - ingress (host -> guest) when using `gondolin bash --listen`
 
 ### DNS Options
 
 - `--dns MODE`
-  - DNS resolution mode: `synthetic` (default), `trusted`, or `open`
-  - `synthetic`: the host intercepts DNS lookups and maps hostnames to
+    - DNS resolution mode: `synthetic` (default), `trusted`, or `open`
+    - `synthetic`: the host intercepts DNS lookups and maps hostnames to
     synthetic IP addresses (required for SSH egress proxy)
-  - `trusted`: forward DNS queries to one or more trusted resolvers
-  - `open`: unrestricted DNS
+    - `trusted`: forward DNS queries to one or more trusted resolvers
+    - `open`: unrestricted DNS
 
 - `--dns-trusted-server IP`
-  - Trusted resolver IPv4 address (repeatable; requires `--dns trusted`)
+    - Trusted resolver IPv4 address (repeatable; requires `--dns trusted`)
 
 - `--dns-synthetic-host-mapping MODE`
-  - Hostname-to-IP mapping strategy when using synthetic DNS: `single` or `per-host`
+    - Hostname-to-IP mapping strategy when using synthetic DNS: `single` or `per-host`
 
 - `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
-  - Add an explicit mapped TCP rule (repeatable)
-  - `GUEST_HOST` (or `GUEST_HOST:PORT`) is matched using synthetic DNS host attribution
-  - Traffic is forwarded as raw TCP to the explicit `UPSTREAM_HOST:PORT`
-  - If both `GUEST_HOST` and `GUEST_HOST:PORT` are configured, the port-specific mapping wins
+    - Add an explicit mapped TCP rule (repeatable)
+    - `GUEST_HOST` (or `GUEST_HOST:PORT`) is matched using synthetic DNS host attribution
+    - Traffic is forwarded as raw TCP to the explicit `UPSTREAM_HOST:PORT`
+    - If both `GUEST_HOST` and `GUEST_HOST:PORT` are configured, the port-specific mapping wins
 
 Examples:
 
@@ -151,9 +151,9 @@ Mapped TCP egress is an explicit exception path for non-HTTP protocols.
 
 - Rules are added with `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
 - `--tcp-map` requires synthetic DNS with per-host mapping
-  - the CLI auto-selects `--dns synthetic` and `--dns-synthetic-host-mapping per-host` when needed
+    - the CLI auto-selects `--dns synthetic` and `--dns-synthetic-host-mapping per-host` when needed
 - Mapped TCP is raw forwarding to the explicit upstream target
-  - HTTP hooks and HTTP secret substitution do not apply on mapped flows
+    - HTTP hooks and HTTP secret substitution do not apply on mapped flows
 
 Use this for narrow, explicit development targets (for example local Postgres),
 not as a general network mode.
@@ -169,8 +169,8 @@ Restrictions and properties:
 
 - Non-standard ports are supported by suffixing `:PORT` in `--ssh-allow-host` (default: `22`)
 - Only non-interactive `exec` channels are supported
-  - interactive shells are denied
-  - SSH subsystems (such as `sftp`) are denied
+    - interactive shells are denied
+    - SSH subsystems (such as `sftp`) are denied
 - Upstream host keys are verified on the host (via OpenSSH `known_hosts`)
 - Interactive passphrase prompting is not supported; prefer `passphrase-env`
 - Note: in shells, `~/.ssh/known_hosts` is only expanded when unquoted (otherwise use `$HOME/.ssh/known_hosts`)
@@ -178,16 +178,16 @@ Restrictions and properties:
 CLI flags:
 
 - `--ssh-allow-host HOST_PATTERN[:PORT]`
-  - Allow outbound SSH to the given host+port (repeatable, default port: 22)
+    - Allow outbound SSH to the given host+port (repeatable, default port: 22)
 - `--ssh-agent [SOCK]`
-  - Use a host ssh-agent socket (defaults to `$SSH_AUTH_SOCK`)
+    - Use a host ssh-agent socket (defaults to `$SSH_AUTH_SOCK`)
 - `--ssh-known-hosts PATH`
-  - OpenSSH `known_hosts` file for upstream verification (repeatable)
+    - OpenSSH `known_hosts` file for upstream verification (repeatable)
 - `--ssh-credential SPEC`
-  - Host-side SSH private key for upstream authentication
-  - Format:
-    - `HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
-    - `USER@HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+    - Host-side SSH private key for upstream authentication
+    - Format:
+        - `HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
+        - `USER@HOST[:PORT]=KEY_PATH[,passphrase-env=ENV][,passphrase=...]`
 
 Example (git over ssh using your host ssh-agent):
 
@@ -479,30 +479,30 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`
-  - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets)
-  - If set, Gondolin uses this directory instead of downloading cached assets
+    - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets)
+    - If set, Gondolin uses this directory instead of downloading cached assets
 
 - `GONDOLIN_IMAGE_STORE`
-  - Override local image store location (default: `~/.cache/gondolin/images`)
+    - Override local image store location (default: `~/.cache/gondolin/images`)
 
 - `GONDOLIN_DEFAULT_IMAGE`
-  - Default image selector used by `VM.create()` / `gondolin bash` when no explicit image is set
-  - Default: `alpine-base:latest`
+    - Default image selector used by `VM.create()` / `gondolin bash` when no explicit image is set
+    - Default: `alpine-base:latest`
 
 - `GONDOLIN_IMAGE_REGISTRY_URL`
-  - Override builtin image registry JSON URL
-  - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`
+    - Override builtin image registry JSON URL
+    - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`
 
 - `GONDOLIN_CHECKPOINT_DIR`
-  - Override checkpoint directory used by `gondolin snapshot` / `gondolin bash --resume`
-  - Default: `~/.cache/gondolin/checkpoints`
+    - Override checkpoint directory used by `gondolin snapshot` / `gondolin bash --resume`
+    - Default: `~/.cache/gondolin/checkpoints`
 
 - `GONDOLIN_SESSIONS_DIR`
-  - Override session registry directory used by `gondolin list` / `gondolin attach`
-  - Default: `~/.cache/gondolin/sessions`
+    - Override session registry directory used by `gondolin list` / `gondolin attach`
+    - Default: `~/.cache/gondolin/sessions`
 
 - `GONDOLIN_DEBUG`
-  - Enable debug logging (see [Debug Logging](./debug.md))
+    - Enable debug logging (see [Debug Logging](./debug.md))
 
 
 ## Help

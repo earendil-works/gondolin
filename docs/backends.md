@@ -38,8 +38,8 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 - Guest architecture must match the **host** architecture
 - Requires a **libkrunfw-compatible kernel**
 - Gondolin requires image manifest krun boot assets:
-  - `assets.krunKernel`
-  - `assets.krunInitrd` (optional; defaults to an empty initrd)
+    - `assets.krunKernel`
+    - `assets.krunInitrd` (optional; defaults to an empty initrd)
 - Build/setup path: `gondolin build` (or published image assets)
 - `make krun-runner` builds the runner binary; it does not provide kernel assets
 
