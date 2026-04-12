@@ -246,3 +246,52 @@ test("IngressGateway: returns 502 on upstream response body timeout while buffer
   assert.equal(res.statusCode, 502);
   assert.equal(Buffer.concat(res.bodyChunks).toString("utf8"), "bad gateway\n");
 });
+
+test("IngressGateway: does not half-close upstream before response arrives", async () => {
+  const listeners = new GondolinListeners(new MemoryProvider());
+  listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
+
+  let upstream: CaptureDuplex | null = null;
+  let upstreamEndCalls = 0;
+
+  const sandbox = {
+    openIngressStream: async () => {
+      upstream = new CaptureDuplex();
+
+      // Model backends (for example Kestrel) that treat an incoming FIN as
+      // a client disconnect and abort without sending a response.
+      upstream.end = ((..._args: any[]) => {
+        upstreamEndCalls += 1;
+        upstream!.destroy(new Error("backend aborted on client half-close"));
+        return upstream!;
+      }) as any;
+
+      upstream.once("first_write", () => {
+        setTimeout(() => {
+          if (!upstream || upstream.destroyed) return;
+          upstream.push("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+          upstream.push(null);
+        }, 20);
+      });
+
+      return upstream;
+    },
+  } as any;
+
+  const gateway = new IngressGateway(sandbox, listeners);
+
+  const req = Readable.from([]) as any;
+  req.method = "GET";
+  req.url = "/";
+  req.headers = { host: "example" };
+  req.socket = { remoteAddress: "203.0.113.1" };
+
+  const res = new CaptureResponse() as any;
+
+  await (gateway as any).handleRequest(req, res);
+  await once(res, "finish");
+
+  assert.equal(upstreamEndCalls, 0);
+  assert.equal(res.statusCode, 200);
+  assert.equal(Buffer.concat(res.bodyChunks).toString("utf8"), "ok");
+});
