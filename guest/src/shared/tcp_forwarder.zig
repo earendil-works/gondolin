@@ -275,6 +275,10 @@ fn closeConn(
 }
 
 test "forwardBackendPayload closes connection when encoding fails after read" {
+    const silent_log = struct {
+        fn err(_: @This(), comptime _: []const u8, _: anytype) void {}
+    }{};
+
     var allocator_bytes: [1024]u8 = undefined;
     var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&allocator_bytes);
     const allocator = fixed_buffer_allocator.allocator();
@@ -308,7 +312,7 @@ test "forwardBackendPayload closes connection when encoding fails after read" {
         &conns,
         &writer,
         pipe_fds[1],
-        std.log.scoped(.tcp_forwarder_test),
+        silent_log,
         7,
         payload[0..],
     );

@@ -13,6 +13,7 @@ guest/fuzz/out/
 guest/fuzz/out-native/
 guest/fuzz/cache/
 node_modules/
+.pnpm-store/
 host/node_modules/
 host/dist/
 host/var/
