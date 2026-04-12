@@ -180,31 +180,34 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                 }
             }
 
-            if ((revents & std.posix.POLL.IN) != 0) {
-                const n = std.posix.read(conn_ptr.fd, buffer[0..]) catch |err| blk: {
-                    if (err == error.WouldBlock) break :blk @as(usize, 0);
-                    closeConn(allocator, &conns, &writer, id);
-                    break :blk @as(usize, 0);
-                };
-                if (n == 0) {
-                    closeConn(allocator, &conns, &writer, id);
-                } else if (n > 0) {
-                    const payload = protocol.encodeTcpData(allocator, id, buffer[0..n]) catch |err| {
-                        log.err("encode tcp_data failed: {s}", .{@errorName(err)});
-                        continue;
-                    };
-                    defer allocator.free(payload);
-                    writer.enqueue(payload) catch |err| {
-                        log.err("virtio enqueue failed: {s}", .{@errorName(err)});
+            // POLLHUP can arrive while unread bytes are still pending.
+            // Probe with read() and only close on EOF (n == 0).
+            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                const maybe_n = std.posix.read(conn_ptr.fd, buffer[0..]) catch |err| switch (err) {
+                    error.WouldBlock => null,
+                    else => blk: {
                         closeConn(allocator, &conns, &writer, id);
-                        continue;
-                    };
-                    writer.flush(virtio_fd) catch {};
-                }
-            }
+                        break :blk null;
+                    },
+                };
 
-            if ((revents & std.posix.POLL.HUP) != 0) {
-                closeConn(allocator, &conns, &writer, id);
+                if (maybe_n) |n| {
+                    if (n == 0) {
+                        closeConn(allocator, &conns, &writer, id);
+                    } else {
+                        const payload = protocol.encodeTcpData(allocator, id, buffer[0..n]) catch |err| {
+                            log.err("encode tcp_data failed: {s}", .{@errorName(err)});
+                            continue;
+                        };
+                        defer allocator.free(payload);
+                        writer.enqueue(payload) catch |err| {
+                            log.err("virtio enqueue failed: {s}", .{@errorName(err)});
+                            closeConn(allocator, &conns, &writer, id);
+                            continue;
+                        };
+                        writer.flush(virtio_fd) catch {};
+                    }
+                }
             }
         }
     }
