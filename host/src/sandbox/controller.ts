@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
-import { isProcessAlive, signalProcess } from "../utils/process.ts";
+import { isProcessAlive, signalProcess } from "../utils/process-control.ts";
 
 const activeChildren = new Set<ChildProcess>();
 let exitHookRegistered = false;

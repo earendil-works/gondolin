@@ -62,7 +62,7 @@ import {
   parseEnvEntry,
   resolveEnvNumber,
 } from "../utils/env.ts";
-import { isProcessAlive } from "../utils/process.ts";
+import { isProcessAlive } from "../utils/process-control.ts";
 import {
   defaultDebugLog,
   resolveDebugFlags,
