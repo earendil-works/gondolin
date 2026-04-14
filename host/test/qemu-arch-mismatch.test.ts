@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import { __test as serverOptionsTest } from "../src/sandbox/server-options.ts";
 
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
@@ -93,6 +94,29 @@ test("resolveSandboxServerOptions fails fast on guest/qemu arch mismatch", () =>
   }
 });
 
+test("parseQemuVersion accepts 9.2 and newer reconnect-capable versions", () => {
+  assert.deepEqual(
+    (serverOptionsTest as any).parseQemuVersion(
+      "QEMU emulator version 9.2.0\nCopyright",
+    ),
+    { major: 9, minor: 2 },
+  );
+  assert.deepEqual(
+    (serverOptionsTest as any).parseQemuVersion(
+      "QEMU emulator version 10.2.2",
+    ),
+    { major: 10, minor: 2 },
+  );
+});
+
+test("parseQemuVersion rejects malformed output", () => {
+  assert.equal((serverOptionsTest as any).parseQemuVersion("garbage"), null);
+  assert.equal(
+    (serverOptionsTest as any).parseQemuVersion("QEMU emulator version 9"),
+    null,
+  );
+});
+
 test("resolveSandboxServerOptions auto-selects qemu binary from guest image arch", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const guestArch = hostArch === "aarch64" ? "x86_64" : "aarch64";
@@ -172,6 +196,45 @@ test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () 
         } as any),
       /sandbox\.rootDiskSnapshot has been removed/,
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions derives deterministic runtime socket paths from runtime id", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+
+  try {
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+      },
+      undefined,
+      {
+        qemuRuntimeId: "vm-reconnect-test",
+        qemuSupportsReconnect: () => true,
+      } as any,
+    );
+
+    const expectedRuntimeDir = path.resolve(
+      tmpDir,
+      "gondolin-runtime",
+      "vm-reconnect-test",
+    );
+
+    assert.equal(resolved.runtimeId, "vm-reconnect-test");
+    assert.equal(resolved.runtimeDir, expectedRuntimeDir);
+    assert.equal(resolved.virtioSocketPath, path.join(expectedRuntimeDir, "virtio.sock"));
+    assert.equal(resolved.virtioFsSocketPath, path.join(expectedRuntimeDir, "virtio-fs.sock"));
+    assert.equal(resolved.virtioSshSocketPath, path.join(expectedRuntimeDir, "virtio-ssh.sock"));
+    assert.equal(
+      resolved.virtioIngressSocketPath,
+      path.join(expectedRuntimeDir, "virtio-ingress.sock"),
+    );
+    assert.equal(resolved.netSocketPath, path.join(expectedRuntimeDir, "net.sock"));
+    assert.equal(resolved.reconnectCapable, true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

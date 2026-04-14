@@ -63,3 +63,24 @@ export type VMOptions = {
   /** debug log callback */
   debugLog?: DebugLogFn | null;
 };
+
+export type VMAttachOptions = {
+  /** existing vm session identifier */
+  id: string;
+} & Pick<
+  VMOptions,
+  | "allowWebSockets"
+  | "debugLog"
+  | "dns"
+  | "env"
+  | "fetch"
+  | "httpHooks"
+  | "maxHttpBodyBytes"
+  | "maxHttpResponseBodyBytes"
+  | "sandbox"
+  | "sessionLabel"
+  | "ssh"
+  | "startTimeoutMs"
+  | "tcp"
+  | "vfs"
+>;

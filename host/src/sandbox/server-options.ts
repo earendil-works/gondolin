@@ -51,6 +51,7 @@ const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
+const DEFAULT_QEMU_RECONNECT_MS = 5000;
 
 /**
  * sandbox server options
@@ -202,6 +203,10 @@ export type ResolvedSandboxServerOptions = {
   virtioIngressSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
+  /** stable runtime identifier */
+  runtimeId: string;
+  /** per-vm runtime directory */
+  runtimeDir: string;
   /** guest mac address */
   netMac: string;
   /** whether networking is enabled */
@@ -217,6 +222,10 @@ export type ResolvedSandboxServerOptions = {
   accel?: string;
   /** qemu cpu model */
   cpu?: string;
+  /** whether the local qemu supports reconnect-ready client sockets */
+  reconnectCapable: boolean;
+  /** reconnect interval for qemu client sockets in `ms` */
+  reconnectMs?: number;
   /** guest console mode */
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
@@ -768,7 +777,41 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
 type ResolveSandboxServerOptionsDeps = {
   /** test-only override for default krun runner resolution */
   resolveDefaultKrunRunnerPath?: () => string;
+  /** internal runtime id override for deterministic transport paths */
+  qemuRuntimeId?: string;
+  /** test-only override for qemu reconnect capability detection */
+  qemuSupportsReconnect?: (qemuPath: string) => boolean;
 };
+
+function parseQemuVersion(qemuVersionOutput: string): {
+  major: number;
+  minor: number;
+} | null {
+  const match = /version\s+(\d+)\.(\d+)/iu.exec(qemuVersionOutput);
+  if (!match) return null;
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return null;
+
+  return { major, minor };
+}
+
+function qemuSupportsReconnect(qemuPath: string): boolean {
+  try {
+    const output = execFileSync(qemuPath, ["--version"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    const version = parseQemuVersion(output);
+    if (!version) return false;
+    if (version.major > 9) return true;
+    if (version.major === 9 && version.minor >= 2) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
@@ -807,26 +850,13 @@ export function resolveSandboxServerOptions(
 
   // we are running into length limits on macos on the default temp dir
   const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
-  const defaultVirtio = path.resolve(
-    tmpDir,
-    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioFs = path.resolve(
-    tmpDir,
-    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioSsh = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioIngress = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultNetSock = path.resolve(
-    tmpDir,
-    `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
-  );
+  const runtimeId = deps.qemuRuntimeId ?? randomUUID();
+  const runtimeDir = path.resolve(tmpDir, "gondolin-runtime", runtimeId);
+  const defaultVirtio = path.join(runtimeDir, "virtio.sock");
+  const defaultVirtioFs = path.join(runtimeDir, "virtio-fs.sock");
+  const defaultVirtioSsh = path.join(runtimeDir, "virtio-ssh.sock");
+  const defaultVirtioIngress = path.join(runtimeDir, "virtio-ingress.sock");
+  const defaultNetSock = path.join(runtimeDir, "net.sock");
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
@@ -849,6 +879,8 @@ export function resolveSandboxServerOptions(
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
   let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
+  const qemuSupportsReconnectFn =
+    deps.qemuSupportsReconnect ?? qemuSupportsReconnect;
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
   const krunRunnerPath =
@@ -963,6 +995,9 @@ export function resolveSandboxServerOptions(
     options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
     maxQueuedStdinBytes,
   );
+  const reconnectCapable =
+    vmm === "qemu" ? qemuSupportsReconnectFn(qemuPath) : false;
+  const reconnectMs = reconnectCapable ? DEFAULT_QEMU_RECONNECT_MS : undefined;
 
   return {
     vmm,
@@ -982,6 +1017,8 @@ export function resolveSandboxServerOptions(
     virtioIngressSocketPath:
       options.virtioIngressSocketPath ?? defaultVirtioIngress,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
+    runtimeId,
+    runtimeDir,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
     allowWebSockets: options.allowWebSockets ?? true,
@@ -989,6 +1026,8 @@ export function resolveSandboxServerOptions(
     machineType: options.machineType,
     accel: options.accel,
     cpu: options.cpu,
+    reconnectCapable,
+    reconnectMs,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
@@ -1016,10 +1055,11 @@ export function resolveSandboxServerOptions(
  */
 export async function resolveSandboxServerOptionsAsync(
   options: SandboxServerOptions = {},
+  deps: ResolveSandboxServerOptionsDeps = {},
 ): Promise<ResolvedSandboxServerOptions> {
   // Explicit object imagePath is already fully resolved.
   if (options.imagePath && typeof options.imagePath === "object") {
-    return resolveSandboxServerOptions(options);
+    return resolveSandboxServerOptions(options, undefined, deps);
   }
 
   // String image selectors may require pulling from the builtin registry.
@@ -1028,14 +1068,16 @@ export async function resolveSandboxServerOptionsAsync(
     return resolveSandboxServerOptions({
       ...options,
       imagePath: resolvedImage.assetDir,
-    });
+    }, undefined, deps);
   }
 
   const assets = await ensureGuestAssets();
-  return resolveSandboxServerOptions(options, assets);
+  return resolveSandboxServerOptions(options, assets, deps);
 }
 
 export const __test = {
+  parseQemuVersion,
+  qemuSupportsReconnect,
   probeKrunRunnerCandidate,
   resolvePackagedKrunRunnerPath,
   resolveDefaultKrunRunnerPath,
