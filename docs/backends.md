@@ -87,6 +87,7 @@ Two cases keep `qemu` as the default:
 ### krun
 
 - Guest architecture must match the **host** architecture
+- Windows hosts are not supported; use `qemu` there
 - Requires a **libkrunfw-compatible kernel**
 - Gondolin requires image manifest krun boot assets:
     - `assets.krunKernel`

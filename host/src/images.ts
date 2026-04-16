@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { extractTarGz } from "./alpine/tar.ts";
 import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
 import type { Architecture } from "./build/config.ts";
 import {
@@ -1015,9 +1016,7 @@ async function importImageFromSource(
     await downloadArchive(source, archivePath, progressLabel);
     fs.mkdirSync(extractDir, { recursive: true });
 
-    child_process.execFileSync("tar", ["-xzf", archivePath, "-C", extractDir], {
-      stdio: "pipe",
-    });
+    await extractTarGz(archivePath, extractDir);
 
     const imported = importImageFromDirectory(extractDir);
 

@@ -190,10 +190,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@earendil-works/gondolin':
-        specifier: workspace:*
-        version: link:host
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.15

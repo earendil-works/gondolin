@@ -171,6 +171,11 @@ export {
   type IngressHookResponsePatch,
 } from "./ingress.ts";
 
+export {
+  type LocalEndpoint,
+  type LocalEndpointInput,
+} from "./local-endpoint.ts";
+
 // Session registry
 export {
   registerSession,
@@ -179,6 +184,7 @@ export {
   findSession,
   gcSessions,
   SessionIpcServer,
+  createSessionEndpoint,
   connectToSession,
   type SessionInfo,
   type SessionEntry,

@@ -171,11 +171,28 @@ pub trait Storage {
 
 impl Storage for File {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        std::os::unix::fs::FileExt::read_at(self, buf, offset)
+        #[cfg(unix)]
+        { std::os::unix::fs::FileExt::read_at(self, buf, offset) }
+        #[cfg(windows)]
+        { std::os::windows::fs::FileExt::seek_read(self, buf, offset) }
     }
 
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+        #[cfg(unix)]
+        { std::os::unix::fs::FileExt::write_all_at(self, buf, offset) }
+        #[cfg(windows)]
+        {
+            let mut written = 0;
+            while written < buf.len() {
+                match std::os::windows::fs::FileExt::seek_write(self, &buf[written..], offset + written as u64) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(n) => written += n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
     }
 
     fn len(&mut self) -> io::Result<u64> {

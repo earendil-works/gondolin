@@ -7,6 +7,11 @@ import test from "node:test";
 
 import { exportOciRootfs } from "../src/alpine/oci.ts";
 
+const skipWindowsOciPullPolicyTests =
+  process.platform === "win32"
+    ? "OCI docker runtime tests require POSIX shell/tar semantics"
+    : false;
+
 function writeFakeDockerRuntime(binDir: string): void {
   const runtimePath = path.join(binDir, "docker");
   fs.writeFileSync(
@@ -127,7 +132,10 @@ function restoreEnv(name: string, value: string | undefined): void {
   process.env[name] = value;
 }
 
-test("oci pullPolicy never: fails when requested platform is not local", () => {
+test(
+  "oci pullPolicy never: fails when requested platform is not local",
+  { skip: skipWindowsOciPullPolicyTests },
+  () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
   );
@@ -181,9 +189,13 @@ test("oci pullPolicy never: fails when requested platform is not local", () => {
     restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("oci pullPolicy if-not-present: pulls when requested platform is not local", () => {
+test(
+  "oci pullPolicy if-not-present: pulls when requested platform is not local",
+  { skip: skipWindowsOciPullPolicyTests },
+  () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-pull-auto-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -240,9 +252,13 @@ test("oci pullPolicy if-not-present: pulls when requested platform is not local"
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("oci pullPolicy never: export create uses --pull=never", () => {
+test(
+  "oci pullPolicy never: export create uses --pull=never",
+  { skip: skipWindowsOciPullPolicyTests },
+  () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
   );
@@ -298,9 +314,13 @@ test("oci pullPolicy never: export create uses --pull=never", () => {
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("oci export: returns resolved image digest metadata", () => {
+test(
+  "oci export: returns resolved image digest metadata",
+  { skip: skipWindowsOciPullPolicyTests },
+  () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-digest-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -341,9 +361,13 @@ test("oci export: returns resolved image digest metadata", () => {
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("oci export: fails when runtime does not report RepoDigests", () => {
+test(
+  "oci export: fails when runtime does not report RepoDigests",
+  { skip: skipWindowsOciPullPolicyTests },
+  () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-digest-missing-"),
   );
@@ -383,4 +407,5 @@ test("oci export: fails when runtime does not report RepoDigests", () => {
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);

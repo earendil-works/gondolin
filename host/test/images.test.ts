@@ -18,6 +18,12 @@ import {
   removeUntaggedImages,
   removeAllImages,
 } from "../src/images.ts";
+
+function systemTarPath(): string {
+  return process.platform === "win32"
+    ? "C:\\Windows\\System32\\tar.exe"
+    : "tar";
+}
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
 const prevImageStore = process.env.GONDOLIN_IMAGE_STORE;
@@ -739,7 +745,7 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
 
   try {
     child_process.execFileSync(
-      "tar",
+      systemTarPath(),
       [
         "-czf",
         archivePath,
