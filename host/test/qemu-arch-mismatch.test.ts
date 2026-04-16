@@ -4,7 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import {
+  __test as serverOptionsTest,
+  resolveSandboxServerOptions,
+} from "../src/sandbox/server-options.ts";
+
+function skipWindowsKrun(t: { skip: (message?: string) => void }): boolean {
+  if (process.platform === "win32") {
+    t.skip("krun is not supported on Windows hosts");
+    return true;
+  }
+  return false;
+}
 
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
@@ -99,17 +110,47 @@ test("resolveSandboxServerOptions auto-selects qemu binary from guest image arch
   const dir = makeTempAssetsDir(guestArch);
 
   try {
-    const resolved = resolveSandboxServerOptions({
-      imagePath: dir,
-    });
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+      },
+      undefined,
+      {
+        resolveDefaultQemuPath: (targetArch) =>
+          targetArch === "arm64" ? "chosen-aarch64" : "chosen-x86_64",
+      },
+    );
 
     assert.equal(
       resolved.qemuPath,
-      guestArch === "aarch64" ? "qemu-system-aarch64" : "qemu-system-x86_64",
+      guestArch === "aarch64" ? "chosen-aarch64" : "chosen-x86_64",
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveDefaultQemuPath prefers Windows w-suffixed PATH binary when available", () => {
+  const resolved = serverOptionsTest.resolveDefaultQemuPath("x64", {
+    platform: "win32",
+    env: { ProgramFiles: "C:\\Program Files" } as NodeJS.ProcessEnv,
+    existsSync: () => false,
+    probeQemuBinary: (candidate: string) => candidate === "qemu-system-x86_64w",
+  });
+
+  assert.equal(resolved, "qemu-system-x86_64w");
+});
+
+test("resolveDefaultQemuPath falls back to standard Program Files install on Windows", () => {
+  const qemuPath = "C:\\Program Files\\qemu\\qemu-system-x86_64.exe";
+  const resolved = serverOptionsTest.resolveDefaultQemuPath("x64", {
+    platform: "win32",
+    env: { ProgramFiles: "C:\\Program Files" } as NodeJS.ProcessEnv,
+    existsSync: (candidate: string) => candidate === qemuPath,
+    probeQemuBinary: (candidate: string) => candidate === qemuPath,
+  });
+
+  assert.equal(resolved, qemuPath);
 });
 
 test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {
@@ -149,7 +190,8 @@ test("resolveSandboxServerOptions applies GONDOLIN_CPU with explicit override pr
   }
 });
 
-test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", () => {
+test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const otherArch = hostArch === "aarch64" ? "x86_64" : "aarch64";
   const dir = makeTempAssetsDir(otherArch);
@@ -201,7 +243,8 @@ test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () 
   }
 });
 
-test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
+test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });
 
@@ -219,7 +262,8 @@ test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", ()
   }
 });
 
-test("resolveSandboxServerOptions rejects qemu-only options for krun", () => {
+test("resolveSandboxServerOptions rejects qemu-only options for krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   try {
@@ -240,7 +284,8 @@ test("resolveSandboxServerOptions rejects qemu-only options for krun", () => {
   }
 });
 
-test("resolveSandboxServerOptions rejects single qemu-only option for krun", () => {
+test("resolveSandboxServerOptions rejects single qemu-only option for krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   try {
@@ -258,7 +303,8 @@ test("resolveSandboxServerOptions rejects single qemu-only option for krun", () 
   }
 });
 
-test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=krun", () => {
+test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
 
@@ -286,7 +332,8 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
   }
 });
 
-test("resolveSandboxServerOptions supports split manifest asset directories for krun", () => {
+test("resolveSandboxServerOptions supports split manifest asset directories for krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { splitAssetDirs: true });
 
@@ -304,7 +351,8 @@ test("resolveSandboxServerOptions supports split manifest asset directories for 
   }
 });
 
-test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
+test("resolveSandboxServerOptions keeps explicit asset object for krun", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
 
@@ -327,7 +375,8 @@ test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
   }
 });
 
-test("resolveSandboxServerOptions auto-detects local krun runner path", () => {
+test("resolveSandboxServerOptions auto-detects local krun runner path", (t) => {
+  if (skipWindowsKrun(t)) return;
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   const tempRoot = fs.mkdtempSync(

@@ -1,12 +1,69 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
+
+function windowsQemuCandidates(): string[] {
+  const candidates = ["qemu-system-x86_64", "qemu-system-x86_64w"];
+  const installRoots = [process.env.ProgramW6432, process.env.ProgramFiles].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+
+  for (const root of installRoots) {
+    candidates.push(
+      path.join(root, "qemu", "qemu-system-x86_64.exe"),
+      path.join(root, "qemu", "qemu-system-x86_64w.exe"),
+    );
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function hasWindowsWhpx(): boolean {
+  if (process.arch !== "x64") {
+    return false;
+  }
+
+  for (const candidate of windowsQemuCandidates()) {
+    try {
+      const output = execFileSync(candidate, ["-accel", "help"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      const supported = output
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase());
+      if (!supported.includes("whpx")) {
+        continue;
+      }
+
+      const probe = spawnSync(
+        candidate,
+        ["-accel", "whpx", "-machine", "none", "-nodefaults", "-display", "none", "-S"],
+        {
+          timeout: 1500,
+          windowsHide: true,
+          encoding: "utf8",
+        },
+      );
+      const timedOut = probe.error?.code === "ETIMEDOUT";
+      if (timedOut || probe.status === 0) {
+        return true;
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return false;
+}
 
 /**
  * Check if hardware virtualization is available.
  * On Linux, this checks for KVM. On macOS, HVF is always available.
+ * On Windows x64, this checks whether an installed QEMU can initialize WHPX.
  * Returns false for other platforms or when acceleration is unavailable.
  */
 export function hasHardwareAccel(): boolean {
@@ -20,6 +77,9 @@ export function hasHardwareAccel(): boolean {
     } catch {
       return false;
     }
+  }
+  if (process.platform === "win32") {
+    return hasWindowsWhpx();
   }
   return false;
 }

@@ -1,9 +1,9 @@
-import child_process from "child_process";
 import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { extractTarGz } from "./alpine/tar.ts";
 import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
 import { gondolinCacheDir } from "./cache.ts";
 import type { Architecture } from "./build/config.ts";
@@ -1295,9 +1295,7 @@ async function importImageFromSource(
     await downloadArchive(source, archivePath, progressLabel);
     fs.mkdirSync(extractDir, { recursive: true });
 
-    child_process.execFileSync("tar", ["-xzf", archivePath, "-C", extractDir], {
-      stdio: "pipe",
-    });
+    await extractTarGz(archivePath, extractDir);
 
     const imported = importImageFromDirectory(extractDir);
 

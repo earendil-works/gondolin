@@ -74,9 +74,9 @@ Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default: `alpine-base:latest`).
 
 Requirements:
 
-| macOS                    | Linux (Debian/Ubuntu)                         |
-| ------------------------ | --------------------------------------------- |
-| `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
+| macOS                    | Linux (Debian/Ubuntu)                         | Windows x64 |
+| ------------------------ | --------------------------------------------- | ----------- |
+| `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` | Install Node.js 23.6+ and a QEMU build with WHPX support, then put `qemu-system-x86_64` or `qemu-system-x86_64w` on `PATH` |
 
 Optional experimental libkrun backend setup:
 
@@ -85,7 +85,8 @@ make krun-runner
 ```
 
 Published installs of `@earendil-works/gondolin` also include platform-specific
-optional runner packages for supported targets.
+optional runner packages for supported targets. `krun` is currently unsupported
+on Windows hosts; use the default `qemu` backend there.
 
 This stages `libkrun` under `.cache/` (no global install) and builds the local
 runner helper at `host/krun-runner/zig-out/bin/gondolin-krun-runner`.
@@ -111,7 +112,8 @@ When `vmm=krun` is selected, Gondolin requires krun boot assets from the selecte
 image manifest (`assets.krunKernel` and optional `assets.krunInitrd`).
 For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object.
 
-> Linux and macOS are supported. ARM64 is the most tested runtime path today.
+> The QEMU backend is supported on macOS, Linux, and Windows x64.
+> `krun` remains supported on macOS/Linux only. ARM64 is the most tested runtime path today.
 > Linux x86_64 `make krun-runner` is covered by CI smoke builds.
 
 ## Feature Highlights
@@ -138,6 +140,7 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
 - [SSH](https://earendil-works.github.io/gondolin/ssh/)
 - [Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
 - [Architecture Overview](https://earendil-works.github.io/gondolin/architecture/)
+- [Windows QEMU showcase](docs/windows-showcase.md)
 - [VM Backends (QEMU vs krun)](docs/backends.md)
 - [Security Design](https://earendil-works.github.io/gondolin/security/)
 - [Limitations](https://earendil-works.github.io/gondolin/limitations/)

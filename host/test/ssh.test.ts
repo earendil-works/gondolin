@@ -12,6 +12,9 @@ import {
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
 const sshVmKey = "ssh-default";
+const sshConnectTimeoutSeconds = process.platform === "win32" ? 10 : 5;
+const sshExecTimeoutMs = process.platform === "win32" ? 15000 : 10000;
+const sshRetryWindowMs = process.platform === "win32" ? 45000 : 15000;
 
 function hasSshClient(): boolean {
   try {
@@ -23,6 +26,36 @@ function hasSshClient(): boolean {
 }
 
 const skipIfNoSsh = !hasSshClient();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runSshCommand(args: string[]): Promise<string> {
+  const deadline = Date.now() + sshRetryWindowMs;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        execFile(
+          "ssh",
+          args,
+          { timeout: sshExecTimeoutMs },
+          (err, stdout) => {
+            if (err) reject(err);
+            else resolve(stdout);
+          },
+        );
+      });
+    } catch (err) {
+      lastError = err;
+      await sleep(500);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
 test.after(async () => {
   await closeVm(sshVmKey);
@@ -55,41 +88,31 @@ test(
 
         const access = await vm.enableSsh();
 
-        const stdout = await new Promise<string>((resolve, reject) => {
-          execFile(
-            "ssh",
-            [
-              "-p",
-              String(access.port),
-              "-i",
-              access.identityFile,
-              "-o",
-              "StrictHostKeyChecking=no",
-              "-o",
-              "UserKnownHostsFile=/dev/null",
-              "-o",
-              "BatchMode=yes",
-              "-o",
-              "ConnectTimeout=5",
-              "-o",
-              "IdentitiesOnly=yes",
-              "-o",
-              "ForwardAgent=no",
-              "-o",
-              "ClearAllForwardings=yes",
-              "-o",
-              "LogLevel=ERROR",
-              `${access.user}@${access.host}`,
-              "echo",
-              "ssh-ok",
-            ],
-            { timeout: 20000 },
-            (err, stdout) => {
-              if (err) reject(err);
-              else resolve(stdout);
-            },
-          );
-        });
+        const stdout = await runSshCommand([
+          "-p",
+          String(access.port),
+          "-i",
+          access.identityFile,
+          "-o",
+          "StrictHostKeyChecking=no",
+          "-o",
+          "UserKnownHostsFile=/dev/null",
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          `ConnectTimeout=${sshConnectTimeoutSeconds}`,
+          "-o",
+          "IdentitiesOnly=yes",
+          "-o",
+          "ForwardAgent=no",
+          "-o",
+          "ClearAllForwardings=yes",
+          "-o",
+          "LogLevel=ERROR",
+          `${access.user}@${access.host}`,
+          "echo",
+          "ssh-ok",
+        ]);
 
         assert.equal(stdout.trim(), "ssh-ok");
 
