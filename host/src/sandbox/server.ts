@@ -459,12 +459,18 @@ export class SandboxServer extends EventEmitter {
       });
     }
 
+    const reconnectBridge = (promise: Promise<void>) => {
+      void promise.catch((err) => {
+        this.emit("error", err);
+      });
+    };
+
     this.controller.on("state", (state) => {
       if (state === "running") {
-        this.bridge.connect();
-        this.fsBridge.connect();
-        this.sshBridge.connect();
-        this.ingressBridge.connect();
+        reconnectBridge(this.bridge.connect());
+        reconnectBridge(this.fsBridge.connect());
+        reconnectBridge(this.sshBridge.connect());
+        reconnectBridge(this.ingressBridge.connect());
       }
       if (state === "stopped") {
         // The controller emits state="stopped" before emitting "exit".

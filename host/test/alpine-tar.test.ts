@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
-import { extractEntries, parseTar } from "../src/alpine/tar.ts";
+import { extractEntries, extractTarGz, parseTar } from "../src/alpine/tar.ts";
 
 interface TarBuildEntry {
   /** entry name stored in the tar header */
@@ -96,6 +97,46 @@ test("extractEntries preserves zero-byte regular files", () => {
     assert.equal(stat.size, 0);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("extractTarGz extracts long-path gzip archives", async () => {
+  const longPath =
+    "usr/lib/node_modules/npm/node_modules/@sigstore/protobuf-specs/dist/__generated__/google/api/field_behavior.js";
+  const body = Buffer.alloc(1024 * 1024 + 137, 0x61);
+  const tar = buildTar([
+    {
+      name: "././@LongLink",
+      type: "L",
+      body: Buffer.from(`${longPath}\0`, "utf8"),
+    },
+    {
+      name: "field_behavior.js",
+      type: "0",
+      body,
+    },
+  ]);
+
+  const archivePath = path.join(
+    os.tmpdir(),
+    `gondolin-tar-${process.pid}-${Date.now()}.tar.gz`,
+  );
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-tar-"));
+
+  try {
+    fs.writeFileSync(archivePath, gzipSync(tar));
+    await extractTarGz(archivePath, tmpDir);
+
+    const extractedPath = path.join(tmpDir, longPath);
+    const stat = fs.statSync(extractedPath);
+    assert.equal(stat.size, body.length);
+
+    const extracted = fs.readFileSync(extractedPath);
+    assert.equal(extracted[0], 0x61);
+    assert.equal(extracted[extracted.length - 1], 0x61);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(archivePath, { force: true });
   }
 });
 

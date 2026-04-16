@@ -8,10 +8,10 @@ want to be able to tightly control the file system, for convenience of the agent
 and to control persistence.
 
 Gondolin gives you that. Lightweight micro-VMs (QEMU by default, optional
-libkrun backend) boot in under a second on your Mac or Linux machine. The
-network stack and virtual filesystem are implemented entirely in JavaScript,
-giving you complete programmatic control over what the sandbox can access and
-what secrets it can use.
+libkrun backend on macOS/Linux) boot in under a second on your Mac, Linux, or
+Windows machine. The network stack and virtual filesystem are implemented
+entirely in JavaScript, giving you complete programmatic control over what the
+sandbox can access and what secrets it can use.
 
 This documentation helps you get started with it. We also welcome your feedback
 as this is an early project and we are eager to learn more about how you want
@@ -65,6 +65,7 @@ await vm.close();
 
 - [Workloads](./workloads.md): typical workloads and lifecycles
 - [CLI](./cli.md): run shells/commands, list sessions, and attach to running VMs
+- [Windows QEMU showcase](./windows-showcase.md): end-to-end Git Bash walkthrough for Windows x64
 - [Secrets Handling](./secrets.md): placeholder-based secret injection and host allowlists
 - [Ingress](./ingress.md): expose guest HTTP servers on the host
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults

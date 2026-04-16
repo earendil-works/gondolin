@@ -19,7 +19,7 @@
     "dist/"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ./scripts/postbuild.mjs",
+    "build": "node ./scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node ./scripts/postbuild.mjs",
     "start": "node dist/bin/gondolin.js exec",
     "dev": "node bin/gondolin.ts exec",
     "test": "node --test test/*.test.ts",

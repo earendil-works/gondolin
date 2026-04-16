@@ -1,7 +1,11 @@
-import fs from "fs";
 import net from "net";
-import path from "path";
 import { Duplex } from "stream";
+
+import {
+  listenOnLocalEndpoint,
+  normalizeLocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
 
 import {
   FrameReader,
@@ -22,22 +26,21 @@ export class VirtioBridge {
   private waitingDrain = false;
   private allowReconnect = true;
   private closed = false;
-  private readonly socketPath: string;
+  private readonly endpoint: LocalEndpointInput;
   private readonly maxPendingBytes: number;
 
-  constructor(socketPath: string, maxPendingBytes: number = 8 * 1024 * 1024) {
-    this.socketPath = socketPath;
+  constructor(
+    endpoint: LocalEndpointInput,
+    maxPendingBytes: number = 8 * 1024 * 1024,
+  ) {
+    this.endpoint = endpoint;
     this.maxPendingBytes = maxPendingBytes;
   }
 
-  connect() {
+  async connect() {
     if (this.closed) return;
     if (this.server) return;
     this.allowReconnect = true;
-    if (!fs.existsSync(path.dirname(this.socketPath))) {
-      fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
-    }
-    fs.rmSync(this.socketPath, { force: true });
 
     const server = net.createServer((socket) => {
       this.attachSocket(socket);
@@ -54,11 +57,27 @@ export class VirtioBridge {
       this.scheduleReconnect();
     });
 
-    server.listen(this.socketPath);
+    try {
+      await listenOnLocalEndpoint(
+        server,
+        normalizeLocalEndpoint(this.endpoint, "virtio endpoint"),
+      );
+    } catch (err) {
+      this.server = null;
+      try {
+        server.close();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
   }
 
-  async disconnect(): Promise<void> {
-    this.closed = true;
+  async disconnect(options: { permanent?: boolean } = {}): Promise<void> {
+    const permanent = options.permanent ?? true;
+    if (permanent) {
+      this.closed = true;
+    }
     this.allowReconnect = false;
 
     if (this.reconnectTimer) {
@@ -92,7 +111,8 @@ export class VirtioBridge {
 
     this.waitingDrain = false;
 
-    // Drop any queued frames; after disconnect the bridge is permanently closed.
+    // Drop any queued frames; temporary startup cleanup should not replay
+    // stale messages into a future guest connection.
     this.pending = [];
     this.pendingBytes = 0;
   }
@@ -102,7 +122,7 @@ export class VirtioBridge {
       return false;
     }
     if (!this.socket) {
-      this.connect();
+      this.connectInBackground();
     }
     const frame = encodeFrame(message);
     if (this.pending.length === 0 && !this.waitingDrain) {
@@ -210,12 +230,18 @@ export class VirtioBridge {
     this.waitingDrain = false;
   }
 
+  private connectInBackground() {
+    void this.connect().catch(() => {
+      this.scheduleReconnect();
+    });
+  }
+
   private scheduleReconnect() {
     if (!this.allowReconnect || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.allowReconnect) {
-        this.connect();
+        this.connectInBackground();
       }
     }, 500);
   }

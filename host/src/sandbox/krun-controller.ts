@@ -6,6 +6,10 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 
+import {
+  normalizeLocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
 import type { SandboxLogStream, SandboxState } from "./controller.ts";
 
 const activeChildren = new Set<ChildProcess>();
@@ -58,21 +62,21 @@ export type KrunConfig = {
   memory: string;
   /** vm cpu count */
   cpus: number;
-  /** virtio-serial control socket path */
-  virtioSocketPath: string;
-  /** virtiofs/vfs socket path */
-  virtioFsSocketPath: string;
-  /** virtio-serial ssh socket path */
-  virtioSshSocketPath: string;
-  /** virtio-serial ingress socket path */
-  virtioIngressSocketPath: string;
+  /** virtio-serial control endpoint */
+  virtioSocketPath: LocalEndpointInput;
+  /** virtiofs/vfs endpoint */
+  virtioFsSocketPath: LocalEndpointInput;
+  /** virtio-serial ssh endpoint */
+  virtioSshSocketPath: LocalEndpointInput;
+  /** virtio-serial ingress endpoint */
+  virtioIngressSocketPath: LocalEndpointInput;
 
   /** kernel cmdline append string */
   append: string;
   /** guest console mode */
   console?: "stdio" | "none";
-  /** qemu net socket path */
-  netSocketPath?: string;
+  /** qemu net backend endpoint */
+  netSocketPath?: LocalEndpointInput;
   /** guest mac address */
   netMac?: string;
   /** whether to restart the vm automatically on exit */
@@ -344,6 +348,14 @@ function parseMemoryToMiB(value: string): number {
   return mib;
 }
 
+function getUnixEndpointPath(value: LocalEndpointInput, fieldName: string): string {
+  const endpoint = normalizeLocalEndpoint(value, fieldName);
+  if (endpoint.transport !== "unix") {
+    throw new Error(`${fieldName} must use a unix socket for vmm=krun`);
+  }
+  return endpoint.path;
+}
+
 function buildRunnerConfig(config: KrunConfig): KrunRunnerConfig {
   if (config.cpus < 1 || config.cpus > 255 || !Number.isInteger(config.cpus)) {
     throw new Error(`invalid vm cpu count for krun backend: ${config.cpus}`);
@@ -357,13 +369,27 @@ function buildRunnerConfig(config: KrunConfig): KrunRunnerConfig {
     rootDiskReadOnly: config.rootDiskReadOnly ?? false,
     memoryMiB: parseMemoryToMiB(config.memory),
     cpus: config.cpus,
-    virtioSocketPath: config.virtioSocketPath,
-    virtioFsSocketPath: config.virtioFsSocketPath,
-    virtioSshSocketPath: config.virtioSshSocketPath,
-    virtioIngressSocketPath: config.virtioIngressSocketPath,
+    virtioSocketPath: getUnixEndpointPath(
+      config.virtioSocketPath,
+      "sandbox.virtioSocketPath",
+    ),
+    virtioFsSocketPath: getUnixEndpointPath(
+      config.virtioFsSocketPath,
+      "sandbox.virtioFsSocketPath",
+    ),
+    virtioSshSocketPath: getUnixEndpointPath(
+      config.virtioSshSocketPath,
+      "sandbox.virtioSshSocketPath",
+    ),
+    virtioIngressSocketPath: getUnixEndpointPath(
+      config.virtioIngressSocketPath,
+      "sandbox.virtioIngressSocketPath",
+    ),
     append: config.append,
     console: config.console ?? "none",
-    netSocketPath: config.netSocketPath,
+    netSocketPath: config.netSocketPath
+      ? getUnixEndpointPath(config.netSocketPath, "sandbox.netSocketPath")
+      : undefined,
     netMac: config.netMac,
   };
 }

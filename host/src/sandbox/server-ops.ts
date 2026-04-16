@@ -566,15 +566,41 @@ export class SandboxServerOps {
     return this.closeSingleflight.run(() => this.closeInternal());
   }
 
+  private async cleanupFailedStart(): Promise<void> {
+    const results = await Promise.allSettled([
+      this.network?.close(),
+      this.bridge.disconnect({ permanent: false }),
+      this.fsBridge.disconnect({ permanent: false }),
+      this.sshBridge.disconnect({ permanent: false }),
+      this.ingressBridge.disconnect({ permanent: false }),
+    ]);
+
+    for (const result of results) {
+      if (result.status === "rejected") {
+        const error =
+          result.reason instanceof Error
+            ? result.reason
+            : new Error(String(result.reason));
+        this.emit("error", error);
+      }
+    }
+  }
+
   async startInternal(): Promise<void> {
     if (this.started) return;
 
     this.started = true;
-    this.network?.start();
-    this.bridge.connect();
-    this.fsBridge.connect();
-    this.sshBridge.connect();
-    this.ingressBridge.connect();
+    try {
+      await this.network?.start();
+      await this.bridge.connect();
+      await this.fsBridge.connect();
+      await this.sshBridge.connect();
+      await this.ingressBridge.connect();
+    } catch (err) {
+      this.started = false;
+      await this.cleanupFailedStart();
+      throw err;
+    }
   }
 
   async closeInternal() {

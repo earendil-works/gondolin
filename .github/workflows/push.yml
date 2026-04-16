@@ -1,0 +1,5 @@
+on: push
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml

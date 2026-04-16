@@ -17,6 +17,16 @@ import {
 } from "../src/alpine/rootfs.ts";
 import { syncKernelModules } from "../src/alpine/kernel-modules.ts";
 
+const skipWindowsOciRuntimeTests =
+  process.platform === "win32"
+    ? "OCI docker runtime tests require POSIX shell/tar semantics"
+    : false;
+
+const skipWindowsAbsoluteSymlinkRewriteTest =
+  process.platform === "win32"
+    ? "Windows host symlink APIs rewrite absolute targets differently"
+    : false;
+
 interface TarFixtureEntry {
   /** tar entry path */
   name: string;
@@ -253,7 +263,10 @@ test("oci rootfs: tar ownership parser preserves uid/gid metadata", () => {
   }
 });
 
-test("oci rootfs: pullPolicy always tolerates large pull output", () => {
+test(
+  "oci rootfs: pullPolicy always tolerates large pull output",
+  { skip: skipWindowsOciRuntimeTests },
+  () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-large-pull-"),
   );
@@ -293,43 +306,48 @@ test("oci rootfs: pullPolicy always tolerates large pull output", () => {
     }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("oci rootfs: pullPolicy never propagates non-missing runtime errors", () => {
-  const tmp = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-oci-runtime-fail-"),
-  );
-  const binDir = path.join(tmp, "bin");
-  const rootfsDir = path.join(tmp, "rootfs");
-
-  fs.mkdirSync(binDir, { recursive: true });
-  fs.mkdirSync(rootfsDir, { recursive: true });
-  writeCreateFailRuntime(binDir);
-
-  const oldPath = process.env.PATH;
-
-  try {
-    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
-
-    assert.throws(
-      () =>
-        exportOciRootfs({
-          arch: "x86_64",
-          image: "docker.io/library/debian:bookworm-slim",
-          runtime: "docker",
-          platform: "linux/amd64",
-          pullPolicy: "never",
-          workDir: tmp,
-          targetDir: rootfsDir,
-          log: () => {},
-        }),
-      /daemon unavailable/,
+test(
+  "oci rootfs: pullPolicy never propagates non-missing runtime errors",
+  { skip: skipWindowsOciRuntimeTests },
+  () => {
+    const tmp = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-oci-runtime-fail-"),
     );
-  } finally {
-    process.env.PATH = oldPath;
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
+    const binDir = path.join(tmp, "bin");
+    const rootfsDir = path.join(tmp, "rootfs");
+
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(rootfsDir, { recursive: true });
+    writeCreateFailRuntime(binDir);
+
+    const oldPath = process.env.PATH;
+
+    try {
+      process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+
+      assert.throws(
+        () =>
+          exportOciRootfs({
+            arch: "x86_64",
+            image: "docker.io/library/debian:bookworm-slim",
+            runtime: "docker",
+            platform: "linux/amd64",
+            pullPolicy: "never",
+            workDir: tmp,
+            targetDir: rootfsDir,
+            log: () => {},
+          }),
+        /daemon unavailable/,
+      );
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
 
 test("oci rootfs: hardenExtractedRootfs rejects escaping relative symlinks", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-symlink-"));
@@ -348,29 +366,35 @@ test("oci rootfs: hardenExtractedRootfs rejects escaping relative symlinks", () 
   }
 });
 
-test("oci rootfs: hardenExtractedRootfs rewrites absolute symlinks", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-symlink-"));
-  const rootfsDir = path.join(tmp, "rootfs");
-
-  fs.mkdirSync(path.join(rootfsDir, "tmp", "hostdir"), { recursive: true });
-  fs.symlinkSync("/tmp/hostdir", path.join(rootfsDir, "usr"));
-
-  try {
-    hardenExtractedRootfs(rootfsDir);
-
-    assert.equal(fs.readlinkSync(path.join(rootfsDir, "usr")), "tmp/hostdir");
-    assert.throws(
-      () =>
-        assertSafeWritePath(
-          path.join(rootfsDir, "usr", "bin", "sandboxd"),
-          rootfsDir,
-        ),
-      /symlinked path/,
+test(
+  "oci rootfs: hardenExtractedRootfs rewrites absolute symlinks",
+  { skip: skipWindowsAbsoluteSymlinkRewriteTest },
+  () => {
+    const tmp = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-oci-symlink-"),
     );
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
+    const rootfsDir = path.join(tmp, "rootfs");
+
+    fs.mkdirSync(path.join(rootfsDir, "tmp", "hostdir"), { recursive: true });
+    fs.symlinkSync("/tmp/hostdir", path.join(rootfsDir, "usr"));
+
+    try {
+      hardenExtractedRootfs(rootfsDir);
+
+      assert.equal(fs.readlinkSync(path.join(rootfsDir, "usr")), "tmp/hostdir");
+      assert.throws(
+        () =>
+          assertSafeWritePath(
+            path.join(rootfsDir, "usr", "bin", "sandboxd"),
+            rootfsDir,
+          ),
+        /symlinked path/,
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
 
 test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-modules-"));

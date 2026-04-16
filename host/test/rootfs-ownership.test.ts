@@ -16,7 +16,15 @@ function writeStubCommand(binDir: string, name: string, body: string): string {
   return commandPath;
 }
 
-test("rootfs image: applies OCI ownership metadata with debugfs for non-root builds", () => {
+const skipWindowsRootfsOwnershipTest =
+  process.platform === "win32"
+    ? "rootfs ownership tests require POSIX shell/ext4 tool semantics"
+    : false;
+
+test(
+  "rootfs image: applies OCI ownership metadata with debugfs for non-root builds",
+  { skip: skipWindowsRootfsOwnershipTest },
+  () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-rootfs-owners-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -122,4 +130,5 @@ test("rootfs image: applies OCI ownership metadata with debugfs for non-root bui
     }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
+},
+);

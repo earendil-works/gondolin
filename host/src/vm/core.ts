@@ -43,6 +43,7 @@ import type { SandboxConnection } from "../sandbox/client.ts";
 import type { SandboxState } from "../sandbox/controller.ts";
 import {
   SessionIpcServer,
+  createSessionEndpoint,
   gcSessions,
   registerSession,
   unregisterSession,
@@ -487,6 +488,7 @@ export class VM {
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
     const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
     const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
+    const qemuImgPathHint = resolved.qemuPath;
 
     // Prepare root disk:
     // - Explicit sandbox.rootDisk* options win.
@@ -553,11 +555,12 @@ export class VM {
           deleteOnClose: false,
         };
       } else {
-        ensureQemuImgAvailable();
+        ensureQemuImgAvailable(qemuImgPathHint);
         const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
         const overlayPath = createTempQcow2Overlay(
           resolved.rootfsPath,
           backingFormat,
+          qemuImgPathHint,
         );
 
         resolved.rootDiskPath = overlayPath;
@@ -573,11 +576,12 @@ export class VM {
         };
       }
     } else if (rootfsMode === "cow") {
-      ensureQemuImgAvailable();
+      ensureQemuImgAvailable(qemuImgPathHint);
       const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
       const overlayPath = createTempQcow2Overlay(
         resolved.rootfsPath,
         backingFormat,
+        qemuImgPathHint,
       );
 
       resolved.rootDiskPath = overlayPath;
@@ -633,6 +637,19 @@ export class VM {
       };
       this.server.on("debug", this.debugListener);
     }
+  }
+
+  /**
+   * Return the resolved backend runtime settings for this VM
+   */
+  getBackendInfo() {
+    return {
+      vmm: this.resolvedSandboxOptions.vmm,
+      qemuPath: this.resolvedSandboxOptions.qemuPath,
+      accel: this.resolvedSandboxOptions.accel,
+      cpu: this.resolvedSandboxOptions.cpu,
+      machineType: this.resolvedSandboxOptions.machineType,
+    };
   }
 
   /**
@@ -1334,15 +1351,12 @@ fi
       this.ensureStartupGeneration(startupGeneration);
     }
 
-    const { socketPath } = registerSession({
-      id: this.id,
-      label: this.sessionLabel,
-    });
+    const sessionEndpoint = createSessionEndpoint(this.id);
 
     let sessionIpc: SessionIpcServer | null = null;
     try {
       sessionIpc = new SessionIpcServer(
-        socketPath,
+        sessionEndpoint,
         (onMessage, onClose) => {
           const server = this.server;
           if (!server) {
@@ -1371,7 +1385,13 @@ fi
         this.ensureStartupGeneration(startupGeneration);
       }
 
-      sessionIpc.start();
+      await sessionIpc.start();
+
+      registerSession({
+        id: this.id,
+        endpoint: sessionEndpoint,
+        label: this.sessionLabel,
+      });
 
       if (startupGeneration !== undefined) {
         this.ensureStartupGeneration(startupGeneration);
@@ -1968,19 +1988,24 @@ fi
     const resolvedCheckpointPath = path.resolve(checkpointPath);
 
     const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
-    const backingPath = resolveQcow2BackingPath(rootDisk.path);
+    const qemuImgPathHint = this.resolvedSandboxOptions.qemuPath;
+    const backingPath = resolveQcow2BackingPath(rootDisk.path, qemuImgPathHint);
     if (backingPath && backingPath !== rootfsPath) {
       // Collapse resume-generated checkpoint ancestry before we publish this
       // overlay as the new checkpoint file.
-      ensureQemuImgAvailable();
+      ensureQemuImgAvailable(qemuImgPathHint);
       rebaseQcow2InPlace(
         rootDisk.path,
         rootfsPath,
         inferDiskFormatFromPath(rootfsPath),
         "safe",
+        qemuImgPathHint,
       );
 
-      const rebasedBackingPath = resolveQcow2BackingPath(rootDisk.path);
+      const rebasedBackingPath = resolveQcow2BackingPath(
+        rootDisk.path,
+        qemuImgPathHint,
+      );
       if (rebasedBackingPath === resolvedCheckpointPath) {
         throw new Error(
           `cannot checkpoint: rebased overlay still points to destination checkpoint path (${resolvedCheckpointPath})`,
