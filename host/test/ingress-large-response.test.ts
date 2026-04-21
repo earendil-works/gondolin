@@ -28,6 +28,11 @@ const missingRepoGuestAssetsReason =
     ? "repo guest assets missing (run make build or make -C guest assets)"
     : false;
 
+type GuestHttpServerSpec = {
+  launchCommand: string;
+  readinessCommand: string;
+};
+
 type CapturedHttpResponse = {
   statusCode: number;
   headers: http.IncomingHttpHeaders;
@@ -90,6 +95,7 @@ async function fetchCapturedHttpResponse(
 
 async function waitForGuestHttpServer(
   vm: VM,
+  readinessCommand: string,
   expectedBodyLength: number,
 ): Promise<void> {
   let lastStdout = "";
@@ -99,11 +105,7 @@ async function waitForGuestHttpServer(
     const probe = await vm.exec([
       "/bin/sh",
       "-lc",
-      [
-        "rm -f /tmp/ingress-large-probe.bin",
-        "busybox wget -qO /tmp/ingress-large-probe.bin http://127.0.0.1:18080/asset.bin",
-        "wc -c < /tmp/ingress-large-probe.bin",
-      ].join("; "),
+      readinessCommand,
     ]);
 
     lastStdout = probe.stdout.trim();
@@ -120,17 +122,19 @@ async function waitForGuestHttpServer(
   );
 }
 
-async function resolveGuestHttpServerLaunchCommand(vm: VM): Promise<string | null> {
+async function resolveGuestHttpServer(
+  vm: VM,
+): Promise<GuestHttpServerSpec | null> {
   const probe = await vm.exec([
     "/bin/sh",
     "-lc",
     [
       "if command -v python3 >/dev/null 2>&1; then",
-      "  echo 'python3 -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www';",
+      "  echo python3;",
       "elif command -v python >/dev/null 2>&1; then",
-      "  echo 'python -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www';",
-      "elif busybox --list 2>/dev/null | grep -qx httpd; then",
-      "  echo 'busybox httpd -f -p 127.0.0.1:18080 -h /tmp/ingress-large-www';",
+      "  echo python;",
+      "elif busybox --list 2>/dev/null | grep -qx httpd && busybox --list 2>/dev/null | grep -qx wget; then",
+      "  echo busybox;",
       "else",
       "  exit 1;",
       "fi",
@@ -141,7 +145,37 @@ async function resolveGuestHttpServerLaunchCommand(vm: VM): Promise<string | nul
     return null;
   }
 
-  return probe.stdout.trim() || null;
+  const serverKind = probe.stdout.trim();
+  if (serverKind === "python3") {
+    return {
+      launchCommand:
+        "python3 -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www",
+      readinessCommand: [
+        "python3 -c 'import sys, urllib.request; data = urllib.request.urlopen(\"http://127.0.0.1:18080/asset.bin\").read(); sys.stdout.write(str(len(data)))'",
+      ].join(" "),
+    };
+  }
+
+  if (serverKind === "python") {
+    return {
+      launchCommand:
+        "python -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www",
+      readinessCommand: [
+        "python -c 'import sys, urllib.request; data = urllib.request.urlopen(\"http://127.0.0.1:18080/asset.bin\").read(); sys.stdout.write(str(len(data)))'",
+      ].join(" "),
+    };
+  }
+
+  if (serverKind === "busybox") {
+    return {
+      launchCommand:
+        "busybox httpd -f -p 127.0.0.1:18080 -h /tmp/ingress-large-www",
+      readinessCommand:
+        "busybox wget -qO - http://127.0.0.1:18080/asset.bin | wc -c",
+    };
+  }
+
+  throw new Error(`unexpected guest http server kind: ${JSON.stringify(serverKind)}`);
 }
 
 test.after(() => {
@@ -183,12 +217,11 @@ test(
 
     await vm.start();
 
-    const guestHttpServerLaunchCommand =
-      await resolveGuestHttpServerLaunchCommand(vm);
-    if (!guestHttpServerLaunchCommand) {
-      t.skip("guest image does not include a supported local HTTP server");
-      return;
-    }
+    const guestHttpServer = await resolveGuestHttpServer(vm);
+    assert.ok(
+      guestHttpServer,
+      "guest image does not include a supported local HTTP server",
+    );
 
     const payload = buildDeterministicPayload(payloadSizeBytes);
     const expectedDigest = sha256Hex(payload);
@@ -200,7 +233,7 @@ test(
       "/bin/sh",
       "-lc",
       [
-        `${guestHttpServerLaunchCommand} >/tmp/ingress-large-httpd.log 2>&1 & pid=$!`,
+        `${guestHttpServer.launchCommand} >/tmp/ingress-large-httpd.log 2>&1 & pid=$!`,
         "echo $pid > /tmp/ingress-large-httpd.pid",
       ].join("; "),
     ]);
@@ -210,7 +243,11 @@ test(
       launch.stderr || "failed to launch ingress httpd",
     );
 
-    await waitForGuestHttpServer(vm, payload.length);
+    await waitForGuestHttpServer(
+      vm,
+      guestHttpServer.readinessCommand,
+      payload.length,
+    );
 
     vm.setIngressRoutes([{ prefix: "/", port: 18080, stripPrefix: true }]);
     access = await vm.enableIngress();
