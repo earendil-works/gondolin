@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
+import { isProcessAlive, signalProcess } from "../utils/process-control.ts";
 
 const activeChildren = new Set<ChildProcess>();
 let exitHookRegistered = false;
@@ -76,12 +77,18 @@ export type SandboxConfig = {
   accel?: string;
   /** qemu cpu model */
   cpu?: string;
+  /** whether qemu client sockets should reconnect to recreated host listeners */
+  reconnectCapable?: boolean;
+  /** reconnect interval for qemu client sockets in `ms` */
+  reconnectMs?: number;
   /** guest console mode */
   console?: "stdio" | "none";
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
   netMac?: string;
+  /** existing qemu pid to re-own instead of spawning a new process */
+  attachedPid?: number;
   /** whether to restart the vm automatically on exit */
   autoRestart: boolean;
 };
@@ -92,6 +99,7 @@ export type SandboxLogStream = "stdout" | "stderr";
 
 export class SandboxController extends EventEmitter {
   private child: ChildProcess | null = null;
+  private attachedPid: number | null = null;
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private manualStop = false;
@@ -100,6 +108,10 @@ export class SandboxController extends EventEmitter {
   constructor(config: SandboxConfig) {
     super();
     this.config = config;
+    this.attachedPid =
+      Number.isInteger(config.attachedPid) && (config.attachedPid ?? 0) > 0
+        ? (config.attachedPid ?? null)
+        : null;
   }
 
   setAppend(append: string) {
@@ -110,11 +122,27 @@ export class SandboxController extends EventEmitter {
     return this.state;
   }
 
+  getRuntimePid() {
+    return this.child?.pid ?? this.attachedPid;
+  }
+
   async start() {
-    if (this.child) return;
+    if (this.child || (this.attachedPid !== null && this.state === "running")) {
+      return;
+    }
 
     this.manualStop = false;
     this.setState("starting");
+
+    if (this.attachedPid !== null) {
+      if (!isProcessAlive(this.attachedPid)) {
+        this.attachedPid = null;
+        this.setState("stopped");
+        throw new Error("attached qemu process is not running");
+      }
+      this.setState("running");
+      return;
+    }
 
     const args = buildQemuArgs(this.config);
     this.child = child_process.spawn(this.config.qemuPath, args, {
@@ -155,6 +183,20 @@ export class SandboxController extends EventEmitter {
   }
 
   async close() {
+    if (this.child === null && this.attachedPid !== null) {
+      this.manualStop = true;
+
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = null;
+      }
+
+      await terminateAttachedProcess(this.attachedPid);
+      this.attachedPid = null;
+      this.setState("stopped");
+      return;
+    }
+
     if (!this.child) return;
     const child = this.child;
     this.child = null;
@@ -295,6 +337,39 @@ export class SandboxController extends EventEmitter {
   }
 }
 
+async function terminateAttachedProcess(pid: number): Promise<void> {
+  const closeTimeoutMs = 10_000;
+  const sigkillAfterMs = 3_000;
+  const pollIntervalMs = 50;
+
+  if (signalProcess(pid, "SIGTERM") === "missing") {
+    return;
+  }
+
+  const startedAt = Date.now();
+  let sigkilled = false;
+  while (Date.now() - startedAt < closeTimeoutMs) {
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+
+    if (!sigkilled && Date.now() - startedAt >= sigkillAfterMs) {
+      if (signalProcess(pid, "SIGKILL") === "missing") {
+        return;
+      }
+      sigkilled = true;
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  if (isProcessAlive(pid)) {
+    if (signalProcess(pid, "SIGKILL") === "missing") {
+      return;
+    }
+  }
+}
+
 function buildQemuArgs(config: SandboxConfig) {
   const args: string[] = [
     "-nodefaults",
@@ -366,23 +441,28 @@ function buildQemuArgs(config: SandboxConfig) {
   const serialDev = useMmio ? "virtio-serial-device" : "virtio-serial-pci";
   const netDev = useMmio ? "virtio-net-device" : "virtio-net-pci";
 
+  const reconnectSuffix =
+    config.reconnectCapable && config.reconnectMs && config.reconnectMs > 0
+      ? `,reconnect-ms=${Math.trunc(config.reconnectMs)}`
+      : "";
+
   args.push("-object", "rng-random,filename=/dev/urandom,id=rng0");
   args.push("-device", `${rngDev},rng=rng0`);
   args.push(
     "-chardev",
-    `socket,id=virtiocon0,path=${config.virtioSocketPath},server=off`,
+    `socket,id=virtiocon0,path=${config.virtioSocketPath},server=off${reconnectSuffix}`,
   );
   args.push(
     "-chardev",
-    `socket,id=virtiofs0,path=${config.virtioFsSocketPath},server=off`,
+    `socket,id=virtiofs0,path=${config.virtioFsSocketPath},server=off${reconnectSuffix}`,
   );
   args.push(
     "-chardev",
-    `socket,id=virtiossh0,path=${config.virtioSshSocketPath},server=off`,
+    `socket,id=virtiossh0,path=${config.virtioSshSocketPath},server=off${reconnectSuffix}`,
   );
   args.push(
     "-chardev",
-    `socket,id=virtioingress0,path=${config.virtioIngressSocketPath},server=off`,
+    `socket,id=virtioingress0,path=${config.virtioIngressSocketPath},server=off${reconnectSuffix}`,
   );
 
   args.push("-device", `${serialDev},id=virtio-serial0`);
@@ -406,7 +486,7 @@ function buildQemuArgs(config: SandboxConfig) {
   if (config.netSocketPath) {
     args.push(
       "-netdev",
-      `stream,id=net0,server=off,addr.type=unix,addr.path=${config.netSocketPath}`,
+      `stream,id=net0,server=off,addr.type=unix,addr.path=${config.netSocketPath}${reconnectSuffix}`,
     );
     const mac = config.netMac ?? "02:00:00:00:00:01";
     args.push("-device", `${netDev},netdev=net0,mac=${mac}`);

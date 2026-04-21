@@ -28,6 +28,7 @@ export {
   type VmFsWriteFileOptions,
   type VmFsDeleteOptions,
 } from "./vm/core.ts";
+export { type VMAttachOptions } from "./vm/types.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
 export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec.ts";
 

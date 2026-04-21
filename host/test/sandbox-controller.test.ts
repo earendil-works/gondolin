@@ -117,6 +117,26 @@ test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", 
   assert.match(args[driveIndex + 1]!, /snapshot=on/);
 });
 
+test("buildQemuArgs: reconnect-capable transports add reconnect-ms to all client sockets", () => {
+  const args = __test.buildQemuArgs(
+    makeConfig({
+      netSocketPath: "/tmp/net.sock",
+      reconnectCapable: true as any,
+      reconnectMs: 5000 as any,
+    }),
+  );
+
+  const chardevs = args.filter((value) => value.includes("socket,id=virtio"));
+  assert.equal(chardevs.length, 4);
+  for (const chardev of chardevs) {
+    assert.match(chardev, /reconnect-ms=5000/);
+  }
+
+  const netdev = args.find((value) => value.includes("stream,id=net0"));
+  assert.ok(netdev);
+  assert.match(netdev!, /reconnect-ms=5000/);
+});
+
 test("SandboxController: start is idempotent while running", async () => {
   let spawnCalls = 0;
   const child = new FakeChildProcess();
@@ -132,6 +152,118 @@ test("SandboxController: start is idempotent while running", async () => {
 
   await controller.start();
   assert.equal(spawnCalls, 1);
+});
+
+test("SandboxController: attach mode does not spawn qemu and transitions to running", async () => {
+  let spawnCalls = 0;
+  mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+    if (pid === 4242 && signal === 0) {
+      return true;
+    }
+    return true;
+  }) as typeof process.kill);
+  mock.method(cp, "spawn", () => {
+    spawnCalls += 1;
+    return new FakeChildProcess() as any;
+  });
+
+  const controller = new SandboxController(makeConfig({ attachedPid: 4242 }));
+
+  const states: SandboxState[] = [];
+  controller.on("state", (state) => states.push(state));
+
+  await controller.start();
+
+  assert.equal(spawnCalls, 0);
+  assert.equal(controller.getState(), "running");
+  assert.deepEqual(states, ["starting", "running"]);
+});
+
+test("SandboxController: attach mode close kills the attached qemu pid", async () => {
+  const killCalls: Array<{ pid: number; signal?: string | number }> = [];
+  let pidAlive = true;
+
+  mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+    killCalls.push({ pid, signal });
+    if (signal === 0) {
+      if (pidAlive) return true;
+      throw new Error("dead");
+    }
+    pidAlive = false;
+    return true;
+  }) as typeof process.kill);
+
+  const controller = new SandboxController(makeConfig({ attachedPid: 4242 }));
+
+  await controller.start();
+  await controller.close();
+
+  assert.deepEqual(killCalls[0], { pid: 4242, signal: 0 });
+  assert.deepEqual(killCalls[1], { pid: 4242, signal: "SIGTERM" });
+  assert.equal(controller.getState(), "stopped");
+});
+
+test("SandboxController: attach mode rejects stale pid before reporting running", async () => {
+  mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+    if (pid === 4242 && signal === 0) {
+      const error = new Error("missing") as Error & { code?: string };
+      error.code = "ESRCH";
+      throw error;
+    }
+    return true;
+  }) as typeof process.kill);
+
+  const controller = new SandboxController(makeConfig({ attachedPid: 4242 }));
+  await assert.rejects(() => controller.start(), /attached qemu process is not running/);
+  assert.equal(controller.getState(), "stopped");
+});
+
+test("SandboxController: attach mode close escalates to SIGKILL when process survives SIGTERM", async () => {
+  mock.timers.enable();
+
+  const killCalls: Array<{ pid: number; signal?: string | number }> = [];
+  let pidAlive = true;
+  mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+    killCalls.push({ pid, signal });
+    if (signal === 0) {
+      if (pidAlive) return true;
+      const error = new Error("missing") as Error & { code?: string };
+      error.code = "ESRCH";
+      throw error;
+    }
+    if (signal === "SIGKILL") {
+      pidAlive = false;
+    }
+    return true;
+  }) as typeof process.kill);
+
+  const controller = new SandboxController(makeConfig({ attachedPid: 4242 }));
+  await controller.start();
+
+  const closing = controller.close();
+  mock.timers.tick(10000);
+  await closing;
+
+  assert.deepEqual(killCalls[0], { pid: 4242, signal: 0 });
+  assert.deepEqual(killCalls[1], { pid: 4242, signal: "SIGTERM" });
+  assert.ok(
+    killCalls.some((entry) => entry.pid === 4242 && entry.signal === "SIGKILL"),
+  );
+});
+
+test("SandboxController: attach mode treats EPERM liveness as alive", async () => {
+  mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+    if (pid === 4242 && signal === 0) {
+      const error = new Error("eperm") as Error & { code?: string };
+      error.code = "EPERM";
+      throw error;
+    }
+    return true;
+  }) as typeof process.kill);
+
+  const controller = new SandboxController(makeConfig({ attachedPid: 4242 }));
+  await controller.start();
+  assert.equal(controller.getState(), "running");
 });
 
 test("SandboxController: close sends SIGTERM and does not SIGKILL if child exits quickly", async () => {

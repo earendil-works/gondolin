@@ -118,6 +118,10 @@ export class KrunController extends EventEmitter {
     return this.state;
   }
 
+  getRuntimePid() {
+    return this.child?.pid ?? null;
+  }
+
   async start() {
     if (this.child) return;
 

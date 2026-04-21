@@ -48,7 +48,12 @@ import {
   unregisterSession,
 } from "../session-registry.ts";
 import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs.ts";
-import type { EnvInput, VMOptions, VmVfsOptions } from "./types.ts";
+import type {
+  EnvInput,
+  VMAttachOptions,
+  VMOptions,
+  VmVfsOptions,
+} from "./types.ts";
 import {
   buildShellEnv,
   envInputToEntries,
@@ -57,6 +62,7 @@ import {
   parseEnvEntry,
   resolveEnvNumber,
 } from "../utils/env.ts";
+import { isProcessAlive } from "../utils/process-control.ts";
 import {
   defaultDebugLog,
   resolveDebugFlags,
@@ -102,6 +108,7 @@ import {
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
 const DEFAULT_VM_START_TIMEOUT_MS = 120000;
+const VM_RUNTIME_METADATA_FILE = "runtime.json";
 const VM_START_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_START_TIMEOUT_MS",
   DEFAULT_VM_START_TIMEOUT_MS,
@@ -126,6 +133,93 @@ function normalizeStartTimeoutMs(
 
   return Math.max(0, Math.trunc(value));
 }
+
+type VmRuntimeMetadata = {
+  id: string;
+  qemuPid: number;
+  qemuPath: string;
+  createdAt: string;
+  reconnectCapable: boolean;
+};
+
+type VMConstructionOptions =
+  | {
+      mode: "attach";
+      attachedQemuPid: number;
+      vmId: string;
+    }
+  | {
+      mode: "create";
+      vmId: string;
+    };
+
+function resolveVmRuntimeDir(id: string): string {
+  const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+  return path.resolve(tmpDir, "gondolin-runtime", id);
+}
+
+function runtimeMetadataPath(runtimeDir: string): string {
+  return path.join(runtimeDir, VM_RUNTIME_METADATA_FILE);
+}
+
+function readVmRuntimeMetadata(id: string): VmRuntimeMetadata {
+  const runtimeDir = resolveVmRuntimeDir(id);
+  const metadataPath = runtimeMetadataPath(runtimeDir);
+  if (!fs.existsSync(metadataPath)) {
+    throw new Error(`runtime metadata not found for vm '${id}'`);
+  }
+
+  let parsed: Partial<VmRuntimeMetadata>;
+  try {
+    parsed = JSON.parse(
+      fs.readFileSync(metadataPath, "utf8"),
+    ) as Partial<VmRuntimeMetadata>;
+  } catch {
+    throw new Error(
+      `runtime metadata at ${metadataPath} is corrupt for vm '${id}'`,
+    );
+  }
+  if (
+    parsed.id !== id ||
+    !Number.isInteger(parsed.qemuPid) ||
+    (parsed.qemuPid ?? 0) <= 0 ||
+    typeof parsed.qemuPath !== "string" ||
+    typeof parsed.createdAt !== "string" ||
+    typeof parsed.reconnectCapable !== "boolean"
+  ) {
+    throw new Error(`runtime metadata is invalid for vm '${id}'`);
+  }
+
+  return parsed as VmRuntimeMetadata;
+}
+
+function writeVmRuntimeMetadata(
+  resolved: ResolvedSandboxServerOptions,
+  qemuPid: number,
+): void {
+  fs.mkdirSync(resolved.runtimeDir, { recursive: true });
+  const metadata: VmRuntimeMetadata = {
+    id: resolved.runtimeId,
+    qemuPid,
+    qemuPath: resolved.qemuPath,
+    createdAt: new Date().toISOString(),
+    reconnectCapable: resolved.reconnectCapable,
+  };
+  fs.writeFileSync(
+    runtimeMetadataPath(resolved.runtimeDir),
+    JSON.stringify(metadata, null, 2) + "\n",
+    "utf8",
+  );
+}
+
+function removeVmRuntimeMetadata(runtimeDir: string): void {
+  try {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+}
+
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
@@ -278,6 +372,7 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
+    const vmId = randomUUID();
     // Resolve sandbox options with async asset fetching
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
 
@@ -325,10 +420,40 @@ export class VM {
 
     // Resolve options with asset fetching
     const resolvedSandboxOptions =
-      await resolveSandboxServerOptionsAsync(sandboxOptions);
+      await resolveSandboxServerOptionsAsync(sandboxOptions, {
+        qemuRuntimeId: vmId,
+      });
 
     // Create VM with pre-resolved options
-    return new VM(options, resolvedSandboxOptions);
+    return new VM(options, resolvedSandboxOptions, {
+      mode: "create",
+      vmId,
+    });
+  }
+
+  static async attach(options: VMAttachOptions): Promise<VM> {
+    const runtimeMetadata = readVmRuntimeMetadata(options.id);
+    if (!runtimeMetadata.reconnectCapable) {
+      throw new Error(
+        `vm '${options.id}' was created without reconnect support and cannot be attached`,
+      );
+    }
+    if (!isProcessAlive(runtimeMetadata.qemuPid)) {
+      throw new Error(`runtime metadata is stale for vm '${options.id}'`);
+    }
+
+    const resolvedSandboxOptions = await resolveSandboxServerOptionsAsync(
+      { ...options.sandbox },
+      {
+        qemuRuntimeId: options.id,
+      },
+    );
+
+    return new VM(options, resolvedSandboxOptions, {
+      mode: "attach",
+      attachedQemuPid: runtimeMetadata.qemuPid,
+      vmId: options.id,
+    });
   }
 
   /**
@@ -344,8 +469,15 @@ export class VM {
   constructor(
     options: VMOptions = {},
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
+    constructionOptions?: VMConstructionOptions,
   ) {
-    this.id = randomUUID();
+    const resolvedConstructionOptions =
+      constructionOptions ??
+      ({
+        mode: "create",
+        vmId: resolvedSandboxOptions?.runtimeId ?? randomUUID(),
+      } satisfies VMConstructionOptions);
+    this.id = resolvedConstructionOptions.vmId;
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
@@ -471,7 +603,9 @@ export class VM {
     // Resolve sandbox options (sync) if needed so we can prepare the root disk.
     const resolved = resolvedSandboxOptions
       ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
-      : resolveSandboxServerOptions(sandboxOptions);
+      : resolveSandboxServerOptions(sandboxOptions, undefined, {
+          qemuRuntimeId: this.id,
+        });
 
     // Merge VFS provider into resolved options
     if (this.vfs) {
@@ -597,6 +731,10 @@ export class VM {
 
     this.resolvedSandboxOptions = resolved;
     this.server = new SandboxServer(resolved, {
+      attachedQemuPid:
+        resolvedConstructionOptions.mode === "attach"
+          ? resolvedConstructionOptions.attachedQemuPid
+          : undefined,
       qemuRootDiskVolatileMode: this.rootDisk?.snapshot
         ? "snapshot"
         : undefined,
@@ -1262,6 +1400,16 @@ fi
         await this.ensureSessionIpc(startupGeneration);
 
         this.ensureStartupGeneration(startupGeneration);
+        const runtimePid = this.server?.getRuntimePid();
+        if (
+          this.resolvedSandboxOptions.vmm === "qemu" &&
+          runtimePid !== null &&
+          runtimePid !== undefined
+        ) {
+          writeVmRuntimeMetadata(this.resolvedSandboxOptions, runtimePid);
+        }
+
+        this.ensureStartupGeneration(startupGeneration);
       },
       "guest readiness",
       () => {
@@ -1435,6 +1583,7 @@ fi
     if (this.server) {
       await this.server.close();
     }
+    removeVmRuntimeMetadata(this.resolvedSandboxOptions.runtimeDir);
     if (this.vfs) {
       await this.vfs.close();
     }

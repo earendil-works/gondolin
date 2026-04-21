@@ -16,6 +16,12 @@ function makeTempResolvedServerOptions() {
   const kernelPath = path.join(dir, "vmlinuz");
   const initrdPath = path.join(dir, "initrd");
   const rootfsPath = path.join(dir, "rootfs");
+  const runtimeId = "test-runtime-id";
+  const runtimeDir = path.join(
+    process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+    "gondolin-runtime",
+    runtimeId,
+  );
   fs.writeFileSync(kernelPath, "");
   fs.writeFileSync(initrdPath, "");
   fs.writeFileSync(rootfsPath, "");
@@ -23,10 +29,13 @@ function makeTempResolvedServerOptions() {
   return {
     dir,
     resolved: {
+      vmm: "qemu" as const,
       qemuPath: "qemu-system-aarch64",
       kernelPath,
       initrdPath,
       rootfsPath,
+      runtimeId,
+      runtimeDir,
       memory: "256M",
       cpus: 1,
       virtioSocketPath: path.join(dir, "virtio.sock"),
@@ -40,6 +49,8 @@ function makeTempResolvedServerOptions() {
       machineType: "virt",
       accel: "tcg",
       cpu: "max",
+      reconnectCapable: false,
+      reconnectMs: undefined,
       console: "none" as const,
       autoRestart: false,
       append: "console=ttyAMA0",
@@ -99,6 +110,239 @@ function makeVm(options: VMOptions = {}) {
     cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
   };
 }
+
+function writeRuntimeMetadata(metadata: Record<string, unknown>) {
+  const runtimeDir = path.join(
+    process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+    "gondolin-runtime",
+    String(metadata.id),
+  );
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runtimeDir, "runtime.json"),
+    JSON.stringify(metadata, null, 2) + "\n",
+    "utf8",
+  );
+}
+
+test("vm internals: constructor derives runtime identity and socket paths from vm id", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+
+  const vm = new VM({
+    autoStart: false,
+    vfs: null,
+    sandbox: {
+      imagePath: {
+        kernelPath: resolved.kernelPath,
+        initrdPath: resolved.initrdPath,
+        rootfsPath: resolved.rootfsPath,
+      },
+    },
+  });
+
+  try {
+    const runtimeOptions = (vm as any).resolvedSandboxOptions;
+    const expectedRuntimeDir = path.join(
+      process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+      "gondolin-runtime",
+      vm.id,
+    );
+
+    assert.equal(runtimeOptions.runtimeId, vm.id);
+    assert.equal(runtimeOptions.runtimeDir, expectedRuntimeDir);
+    assert.equal(runtimeOptions.virtioSocketPath, path.join(expectedRuntimeDir, "virtio.sock"));
+    assert.equal(runtimeOptions.netSocketPath, path.join(expectedRuntimeDir, "net.sock"));
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: VM.attach rejects when runtime metadata is missing", async () => {
+  await assert.rejects(
+    () => (VM as any).attach({ id: "missing-vm-id", autoStart: false, vfs: null }),
+    /runtime metadata/i,
+  );
+});
+
+test("vm internals: VM.attach reuses runtime metadata id and attached qemu pid", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const originalKill = process.kill;
+  let attachedPidAlive = true;
+
+  (process as any).kill = ((pid: number, signal?: string | number) => {
+    if (pid === 4242 && signal === 0) {
+      if (attachedPidAlive) return true;
+      throw new Error("dead");
+    }
+    if (pid === 4242) {
+      attachedPidAlive = false;
+      return true;
+    }
+    return originalKill.call(process, pid, signal as any);
+  }) as typeof process.kill;
+
+  writeRuntimeMetadata({
+    id: "test-runtime-id",
+    qemuPid: 4242,
+    qemuPath: resolved.qemuPath,
+    createdAt: new Date().toISOString(),
+    reconnectCapable: true,
+  });
+
+  const vm = await VM.attach({
+    id: "test-runtime-id",
+    autoStart: false,
+    vfs: null,
+    sandbox: {
+      imagePath: {
+        kernelPath: resolved.kernelPath,
+        initrdPath: resolved.initrdPath,
+        rootfsPath: resolved.rootfsPath,
+      },
+    },
+  });
+
+  try {
+    assert.equal(vm.id, "test-runtime-id");
+    const runtimeOptions = (vm as any).resolvedSandboxOptions;
+    assert.equal(runtimeOptions.runtimeId, "test-runtime-id");
+    assert.equal((vm as any).server.getRuntimePid(), 4242);
+  } finally {
+    await vm.close();
+    (process as any).kill = originalKill;
+    fs.rmSync(
+      path.join(
+        process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+        "gondolin-runtime",
+        "test-runtime-id",
+      ),
+      { recursive: true, force: true },
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: VM.attach rejects when runtime metadata is corrupt", async () => {
+  const runtimeDir = path.join(
+    process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+    "gondolin-runtime",
+    "corrupt-runtime-id",
+  );
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeDir, "runtime.json"), "{", "utf8");
+
+  try {
+    await assert.rejects(
+      () => VM.attach({ id: "corrupt-runtime-id", vfs: null }),
+      /is corrupt/,
+    );
+  } finally {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: VM.attach rejects non-reconnect-capable runtimes", async () => {
+  const { resolved } = makeTempResolvedServerOptions();
+
+  writeRuntimeMetadata({
+    id: "non-reconnect-runtime-id",
+    qemuPid: process.pid,
+    qemuPath: resolved.qemuPath,
+    createdAt: new Date().toISOString(),
+    reconnectCapable: false,
+  });
+
+  try {
+    await assert.rejects(
+      () =>
+        VM.attach({
+          id: "non-reconnect-runtime-id",
+          vfs: null,
+        }),
+      /created without reconnect support/,
+    );
+  } finally {
+    fs.rmSync(
+      path.join(
+        process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+        "gondolin-runtime",
+        "non-reconnect-runtime-id",
+      ),
+      { recursive: true, force: true },
+    );
+  }
+});
+
+test("vm internals: VM.attach rejects stale runtime pids", async () => {
+  const { resolved } = makeTempResolvedServerOptions();
+
+  writeRuntimeMetadata({
+    id: "stale-runtime-id",
+    qemuPid: 4242,
+    qemuPath: resolved.qemuPath,
+    createdAt: new Date().toISOString(),
+    reconnectCapable: true,
+  });
+
+  const originalKill = process.kill;
+  (process as any).kill = ((pid: number, signal?: string | number) => {
+    if (pid === 4242 && signal === 0) {
+      const error = new Error("missing") as Error & { code?: string };
+      error.code = "ESRCH";
+      throw error;
+    }
+    return originalKill.call(process, pid, signal as any);
+  }) as typeof process.kill;
+
+  try {
+    await assert.rejects(
+      () => VM.attach({ id: "stale-runtime-id", vfs: null }),
+      /metadata is stale/,
+    );
+  } finally {
+    (process as any).kill = originalKill;
+    fs.rmSync(
+      path.join(
+        process.platform === "darwin" ? "/tmp" : os.tmpdir(),
+        "gondolin-runtime",
+        "stale-runtime-id",
+      ),
+      { recursive: true, force: true },
+    );
+  }
+});
+
+test("vm internals: start writes runtime metadata and close removes it", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+  });
+
+  const runtimeDir = (vm as any).resolvedSandboxOptions.runtimeDir as string;
+  const metadataPath = path.join(runtimeDir, "runtime.json");
+
+  (vm as any).ensureVmmAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => {};
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+  (vm as any).server.start = async () => {};
+  (vm as any).server.getRuntimePid = () => 4242;
+  (vm as any).server.close = async () => {};
+  (vm as any).disconnect = async () => {};
+
+  try {
+    await vm.start();
+    assert.equal(fs.existsSync(metadataPath), true);
+
+    await vm.close();
+    assert.equal(fs.existsSync(metadataPath), false);
+  } finally {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+    cleanup();
+  }
+});
 
 test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   const { vm, cleanup } = makeVm({

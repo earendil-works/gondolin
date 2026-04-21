@@ -124,11 +124,14 @@ type SandboxControllerLike = {
       error?: Error;
     }) => void,
   ): unknown;
+  getRuntimePid(): number | null;
 };
 
 type SandboxServerInternalOptions = {
   /** qemu root disk volatility mode */
   qemuRootDiskVolatileMode?: "snapshot";
+  /** existing qemu pid to re-own instead of spawning */
+  attachedQemuPid?: number;
 };
 
 export class SandboxServer extends EventEmitter {
@@ -268,6 +271,11 @@ export class SandboxServer extends EventEmitter {
     return this.options.qemuPath;
   }
 
+  /** @internal active vm process pid when known */
+  getRuntimePid(): number | null {
+    return this.controller.getRuntimePid();
+  }
+
   /**
    * Create a SandboxServer, downloading guest assets if needed.
    *
@@ -387,6 +395,9 @@ export class SandboxServer extends EventEmitter {
         machineType: this.options.machineType,
         accel: this.options.accel,
         cpu: this.options.cpu,
+        reconnectCapable: this.options.reconnectCapable,
+        reconnectMs: this.options.reconnectMs,
+        attachedPid: this.internalOptions.attachedQemuPid,
         console: this.options.console,
         autoRestart: this.options.autoRestart,
       };

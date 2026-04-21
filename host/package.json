@@ -23,6 +23,7 @@
     "start": "node dist/bin/gondolin.js exec",
     "dev": "node bin/gondolin.ts exec",
     "test": "node --test test/*.test.ts",
+    "test:attach-reconnect": "node ./scripts/validate-vm-attach-reconnect.ts",
     "test:backend-parity": "node --test test/backend-parity.test.ts",
     "bash": "node bin/gondolin.ts bash",
     "gondolin": "node bin/gondolin.ts",

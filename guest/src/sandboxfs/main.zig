@@ -1122,14 +1122,28 @@ fn openRpcPort(path: []const u8) ?std.posix.fd_t {
     const expected = std.fs.path.basename(path);
     var attempts: usize = 0;
     while (attempts < 50) : (attempts += 1) {
-        if (std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
+        if (tryOpenRpcPath(path) catch null) |fd| {
             return fd;
-        } else |_| {
-            if (openVirtioPortByName(expected)) |fd| return fd;
         }
+        if (openVirtioPortByName(expected)) |fd| return fd;
         std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
     return null;
+}
+
+fn tryOpenRpcPath(path: []const u8) !?std.posix.fd_t {
+    const fd = std.posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+        error.FileNotFound, error.NoDevice => return null,
+        else => return err,
+    };
+    errdefer std.posix.close(fd);
+
+    const original_flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    const nonblock_flag_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    const nonblock_flag: usize = @intCast(nonblock_flag_u32);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, original_flags & ~nonblock_flag);
+
+    return fd;
 }
 
 fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {
@@ -1142,7 +1156,7 @@ fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {
         if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
         if (!virtioPortMatches(entry.name, expected)) continue;
         const path = std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name}) catch continue;
-        return std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch continue;
+        return tryOpenRpcPath(path) catch continue;
     }
 
     return null;
