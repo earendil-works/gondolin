@@ -1,6 +1,6 @@
 {
   "name": "@earendil-works/gondolin-krun-runner-darwin-arm64",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Prebuilt gondolin-krun-runner binary for macOS arm64",
   "license": "Apache-2.0",
   "repository": {
