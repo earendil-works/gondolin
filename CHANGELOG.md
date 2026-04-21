@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.8.0
+
 - Fixed checkpoint resume to avoid overwriting the source checkpoint when resuming into the same path
 - Fixed WebSocket proxying through `httpHooks` by re-injecting upgrade headers stripped by WHATWG `Request` handling #83
 - Fixed ingress proxying for some HTTP backends (including Kestrel and Vite) and large responses by avoiding premature EOF handling and draining readable bytes on `POLLHUP` #84 #87
