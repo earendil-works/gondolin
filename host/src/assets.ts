@@ -266,6 +266,7 @@ export type AssetBuildIdInput = {
     rootfs: string;
     krunKernel?: string;
     krunInitrd?: string;
+    wasm?: string;
   };
   /** guest architecture identifier (e.g. "aarch64") */
   arch?: string;
@@ -291,6 +292,9 @@ export function computeAssetBuildId(input: AssetBuildIdInput): string {
   }
   if (input.checksums.krunInitrd !== undefined) {
     parts.push(`krunInitrd=${input.checksums.krunInitrd}`);
+  }
+  if (input.checksums.wasm !== undefined) {
+    parts.push(`wasm=${input.checksums.wasm}`);
   }
 
   parts.push(`arch=${arch}`);
@@ -348,6 +352,8 @@ export interface AssetManifest {
     krunKernel?: string;
     /** krun initrd image filename */
     krunInitrd?: string;
+    /** wasm guest module filename */
+    wasm?: string;
   };
 
   /** sha256 checksums (hex) */
@@ -362,6 +368,8 @@ export interface AssetManifest {
     krunKernel?: string;
     /** krun initrd checksum */
     krunInitrd?: string;
+    /** wasm guest module checksum */
+    wasm?: string;
   };
 }
 
@@ -450,6 +458,13 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
     }
   }
 
+  if (assetFiles.wasm) {
+    const wasmPath = path.join(resolvedDir, assetFiles.wasm);
+    if (!fs.existsSync(wasmPath)) {
+      missing.push(assetFiles.wasm);
+    }
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Missing guest assets in ${resolvedDir}: ${missing.join(", ")}\n` +
@@ -495,6 +510,10 @@ function assetsExist(dir: string): boolean {
     assetFiles.krunInitrd &&
     !fs.existsSync(path.join(dir, assetFiles.krunInitrd))
   ) {
+    return false;
+  }
+
+  if (assetFiles.wasm && !fs.existsSync(path.join(dir, assetFiles.wasm))) {
     return false;
   }
 

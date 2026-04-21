@@ -42,6 +42,7 @@ pub fn handleFileWrite(
     tx: anytype,
     root_dir: []const u8,
     req: protocol.FileWriteRequest,
+    stdio_transport: bool,
 ) !void {
     const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
     defer allocator.free(resolved_path);
@@ -50,7 +51,10 @@ pub fn handleFileWrite(
     defer file.close();
 
     while (true) {
-        const frame = try protocol.readFrame(allocator, virtio_fd);
+        const frame = if (stdio_transport)
+            try protocol.readStdioFramePayload(allocator, virtio_fd)
+        else
+            try protocol.readFrame(allocator, virtio_fd);
         defer allocator.free(frame);
 
         const input = try protocol.decodeFileWriteData(allocator, frame, req.id);

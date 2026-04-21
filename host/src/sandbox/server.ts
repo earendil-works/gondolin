@@ -13,6 +13,7 @@ import {
   buildFileReadRequest,
   buildFileWriteData,
   buildFileWriteRequest,
+  type IncomingMessage,
 } from "./virtio-protocol.ts";
 import {
   type BootCommandMessage,
@@ -50,8 +51,9 @@ import {
 } from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
+  type ServerTransport,
   TcpForwardStream,
-  VirtioBridge,
+  UnixSocketTransport,
   estimateBase64Bytes,
   isValidRequestId,
   parseMac,
@@ -71,6 +73,8 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
+import { WasmFunctionBridgeRunner } from "./wasm-function-bridge-runner.ts";
+import { WasmFunctionBridgeController } from "./wasm-function-bridge-controller.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 
@@ -126,9 +130,22 @@ type SandboxControllerLike = {
   ): unknown;
 };
 
+type SandboxServerTransportName = "control" | "fs" | "ssh" | "ingress";
+
+type SandboxServerTransportFactory = (options: {
+  /** transport channel identifier */
+  name: SandboxServerTransportName;
+  /** unix socket path for this channel */
+  socketPath: string;
+  /** maximum queued transport bytes */
+  maxPendingBytes: number;
+}) => ServerTransport;
+
 type SandboxServerInternalOptions = {
   /** qemu root disk volatility mode */
   qemuRootDiskVolatileMode?: "snapshot";
+  /** transport factory override for tests and alternate runtimes */
+  transportFactory?: SandboxServerTransportFactory;
 };
 
 export class SandboxServer extends EventEmitter {
@@ -178,18 +195,180 @@ export class SandboxServer extends EventEmitter {
     return ` (qemu: ${truncated})`;
   }
 
+  private readonly ptyLineEndingState = new Map<
+    number,
+    {
+      /** whether last processed byte was a carriage return */
+      pendingCR: boolean;
+      /** whether to drop a single trailing LF after synthesizing CRLF from CRCR */
+      dropNextLF: boolean;
+      /** whether newline repair is active for this exec id */
+      normalize: boolean;
+    }
+  >();
+
+  private shouldEnablePtyLineEndingRepair(data: Buffer): boolean {
+    if (data.length < 2) return false;
+    for (let i = 1; i < data.length; i += 1) {
+      if (data[i - 1] === 0x0d && data[i] === 0x0d) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private normalizePtyOutput(id: number, data: Buffer): Buffer {
+    if (!this.ptyExecIds.has(id)) {
+      this.ptyLineEndingState.delete(id);
+      return data;
+    }
+
+    const state =
+      this.ptyLineEndingState.get(id) ??
+      ({ pendingCR: false, dropNextLF: false, normalize: false } as {
+        pendingCR: boolean;
+        dropNextLF: boolean;
+        normalize: boolean;
+      });
+
+    if (!state.normalize && this.shouldEnablePtyLineEndingRepair(data)) {
+      state.normalize = true;
+    }
+
+    if (!state.normalize) {
+      this.ptyLineEndingState.set(id, state);
+      return data;
+    }
+
+    const out: number[] = [];
+
+    for (let i = 0; i < data.length; i += 1) {
+      const byte = data[i]!;
+
+      if (state.dropNextLF) {
+        state.dropNextLF = false;
+        if (byte === 0x0a) {
+          continue;
+        }
+      }
+
+      if (state.pendingCR) {
+        if (byte === 0x0a) {
+          out.push(0x0d, 0x0a);
+          state.pendingCR = false;
+          continue;
+        }
+        if (byte === 0x0d) {
+          out.push(0x0d, 0x0a);
+          state.pendingCR = false;
+          state.dropNextLF = true;
+          continue;
+        }
+
+        out.push(0x0d);
+        state.pendingCR = false;
+      }
+
+      if (byte === 0x0d) {
+        state.pendingCR = true;
+        continue;
+      }
+
+      out.push(byte);
+    }
+
+    this.ptyLineEndingState.set(id, state);
+    return out.length > 0 ? Buffer.from(out) : Buffer.alloc(0);
+  }
+
+  private flushPtyOutputNormalizer(id: number, client: SandboxClient | null): void {
+    if (!client) {
+      this.ptyLineEndingState.delete(id);
+      return;
+    }
+
+    const state = this.ptyLineEndingState.get(id);
+    if (!state || !state.normalize || !state.pendingCR) {
+      this.ptyLineEndingState.delete(id);
+      return;
+    }
+
+    state.pendingCR = false;
+    state.dropNextLF = false;
+    this.ptyLineEndingState.delete(id);
+
+    try {
+      sendBinary(client, encodeOutputFrame(id, "stdout", Buffer.from("\r")));
+    } catch {
+      // ignore trailing flush failures
+    }
+  }
+
   private readonly debugFlags: ReadonlySet<DebugFlag>;
 
   private hasDebug(flag: DebugFlag) {
     return this.debugFlags.has(flag);
   }
 
+  private handleFsRequestMessage(
+    message: IncomingMessage,
+    transport: ServerTransport,
+    source: "control" | "fs",
+  ) {
+    if (!isValidRequestId(message.id) || message.t !== "fs_request") {
+      return;
+    }
+
+    const respond = (response: IncomingMessage) => {
+      if (!transport.send(response)) {
+        this.emit(
+          "error",
+          new Error(`[fs/${source}] virtio bridge queue exceeded`),
+        );
+      }
+    };
+
+    if (!this.fsService) {
+      respond({
+        v: 1,
+        t: "fs_response",
+        id: message.id,
+        p: {
+          op: message.p.op,
+          err: LINUX_ERRNO.ENOSYS,
+          message: "filesystem service unavailable",
+        },
+      });
+      return;
+    }
+
+    void this.fsService
+      .handleRequest(message)
+      .then((response) => {
+        respond(response);
+      })
+      .catch((err) => {
+        const detail = err instanceof Error ? err.message : "fs handler error";
+        respond({
+          v: 1,
+          t: "fs_response",
+          id: message.id,
+          p: {
+            op: message.p.op,
+            err: LINUX_ERRNO.EIO,
+            message: detail,
+          },
+        });
+        this.emit("error", err instanceof Error ? err : new Error(detail));
+      });
+  }
+
   private readonly options: ResolvedSandboxServerOptions;
   private readonly controller: SandboxControllerLike;
-  private readonly bridge: VirtioBridge;
-  private readonly fsBridge: VirtioBridge;
-  private readonly sshBridge: VirtioBridge;
-  private readonly ingressBridge: VirtioBridge;
+  private readonly bridge: ServerTransport;
+  private readonly fsBridge: ServerTransport;
+  private readonly sshBridge: ServerTransport;
+  private readonly ingressBridge: ServerTransport;
   private readonly network: QemuNetworkBackend | null;
   private readonly internalOptions: SandboxServerInternalOptions;
 
@@ -232,6 +411,8 @@ export class SandboxServer extends EventEmitter {
   /** stdin credits available to send to sandboxd, tracked in `bytes` */
   private stdinCredits = new Map<number, number>();
   private queuedPtyResize = new Map<number, { rows: number; cols: number }>();
+  /** exec ids requested with PTY enabled */
+  private ptyExecIds = new Set<number>();
 
   // Pending exec_window credits that could not be sent due to virtio queue pressure
   private pendingExecWindows = new Map<
@@ -258,9 +439,13 @@ export class SandboxServer extends EventEmitter {
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    return this.options.vmm === "krun"
-      ? this.options.krunRunnerPath
-      : this.options.qemuPath;
+    if (this.options.vmm === "krun") {
+      return this.options.krunRunnerPath;
+    }
+    if (this.options.vmm === "wasm-node") {
+      return this.options.wasmNodePath ?? process.execPath;
+    }
+    return this.options.qemuPath;
   }
 
   /** @internal resolved qemu binary path */
@@ -341,6 +526,8 @@ export class SandboxServer extends EventEmitter {
     const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
 
+    let wasmRunner: WasmFunctionBridgeRunner | null = null;
+
     if (this.options.vmm === "krun") {
       const krunConfig: KrunConfig = {
         krunRunnerPath: this.options.krunRunnerPath,
@@ -364,6 +551,23 @@ export class SandboxServer extends EventEmitter {
         autoRestart: this.options.autoRestart,
       };
       this.controller = new KrunController(krunConfig);
+    } else if (this.options.vmm === "wasm-node") {
+      wasmRunner = new WasmFunctionBridgeRunner({
+        nodePath: this.options.wasmNodePath,
+        entryPath: this.options.wasmRunnerPath,
+        mode: this.options.wasmRunnerMode,
+        wasmPath: this.options.wasmPath,
+        netSocketPath: this.options.netEnabled
+          ? this.options.netSocketPath
+          : undefined,
+        preopens: this.options.wasmPreopens,
+      });
+      this.controller = new WasmFunctionBridgeController({
+        runner: wasmRunner,
+        mode: this.options.wasmRunnerMode,
+        autoRestart: this.options.autoRestart,
+        append: this.baseAppend,
+      });
     } else {
       const sandboxConfig: SandboxConfig = {
         qemuPath: this.options.qemuPath,
@@ -402,7 +606,31 @@ export class SandboxServer extends EventEmitter {
       (this.options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES) * 2,
     );
 
-    this.bridge = new VirtioBridge(
+    const createTransport = (
+      name: SandboxServerTransportName,
+      socketPath: string,
+      channelMaxPendingBytes: number = maxPendingBytes,
+    ): ServerTransport => {
+      if (this.internalOptions.transportFactory) {
+        return this.internalOptions.transportFactory({
+          name,
+          socketPath,
+          maxPendingBytes: channelMaxPendingBytes,
+        });
+      }
+
+      if (wasmRunner) {
+        return wasmRunner.createChannelTransport(
+          name,
+          channelMaxPendingBytes,
+        );
+      }
+
+      return new UnixSocketTransport(socketPath, channelMaxPendingBytes);
+    };
+
+    this.bridge = createTransport(
+      "control",
       this.options.virtioSocketPath,
       maxPendingBytes,
     );
@@ -411,14 +639,19 @@ export class SandboxServer extends EventEmitter {
       this.scheduleExecIoFlush();
       this.flushBridgeWritableWaiters();
     };
-    this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
+
+    this.fsBridge = createTransport("fs", this.options.virtioFsSocketPath);
+
     // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
-    this.sshBridge = new VirtioBridge(
+    this.sshBridge = createTransport(
+      "ssh",
       this.options.virtioSshSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
+
     // Ingress proxy streams can also be long-lived and high-throughput.
-    this.ingressBridge = new VirtioBridge(
+    this.ingressBridge = createTransport(
+      "ingress",
       this.options.virtioIngressSocketPath,
       Math.max(maxPendingBytes, 64 * 1024 * 1024),
     );
@@ -615,7 +848,10 @@ export class SandboxServer extends EventEmitter {
       if (message.t === "exec_output") {
         const client = this.inflight.get(message.id);
         if (!client) return;
-        const data = message.p.data;
+        const data = this.normalizePtyOutput(message.id, message.p.data);
+        if (data.length === 0) {
+          return;
+        }
         try {
           if (
             !sendBinary(
@@ -623,14 +859,12 @@ export class SandboxServer extends EventEmitter {
               encodeOutputFrame(message.id, message.p.stream, data),
             )
           ) {
-            this.inflight.delete(message.id);
-            this.stdinAllowed.delete(message.id);
-            this.stdinCredits.delete(message.id);
+            this.flushPtyOutputNormalizer(message.id, client);
+            this.detachExecClient(message.id);
           }
         } catch {
-          this.inflight.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
+          this.flushPtyOutputNormalizer(message.id, client);
+          this.detachExecClient(message.id);
         }
       } else if (message.t === "exec_response") {
         if (this.hasDebug("exec")) {
@@ -640,6 +874,7 @@ export class SandboxServer extends EventEmitter {
           );
         }
         const client = this.inflight.get(message.id);
+        this.flushPtyOutputNormalizer(message.id, client ?? null);
         if (client) {
           sendJson(client, {
             type: "exec_response",
@@ -648,13 +883,7 @@ export class SandboxServer extends EventEmitter {
             signal: message.p.signal,
           });
         }
-        this.inflight.delete(message.id);
-        this.startedExecs.delete(message.id);
-        this.stdinAllowed.delete(message.id);
-        this.stdinCredits.delete(message.id);
-        this.pendingExecWindows.delete(message.id);
-        this.clearQueuedStdin(message.id);
-        this.queuedPtyResize.delete(message.id);
+        this.clearExecTracking(message.id);
       } else if (message.t === "stdin_window") {
         const stdin = (message as any).p?.stdin;
         const credits = Number(stdin);
@@ -714,13 +943,8 @@ export class SandboxServer extends EventEmitter {
         }
 
         if (client) {
-          this.inflight.delete(message.id);
-          this.startedExecs.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
-          this.pendingExecWindows.delete(message.id);
-          this.clearQueuedStdin(message.id);
-          this.queuedPtyResize.delete(message.id);
+          this.flushPtyOutputNormalizer(message.id, client);
+          this.clearExecTracking(message.id);
         } else if (this.fileOps.has(message.id)) {
           this.rejectFileOperation(
             message.id,
@@ -729,12 +953,7 @@ export class SandboxServer extends EventEmitter {
         } else if (this.startedExecs.has(message.id)) {
           // Orphaned exec (client disconnected): still clear guest-side lifecycle
           // tracking when sandboxd reports terminal failure.
-          this.startedExecs.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
-          this.pendingExecWindows.delete(message.id);
-          this.clearQueuedStdin(message.id);
-          this.queuedPtyResize.delete(message.id);
+          this.clearExecTracking(message.id);
         } else if (message.id === 0 && this.activeFileOpId !== null) {
           this.rejectFileOperation(
             this.activeFileOpId,
@@ -745,6 +964,8 @@ export class SandboxServer extends EventEmitter {
         this.handleVfsReady();
       } else if (message.t === "vfs_error") {
         this.handleVfsError(message.p.message);
+      } else if (message.t === "fs_request") {
+        this.handleFsRequestMessage(message, this.bridge, "control");
       }
     };
 
@@ -758,48 +979,7 @@ export class SandboxServer extends EventEmitter {
           `virtiofs rx t=${message.t} id=${id}${extra}`,
         );
       }
-      if (!isValidRequestId(message.id)) {
-        return;
-      }
-      if (message.t !== "fs_request") {
-        return;
-      }
-      if (!this.fsService) {
-        this.fsBridge.send({
-          v: 1,
-          t: "fs_response",
-          id: message.id,
-          p: {
-            op: message.p.op,
-            err: LINUX_ERRNO.ENOSYS,
-            message: "filesystem service unavailable",
-          },
-        });
-        return;
-      }
-
-      void this.fsService
-        .handleRequest(message)
-        .then((response) => {
-          if (!this.fsBridge.send(response)) {
-            this.emit("error", new Error("[fs] virtio bridge queue exceeded"));
-          }
-        })
-        .catch((err) => {
-          const detail =
-            err instanceof Error ? err.message : "fs handler error";
-          this.fsBridge.send({
-            v: 1,
-            t: "fs_response",
-            id: message.id,
-            p: {
-              op: message.p.op,
-              err: LINUX_ERRNO.EIO,
-              message: detail,
-            },
-          });
-          this.emit("error", err instanceof Error ? err : new Error(detail));
-        });
+      this.handleFsRequestMessage(message, this.fsBridge, "fs");
     };
 
     this.sshBridge.onMessage = (message: any) => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import test from "node:test";
 
+import { getBackendCapabilities } from "../src/sandbox/backend-capabilities.ts";
 import { VM } from "../src/vm/core.ts";
 import { MemoryProvider } from "../src/vfs/node/index.ts";
 import {
@@ -9,6 +10,8 @@ import {
   shouldSkipVmTests,
   resolveKrunRunnerPath,
   getKrunRuntimeSkipReason,
+  resolveWasmTestPath,
+  getWasmRuntimeSkipReason,
 } from "./helpers/vm-fixture.ts";
 
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
@@ -22,9 +25,11 @@ const ingressFetchTimeoutMs = Math.max(
 );
 const requireKrun = process.env.GONDOLIN_REQUIRE_KRUN === "1";
 const requireQemu = process.env.GONDOLIN_REQUIRE_QEMU !== "0";
+const requireWasm = process.env.GONDOLIN_REQUIRE_WASM === "1";
 const runIngressParity = process.env.GONDOLIN_BACKEND_PARITY_INGRESS === "1";
+const wasmPath = resolveWasmTestPath();
 
-const ALL_BACKENDS = ["qemu", "krun"] as const;
+const ALL_BACKENDS = ["qemu", "krun", "wasm-node"] as const;
 type BackendName = (typeof ALL_BACKENDS)[number];
 
 function resolveRequestedBackends(): BackendName[] {
@@ -54,6 +59,13 @@ function backendSandboxOptions(backend: BackendName) {
     return {
       vmm: "krun" as const,
       krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+      console: "none" as const,
+    };
+  }
+  if (backend === "wasm-node") {
+    return {
+      vmm: "wasm-node" as const,
+      wasmPath: wasmPath ?? undefined,
       console: "none" as const,
     };
   }
@@ -99,7 +111,7 @@ async function skipIfBackendUnavailable(
   t: test.TestContext,
   backend: BackendName,
 ): Promise<boolean> {
-  if (shouldSkipVmTests()) {
+  if (backend !== "wasm-node" && shouldSkipVmTests()) {
     t.skip("hardware virtualization unavailable");
     return true;
   }
@@ -113,6 +125,18 @@ async function skipIfBackendUnavailable(
       throw new Error(qemuSkipReason);
     }
     t.skip(qemuSkipReason);
+    return true;
+  }
+
+  if (backend === "wasm-node") {
+    const wasmSkipReason = await getWasmRuntimeSkipReason();
+    if (!wasmSkipReason) {
+      return false;
+    }
+    if (requireWasm) {
+      throw new Error(wasmSkipReason);
+    }
+    t.skip(wasmSkipReason);
     return true;
   }
 
@@ -139,6 +163,14 @@ function hasSshClient(): boolean {
 }
 
 const skipIfNoSshClient = !hasSshClient();
+
+function backendSkipReasonForTcpForwardParity(
+  backend: BackendName,
+): string | false {
+  return getBackendCapabilities(backend).tcpForwardChannels
+    ? false
+    : `intentionally unsupported for vmm=${backend}`;
+}
 
 test.after(() => {
   scheduleForceExit();
@@ -167,7 +199,7 @@ for (const backend of backends) {
   );
 
   test(
-    `backend parity (${backend}): vfs mount is ready and serves guest reads`,
+    `backend parity (${backend}): vfs mount is ready and supports guest read/write round-trip`,
     { timeout: timeoutMs },
     async (t) => {
       if (await skipIfBackendUnavailable(t, backend)) return;
@@ -192,13 +224,25 @@ for (const backend of backends) {
       });
 
       await vm.start();
-      const result = await vm.exec([
+      const read = await vm.exec([
         "/bin/sh",
         "-lc",
         "cat /data/from-host.txt",
       ]);
-      assert.equal(result.exitCode, 0);
-      assert.equal(result.stdout.trim(), "vfs-ok");
+      assert.equal(read.exitCode, 0);
+      assert.equal(read.stdout.trim(), "vfs-ok");
+
+      const write = await vm.exec([
+        "/bin/sh",
+        "-lc",
+        "echo -n vfs-guest > /data/from-guest.txt",
+      ]);
+      assert.equal(write.exitCode, 0, write.stderr);
+
+      const guestFile = await provider.open("/from-guest.txt", "r");
+      const guestData = await guestFile.readFile({ encoding: "utf8" });
+      await guestFile.close();
+      assert.equal(guestData, "vfs-guest");
     },
   );
 
@@ -234,7 +278,9 @@ for (const backend of backends) {
   test(
     `backend parity (${backend}): enableSsh smoke`,
     {
-      skip: skipIfNoSshClient && "host ssh client unavailable",
+      skip:
+        backendSkipReasonForTcpForwardParity(backend) ||
+        (skipIfNoSshClient && "host ssh client unavailable"),
       timeout: timeoutMs,
     },
     async (t) => {
@@ -312,8 +358,9 @@ for (const backend of backends) {
     `backend parity (${backend}): enableIngress smoke`,
     {
       skip:
-        !runIngressParity &&
-        "set GONDOLIN_BACKEND_PARITY_INGRESS=1 to enable ingress parity smoke",
+        backendSkipReasonForTcpForwardParity(backend) ||
+        (!runIngressParity &&
+          "set GONDOLIN_BACKEND_PARITY_INGRESS=1 to enable ingress parity smoke"),
       timeout: timeoutMs,
     },
     async (t) => {

@@ -410,6 +410,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets.krunInitrd,
               "manifest.assets.krunInitrd",
             );
+      const sourceWasmPath =
+        manifest.assets?.wasm === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.wasm,
+              "manifest.assets.wasm",
+            );
 
       if (!fs.existsSync(sourceKernelPath)) {
         throw new Error(
@@ -435,6 +443,9 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         throw new Error(
           `missing manifest.assets.krunInitrd file at ${sourceKrunInitrdPath}`,
         );
+      }
+      if (sourceWasmPath && !fs.existsSync(sourceWasmPath)) {
+        throw new Error(`missing manifest.assets.wasm file at ${sourceWasmPath}`);
       }
 
       const safeKernelPath = ensureSafeImportSourcePath(
@@ -485,6 +496,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets!.krunInitrd,
               "manifest.assets.krunInitrd",
             );
+      const targetWasmPath =
+        sourceWasmPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.wasm,
+              "manifest.assets.wasm",
+            );
 
       fs.mkdirSync(path.dirname(targetKernelPath), {
         recursive: true,
@@ -500,6 +519,9 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       }
       if (targetKrunInitrdPath) {
         fs.mkdirSync(path.dirname(targetKrunInitrdPath), { recursive: true });
+      }
+      if (targetWasmPath) {
+        fs.mkdirSync(path.dirname(targetWasmPath), { recursive: true });
       }
 
       fs.copyFileSync(safeKernelPath, targetKernelPath);
@@ -520,6 +542,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           "manifest.assets.krunInitrd",
         );
         fs.copyFileSync(safeKrunInitrdPath, targetKrunInitrdPath);
+      }
+      if (targetWasmPath && sourceWasmPath) {
+        const safeWasmPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceWasmPath,
+          "manifest.assets.wasm",
+        );
+        fs.copyFileSync(safeWasmPath, targetWasmPath);
       }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });

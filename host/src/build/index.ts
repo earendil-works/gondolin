@@ -75,6 +75,12 @@ export async function buildAssets(
     );
   }
 
+  if (config.wasm?.enabled && !hasOciRootfs(config)) {
+    throw new Error(
+      "WASM builds currently require oci.image in build config.",
+    );
+  }
+
   if (
     hasOciRootfs(config) &&
     hasPostBuildCommands(config) &&
@@ -159,6 +165,17 @@ export function verifyAssets(assetDir: string): boolean {
       name: "krunInitrd",
       file: manifest.assets.krunInitrd,
       expected: manifest.checksums.krunInitrd,
+    });
+  }
+
+  if (manifest.assets.wasm) {
+    if (!manifest.checksums.wasm) {
+      return false;
+    }
+    assets.push({
+      name: "wasm",
+      file: manifest.assets.wasm,
+      expected: manifest.checksums.wasm,
     });
   }
 

@@ -159,6 +159,50 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
   }
 });
 
+test("resolveSandboxServerOptions supports vmm=wasm-node without guest assets", () => {
+  const resolved = resolveSandboxServerOptions({
+    vmm: "wasm-node",
+    netEnabled: false,
+  });
+
+  assert.equal(resolved.vmm, "wasm-node");
+  assert.equal(resolved.wasmNodePath, process.execPath);
+  assert.equal(resolved.wasmRunnerMode, "harness");
+  assert.ok(typeof resolved.kernelPath === "string");
+  assert.ok(typeof resolved.rootfsPath === "string");
+});
+
+test("resolveSandboxServerOptions rejects qemu-specific options for vmm=wasm-node", () => {
+  assert.throws(
+    () =>
+      resolveSandboxServerOptions({
+        vmm: "wasm-node",
+        qemuPath: "qemu-system-aarch64",
+      }),
+    /Unsupported sandbox option for vmm=wasm-node: sandbox\.qemuPath/,
+  );
+});
+
+test("resolveSandboxServerOptions selects wasi-stdio mode when wasmPath is provided", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-wasm-"));
+  const wasmPath = path.join(dir, "sandbox.wasm");
+  fs.writeFileSync(wasmPath, "");
+
+  try {
+    const resolved = resolveSandboxServerOptions({
+      vmm: "wasm-node",
+      wasmPath,
+      netEnabled: false,
+    });
+
+    assert.equal(resolved.vmm, "wasm-node");
+    assert.equal(resolved.wasmPath, wasmPath);
+    assert.equal(resolved.wasmRunnerMode, "wasi-stdio");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);

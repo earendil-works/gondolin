@@ -85,6 +85,8 @@ export interface OciResolvedSource {
 export interface AlpineBuildResult {
   /** rootfs ext4 image path */
   rootfsImage: string;
+  /** rootfs staging directory path */
+  rootfsDir: string;
   /** compressed initramfs path */
   initramfs: string;
   /** OCI source metadata captured during rootfs export */

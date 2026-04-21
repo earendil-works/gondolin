@@ -39,6 +39,7 @@ import {
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
+import { getBackendCapabilities } from "../sandbox/backend-capabilities.ts";
 import type { SandboxConnection } from "../sandbox/client.ts";
 import type { SandboxState } from "../sandbox/controller.ts";
 import {
@@ -71,7 +72,10 @@ import {
   createGondolinEtcHooks,
   createGondolinEtcMount,
 } from "../ingress.ts";
-import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
+import {
+  MemoryProvider,
+  type VirtualProvider,
+} from "../vfs/node/index.ts";
 import {
   SandboxVfsProvider,
   type VfsHooks,
@@ -473,6 +477,17 @@ export class VM {
       ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(sandboxOptions);
 
+    const backend = (resolved.vmm ?? "qemu") as SandboxVmm;
+    const backendCapabilities = getBackendCapabilities(backend);
+    const explicitMounts = options.vfs?.mounts;
+    const explicitVfsMounts = listMountPaths(explicitMounts);
+
+    if (!backendCapabilities.vfsMounts && explicitVfsMounts.length > 0) {
+      throw new Error(
+        `vmm=${backend} does not support VFS mounts yet (${explicitVfsMounts.join(", ")})`,
+      );
+    }
+
     // Merge VFS provider into resolved options
     if (this.vfs) {
       (resolved as any).vfsProvider = this.vfs;
@@ -491,7 +506,21 @@ export class VM {
     // Prepare root disk:
     // - Explicit sandbox.rootDisk* options win.
     // - Otherwise, use rootfs mode from VM options/manifest/default.
-    if (hasUserRootDiskConfig) {
+    if ((resolved.vmm ?? "qemu") === "wasm-node") {
+      const format = inferDiskFormatFromPath(resolved.rootfsPath);
+
+      resolved.rootDiskPath = resolved.rootfsPath;
+      resolved.rootDiskFormat = format;
+      resolved.rootDiskReadOnly = true;
+
+      this.rootDisk = {
+        path: resolved.rootfsPath,
+        format,
+        snapshot: false,
+        readOnly: true,
+        deleteOnClose: false,
+      };
+    } else if (hasUserRootDiskConfig) {
       const rootDiskPath = sandboxOptions.rootDiskPath ?? resolved.rootDiskPath;
       const format =
         sandboxOptions.rootDiskFormat ??
@@ -1645,6 +1674,7 @@ fi
 
   private async ensureVfsReady() {
     if (!this.vfs) return;
+
     if (!this.vfsReadyPromise) {
       this.vfsReadyPromise = this.waitForVfsReadyInternal().catch((error) => {
         this.vfsReadyPromise = null;
@@ -1690,7 +1720,7 @@ fi
     }
 
     const source = `${this.fuseMount}${mountPoint}`;
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
+    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; if [ -e "$2" ] && [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then exit 0; fi; mkdir -p "$1"; if ! mount --bind "$2" "$1" > /dev/null 2>&1; then rm -rf "$1" > /dev/null 2>&1 || true; ln -s "$2" "$1" > /dev/null 2>&1 || true; fi; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     const result = await this.execInternalNoVfsWait([
       "/bin/sh",
@@ -2123,8 +2153,21 @@ function resolveFuseConfig(
   mounts?: Record<string, VirtualProvider>,
 ) {
   const fuseMount = normalizeMountPath(options?.fuseMount ?? "/data");
-  const mountPaths = listMountPaths(mounts ?? options?.mounts);
-  const fuseBinds = mountPaths.filter((mountPath) => mountPath !== "/");
+  const mountPaths = listMountPaths(mounts ?? options?.mounts)
+    .filter((mountPath) => mountPath !== "/")
+    .sort((a, b) => a.length - b.length || a.localeCompare(b));
+
+  const fuseBinds: string[] = [];
+  for (const mountPath of mountPaths) {
+    const covered = fuseBinds.some(
+      (parentMount) =>
+        mountPath === parentMount || mountPath.startsWith(`${parentMount}/`),
+    );
+    if (!covered) {
+      fuseBinds.push(mountPath);
+    }
+  }
+
   return { fuseMount, fuseBinds };
 }
 

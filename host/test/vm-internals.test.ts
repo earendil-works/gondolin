@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
+import {
+  MemoryProvider,
+  RealFSProvider,
+  type VirtualProvider,
+} from "../src/vfs/node/index.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createExecSession } from "../src/exec.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
@@ -118,6 +123,43 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   } finally {
     await vm.close();
     cleanup();
+  }
+});
+
+test("vm internals: wasm-node keeps VFS mounts on shared fs-rpc path", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const mountRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-hostfs-"));
+
+  let vm: VM | null = null;
+  try {
+    vm = new VM(
+      {
+        autoStart: false,
+        vfs: {
+          mounts: {
+            "/workspace": new ReadonlyProvider(new RealFSProvider(mountRoot)),
+            "/mem": new MemoryProvider(),
+          },
+        },
+      },
+      {
+        ...(resolved as any),
+        vmm: "wasm-node",
+        wasmNodePath: process.execPath,
+        wasmRunnerPath: "/tmp/wasm-runner-entry.ts",
+        wasmRunnerMode: "harness",
+        wasmPath: undefined,
+      } as any,
+    );
+
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    assert.deepEqual(resolvedOptions.wasmPreopens ?? [], []);
+  } finally {
+    if (vm) {
+      await vm.close();
+    }
+    fs.rmSync(mountRoot, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -368,13 +410,14 @@ test("vm internals: resolveFuseConfig normalizes fuseMount and binds", () => {
   const mounts: Record<string, VirtualProvider> = {
     "/": new MemoryProvider(),
     "/app": new MemoryProvider(),
+    "/deep": new MemoryProvider(),
     "/deep/nested": new MemoryProvider(),
   };
 
   const cfg = __test.resolveFuseConfig({ fuseMount: "/data" }, mounts);
   assert.equal(cfg.fuseMount, "/data");
-  // bind mounts exclude "/"
-  assert.deepEqual(cfg.fuseBinds.sort(), ["/app", "/deep/nested"].sort());
+  // bind mounts exclude "/" and skip nested paths covered by a parent bind
+  assert.deepEqual(cfg.fuseBinds.sort(), ["/app", "/deep"].sort());
 });
 
 test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", () => {

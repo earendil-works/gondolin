@@ -91,10 +91,20 @@ test("assets: computeAssetBuildId is deterministic", () => {
     },
     arch: "aarch64",
   });
+  const id5 = computeAssetBuildId({
+    checksums: {
+      kernel: "a",
+      initramfs: "b",
+      rootfs: "c",
+      wasm: "w1",
+    },
+    arch: "aarch64",
+  });
 
   assert.equal(id1, id2);
   assert.notEqual(id1, id3);
   assert.notEqual(id1, id4);
+  assert.notEqual(id1, id5);
 });
 
 test("assets: loadGuestAssets uses manifest filenames and validates existence", () => {
@@ -130,6 +140,44 @@ test("assets: loadGuestAssets uses manifest filenames and validates existence", 
     assert.equal(path.basename(assets.kernelPath), "kernel.bin");
     assert.equal(path.basename(assets.initrdPath), "initrd.bin");
     assert.equal(path.basename(assets.rootfsPath), "rootfs.img");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("assets: loadGuestAssets validates optional wasm asset when declared", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-assets-load-"));
+  try {
+    const manifest = {
+      version: 1,
+      config: {
+        arch: "aarch64",
+        distro: "alpine",
+        alpine: { version: "3.23.0" },
+      },
+      buildTime: new Date().toISOString(),
+      assets: {
+        kernel: "vmlinuz-virt",
+        initramfs: "initramfs.cpio.lz4",
+        rootfs: "rootfs.ext4",
+        wasm: "sandbox.wasm",
+      },
+      checksums: { kernel: "", initramfs: "", rootfs: "", wasm: "" },
+    };
+    fs.writeFileSync(
+      path.join(dir, MANIFEST_FILENAME),
+      JSON.stringify(manifest),
+    );
+
+    fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
+    fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
+    fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
+
+    assert.throws(() => loadGuestAssets(dir), /Missing guest assets/);
+
+    fs.writeFileSync(path.join(dir, "sandbox.wasm"), "");
+    const assets = loadGuestAssets(dir);
+    assert.equal(path.basename(assets.rootfsPath), "rootfs.ext4");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

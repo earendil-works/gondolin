@@ -95,6 +95,7 @@ function patchManifestAssets(
     rootfs?: string;
     krunKernel?: string;
     krunInitrd?: string;
+    wasm?: string;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -165,6 +166,33 @@ test("images: import preserves optional krun assets from manifest", () => {
     assert.equal(
       fs.existsSync(path.join(imported.assetDir, "krun-initrd")),
       true,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import preserves optional wasm asset from manifest", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+  const wasmPath = path.join(assets.dir, "sandbox.wasm");
+  fs.writeFileSync(wasmPath, "wasm-asset");
+
+  patchManifestAssets(assets.dir, {
+    wasm: "sandbox.wasm",
+  });
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+
+    assert.equal(
+      fs.readFileSync(path.join(imported.assetDir, "sandbox.wasm"), "utf8"),
+      "wasm-asset",
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
@@ -677,6 +705,34 @@ test("images: sandbox server options accept image refs", () => {
 
     assert.equal(path.dirname(resolved.rootfsPath), imported.assetDir);
     assert.equal(path.dirname(resolved.kernelPath), imported.assetDir);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: wasm asset from image ref is resolved for wasm-node", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+  fs.writeFileSync(path.join(assets.dir, "sandbox.wasm"), "wasm-asset");
+  patchManifestAssets(assets.dir, { wasm: "sandbox.wasm" });
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("default:latest", imported.buildId, imported.arch);
+
+    const resolved = resolveSandboxServerOptions({
+      imagePath: "default:latest",
+      vmm: "wasm-node",
+      netEnabled: false,
+    });
+
+    assert.equal(resolved.wasmPath, path.join(imported.assetDir, "sandbox.wasm"));
+    assert.equal(resolved.wasmRunnerMode, "wasi-stdio");
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });

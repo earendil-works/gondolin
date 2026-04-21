@@ -236,6 +236,72 @@ test("downloadKrunArchive falls back on structured 404 status", async () => {
   }
 });
 
+test("generateWasmEntrypointScript installs merged MITM CA bundle", () => {
+  const script = nativeBuildTest.generateWasmEntrypointScript();
+
+  assert.match(script, /setup_mitm_ca\(\)/);
+  assert.match(script, /runtime_ca_bundle="\/run\/gondolin\/ca-certificates\.crt"/);
+  assert.match(script, /mkdir -p \/run\/gondolin/);
+  assert.match(script, /export SSL_CERT_FILE="\$\{runtime_ca_bundle\}"/);
+  assert.match(script, /export CURL_CA_BUNDLE="\$\{runtime_ca_bundle\}"/);
+  assert.match(script, /export REQUESTS_CA_BUNDLE="\$\{runtime_ca_bundle\}"/);
+  assert.match(script, /export NODE_EXTRA_CA_CERTS="\$\{mitm_ca_cert\}"/);
+});
+
+test("generateWasmEntrypointScript loads baked image environment", () => {
+  const script = nativeBuildTest.generateWasmEntrypointScript();
+
+  assert.match(script, /\/etc\/profile\.d\/gondolin-image-env\.sh/);
+  assert.match(script, /\. \/etc\/profile\.d\/gondolin-image-env\.sh/);
+});
+
+test("patchC2wDockerfileForFuse enables CAP_SYS_ADMIN and FUSE", () => {
+  const input = [
+    "FROM golang-base AS bundle-dev",
+    "ARG TARGETPLATFORM",
+    "ARG INIT_DEBUG",
+    "ARG OPTIMIZATION_MODE",
+    "ARG NO_VMTOUCH",
+    "ARG NO_BINFMT",
+    "ARG EXTERNAL_BUNDLE",
+    "COPY --link --from=assets / /work",
+    "WORKDIR /work",
+    "RUN if test -f image.json; then mv image.json /out/oci/ ; fi && \\",
+    "    if test -f spec.json; then mv spec.json /out/oci/ ; fi",
+    "FROM linux-riscv64-dev-common AS linux-riscv64-dev",
+    "WORKDIR /work-buildlinux/linux",
+    "COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config",
+    "RUN make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- -j$(nproc) all && \\",
+    "    mkdir /out && \\",
+    "    mv /work-buildlinux/linux/arch/riscv/boot/Image /out/Image && \\",
+    "    make clean",
+    "FROM linux-riscv64-dev-common AS linux-riscv64-config-dev",
+    "WORKDIR /work-buildlinux/linux",
+    "COPY --link --from=assets /config/tinyemu/linux_rv64_config ./.config",
+    "RUN make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- olddefconfig",
+  ].join("\n");
+
+  const patched = nativeBuildTest.patchC2wDockerfileForFuse(input);
+
+  assert.match(patched, /CAP_SYS_ADMIN/);
+  assert.match(patched, /\/dev\/fuse/);
+  assert.match(patched, /apt-get update && apt-get install -y jq/);
+  assert.match(patched, /CONFIG_FUSE_FS=y/);
+  assert.match(patched, /CONFIG_CUSE=y/);
+});
+
+test("resolveWasmTargetArch prefers oci platform override", () => {
+  assert.equal(
+    nativeBuildTest.resolveWasmTargetArch({
+      arch: "aarch64",
+      distro: "alpine",
+      oci: { image: "alpine:3.23", platform: "linux/riscv64" },
+      wasm: { enabled: true },
+    }),
+    "riscv64",
+  );
+});
+
 test("downloadKrunArchive does not fallback on message-only 404 text", async () => {
   const cacheDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-krun-test-"),

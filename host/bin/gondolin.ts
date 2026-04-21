@@ -249,7 +249,10 @@ function bashUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|wasm-node (default: qemu)",
+  );
+  console.log(
+    "  --wasm PATH                     Guest wasm module path (wasm-node)",
   );
   console.log();
   console.log("VFS Options:");
@@ -338,6 +341,7 @@ function bashUsage() {
   console.log("  gondolin bash --resume 4a8f2b0c");
   console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
   console.log("  gondolin bash --vmm krun");
+  console.log("  gondolin bash --vmm wasm-node --wasm ./sandbox.wasm");
   console.log("  gondolin bash --ssh");
 }
 
@@ -406,7 +410,10 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|wasm-node (default: qemu)",
+  );
+  console.log(
+    "  --wasm PATH                     Guest wasm module path (wasm-node)",
   );
   console.log();
   console.log("Network Options (VM mode only):");
@@ -480,7 +487,10 @@ type CommonOptions = {
   image?: string;
 
   /** vm backend selection */
-  vmm?: "qemu" | "krun";
+  vmm?: "qemu" | "krun" | "wasm-node";
+
+  /** guest wasm module path (wasm-node only) */
+  wasmPath?: string;
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -724,12 +734,16 @@ function resolveSshAgent(explicit?: string): string {
   return sock;
 }
 
-function parseVmmOption(value: string): "qemu" | "krun" {
+function parseVmmOption(value: string): "qemu" | "krun" | "wasm-node" {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "wasm-node"
+  ) {
     return normalized;
   }
-  throw new Error("--vmm must be one of: qemu, krun");
+  throw new Error("--vmm must be one of: qemu, krun, wasm-node");
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {
@@ -936,11 +950,12 @@ function buildVmOptions(common: CommonOptions) {
     env,
   };
 
-  if (common.image || common.vmm) {
+  if (common.image || common.vmm || common.wasmPath) {
     vmOptions.sandbox = {
       ...(vmOptions.sandbox ?? {}),
       ...(common.image ? { imagePath: common.image } : {}),
       ...(common.vmm ? { vmm: common.vmm } : {}),
+      ...(common.wasmPath ? { wasmPath: common.wasmPath } : {}),
     };
   }
 
@@ -992,6 +1007,13 @@ function parseExecArgs(argv: string[]): ExecArgs {
       return i;
     }
 
+    if (arg.startsWith("--wasm=")) {
+      const value = arg.slice("--wasm=".length).trim();
+      if (!value) fail("--wasm requires an argument");
+      args.common.wasmPath = value;
+      return i;
+    }
+
     switch (arg) {
       case "--mount-hostfs": {
         const spec = optionArgs[++i];
@@ -1015,6 +1037,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const value = optionArgs[++i];
         if (!value) fail("--vmm requires an argument");
         args.common.vmm = parseVmmOption(value);
+        return i;
+      }
+      case "--wasm": {
+        const value = optionArgs[++i];
+        if (!value) fail("--wasm requires an argument");
+        args.common.wasmPath = value;
         return i;
       }
       case "--allow-host": {
@@ -1412,6 +1440,16 @@ function parseBashArgs(argv: string[]): BashArgs {
       continue;
     }
 
+    if (arg.startsWith("--wasm=")) {
+      const value = arg.slice("--wasm=".length).trim();
+      if (!value) {
+        console.error("--wasm requires an argument");
+        process.exit(1);
+      }
+      args.wasmPath = value;
+      continue;
+    }
+
     // Handle -- delimiter for command + args
     if (arg === "--") {
       if (i + 1 < argv.length) {
@@ -1460,6 +1498,15 @@ function parseBashArgs(argv: string[]): BashArgs {
           console.error(err instanceof Error ? err.message : String(err));
           process.exit(1);
         }
+        break;
+      }
+      case "--wasm": {
+        const value = argv[++i];
+        if (!value) {
+          console.error("--wasm requires an argument");
+          process.exit(1);
+        }
+        args.wasmPath = value;
         break;
       }
       case "--allow-host": {

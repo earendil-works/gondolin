@@ -45,6 +45,7 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { stripTrailingNewline } from "../debug.ts";
+import { getBackendCapabilities } from "./backend-capabilities.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;
@@ -343,6 +344,11 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    const backend = this.options?.vmm ?? "qemu";
+    if (!getBackendCapabilities(backend).tcpForwardChannels) {
+      throw new Error(`openTcpStream is not supported for vmm=${backend}`);
+    }
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -428,6 +434,11 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    const backend = this.options?.vmm ?? "qemu";
+    if (!getBackendCapabilities(backend).tcpForwardChannels) {
+      throw new Error(`openIngressStream is not supported for vmm=${backend}`);
+    }
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -772,12 +783,7 @@ export class SandboxServerOps {
 
     for (const [id, entry] of this.inflight.entries()) {
       if (entry === client) {
-        this.inflight.delete(id);
-        this.stdinAllowed.delete(id);
-        this.stdinCredits.delete(id);
-        this.pendingExecWindows.delete(id);
-        this.clearQueuedStdin(id);
-        this.queuedPtyResize.delete(id);
+        this.detachExecClient(id);
       }
     }
 
@@ -799,6 +805,26 @@ export class SandboxServerOps {
     }
     this.queuedStdin.delete(id);
     this.queuedStdinBytes.delete(id);
+  }
+
+  clearExecPtyState(id: number) {
+    this.ptyExecIds.delete(id);
+    this.ptyLineEndingState.delete(id);
+  }
+
+  detachExecClient(id: number) {
+    this.inflight.delete(id);
+    this.stdinAllowed.delete(id);
+    this.stdinCredits.delete(id);
+    this.pendingExecWindows.delete(id);
+    this.clearQueuedStdin(id);
+    this.queuedPtyResize.delete(id);
+    this.clearExecPtyState(id);
+  }
+
+  clearExecTracking(id: number) {
+    this.detachExecClient(id);
+    this.startedExecs.delete(id);
   }
 
   handleClientMessage(client: SandboxClient, message: ClientMessage) {
@@ -898,13 +924,7 @@ export class SandboxServerOps {
     const id = entry.message.id;
 
     if (!this.bridge.send(buildExecRequest(id, entry.payload))) {
-      this.inflight.delete(id);
-      this.startedExecs.delete(id);
-      this.stdinAllowed.delete(id);
-      this.stdinCredits.delete(id);
-      this.pendingExecWindows.delete(id);
-      this.clearQueuedStdin(id);
-      this.queuedPtyResize.delete(id);
+      this.clearExecTracking(id);
       sendError(entry.client, {
         type: "error",
         id,
@@ -937,12 +957,7 @@ export class SandboxServerOps {
 
       // The client may have disconnected while queued.
       if (!this.inflight.has(id)) {
-        this.startedExecs.delete(id);
-        this.stdinAllowed.delete(id);
-        this.stdinCredits.delete(id);
-        this.pendingExecWindows.delete(id);
-        this.clearQueuedStdin(id);
-        this.queuedPtyResize.delete(id);
+        this.clearExecTracking(id);
         continue;
       }
 
@@ -1025,6 +1040,11 @@ export class SandboxServerOps {
       this.stdinAllowed.add(message.id);
       this.stdinCredits.set(message.id, 0);
     }
+    if (message.pty) {
+      this.ptyExecIds.add(message.id);
+    } else {
+      this.clearExecPtyState(message.id);
+    }
 
     const payload = {
       cmd: message.cmd,
@@ -1033,8 +1053,8 @@ export class SandboxServerOps {
       cwd: message.cwd,
       stdin: message.stdin ?? false,
       pty: message.pty ?? false,
-      stdout_window: message.stdout_window,
-      stderr_window: message.stderr_window,
+      stdout_window: message.stdout_window ?? 256 * 1024,
+      stderr_window: message.stderr_window ?? 256 * 1024,
     };
 
     const entry = { client, message, payload };
@@ -1136,13 +1156,7 @@ export class SandboxServerOps {
         ) {
           // Cancel queued execs on stdin overflow to avoid running with partial
           // stdin once file-operation gating is lifted.
-          this.inflight.delete(message.id);
-          this.startedExecs.delete(message.id);
-          this.stdinAllowed.delete(message.id);
-          this.stdinCredits.delete(message.id);
-          this.pendingExecWindows.delete(message.id);
-          this.clearQueuedStdin(message.id);
-          this.queuedPtyResize.delete(message.id);
+          this.clearExecTracking(message.id);
           this.execQueue = this.execQueue.filter(
             (entry: { message: { id: number } }) =>
               entry.message.id !== message.id,
