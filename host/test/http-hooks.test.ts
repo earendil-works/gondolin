@@ -210,7 +210,7 @@ test("http hooks allowedInternalHosts can bypass internal range block", async ()
     allowedInternalHosts: ["corp.example"],
   });
 
-  assert.deepEqual(allowedHosts, ["corp.example"]);
+  assert.deepEqual(allowedHosts, ["*"]);
 
   const isAllowed = httpHooks.isIpAllowed!;
 
@@ -451,7 +451,7 @@ test("http hooks replace secret placeholders", async () => {
     },
   });
 
-  assert.ok(allowedHosts.includes("example.com"));
+  assert.deepEqual(allowedHosts, ["*"]);
 
   const request = await runRequestHook(
     httpHooks.onRequest!,
@@ -465,6 +465,194 @@ test("http hooks replace secret placeholders", async () => {
   );
 
   assert.equal(request.headers.get("authorization"), "Bearer secret-value");
+});
+
+test("http hooks update existing secrets after creation", async () => {
+  const { httpHooks, env, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "rotated-value" });
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+
+  assert.equal(request.headers.get("authorization"), "Bearer rotated-value");
+});
+
+test("http hooks update secret host allowlists after creation", async () => {
+  const { httpHooks, env, allowedHosts, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  assert.deepEqual(allowedHosts, ["*"]);
+
+  secretManager.updateSecret("API_KEY", { hosts: ["example.org"] });
+
+  assert.deepEqual(allowedHosts, ["*"]);
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            authorization: `Bearer ${env.API_KEY}`,
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.org/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+
+  assert.equal(request.headers.get("authorization"), "Bearer secret-value");
+});
+
+test("http hooks delete secrets by substituting empty strings", async () => {
+  const { httpHooks, env, allowedHosts, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  secretManager.deleteSecret("API_KEY");
+
+  assert.deepEqual(allowedHosts, ["*"]);
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.org/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+
+  assert.match(request.headers.get("authorization") ?? "", /^Bearer ?$/);
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.org/data",
+          headers: {
+            authorization: "Bearer secret-value",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks default global allowlist stays open when secrets are configured", async () => {
+  const { httpHooks, allowedHosts } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  assert.deepEqual(allowedHosts, ["*"]);
+
+  assert.equal(
+    await httpHooks.isIpAllowed!({
+      hostname: "unrelated.example",
+      ip: "93.184.216.34",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    true,
+  );
+});
+
+test("http hooks explicit empty allowlist denies all even when secrets exist", async () => {
+  const { httpHooks, allowedHosts } = createHttpHooks({
+    allowedHosts: [],
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  assert.deepEqual(allowedHosts, []);
+
+  assert.equal(
+    await httpHooks.isIpAllowed!({
+      hostname: "example.com",
+      ip: "93.184.216.34",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    false,
+  );
+});
+
+test("http hooks reject revoked secret values after rotation on allowed hosts", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "rotated-value" });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            authorization: "Bearer secret-value",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
 });
 
 test("http hooks keep placeholders in URL parameters by default", async () => {
