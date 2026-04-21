@@ -12,7 +12,7 @@ const scriptPath = path.join(
   "prepare-krun-runner-package.mjs",
 );
 
-test("prepare-krun-runner-package preserves SONAME symlinks", () => {
+test("prepare-krun-runner-package materializes SONAME aliases for npm pack", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-package-test-"));
 
   try {
@@ -23,8 +23,14 @@ test("prepare-krun-runner-package preserves SONAME symlinks", () => {
     fs.mkdirSync(packageDir, { recursive: true });
     fs.writeFileSync(
       path.join(packageDir, "package.json"),
-      JSON.stringify({ name: "@earendil-works/gondolin-krun-runner-test" }),
+      JSON.stringify({
+        name: "@earendil-works/gondolin-krun-runner-test",
+        version: "1.0.0",
+        files: ["bin/", "lib/", "LICENSE"],
+      }),
     );
+    fs.writeFileSync(path.join(packageDir, "README.md"), "test\n");
+    fs.writeFileSync(path.join(packageDir, "LICENSE"), "license\n");
 
     fs.mkdirSync(path.dirname(runnerPath), { recursive: true });
     fs.writeFileSync(runnerPath, "#!/bin/sh\necho gondolin-krun-runner\n", {
@@ -61,8 +67,19 @@ test("prepare-krun-runner-package preserves SONAME symlinks", () => {
     assert.equal(fs.existsSync(stagedLibSoname), true);
 
     const sonameStat = fs.lstatSync(stagedLibSoname);
-    assert.equal(sonameStat.isSymbolicLink(), true);
-    assert.equal(fs.readlinkSync(stagedLibSoname), "libkrun.so.1.0.0");
+    assert.equal(sonameStat.isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(stagedLibSoname, "utf8"), "lib");
+
+    const packName = execFileSync("npm", ["pack", "--silent"], {
+      cwd: packageDir,
+      encoding: "utf8",
+    }).trim();
+    const packPath = path.join(packageDir, packName);
+    const tarList = execFileSync("tar", ["-tf", packPath], {
+      encoding: "utf8",
+    });
+    assert.match(tarList, /package\/lib\/libkrun\.so\.1\.0\.0/);
+    assert.match(tarList, /package\/lib\/libkrun\.so\.1/);
 
     const versionOut = execFileSync(stagedRunner, ["--version"], {
       encoding: "utf8",

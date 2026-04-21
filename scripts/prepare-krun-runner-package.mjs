@@ -55,9 +55,9 @@ function copyFile(src, dest, mode) {
   }
 }
 
-function copySymlink(src, dest) {
-  const linkTarget = fs.readlinkSync(src);
-  fs.symlinkSync(linkTarget, dest);
+function copySymlinkTarget(src, dest) {
+  const realPath = fs.realpathSync(src);
+  fs.copyFileSync(realPath, dest);
 }
 
 function main() {
@@ -109,7 +109,7 @@ function main() {
   for (const entry of symlinkFiles) {
     const src = path.join(libDir, entry.name);
     const dest = path.join(outLibDir, entry.name);
-    copySymlink(src, dest);
+    copySymlinkTarget(src, dest);
   }
 
   const repoLicense = path.resolve("LICENSE");
