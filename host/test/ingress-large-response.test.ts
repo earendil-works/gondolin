@@ -1,126 +1,301 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
 import test from "node:test";
 
+import { VM } from "../src/vm/core.ts";
 import {
-  closeVm,
   scheduleForceExit,
   shouldSkipVmTests,
-  withVm,
 } from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
-const vmKey = "ingress-issue-86";
+const ingressFetchTimeoutMs = 5000;
+const payloadSizeBytes = 900_000;
+const repoGuestAssetsDir = path.resolve(
+  import.meta.dirname,
+  "..",
+  "..",
+  "guest",
+  "image",
+  "out",
+);
+const missingRepoGuestAssetsReason =
+  !fs.existsSync(path.join(repoGuestAssetsDir, "manifest.json"))
+    ? "repo guest assets missing (run make build or make -C guest assets)"
+    : false;
 
-test.after(async () => {
-  await closeVm(vmKey);
+type GuestHttpServerSpec = {
+  launchCommand: string;
+  readinessCommand: string;
+};
+
+type CapturedHttpResponse = {
+  statusCode: number;
+  headers: http.IncomingHttpHeaders;
+  body: Buffer;
+  complete: boolean;
+  aborted: boolean;
+  responseErrorMessage: string | null;
+};
+
+function buildDeterministicPayload(length: number): Buffer {
+  const payload = Buffer.allocUnsafe(length);
+  for (let index = 0; index < payload.length; index += 1) {
+    payload[index] = (index * 31) % 251;
+  }
+  return payload;
+}
+
+function sha256Hex(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+async function fetchCapturedHttpResponse(
+  targetUrl: URL,
+): Promise<CapturedHttpResponse> {
+  return await new Promise<CapturedHttpResponse>((resolve, reject) => {
+    const request = http.get(targetUrl, (response) => {
+      const chunks: Buffer[] = [];
+      let aborted = false;
+      let responseErrorMessage: string | null = null;
+
+      response.on("data", (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      response.once("aborted", () => {
+        aborted = true;
+      });
+      response.once("error", (error) => {
+        responseErrorMessage = error.message;
+      });
+      response.once("close", () => {
+        resolve({
+          statusCode: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks),
+          complete: response.complete,
+          aborted,
+          responseErrorMessage,
+        });
+      });
+    });
+
+    request.setTimeout(ingressFetchTimeoutMs, () => {
+      request.destroy(new Error("timed out waiting for ingress response"));
+    });
+    request.once("error", (error) => {
+      reject(error);
+    });
+  });
+}
+
+async function waitForGuestHttpServer(
+  vm: VM,
+  readinessCommand: string,
+  expectedBodyLength: number,
+): Promise<void> {
+  let lastStdout = "";
+  let lastStderr = "";
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const probe = await vm.exec([
+      "/bin/sh",
+      "-lc",
+      readinessCommand,
+    ]);
+
+    lastStdout = probe.stdout.trim();
+    lastStderr = probe.stderr.trim();
+    if (probe.exitCode === 0 && lastStdout === String(expectedBodyLength)) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(
+    `guest http server never served the expected payload (stdout=${JSON.stringify(lastStdout)}, stderr=${JSON.stringify(lastStderr)})`,
+  );
+}
+
+async function resolveGuestHttpServer(
+  vm: VM,
+): Promise<GuestHttpServerSpec | null> {
+  const probe = await vm.exec([
+    "/bin/sh",
+    "-lc",
+    [
+      "if command -v python3 >/dev/null 2>&1; then",
+      "  echo python3;",
+      "elif command -v python >/dev/null 2>&1; then",
+      "  echo python;",
+      "elif busybox --list 2>/dev/null | grep -qx httpd && busybox --list 2>/dev/null | grep -qx wget; then",
+      "  echo busybox;",
+      "else",
+      "  exit 1;",
+      "fi",
+    ].join(" "),
+  ]);
+
+  if (probe.exitCode !== 0) {
+    return null;
+  }
+
+  const serverKind = probe.stdout.trim();
+  if (serverKind === "python3") {
+    return {
+      launchCommand:
+        "python3 -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www",
+      readinessCommand: [
+        "python3 -c 'import sys, urllib.request; data = urllib.request.urlopen(\"http://127.0.0.1:18080/asset.bin\").read(); sys.stdout.write(str(len(data)))'",
+      ].join(" "),
+    };
+  }
+
+  if (serverKind === "python") {
+    return {
+      launchCommand:
+        "python -m http.server 18080 --bind 127.0.0.1 --directory /tmp/ingress-large-www",
+      readinessCommand: [
+        "python -c 'import sys, urllib.request; data = urllib.request.urlopen(\"http://127.0.0.1:18080/asset.bin\").read(); sys.stdout.write(str(len(data)))'",
+      ].join(" "),
+    };
+  }
+
+  if (serverKind === "busybox") {
+    return {
+      launchCommand:
+        "busybox httpd -f -p 127.0.0.1:18080 -h /tmp/ingress-large-www",
+      readinessCommand:
+        "busybox wget -qO - http://127.0.0.1:18080/asset.bin | wc -c",
+    };
+  }
+
+  throw new Error(`unexpected guest http server kind: ${JSON.stringify(serverKind)}`);
+}
+
+test.after(() => {
   scheduleForceExit();
 });
 
 test(
-  "ingress does not truncate responses at 772251-byte boundary (issue #86)",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async () => {
-    await withVm(
-      vmKey,
-      {
-        sandbox: { console: "none" },
+  "ingress forwards full large fixed-length responses (issue #86)",
+  {
+    skip: skipVmTests || missingRepoGuestAssetsReason,
+    timeout: timeoutMs,
+  },
+  async (t) => {
+    const vm = await VM.create({
+      sandbox: {
+        console: "none",
+        imagePath: repoGuestAssetsDir,
       },
-      async (vm) => {
-        await vm.start();
+    });
 
-        const ceilingSize = 772_251;
-        const largeSize = 795_946;
+    let access: Awaited<ReturnType<VM["enableIngress"]>> | null = null;
+    t.after(async () => {
+      if (access) {
+        await access.close();
+      }
 
-        const setup = await vm.exec([
-          "sh",
+      try {
+        await vm.exec([
+          "/bin/sh",
           "-lc",
-          [
-            "set -e",
-            "mkdir -p /tmp/ingress-www/assets",
-            `head -c ${ceilingSize} /dev/zero > /tmp/ingress-www/assets/exact.css`,
-            `head -c ${largeSize} /dev/zero > /tmp/ingress-www/assets/large.js`,
-            "python3 -m http.server 18789 --bind 127.0.0.1 --directory /tmp/ingress-www >/tmp/ingress-httpd.log 2>&1 &",
-            "echo $! > /tmp/ingress-httpd.pid",
-          ].join("\n"),
+          "kill $(cat /tmp/ingress-large-httpd.pid) >/dev/null 2>&1 || true",
         ]);
-        assert.equal(
-          setup.exitCode,
-          0,
-          setup.stderr || "failed to launch ingress test http server",
+      } catch {
+        // best-effort cleanup
+      }
+
+      await vm.close();
+    });
+
+    await vm.start();
+
+    const guestHttpServer = await resolveGuestHttpServer(vm);
+    assert.ok(
+      guestHttpServer,
+      "guest image does not include a supported local HTTP server",
+    );
+
+    const payload = buildDeterministicPayload(payloadSizeBytes);
+    const expectedDigest = sha256Hex(payload);
+
+    await vm.fs.mkdir("/tmp/ingress-large-www", { recursive: true });
+    await vm.fs.writeFile("/tmp/ingress-large-www/asset.bin", payload);
+
+    const launch = await vm.exec([
+      "/bin/sh",
+      "-lc",
+      [
+        `${guestHttpServer.launchCommand} >/tmp/ingress-large-httpd.log 2>&1 & pid=$!`,
+        "echo $pid > /tmp/ingress-large-httpd.pid",
+      ].join("; "),
+    ]);
+    assert.equal(
+      launch.exitCode,
+      0,
+      launch.stderr || "failed to launch ingress httpd",
+    );
+
+    await waitForGuestHttpServer(
+      vm,
+      guestHttpServer.readinessCommand,
+      payload.length,
+    );
+
+    vm.setIngressRoutes([{ prefix: "/", port: 18080, stripPrefix: true }]);
+    access = await vm.enableIngress();
+
+    let response: CapturedHttpResponse | null = null;
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        response = await fetchCapturedHttpResponse(
+          new URL("/asset.bin", access.url),
         );
-
-        const waitForDirectSize = async (path: string, expected: number) => {
-          let size: number | null = null;
-          let lastErr = "";
-          for (let i = 0; i < 40; i += 1) {
-            const direct = await vm.exec([
-              "sh",
-              "-lc",
-              `curl -sS -o /dev/null -w '%{size_download}' http://127.0.0.1:18789${path}`,
-            ]);
-            if (direct.exitCode === 0) {
-              size = Number(direct.stdout.trim());
-              break;
-            }
-            lastErr = direct.stderr;
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-          assert.equal(size, expected, lastErr || `direct curl failed for ${path}`);
-        };
-
-        await waitForDirectSize("/assets/exact.css", ceilingSize);
-        await waitForDirectSize("/assets/large.js", largeSize);
-
-        await vm.setIngressRoutes([
-          {
-            prefix: "/",
-            port: 18789,
-            stripPrefix: true,
-          },
-        ]);
-
-        const ingress = await vm.enableIngress({
-          bufferResponseBody: true,
-          maxBufferedResponseBodyBytes: 100 * 1024 * 1024,
-        });
-
-        try {
-          const exactResponse = await fetch(`${ingress.url}/assets/exact.css`, {
-            signal: AbortSignal.timeout(20000),
-          });
-          const exactBody = Buffer.from(await exactResponse.arrayBuffer());
-          assert.equal(exactResponse.status, 200);
-          assert.equal(
-            Number(exactResponse.headers.get("content-length")),
-            ceilingSize,
-          );
-          assert.equal(exactBody.length, ceilingSize);
-
-          const largeResponse = await fetch(`${ingress.url}/assets/large.js`, {
-            signal: AbortSignal.timeout(20000),
-          });
-          const largeBody = Buffer.from(await largeResponse.arrayBuffer());
-          assert.equal(largeResponse.status, 200);
-          assert.equal(
-            Number(largeResponse.headers.get("content-length")),
-            largeSize,
-          );
-          assert.equal(largeBody.length, largeSize);
-          assert.notEqual(
-            largeBody.length,
-            ceilingSize,
-            "large response must not be capped at 772251 bytes",
-          );
-        } finally {
-          await ingress.close();
-          await vm.exec([
-            "sh",
-            "-lc",
-            "kill $(cat /tmp/ingress-httpd.pid) >/dev/null 2>&1 || true",
-          ]);
+        if (response.statusCode === 200) {
+          break;
         }
-      },
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    if (!response && lastError) {
+      throw lastError;
+    }
+
+    assert.ok(response, "expected ingress response");
+    assert.equal(
+      response.statusCode,
+      200,
+      `unexpected ingress status with ${response.body.length} bytes received`,
+    );
+    assert.equal(response.headers["content-length"], String(payload.length));
+    assert.equal(response.aborted, false, "response should not abort");
+    assert.equal(response.complete, true, "response should complete cleanly");
+    assert.equal(
+      response.responseErrorMessage,
+      null,
+      "response should not emit an error",
+    );
+    assert.equal(
+      response.body.length,
+      payload.length,
+      "ingress should deliver every response byte",
+    );
+    assert.equal(
+      sha256Hex(response.body),
+      expectedDigest,
+      "ingress response body should match the guest payload",
     );
   },
 );

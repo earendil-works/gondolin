@@ -11,6 +11,12 @@ const protocol = @import("protocol.zig");
 const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
 const MAX_BUFFERED_TCP: usize = 256 * 1024;
 
+const BackendReadResult = enum {
+    would_block,
+    forwarded,
+    closed,
+};
+
 const Conn = struct {
     fd: std.posix.fd_t,
     /// pending bytes to write to tcp socket
@@ -129,7 +135,7 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                         if (conns.getPtr(data.id)) |conn| {
                             if (conn.pending.items.len + data.data.len > MAX_BUFFERED_TCP) {
                                 // Too much queued, close.
-                                closeConn(allocator, &conns, &writer, data.id);
+                                try closeConn(allocator, &conns, &writer, data.id);
                                 continue;
                             }
                             try conn.pending.appendSlice(allocator, data.data);
@@ -146,7 +152,7 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                         }
                     },
                     .close => |id| {
-                        closeConn(allocator, &conns, &writer, id);
+                        try closeConn(allocator, &conns, &writer, id);
                     },
                 }
             }
@@ -165,47 +171,42 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                 const n = std.posix.write(conn_ptr.fd, conn_ptr.pending.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk @as(usize, 0);
                     // Remote closed
-                    closeConn(allocator, &conns, &writer, id);
+                    try closeConn(allocator, &conns, &writer, id);
                     break :blk @as(usize, 0);
                 };
+
+                const active_conn = conns.getPtr(id) orelse continue;
+
                 if (n > 0) {
-                    const remaining = conn_ptr.pending.items.len - n;
-                    std.mem.copyForwards(u8, conn_ptr.pending.items[0..remaining], conn_ptr.pending.items[n..]);
-                    conn_ptr.pending.items = conn_ptr.pending.items[0..remaining];
+                    const remaining = active_conn.pending.items.len - n;
+                    std.mem.copyForwards(u8, active_conn.pending.items[0..remaining], active_conn.pending.items[n..]);
+                    active_conn.pending.items = active_conn.pending.items[0..remaining];
                 }
 
-                if (conn_ptr.pending.items.len == 0 and conn_ptr.host_eof and !conn_ptr.backend_shutdown) {
-                    conn_ptr.backend_shutdown = true;
-                    _ = std.posix.shutdown(conn_ptr.fd, .send) catch {};
+                if (active_conn.pending.items.len == 0 and active_conn.host_eof and !active_conn.backend_shutdown) {
+                    active_conn.backend_shutdown = true;
+                    _ = std.posix.shutdown(active_conn.fd, .send) catch {};
                 }
             }
 
-            // POLLHUP can arrive while unread bytes are still pending.
-            // Probe with read() and only close on EOF (n == 0).
             if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
-                const maybe_n = std.posix.read(conn_ptr.fd, buffer[0..]) catch |err| switch (err) {
-                    error.WouldBlock => null,
-                    else => blk: {
-                        closeConn(allocator, &conns, &writer, id);
-                        break :blk null;
-                    },
-                };
+                const should_drain_backend = (revents & std.posix.POLL.HUP) != 0;
 
-                if (maybe_n) |n| {
-                    if (n == 0) {
-                        closeConn(allocator, &conns, &writer, id);
-                    } else {
-                        const payload = protocol.encodeTcpData(allocator, id, buffer[0..n]) catch |err| {
-                            log.err("encode tcp_data failed: {s}", .{@errorName(err)});
-                            continue;
-                        };
-                        defer allocator.free(payload);
-                        writer.enqueue(payload) catch |err| {
-                            log.err("virtio enqueue failed: {s}", .{@errorName(err)});
-                            closeConn(allocator, &conns, &writer, id);
-                            continue;
-                        };
-                        writer.flush(virtio_fd) catch {};
+                while (writer.pendingBytes() < MAX_BUFFERED_VIRTIO) {
+                    switch (try forwardBackendReadChunk(
+                        allocator,
+                        &conns,
+                        &writer,
+                        virtio_fd,
+                        log,
+                        id,
+                        conn_ptr.fd,
+                        buffer[0..],
+                    )) {
+                        .forwarded => {
+                            if (!should_drain_backend) break;
+                        },
+                        .would_block, .closed => break,
                     }
                 }
             }
@@ -213,21 +214,164 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
     }
 }
 
+fn forwardBackendReadChunk(
+    allocator: std.mem.Allocator,
+    conns: *std.AutoHashMap(u32, Conn),
+    writer: *protocol.FrameWriter,
+    virtio_fd: std.posix.fd_t,
+    log: anytype,
+    id: u32,
+    backend_fd: std.posix.fd_t,
+    buffer: []u8,
+) !BackendReadResult {
+    const n = std.posix.read(backend_fd, buffer) catch |err| {
+        if (err == error.WouldBlock) return .would_block;
+        try closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    if (n == 0) {
+        try closeConn(allocator, conns, writer, id);
+        return .closed;
+    }
+
+    return try forwardBackendPayload(allocator, conns, writer, virtio_fd, log, id, buffer[0..n]);
+}
+
+fn forwardBackendPayload(
+    allocator: std.mem.Allocator,
+    conns: *std.AutoHashMap(u32, Conn),
+    writer: *protocol.FrameWriter,
+    virtio_fd: std.posix.fd_t,
+    log: anytype,
+    id: u32,
+    payload_bytes: []const u8,
+) !BackendReadResult {
+    const payload = protocol.encodeTcpData(allocator, id, payload_bytes) catch |err| {
+        log.err("encode tcp_data failed: {s}", .{@errorName(err)});
+        try closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    defer allocator.free(payload);
+
+    writer.enqueue(payload) catch |err| {
+        log.err("virtio enqueue failed: {s}", .{@errorName(err)});
+        try closeConn(allocator, conns, writer, id);
+        return .closed;
+    };
+    writer.flush(virtio_fd) catch |err| {
+        log.err("virtio flush failed for conn {d}: {s}", .{ id, @errorName(err) });
+    };
+    return .forwarded;
+}
+
 fn closeConn(
     allocator: std.mem.Allocator,
     conns: *std.AutoHashMap(u32, Conn),
     writer: *protocol.FrameWriter,
     id: u32,
-) void {
+) !void {
     if (conns.fetchRemove(id)) |entry| {
         std.posix.close(entry.value.fd);
         var pending = entry.value.pending;
         pending.deinit(allocator);
 
-        const payload = protocol.encodeTcpClose(allocator, id) catch return;
+        const payload = try protocol.encodeTcpClose(allocator, id);
         defer allocator.free(payload);
-        writer.enqueue(payload) catch return;
+        try writer.enqueue(payload);
     }
+}
+
+test "forwardBackendPayload closes connection when encoding fails after read" {
+    const silent_log = struct {
+        fn err(_: @This(), comptime _: []const u8, _: anytype) void {}
+    }{};
+
+    var allocator_bytes: [4096]u8 = undefined;
+    var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&allocator_bytes);
+    const allocator = fixed_buffer_allocator.allocator();
+
+    var writer = protocol.FrameWriter.init(allocator);
+    defer writer.deinit();
+
+    var conns = std.AutoHashMap(u32, Conn).init(allocator);
+    defer {
+        var it = conns.iterator();
+        while (it.next()) |entry| {
+            std.posix.close(entry.value_ptr.fd);
+            entry.value_ptr.pending.deinit(allocator);
+        }
+        conns.deinit();
+    }
+
+    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(pipe_fds[1]);
+
+    try conns.put(7, .{
+        .fd = pipe_fds[0],
+        .pending = .empty,
+        .host_eof = false,
+        .backend_shutdown = false,
+    });
+
+    const payload = [_]u8{0xaa} ** 8192;
+    const result = try forwardBackendPayload(
+        allocator,
+        &conns,
+        &writer,
+        pipe_fds[1],
+        silent_log,
+        7,
+        payload[0..],
+    );
+
+    try std.testing.expectEqual(BackendReadResult.closed, result);
+    try std.testing.expect(conns.getPtr(7) == null);
+}
+
+test "forwardBackendPayload propagates close failure when tcp_close cannot be encoded" {
+    const silent_log = struct {
+        fn err(_: @This(), comptime _: []const u8, _: anytype) void {}
+    }{};
+
+    var failing_allocator_state = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing_allocator_state.allocator();
+
+    var writer = protocol.FrameWriter.init(allocator);
+    defer writer.deinit();
+
+    var conns = std.AutoHashMap(u32, Conn).init(allocator);
+    defer {
+        var it = conns.iterator();
+        while (it.next()) |entry| {
+            std.posix.close(entry.value_ptr.fd);
+            entry.value_ptr.pending.deinit(allocator);
+        }
+        conns.deinit();
+    }
+
+    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(pipe_fds[1]);
+
+    try conns.put(9, .{
+        .fd = pipe_fds[0],
+        .pending = .empty,
+        .host_eof = false,
+        .backend_shutdown = false,
+    });
+
+    failing_allocator_state.fail_index = failing_allocator_state.alloc_index;
+
+    const payload = [_]u8{0xbb} ** 8192;
+    try std.testing.expectError(error.OutOfMemory, forwardBackendPayload(
+        allocator,
+        &conns,
+        &writer,
+        pipe_fds[1],
+        silent_log,
+        9,
+        payload[0..],
+    ));
+    try std.testing.expect(conns.getPtr(9) == null);
 }
 
 fn handleOpen(
@@ -244,7 +388,7 @@ fn handleOpen(
     }
 
     // Close existing
-    closeConn(allocator, conns, writer, open.id);
+    try closeConn(allocator, conns, writer, open.id);
 
     const addr = try std.net.Address.parseIp("127.0.0.1", open.port);
     const stream = std.net.tcpConnectToAddress(addr) catch |err| {
