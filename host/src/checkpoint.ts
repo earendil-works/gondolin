@@ -266,9 +266,10 @@ function resolveAssetDirByBuildId(buildId: string): {
 function ensureCheckpointBackedByRootfs(
   checkpointDiskPath: string,
   rootfsPath: string,
+  qemuPathHint?: string,
 ): void {
   const checkpointAbs = path.resolve(checkpointDiskPath);
-  const backingAbs = resolveQcow2BackingPath(checkpointDiskPath);
+  const backingAbs = resolveQcow2BackingPath(checkpointDiskPath, qemuPathHint);
   if (!backingAbs) return;
 
   if (backingAbs === checkpointAbs) {
@@ -285,6 +286,8 @@ function ensureCheckpointBackedByRootfs(
     checkpointDiskPath,
     desired,
     inferDiskFormatFromPath(desired),
+    "unsafe",
+    qemuPathHint,
   );
 }
 
@@ -447,7 +450,8 @@ export class VmCheckpoint {
       );
     }
 
-    ensureQemuImgAvailable();
+    const qemuImgPathHint = mergedForResume.sandbox?.qemuPath;
+    ensureQemuImgAvailable(qemuImgPathHint);
 
     const checkpointDisk = this.diskPath;
     if (!fs.existsSync(checkpointDisk)) {
@@ -460,9 +464,17 @@ export class VmCheckpoint {
     );
 
     // Fix qcow2 backing filename portability by rebasing in-place on resume.
-    ensureCheckpointBackedByRootfs(checkpointDisk, resolved.assets.rootfsPath);
+    ensureCheckpointBackedByRootfs(
+      checkpointDisk,
+      resolved.assets.rootfsPath,
+      qemuImgPathHint,
+    );
 
-    const overlayPath = createTempQcow2Overlay(checkpointDisk, "qcow2");
+    const overlayPath = createTempQcow2Overlay(
+      checkpointDisk,
+      "qcow2",
+      qemuImgPathHint,
+    );
 
     const merged: VMOptions = {
       ...mergedForResume,

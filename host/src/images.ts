@@ -1,10 +1,10 @@
-import child_process from "child_process";
 import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
 import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
+import { extractTarGz } from "./alpine/tar.ts";
 import type { Architecture } from "./build/config.ts";
 import { getHostNodeArchCached } from "./host/arch.ts";
 
@@ -1301,9 +1301,7 @@ async function importImageFromSource(
     await downloadArchive(source, archivePath, progressLabel);
     fs.mkdirSync(extractDir, { recursive: true });
 
-    child_process.execFileSync("tar", ["-xzf", archivePath, "-C", extractDir], {
-      stdio: "pipe",
-    });
+    await extractTarGz(archivePath, extractDir);
 
     const imported = importImageFromDirectory(extractDir);
 

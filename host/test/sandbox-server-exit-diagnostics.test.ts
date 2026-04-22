@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { SandboxServer } from "../src/sandbox/server.ts";
 import type { ResolvedSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import type { LocalEndpoint } from "../src/local-endpoint.ts";
+
+function makeEndpoint(name: string): LocalEndpoint {
+  return process.platform === "win32"
+    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
+    : { transport: "unix", path: `/tmp/${name}.sock` };
+}
 
 function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
@@ -19,10 +26,11 @@ function makeResolvedOptions(
 
     memory: "256M",
     cpus: 1,
-    virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
-    virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
-    virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
-    netSocketPath: "/tmp/gondolin-test-net.sock",
+    virtioSocketPath: makeEndpoint("gondolin-test-virtio"),
+    virtioFsSocketPath: makeEndpoint("gondolin-test-virtiofs"),
+    virtioSshSocketPath: makeEndpoint("gondolin-test-virtiossh"),
+    virtioIngressSocketPath: makeEndpoint("gondolin-test-virtioingress"),
+    netSocketPath: makeEndpoint("gondolin-test-net"),
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
     allowWebSockets: true,

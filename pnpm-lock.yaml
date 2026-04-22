@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@earendil-works/gondolin':
-        specifier: workspace:*
-        version: link:host
     devDependencies:
       prettier:
         specifier: ^3.8.1

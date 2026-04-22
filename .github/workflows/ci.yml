@@ -1,10 +1,5 @@
 name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+on: [workflow_call]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,13 +10,11 @@ jobs:
     name: Lint & Typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -54,13 +47,11 @@ jobs:
             artifact: gondolin-guest-arm64
             zig-target: aarch64-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -108,13 +99,11 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -180,7 +169,7 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Zig
         run: |
@@ -208,9 +197,9 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
 
@@ -254,19 +243,17 @@ jobs:
     needs: [check, build-guest, krun-linux-build, krun-runner-package-smoke]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Download guest assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gondolin-guest-x64
           path: .
@@ -325,19 +312,17 @@ jobs:
     needs: [check, build-guest]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Download guest assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gondolin-guest-x64
           path: .
@@ -378,12 +363,136 @@ jobs:
         run: |
           NODE_BIN="$(node -p 'process.execPath')"
           make -C guest test NODE="$NODE_BIN"
-          make -C host test NODE="$NODE_BIN"
+          pnpm --dir host test
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
           # Enable VM/QEMU logs to help diagnose boot/hang issues in CI.
           GONDOLIN_DEBUG: "net"
+
+  windows-host:
+    name: Windows host (QEMU)
+    needs: [check, build-guest]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install QEMU (Windows)
+        shell: pwsh
+        run: |
+          $url = 'https://qemu.weilnetz.de/w64/2026/qemu-w64-setup-20260415.exe'
+          $expected = '736e125e044149611c47510d5696bc877b8df741655f229a3e9348f31bd49bf2b0105c78717888f5259aac3708e51fdc9d2c45d919becec5ec9398a08c8d435a'
+          $installer = Join-Path $env:RUNNER_TEMP 'qemu-w64-setup-20260415.exe'
+          $installDir = Join-Path $env:ProgramFiles 'qemu'
+          $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          if (-not $sevenZip) {
+            $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+          }
+          if (-not $sevenZip) {
+            throw '7z is required to extract the QEMU installer on windows-latest'
+          }
+
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $actual = (Get-FileHash $installer -Algorithm SHA512).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "QEMU installer SHA512 mismatch: expected $expected got $actual"
+          }
+
+          if (Test-Path $installDir) {
+            Remove-Item -Recurse -Force $installDir
+          }
+          New-Item -ItemType Directory -Force $installDir | Out-Null
+          & $sevenZip.Source x '-y' "-o$installDir" $installer | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to extract the QEMU installer with 7z'
+          }
+
+          $qemuExe = Join-Path $installDir 'qemu-system-x86_64.exe'
+          $qemuGuiExe = Join-Path $installDir 'qemu-system-x86_64w.exe'
+          if (-not (Test-Path $qemuExe) -and -not (Test-Path $qemuGuiExe)) {
+            throw 'Extracted QEMU payload did not contain qemu-system-x86_64(.exe/.w.exe)'
+          }
+
+          Write-Host "Extracted QEMU into $installDir"
+
+      - name: Resolve QEMU path and accelerators
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'qemu\qemu-system-x86_64.exe'),
+            (Join-Path $env:ProgramFiles 'qemu\qemu-system-x86_64w.exe')
+          )
+          $qemu = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $qemu) {
+            throw 'Failed to resolve qemu-system-x86_64(.exe/.w.exe) after extraction'
+          }
+
+          "WINDOWS_QEMU=$qemu" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $qemu -accel help
+
+      - name: Download guest assets
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolin-guest-x64
+          path: .
+
+      - name: Extract guest assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force guest/image/out | Out-Null
+          tar -xzf gondolin-guest-x64.tar.gz -C guest/image/out
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Run host tests
+        timeout-minutes: 25
+        run: pnpm --dir host test
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}\guest\image\out
+          WS_TIMEOUT: "120000"
+          GONDOLIN_DEBUG: "net"
+
+      - name: CLI smoke test (Windows QEMU)
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}\guest\image\out
+        run: |
+          $accelHelp = (& $env:WINDOWS_QEMU -accel help 2>&1 | Out-String)
+          $hasWhpx = $accelHelp -match '(^|\r?\n)\s*whpx\s*(\r?\n|$)'
+
+          $args = @('host/dist/bin/gondolin.js', 'exec', '--', '/bin/sh', '-lc', 'echo WINDOWS_CLI_SMOKE_OK')
+          $output = & node @args 2>&1
+          $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
+          Write-Host $text
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows CLI smoke test failed'
+          }
+          if ($text -notmatch 'WINDOWS_CLI_SMOKE_OK') {
+            throw 'Windows CLI smoke test did not produce the success marker'
+          }
+
+          if ($hasWhpx) {
+            if ($text -match 'using QEMU TCG software emulation') {
+              throw 'Unexpected TCG warning while WHPX is available'
+            }
+          } else {
+            if ($text -notmatch 'using QEMU TCG software emulation') {
+              throw 'Expected the Windows CLI to warn when falling back to TCG'
+            }
+          }
 
   # Optional: Publish preview package for PRs (uses trusted publishing)
   # Uncomment to enable publishing test versions from PRs
@@ -396,13 +505,11 @@ jobs:
   #     contents: read
   #     id-token: write
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
   #
-  #     - uses: pnpm/action-setup@v2
-  #       with:
-  #         version: 8
+  #     - uses: pnpm/action-setup@v5
   #
-  #     - uses: actions/setup-node@v4
+  #     - uses: actions/setup-node@v6
   #       with:
   #         node-version: '24'
   #         registry-url: 'https://registry.npmjs.org'

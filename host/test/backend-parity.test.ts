@@ -99,6 +99,13 @@ async function skipIfBackendUnavailable(
   t: test.TestContext,
   backend: BackendName,
 ): Promise<boolean> {
+  if (process.platform === "win32") {
+    t.skip(
+      "backend parity is covered by the Linux parity job; Windows coverage uses the Windows QEMU suite",
+    );
+    return true;
+  }
+
   if (shouldSkipVmTests()) {
     t.skip("hardware virtualization unavailable");
     return true;

@@ -28,6 +28,8 @@ test("cli: gondolin bash renders a friendly error if qemu is missing from PATH",
         ...process.env,
         GONDOLIN_GUEST_DIR: guestDir,
         PATH: emptyPathDir,
+        ProgramFiles: "",
+        ProgramW6432: "",
       },
       encoding: "utf8",
       timeout: 15000,
@@ -42,7 +44,11 @@ test("cli: gondolin bash renders a friendly error if qemu is missing from PATH",
     const stderr = result.stderr ?? "";
     assert.match(stderr, /QEMU binary '.*qemu.*' not found/i);
 
-    if (process.platform === "darwin") {
+    if (process.platform === "win32") {
+      assert.match(stderr, /qemu-w64-setup/i);
+      assert.match(stderr, /qemu-system-x86_64w/i);
+      assert.match(stderr, /HypervisorPlatform/i);
+    } else if (process.platform === "darwin") {
       assert.match(stderr, /brew install qemu/);
     } else {
       assert.match(stderr, /apt install qemu/i);

@@ -8,7 +8,15 @@ import assert from "node:assert/strict";
 import { buildAssets } from "../src/build/index.ts";
 import type { BuildConfig } from "../src/build/config.ts";
 
-test("builder: container build path does not use guest/image/build.sh", async () => {
+const skipWindowsContainerBuildTests =
+  process.platform === "win32"
+    ? "container build stub tests require POSIX shell/docker semantics"
+    : false;
+
+test(
+  "builder: container build path does not use guest/image/build.sh",
+  { skip: skipWindowsContainerBuildTests },
+  async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -172,9 +180,13 @@ process.exit(0);
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("builder: container build uses --privileged when postBuild commands are configured", async () => {
+test(
+  "builder: container build uses --privileged when postBuild commands are configured",
+  { skip: skipWindowsContainerBuildTests },
+  async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -297,9 +309,13 @@ process.exit(0);
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("builder: container build stages postBuild.copy sources under /work", async () => {
+test(
+  "builder: container build stages postBuild.copy sources under /work",
+  { skip: skipWindowsContainerBuildTests },
+  async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -441,9 +457,13 @@ process.exit(0);
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
-});
+},
+);
 
-test("builder: container build preserves postBuild.copy symlinks", async () => {
+test(
+  "builder: container build preserves postBuild.copy symlinks",
+  { skip: skipWindowsContainerBuildTests },
+  async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -583,4 +603,5 @@ process.exit(0);
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
-});
+},
+);

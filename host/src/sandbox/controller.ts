@@ -3,7 +3,15 @@ import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
 
+import {
+  normalizeLocalEndpoint,
+  type LocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
+
 const activeChildren = new Set<ChildProcess>();
+const accelSupportCache = new Map<string, Set<string>>();
+const accelRuntimeProbeCache = new Map<string, boolean>();
 let exitHookRegistered = false;
 
 function killActiveChildren() {
@@ -59,15 +67,15 @@ export type SandboxConfig = {
   memory: string;
   /** vm cpu count */
   cpus: number;
-  /** virtio-serial control socket path */
-  virtioSocketPath: string;
-  /** virtiofs/vfs socket path */
-  virtioFsSocketPath: string;
-  /** virtio-serial ssh socket path */
-  virtioSshSocketPath: string;
+  /** virtio-serial control endpoint */
+  virtioSocketPath: LocalEndpointInput;
+  /** virtiofs/vfs endpoint */
+  virtioFsSocketPath: LocalEndpointInput;
+  /** virtio-serial ssh endpoint */
+  virtioSshSocketPath: LocalEndpointInput;
 
-  /** virtio-serial ingress socket path */
-  virtioIngressSocketPath: string;
+  /** virtio-serial ingress endpoint */
+  virtioIngressSocketPath: LocalEndpointInput;
   /** kernel cmdline append string */
   append: string;
   /** qemu machine type */
@@ -78,8 +86,8 @@ export type SandboxConfig = {
   cpu?: string;
   /** guest console mode */
   console?: "stdio" | "none";
-  /** qemu net socket path */
-  netSocketPath?: string;
+  /** qemu net backend endpoint */
+  netSocketPath?: LocalEndpointInput;
   /** guest mac address */
   netMac?: string;
   /** whether to restart the vm automatically on exit */
@@ -296,6 +304,26 @@ export class SandboxController extends EventEmitter {
 }
 
 function buildQemuArgs(config: SandboxConfig) {
+  const virtioEndpoint = normalizeLocalEndpoint(
+    config.virtioSocketPath,
+    "sandbox.virtioSocketPath",
+  );
+  const virtioFsEndpoint = normalizeLocalEndpoint(
+    config.virtioFsSocketPath,
+    "sandbox.virtioFsSocketPath",
+  );
+  const virtioSshEndpoint = normalizeLocalEndpoint(
+    config.virtioSshSocketPath,
+    "sandbox.virtioSshSocketPath",
+  );
+  const virtioIngressEndpoint = normalizeLocalEndpoint(
+    config.virtioIngressSocketPath,
+    "sandbox.virtioIngressSocketPath",
+  );
+  const netEndpoint = config.netSocketPath
+    ? normalizeLocalEndpoint(config.netSocketPath, "sandbox.netSocketPath")
+    : null;
+
   const args: string[] = [
     "-nodefaults",
     "-no-reboot",
@@ -313,7 +341,7 @@ function buildQemuArgs(config: SandboxConfig) {
   ];
 
   const targetArch = detectTargetArch(config);
-  const accel = config.accel ?? selectAccel(targetArch);
+  const accel = config.accel ?? selectAccel(targetArch, config.qemuPath);
   const machineType =
     config.machineType ?? selectMachineType(targetArch, accel);
 
@@ -366,23 +394,17 @@ function buildQemuArgs(config: SandboxConfig) {
   const serialDev = useMmio ? "virtio-serial-device" : "virtio-serial-pci";
   const netDev = useMmio ? "virtio-net-device" : "virtio-net-pci";
 
-  args.push("-object", "rng-random,filename=/dev/urandom,id=rng0");
-  args.push("-device", `${rngDev},rng=rng0`);
+  const rngObject = selectRngObject();
+  if (rngObject) {
+    args.push("-object", rngObject);
+    args.push("-device", `${rngDev},rng=rng0`);
+  }
+  args.push("-chardev", buildQemuSocketChardevArg("virtiocon0", virtioEndpoint));
+  args.push("-chardev", buildQemuSocketChardevArg("virtiofs0", virtioFsEndpoint));
+  args.push("-chardev", buildQemuSocketChardevArg("virtiossh0", virtioSshEndpoint));
   args.push(
     "-chardev",
-    `socket,id=virtiocon0,path=${config.virtioSocketPath},server=off`,
-  );
-  args.push(
-    "-chardev",
-    `socket,id=virtiofs0,path=${config.virtioFsSocketPath},server=off`,
-  );
-  args.push(
-    "-chardev",
-    `socket,id=virtiossh0,path=${config.virtioSshSocketPath},server=off`,
-  );
-  args.push(
-    "-chardev",
-    `socket,id=virtioingress0,path=${config.virtioIngressSocketPath},server=off`,
+    buildQemuSocketChardevArg("virtioingress0", virtioIngressEndpoint),
   );
 
   args.push("-device", `${serialDev},id=virtio-serial0`);
@@ -403,11 +425,8 @@ function buildQemuArgs(config: SandboxConfig) {
     "virtserialport,chardev=virtioingress0,name=virtio-ingress,bus=virtio-serial0.0",
   );
 
-  if (config.netSocketPath) {
-    args.push(
-      "-netdev",
-      `stream,id=net0,server=off,addr.type=unix,addr.path=${config.netSocketPath}`,
-    );
+  if (netEndpoint) {
+    args.push("-netdev", buildQemuStreamNetdevArg("net0", netEndpoint));
     const mac = config.netMac ?? "02:00:00:00:00:01";
     args.push("-device", `${netDev},netdev=net0,mac=${mac}`);
   }
@@ -439,11 +458,100 @@ function selectMachineType(targetArch: string, accel?: string) {
   return "q35";
 }
 
+function buildQemuSocketChardevArg(id: string, endpoint: LocalEndpoint) {
+  return endpoint.transport === "unix"
+    ? `socket,id=${id},path=${endpoint.path},server=off`
+    : `socket,id=${id},host=${endpoint.host},port=${endpoint.port},server=off`;
+}
+
+function buildQemuStreamNetdevArg(id: string, endpoint: LocalEndpoint) {
+  return endpoint.transport === "unix"
+    ? `stream,id=${id},server=off,addr.type=unix,addr.path=${endpoint.path}`
+    : `stream,id=${id},server=off,addr.type=inet,addr.host=${endpoint.host},addr.port=${endpoint.port}`;
+}
+
+function selectRngObject() {
+  if (process.platform === "win32") {
+    return null;
+  }
+  return "rng-random,filename=/dev/urandom,id=rng0";
+}
+
 function getHostArch(): "arm64" | "x64" {
   return process.arch === "arm64" ? "arm64" : "x64";
 }
 
-function selectAccel(targetArch: string) {
+function readSupportedAccels(qemuPath: string): Set<string> | null {
+  const cached = accelSupportCache.get(qemuPath);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const result = child_process.spawnSync(qemuPath, ["-accel", "help"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const supported = new Set(
+      `${result.stdout ?? ""}`
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .filter((line) => line.length > 0 && !line.includes("accelerators supported")),
+    );
+    accelSupportCache.set(qemuPath, supported);
+    return supported;
+  } catch {
+    return null;
+  }
+}
+
+function qemuSupportsAccel(qemuPath: string, accel: string) {
+  const supported = readSupportedAccels(qemuPath);
+  return supported?.has(accel.toLowerCase()) ?? false;
+}
+
+function qemuCanInitializeAccel(qemuPath: string, accel: string) {
+  const cacheKey = `${qemuPath}\0${accel.toLowerCase()}`;
+  const cached = accelRuntimeProbeCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const result = child_process.spawnSync(
+      qemuPath,
+      [
+        "-accel",
+        accel,
+        "-machine",
+        "none",
+        "-nodefaults",
+        "-display",
+        "none",
+        "-S",
+      ],
+      {
+        timeout: 1500,
+        windowsHide: true,
+        encoding: "utf8",
+      },
+    );
+    const available =
+      (result.error as NodeJS.ErrnoException | undefined)?.code ===
+        "ETIMEDOUT" || result.status === 0;
+    accelRuntimeProbeCache.set(cacheKey, available);
+    return available;
+  } catch {
+    accelRuntimeProbeCache.set(cacheKey, false);
+    return false;
+  }
+}
+
+export function selectAccel(targetArch: string, qemuPath?: string) {
   const hostArch = getHostArch();
 
   // Cross-arch emulation cannot use hardware acceleration.
@@ -462,6 +570,14 @@ function selectAccel(targetArch: string) {
   }
 
   if (process.platform === "darwin") return "hvf";
+  if (process.platform === "win32") {
+    if (targetArch !== "x64") return "tcg";
+    if (!qemuPath) return "whpx";
+    if (!qemuSupportsAccel(qemuPath, "whpx")) {
+      return "tcg";
+    }
+    return qemuCanInitializeAccel(qemuPath, "whpx") ? "whpx" : "tcg";
+  }
   return "tcg";
 }
 
@@ -484,6 +600,15 @@ function selectCpu(targetArch: string, accel?: string) {
     return accelName === "hvf" ? "host" : "max";
   }
 
+  if (process.platform === "win32") {
+    if (targetArch === "x64" && accelName === "whpx") {
+      // WHPX is more stable with a conservative named CPU model than with
+      // broad synthetic models like `max` on current QEMU/Windows builds.
+      return "qemu64";
+    }
+    return "max";
+  }
+
   return "max";
 }
 
@@ -491,10 +616,15 @@ function selectCpu(targetArch: string, accel?: string) {
 // Expose internal helpers for unit tests. Not part of the public API.
 export const __test = {
   buildQemuArgs,
+  buildQemuSocketChardevArg,
+  buildQemuStreamNetdevArg,
   detectTargetArch,
   selectMachineType,
   selectAccel,
   selectCpu,
+  selectRngObject,
+  qemuSupportsAccel,
+  qemuCanInitializeAccel,
   killActiveChildren,
   getActiveChildrenCount: () => activeChildren.size,
 };

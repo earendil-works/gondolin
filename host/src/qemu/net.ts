@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
 import { stripTrailingNewline } from "../debug.ts";
 import net from "net";
-import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import dgram from "dgram";
@@ -12,6 +11,12 @@ import { Duplex } from "stream";
 import { monitorEventLoopDelay, performance } from "perf_hooks";
 import forge from "node-forge";
 
+import {
+  createNetConnectOptions,
+  listenOnLocalEndpoint,
+  normalizeLocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
 import {
   generatePositiveSerialNumber,
   isNonNegativeSerialNumberHex,
@@ -216,8 +221,8 @@ export type {
 export type { TcpOptions } from "./tcp.ts";
 
 export type QemuNetworkOptions = {
-  /** unix socket path for the qemu net backend */
-  socketPath: string;
+  /** local endpoint for the qemu net backend */
+  socketPath: LocalEndpointInput;
   /** gateway ipv4 address */
   gatewayIP?: string;
   /** guest ipv4 address */
@@ -445,17 +450,26 @@ export class QemuNetworkBackend extends EventEmitter {
     });
   }
 
-  start() {
+  async start() {
     if (this.server) return;
-
-    if (!fs.existsSync(path.dirname(this.options.socketPath))) {
-      fs.mkdirSync(path.dirname(this.options.socketPath), { recursive: true });
-    }
-    fs.rmSync(this.options.socketPath, { force: true });
 
     this.server = net.createServer((socket) => this.attachSocket(socket));
     this.server.on("error", (err) => this.emit("error", err));
-    this.server.listen(this.options.socketPath);
+    try {
+      await listenOnLocalEndpoint(
+        this.server,
+        normalizeLocalEndpoint(this.options.socketPath, "qemu net socketPath"),
+      );
+    } catch (err) {
+      const server = this.server;
+      this.server = null;
+      try {
+        server?.close();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
   }
 
   async close(): Promise<void> {

@@ -62,6 +62,11 @@ Notable gaps today:
 
 See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 
-## No Windows support
+## Windows support notes
 
-The host side of Gondolin is currently supported on macOS and Linux.
+The QEMU backend is supported on Windows x64, where Gondolin uses loopback TCP
+endpoints instead of Unix sockets and prefers WHPX when the installed
+`qemu-system-x86_64` build advertises it.
+
+The experimental `krun` backend remains unsupported on Windows; use
+`vmm=qemu` there.

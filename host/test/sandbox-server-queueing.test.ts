@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { SandboxServer } from "../src/sandbox/server.ts";
 import type { ResolvedSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import type { LocalEndpoint } from "../src/local-endpoint.ts";
+
+function makeEndpoint(name: string): LocalEndpoint {
+  return process.platform === "win32"
+    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
+    : { transport: "unix", path: `/tmp/${name}.sock` };
+}
 
 function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
@@ -19,10 +26,11 @@ function makeResolvedOptions(
 
     memory: "256M",
     cpus: 1,
-    virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
-    virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
-    virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
-    netSocketPath: "/tmp/gondolin-test-net.sock",
+    virtioSocketPath: makeEndpoint("gondolin-test-virtio"),
+    virtioFsSocketPath: makeEndpoint("gondolin-test-virtiofs"),
+    virtioSshSocketPath: makeEndpoint("gondolin-test-virtiossh"),
+    virtioIngressSocketPath: makeEndpoint("gondolin-test-virtioingress"),
+    netSocketPath: makeEndpoint("gondolin-test-net"),
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
     allowWebSockets: true,
@@ -96,6 +104,69 @@ function stdinMessage(id: number, data: Buffer, eof = false) {
     eof,
   };
 }
+
+test("SandboxServer: failed host-side startup tears down partial listeners", async () => {
+  const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
+  const steps: string[] = [];
+
+  const network = (server as any).network;
+  const bridge = (server as any).bridge;
+  const fsBridge = (server as any).fsBridge;
+  const sshBridge = (server as any).sshBridge;
+  const ingressBridge = (server as any).ingressBridge;
+
+  network.start = async () => {
+    steps.push("network.start");
+  };
+  network.close = async () => {
+    steps.push("network.close");
+  };
+
+  bridge.connect = async () => {
+    steps.push("bridge.connect");
+  };
+  bridge.disconnect = async (options: { permanent?: boolean } = {}) => {
+    steps.push(`bridge.disconnect:${String(options.permanent ?? true)}`);
+  };
+
+  fsBridge.connect = async () => {
+    steps.push("fsBridge.connect");
+    throw new Error("bind failed");
+  };
+  fsBridge.disconnect = async (options: { permanent?: boolean } = {}) => {
+    steps.push(`fsBridge.disconnect:${String(options.permanent ?? true)}`);
+  };
+
+  sshBridge.connect = async () => {
+    steps.push("sshBridge.connect");
+  };
+  sshBridge.disconnect = async (options: { permanent?: boolean } = {}) => {
+    steps.push(`sshBridge.disconnect:${String(options.permanent ?? true)}`);
+  };
+
+  ingressBridge.connect = async () => {
+    steps.push("ingressBridge.connect");
+  };
+  ingressBridge.disconnect = async (
+    options: { permanent?: boolean } = {},
+  ) => {
+    steps.push(`ingressBridge.disconnect:${String(options.permanent ?? true)}`);
+  };
+
+  await assert.rejects(server.start(), /bind failed/);
+
+  assert.equal((server as any).started, false);
+  assert.deepEqual(steps, [
+    "network.start",
+    "bridge.connect",
+    "fsBridge.connect",
+    "network.close",
+    "bridge.disconnect:false",
+    "fsBridge.disconnect:false",
+    "sshBridge.disconnect:false",
+    "ingressBridge.disconnect:false",
+  ]);
+});
 
 test("exec requests are started concurrently when no file operation is active", () => {
   const server = new SandboxServer(makeResolvedOptions());
