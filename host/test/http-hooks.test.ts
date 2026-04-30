@@ -655,6 +655,246 @@ test("http hooks reject revoked secret values after rotation on allowed hosts", 
   );
 });
 
+test("http hooks reject revoked secret values embedded in custom headers", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "newsecret" });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            "x-api-key": "key=oldsecret",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks reject revoked secret values embedded in authorization headers", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "newsecret" });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            authorization: "Bearer prefix-oldsecret-suffix",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks reject revoked secret values in malformed basic auth headers", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "newsecret" });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            authorization: "Basic oldsecret",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks reject deleted secret values in malformed basic auth headers", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+  });
+
+  secretManager.deleteSecret("API_KEY");
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data",
+          headers: {
+            authorization: "Basic oldsecret",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks allow rotated secret values that contain revoked header values", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "abc",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "abcd" });
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: "Bearer abcd",
+      },
+    }),
+  );
+
+  assert.equal(request.headers.get("authorization"), "Bearer abcd");
+});
+
+test("http hooks allow embedded current secret values that contain revoked header values", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "abc",
+      },
+    },
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "abcd" });
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: "Bearer prefix-abcd-suffix",
+      },
+    }),
+  );
+
+  assert.equal(
+    request.headers.get("authorization"),
+    "Bearer prefix-abcd-suffix",
+  );
+});
+
+test("http hooks allow rotated secret values that contain revoked query values", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "abc",
+      },
+    },
+    replaceSecretsInQuery: true,
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "abcd" });
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data?token=abcd",
+    }),
+  );
+
+  assert.equal(new URL(request.url).searchParams.get("token"), "abcd");
+});
+
+test("http hooks reject revoked secret values embedded in query values", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+    replaceSecretsInQuery: true,
+  });
+
+  secretManager.updateSecret("API_KEY", { value: "newsecret" });
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data?sig=oldsecret-v2",
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
+test("http hooks reject deleted secret values embedded in headers and query values", async () => {
+  const { httpHooks, secretManager } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "oldsecret",
+      },
+    },
+    replaceSecretsInQuery: true,
+  });
+
+  secretManager.deleteSecret("API_KEY");
+
+  await assert.rejects(
+    () =>
+      httpHooks.onRequest!(
+        makeRequest({
+          method: "GET",
+          url: "https://example.com/data?sig=prefix-oldsecret-suffix",
+          headers: {
+            "x-api-key": "prefix-oldsecret-suffix",
+          },
+        }),
+      ),
+    (err) => err instanceof HttpRequestBlockedError,
+  );
+});
+
 test("http hooks keep placeholders in URL parameters by default", async () => {
   const { httpHooks, env } = createHttpHooks({
     secrets: {

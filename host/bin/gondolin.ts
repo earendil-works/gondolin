@@ -5,6 +5,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { PassThrough } from "stream";
+import { fileURLToPath } from "url";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { VM } from "../src/vm/core.ts";
@@ -814,7 +815,8 @@ function buildVmOptions(common: CommonOptions) {
     }
 
     const result = createHttpHooks({
-      allowedHosts: common.allowedHosts,
+      allowedHosts:
+        common.allowedHosts.length > 0 ? common.allowedHosts : undefined,
       secrets,
     });
     httpHooks = result.httpHooks;
@@ -2875,7 +2877,25 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  renderCliError(err);
-  process.exit(1);
-});
+function isMainModule(moduleUrl: string): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  const entryPath = fs.realpathSync.native(path.resolve(entry));
+  const modulePath = fs.realpathSync.native(fileURLToPath(moduleUrl));
+  return entryPath === modulePath;
+}
+
+export const __test = {
+  buildVmOptions,
+  parseHostSecret,
+};
+
+if (isMainModule(import.meta.url)) {
+  main().catch((err) => {
+    renderCliError(err);
+    process.exit(1);
+  });
+}
