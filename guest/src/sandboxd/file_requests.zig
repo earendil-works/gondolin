@@ -71,6 +71,10 @@ pub fn handleFileWrite(
     try tx.sendPayload(done_payload);
 }
 
+fn ensureRecursiveDeleteTargetAllowed(resolved_path: []const u8) !void {
+    if (std.mem.eql(u8, resolved_path, "/")) return error.CannotDeleteRootDirectory;
+}
+
 pub fn handleFileDelete(
     allocator: std.mem.Allocator,
     tx: anytype,
@@ -81,9 +85,10 @@ pub fn handleFileDelete(
     defer allocator.free(resolved_path);
 
     if (req.recursive) {
+        try ensureRecursiveDeleteTargetAllowed(resolved_path);
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
-        std.Io.Dir.cwd().deleteTree(io, resolved_path) catch |err| return err;
+        try std.Io.Dir.cwd().deleteTree(io, resolved_path);
     } else {
         posix.unlink(resolved_path) catch |err| switch (err) {
             error.FileNotFound => {
@@ -96,4 +101,9 @@ pub fn handleFileDelete(
     const done_payload = try protocol.encodeFileDeleteDone(allocator, req.id);
     defer allocator.free(done_payload);
     try tx.sendPayload(done_payload);
+}
+
+test "recursive delete rejects filesystem root" {
+    try std.testing.expectError(error.CannotDeleteRootDirectory, ensureRecursiveDeleteTargetAllowed("/"));
+    try ensureRecursiveDeleteTargetAllowed("/tmp/gondolin-delete-root-test");
 }

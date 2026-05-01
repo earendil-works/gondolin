@@ -132,13 +132,15 @@ pub const WaitPidResult = struct {
 };
 
 pub fn waitpid(pid: pid_t, flags: u32) WaitPidResult {
-    var status: c_int = 0;
+    var status: c_int = undefined;
     while (true) {
         const rc = std.c.waitpid(pid, &status, @intCast(flags));
         switch (errno(rc)) {
             .SUCCESS => return .{ .pid = rc, .status = @bitCast(status) },
             .INTR => continue,
-            else => return .{ .pid = -1, .status = 0 },
+            .CHILD => unreachable,
+            .INVAL => unreachable,
+            else => unreachable,
         }
     }
 }
