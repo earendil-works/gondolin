@@ -88,7 +88,12 @@ pub fn handleFileDelete(
         try ensureRecursiveDeleteTargetAllowed(resolved_path);
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
-        try std.Io.Dir.cwd().deleteTree(io, resolved_path);
+        const cwd = std.Io.Dir.cwd();
+        // deleteTree treats a missing root as success; preserve force=false semantics
+        if (!req.force) {
+            _ = try cwd.statFile(io, resolved_path, .{ .follow_symlinks = false });
+        }
+        try cwd.deleteTree(io, resolved_path);
     } else {
         posix.unlink(resolved_path) catch |err| switch (err) {
             error.FileNotFound => {
@@ -106,4 +111,40 @@ pub fn handleFileDelete(
 test "recursive delete rejects filesystem root" {
     try std.testing.expectError(error.CannotDeleteRootDirectory, ensureRecursiveDeleteTargetAllowed("/"));
     try ensureRecursiveDeleteTargetAllowed("/tmp/gondolin-delete-root-test");
+}
+
+test "recursive delete reports missing path unless forced" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_dir = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+
+    const TestTx = struct {
+        payloads: usize = 0,
+
+        pub fn sendPayload(self: *@This(), payload: []const u8) !void {
+            _ = payload;
+            self.payloads += 1;
+        }
+    };
+
+    var tx: TestTx = .{};
+    try std.testing.expectError(error.FileNotFound, handleFileDelete(std.testing.allocator, &tx, root_dir, .{
+        .id = 1,
+        .path = "/missing",
+        .cwd = null,
+        .force = false,
+        .recursive = true,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), tx.payloads);
+
+    try handleFileDelete(std.testing.allocator, &tx, root_dir, .{
+        .id = 2,
+        .path = "/missing",
+        .cwd = null,
+        .force = true,
+        .recursive = true,
+    });
+    try std.testing.expectEqual(@as(usize, 1), tx.payloads);
 }

@@ -251,6 +251,27 @@ test(
     await withVm(execVmKey, execVmOptions, async (vm) => {
       await vm.start();
       await vm.fs.deleteFile("/tmp/gondolin-does-not-exist", { force: true });
+      await vm.fs.deleteFile("/tmp/gondolin-recursive-does-not-exist", {
+        force: true,
+        recursive: true,
+      });
+    });
+  },
+);
+
+test(
+  "deleteFile rejects recursive missing paths without force",
+  { skip: skipVmTests, timeout: timeoutMs },
+  async () => {
+    await withVm(execVmKey, execVmOptions, async (vm) => {
+      await vm.start();
+      await assert.rejects(
+        () =>
+          vm.fs.deleteFile("/tmp/gondolin-recursive-does-not-exist", {
+            recursive: true,
+          }),
+        (err) => err instanceof Error && /FileNotFound/.test(err.message),
+      );
     });
   },
 );
