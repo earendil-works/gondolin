@@ -1,5 +1,7 @@
 const std = @import("std");
-const protocol = @import("sandboxd").protocol;
+const sandboxd = @import("sandboxd");
+const protocol = sandboxd.protocol;
+const posix = sandboxd.posix;
 const file_requests = @import("file_requests.zig");
 const c = @cImport({
     @cInclude("pty.h");
@@ -8,6 +10,16 @@ const c = @cImport({
 });
 
 const log = std.log.scoped(.sandboxd);
+
+fn syncIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
+    return @as(i64, @intCast(ts.sec)) * 1000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000_000)));
+}
 
 /// max buffered stdin per exec session in `bytes`
 const max_queued_stdin_bytes: usize = 4 * 1024 * 1024;
@@ -50,36 +62,36 @@ const OwnedExecRequest = struct {
 };
 
 const VirtioTx = struct {
-    fd: std.posix.fd_t,
-    mutex: std.Thread.Mutex = .{},
+    fd: posix.fd_t,
+    mutex: std.Io.Mutex = .init,
 
     pub fn sendPayload(self: *VirtioTx, payload: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
         try protocol.writeFrame(self.fd, payload);
     }
 
     fn sendError(self: *VirtioTx, allocator: std.mem.Allocator, id: u32, code: []const u8, message: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
         try protocol.sendError(allocator, self.fd, id, code, message);
     }
 
     fn sendStdinWindow(self: *VirtioTx, allocator: std.mem.Allocator, id: u32, stdin: u32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
         try protocol.sendStdinWindow(allocator, self.fd, id, stdin);
     }
 
     fn sendVfsReady(self: *VirtioTx, allocator: std.mem.Allocator) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
         try protocol.sendVfsReady(allocator, self.fd);
     }
 
     fn sendVfsError(self: *VirtioTx, allocator: std.mem.Allocator, message: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
         try protocol.sendVfsError(allocator, self.fd, message);
     }
 };
@@ -88,8 +100,8 @@ const ExecSession = struct {
     allocator: std.mem.Allocator,
     tx: *VirtioTx,
     req: OwnedExecRequest,
-    mutex: std.Thread.Mutex = .{},
-    control_cv: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    control_cv: std.Io.Condition = .init,
     controls: std.ArrayList(ExecControlMessage) = .empty,
     /// stdin bytes buffered in the control queue in `bytes`
     stdin_queued_bytes: usize = 0,
@@ -97,11 +109,11 @@ const ExecSession = struct {
     stdin_credit_inflight: usize = 0,
     done: bool = false,
     thread: ?std.Thread = null,
-    wake_read_fd: ?std.posix.fd_t = null,
-    wake_write_fd: ?std.posix.fd_t = null,
+    wake_read_fd: ?posix.fd_t = null,
+    wake_write_fd: ?posix.fd_t = null,
 
     fn init(allocator: std.mem.Allocator, tx: *VirtioTx, req: OwnedExecRequest) !ExecSession {
-        const wake_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const wake_pipe = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
 
         return .{
             .allocator = allocator,
@@ -115,11 +127,11 @@ const ExecSession = struct {
 
     fn deinit(self: *ExecSession) void {
         if (self.wake_read_fd) |fd| {
-            std.posix.close(fd);
+            posix.close(fd);
             self.wake_read_fd = null;
         }
         if (self.wake_write_fd) |fd| {
-            std.posix.close(fd);
+            posix.close(fd);
             self.wake_write_fd = null;
         }
 
@@ -177,10 +189,10 @@ fn cloneExecRequest(allocator: std.mem.Allocator, req: protocol.ExecRequest) !Ow
 }
 
 fn markSessionDone(session: *ExecSession) void {
-    session.mutex.lock();
+    session.mutex.lockUncancelable(syncIo());
     session.done = true;
-    session.control_cv.broadcast();
-    session.mutex.unlock();
+    session.control_cv.broadcast(syncIo());
+    session.mutex.unlock(syncIo());
 }
 
 fn notifyExecWorker(session: *ExecSession) void {
@@ -188,7 +200,7 @@ fn notifyExecWorker(session: *ExecSession) void {
     const byte: [1]u8 = .{1};
 
     while (true) {
-        _ = std.posix.write(fd, &byte) catch |err| switch (err) {
+        _ = posix.write(fd, &byte) catch |err| switch (err) {
             error.WouldBlock, error.BrokenPipe => return,
             else => return,
         };
@@ -196,11 +208,11 @@ fn notifyExecWorker(session: *ExecSession) void {
     }
 }
 
-fn drainExecWakeFd(fd: std.posix.fd_t) void {
+fn drainExecWakeFd(fd: posix.fd_t) void {
     var buffer: [64]u8 = undefined;
 
     while (true) {
-        const n = std.posix.read(fd, &buffer) catch |err| switch (err) {
+        const n = posix.read(fd, &buffer) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return,
         };
@@ -210,15 +222,14 @@ fn drainExecWakeFd(fd: std.posix.fd_t) void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     log.info("starting", .{});
 
-    var virtio = try openVirtioPort();
-    defer virtio.close();
-    const virtio_fd: std.posix.fd_t = virtio.handle;
+    const virtio_fd = try openVirtioPort();
+    defer posix.close(virtio_fd);
 
     var tx = VirtioTx{ .fd = virtio_fd };
 
@@ -366,9 +377,9 @@ fn startExecSession(
     req: protocol.ExecRequest,
 ) !void {
     if (sessions.get(req.id)) |existing| {
-        existing.mutex.lock();
+        existing.mutex.lockUncancelable(syncIo());
         const done = existing.done;
-        existing.mutex.unlock();
+        existing.mutex.unlock(syncIo());
 
         if (!done) {
             return error.DuplicateRequestId;
@@ -406,8 +417,8 @@ fn startExecSession(
 }
 
 fn enqueueExecInput(session: *ExecSession, input: protocol.InputMessage) !void {
-    session.mutex.lock();
-    defer session.mutex.unlock();
+    session.mutex.lockUncancelable(syncIo());
+    defer session.mutex.unlock(syncIo());
 
     if (session.done) return;
 
@@ -442,7 +453,7 @@ fn enqueueExecInput(session: *ExecSession, input: protocol.InputMessage) !void {
         },
     }
 
-    session.control_cv.signal();
+    session.control_cv.signal(syncIo());
     notifyExecWorker(session);
 }
 
@@ -458,9 +469,9 @@ fn cleanupFinishedExecSessions(
         const id = entry.key_ptr.*;
         const session = entry.value_ptr.*;
 
-        session.mutex.lock();
+        session.mutex.lockUncancelable(syncIo());
         const done = session.done;
-        session.mutex.unlock();
+        session.mutex.unlock(syncIo());
 
         if (done) {
             done_ids.append(allocator, id) catch return;
@@ -522,39 +533,49 @@ fn sendVfsStatus(allocator: std.mem.Allocator, tx: *VirtioTx) !void {
 }
 
 fn readVfsErrorMessage(allocator: std.mem.Allocator) !?[]u8 {
-    const file = std.fs.openFileAbsolute("/run/sandboxfs.failed", .{}) catch |err| switch (err) {
+    const fd = posix.open("/run/sandboxfs.failed", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 4096);
+    defer posix.close(fd);
+
+    var out = std.ArrayList(u8).empty;
+    var buffer: [512]u8 = undefined;
+    while (out.items.len < 4096) {
+        const max_read = @min(buffer.len, 4096 - out.items.len);
+        const n = try posix.read(fd, buffer[0..max_read]);
+        if (n == 0) break;
+        try out.appendSlice(allocator, buffer[0..n]);
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
-fn tryOpenVirtioPath(path: []const u8) !?std.fs.File {
-    const fd = std.posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+fn tryOpenVirtioPath(path: []const u8) !?posix.fd_t {
+    const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
         error.FileNotFound, error.NoDevice => return null,
         else => return err,
     };
 
-    const original_flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    const nonblock_flag_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_flag: usize = @intCast(nonblock_flag_u32);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, original_flags & ~nonblock_flag);
+    const original_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = try posix.fcntl(fd, posix.F.SETFL, original_flags & ~nonblock_flag);
 
-    return std.fs.File{ .handle = fd };
+    return fd;
 }
 
-fn scanVirtioPorts() !?std.fs.File {
-    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close();
+fn scanVirtioPorts() !?posix.fd_t {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
+    defer dev_dir.close(io);
 
     var it = dev_dir.iterate();
     var path_buf: [64]u8 = undefined;
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
         if (!virtioPortMatches(entry.name, "virtio-port")) continue;
         const path = try std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name});
-        if (try tryOpenVirtioPath(path)) |file| return file;
+        if (try tryOpenVirtioPath(path)) |fd| return fd;
     }
 
     return null;
@@ -563,16 +584,16 @@ fn scanVirtioPorts() !?std.fs.File {
 fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
     var path_buf: [128]u8 = undefined;
     const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    var file = std.fs.openFileAbsolute(sys_path, .{}) catch return false;
-    defer file.close();
+    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
+    defer posix.close(fd);
 
     var name_buf: [64]u8 = undefined;
-    const size = file.readAll(&name_buf) catch return false;
+    const size = posix.read(fd, &name_buf) catch return false;
     const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
     return std.mem.eql(u8, trimmed, expected);
 }
 
-fn openVirtioPort() !std.fs.File {
+fn openVirtioPort() !posix.fd_t {
     const paths = [_][]const u8{
         "/dev/virtio-ports/virtio-port",
     };
@@ -581,38 +602,38 @@ fn openVirtioPort() !std.fs.File {
 
     while (true) {
         for (paths) |path| {
-            if (try tryOpenVirtioPath(path)) |file| return file;
+            if (try tryOpenVirtioPath(path)) |fd| return fd;
         }
 
-        if (try scanVirtioPorts()) |file| return file;
+        if (try scanVirtioPorts()) |fd| return fd;
 
         if (!warned) {
             log.info("waiting for virtio port", .{});
             warned = true;
         }
 
-        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
 }
 
-fn waitForVirtioData(virtio_fd: std.posix.fd_t) void {
+fn waitForVirtioData(virtio_fd: posix.fd_t) void {
     while (true) {
-        var pollfds: [1]std.posix.pollfd = .{.{
+        var pollfds: [1]posix.pollfd = .{.{
             .fd = virtio_fd,
-            .events = std.posix.POLL.IN,
+            .events = posix.POLL.IN,
             .revents = 0,
         }};
 
-        const res = std.posix.poll(pollfds[0..], -1) catch return;
+        const res = posix.poll(pollfds[0..], -1) catch return;
         if (res <= 0) continue;
 
         const revents = pollfds[0].revents;
-        if ((revents & std.posix.POLL.HUP) != 0) {
-            std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        if ((revents & posix.POLL.HUP) != 0) {
+            posix.nanosleep(0, 100 * std.time.ns_per_ms);
             continue;
         }
 
-        if ((revents & std.posix.POLL.IN) != 0) return;
+        if ((revents & posix.POLL.IN) != 0) return;
     }
 }
 
@@ -638,16 +659,16 @@ fn runExecSession(session: *ExecSession) !void {
     const use_pty = req.pty;
     const wants_stdin = req.stdin or use_pty;
 
-    var stdout_fd: ?std.posix.fd_t = null;
-    var stderr_fd: ?std.posix.fd_t = null;
-    var stdin_fd: ?std.posix.fd_t = null;
-    var pty_master: ?std.posix.fd_t = null;
+    var stdout_fd: ?posix.fd_t = null;
+    var stderr_fd: ?posix.fd_t = null;
+    var stdin_fd: ?posix.fd_t = null;
+    var pty_master: ?posix.fd_t = null;
 
-    var stdout_pipe: ?[2]std.posix.fd_t = null;
-    var stderr_pipe: ?[2]std.posix.fd_t = null;
-    var stdin_pipe: ?[2]std.posix.fd_t = null;
+    var stdout_pipe: ?[2]posix.fd_t = null;
+    var stderr_pipe: ?[2]posix.fd_t = null;
+    var stdin_pipe: ?[2]posix.fd_t = null;
 
-    var pid: std.posix.pid_t = 0;
+    var pid: posix.pid_t = 0;
 
     if (use_pty) {
         var master: c_int = 0;
@@ -658,13 +679,13 @@ fn runExecSession(session: *ExecSession) !void {
         pid = @intCast(forked);
         if (pid == 0) {
             if (req.cwd) |cwd| {
-                _ = std.posix.chdir(cwd) catch std.posix.exit(127);
+                _ = posix.chdir(cwd) catch posix.exit(127);
             }
 
-            std.posix.execvpeZ(argv[0].?, argv, envp) catch {
+            posix.execvpeZ(argv[0].?, argv, envp) catch {
                 const msg = "exec failed\n";
-                _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-                std.posix.exit(127);
+                _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+                posix.exit(127);
             };
         }
 
@@ -672,26 +693,26 @@ fn runExecSession(session: *ExecSession) !void {
         stdout_fd = pty_master;
         stdin_fd = pty_master;
         errdefer {
-            if (pty_master) |fd| std.posix.close(fd);
+            if (pty_master) |fd| posix.close(fd);
         }
     } else {
-        stdout_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+        stdout_pipe = try posix.pipe2(.{ .CLOEXEC = true });
         errdefer {
-            std.posix.close(stdout_pipe.?[0]);
-            std.posix.close(stdout_pipe.?[1]);
+            posix.close(stdout_pipe.?[0]);
+            posix.close(stdout_pipe.?[1]);
         }
 
-        stderr_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+        stderr_pipe = try posix.pipe2(.{ .CLOEXEC = true });
         errdefer {
-            std.posix.close(stderr_pipe.?[0]);
-            std.posix.close(stderr_pipe.?[1]);
+            posix.close(stderr_pipe.?[0]);
+            posix.close(stderr_pipe.?[1]);
         }
 
         if (wants_stdin) {
-            stdin_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+            stdin_pipe = try posix.pipe2(.{ .CLOEXEC = true });
             errdefer {
-                std.posix.close(stdin_pipe.?[0]);
-                std.posix.close(stdin_pipe.?[1]);
+                posix.close(stdin_pipe.?[0]);
+                posix.close(stdin_pipe.?[1]);
             }
         }
 
@@ -699,52 +720,52 @@ fn runExecSession(session: *ExecSession) !void {
         stderr_fd = stderr_pipe.?[0];
         if (wants_stdin) stdin_fd = stdin_pipe.?[1];
 
-        pid = try std.posix.fork();
+        pid = try posix.fork();
         if (pid == 0) {
             if (wants_stdin) {
-                try std.posix.dup2(stdin_pipe.?[0], std.posix.STDIN_FILENO);
+                try posix.dup2(stdin_pipe.?[0], posix.STDIN_FILENO);
             } else {
-                const devnull = std.posix.openZ("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch std.posix.exit(127);
-                try std.posix.dup2(devnull, std.posix.STDIN_FILENO);
-                std.posix.close(devnull);
+                const devnull = posix.openZ("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch posix.exit(127);
+                try posix.dup2(devnull, posix.STDIN_FILENO);
+                posix.close(devnull);
             }
 
-            try std.posix.dup2(stdout_pipe.?[1], std.posix.STDOUT_FILENO);
-            try std.posix.dup2(stderr_pipe.?[1], std.posix.STDERR_FILENO);
+            try posix.dup2(stdout_pipe.?[1], posix.STDOUT_FILENO);
+            try posix.dup2(stderr_pipe.?[1], posix.STDERR_FILENO);
 
-            std.posix.close(stdout_pipe.?[0]);
-            std.posix.close(stdout_pipe.?[1]);
-            std.posix.close(stderr_pipe.?[0]);
-            std.posix.close(stderr_pipe.?[1]);
+            posix.close(stdout_pipe.?[0]);
+            posix.close(stdout_pipe.?[1]);
+            posix.close(stderr_pipe.?[0]);
+            posix.close(stderr_pipe.?[1]);
 
             if (wants_stdin) {
-                std.posix.close(stdin_pipe.?[0]);
-                std.posix.close(stdin_pipe.?[1]);
+                posix.close(stdin_pipe.?[0]);
+                posix.close(stdin_pipe.?[1]);
             }
 
             if (req.cwd) |cwd| {
-                _ = std.posix.chdir(cwd) catch std.posix.exit(127);
+                _ = posix.chdir(cwd) catch posix.exit(127);
             }
 
-            std.posix.execvpeZ(argv[0].?, argv, envp) catch {
+            posix.execvpeZ(argv[0].?, argv, envp) catch {
                 const msg = "exec failed\n";
-                _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-                std.posix.exit(127);
+                _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+                posix.exit(127);
             };
         }
     }
 
     errdefer {
         if (pid > 0) {
-            _ = std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-            _ = std.posix.waitpid(pid, 0);
+            _ = posix.kill(pid, posix.SIG.KILL) catch {};
+            _ = posix.waitpid(pid, 0);
         }
     }
 
     if (!use_pty) {
-        std.posix.close(stdout_pipe.?[1]);
-        std.posix.close(stderr_pipe.?[1]);
-        if (wants_stdin) std.posix.close(stdin_pipe.?[0]);
+        posix.close(stdout_pipe.?[1]);
+        posix.close(stderr_pipe.?[1]);
+        if (wants_stdin) posix.close(stdin_pipe.?[0]);
     }
 
     var stdout_open = stdout_fd != null;
@@ -756,9 +777,9 @@ fn runExecSession(session: *ExecSession) !void {
 
     if (wants_stdin) {
         const grant_bytes: usize = @min(max_queued_stdin_bytes, @as(usize, std.math.maxInt(u32)));
-        session.mutex.lock();
+        session.mutex.lockUncancelable(syncIo());
         session.stdin_credit_inflight = grant_bytes;
-        session.mutex.unlock();
+        session.mutex.unlock(syncIo());
         _ = session.tx.sendStdinWindow(session.allocator, req.id, @intCast(grant_bytes)) catch {};
     }
 
@@ -796,9 +817,9 @@ fn runExecSession(session: *ExecSession) !void {
     }
 
     while (true) {
-        session.mutex.lock();
+        session.mutex.lockUncancelable(syncIo());
         std.mem.swap(std.ArrayList(ExecControlMessage), &local_controls, &session.controls);
-        session.mutex.unlock();
+        session.mutex.unlock(syncIo());
 
         for (local_controls.items) |msg| {
             switch (msg) {
@@ -808,14 +829,14 @@ fn runExecSession(session: *ExecSession) !void {
                     if (stdin_fd) |fd| {
                         if (data_len > 0) {
                             protocol.writeAll(fd, data.data) catch {
-                                std.posix.close(fd);
+                                posix.close(fd);
                                 stdin_fd = null;
                                 stdin_open = false;
                             };
                         }
                         if (data.eof) {
                             if (close_stdin_on_eof) {
-                                std.posix.close(fd);
+                                posix.close(fd);
                                 stdin_fd = null;
                             } else {
                                 const eot: [1]u8 = .{4};
@@ -828,7 +849,7 @@ fn runExecSession(session: *ExecSession) !void {
                     session.allocator.free(data.data);
 
                     var grant: usize = 0;
-                    session.mutex.lock();
+                    session.mutex.lockUncancelable(syncIo());
                     if (session.stdin_queued_bytes >= data_len) {
                         session.stdin_queued_bytes -= data_len;
                     } else {
@@ -844,8 +865,8 @@ fn runExecSession(session: *ExecSession) !void {
                         session.stdin_credit_inflight += grant;
                     }
 
-                    session.control_cv.signal();
-                    session.mutex.unlock();
+                    session.control_cv.signal(syncIo());
+                    session.mutex.unlock(syncIo());
 
                     if (grant > 0) {
                         _ = session.tx.sendStdinWindow(session.allocator, req.id, @intCast(grant)) catch {};
@@ -872,7 +893,7 @@ fn runExecSession(session: *ExecSession) !void {
 
         if (status != null and !stdout_open and !stderr_open) break;
 
-        var pollfds: [3]std.posix.pollfd = undefined;
+        var pollfds: [3]posix.pollfd = undefined;
         var nfds: usize = 0;
         var stdout_index: ?usize = null;
         var stderr_index: ?usize = null;
@@ -882,7 +903,7 @@ fn runExecSession(session: *ExecSession) !void {
         const stderr_can_read = stderr_credit > 0;
 
         if (use_pty and pty_master != null and pty_close_deadline_ms != null) {
-            const now_ms = std.time.milliTimestamp();
+            const now_ms = milliTimestamp();
             const deadline_ms = pty_close_deadline_ms.?;
 
             var should_close = now_ms >= deadline_ms;
@@ -894,7 +915,7 @@ fn runExecSession(session: *ExecSession) !void {
 
             if (should_close) {
                 const fd = pty_master.?;
-                std.posix.close(fd);
+                posix.close(fd);
                 pty_master = null;
 
                 stdout_fd = null;
@@ -909,7 +930,7 @@ fn runExecSession(session: *ExecSession) !void {
                 if (bytesAvailable(fd)) |avail| {
                     if (avail == 0) {
                         stdout_open = false;
-                        std.posix.close(fd);
+                        posix.close(fd);
                         stdout_fd = null;
                         if (use_pty) {
                             pty_master = null;
@@ -927,7 +948,7 @@ fn runExecSession(session: *ExecSession) !void {
                 if (bytesAvailable(fd)) |avail| {
                     if (avail == 0) {
                         stderr_open = false;
-                        std.posix.close(fd);
+                        posix.close(fd);
                         stderr_fd = null;
                     }
                 }
@@ -938,7 +959,7 @@ fn runExecSession(session: *ExecSession) !void {
             const can_read = stdout_can_read;
             if (can_read or !stdout_hup_seen) {
                 stdout_index = nfds;
-                const events: i16 = if (can_read) std.posix.POLL.IN else 0;
+                const events: i16 = if (can_read) posix.POLL.IN else 0;
                 pollfds[nfds] = .{ .fd = stdout_fd.?, .events = events, .revents = 0 };
                 nfds += 1;
             }
@@ -947,7 +968,7 @@ fn runExecSession(session: *ExecSession) !void {
             const can_read = stderr_can_read;
             if (can_read or !stderr_hup_seen) {
                 stderr_index = nfds;
-                const events: i16 = if (can_read) std.posix.POLL.IN else 0;
+                const events: i16 = if (can_read) posix.POLL.IN else 0;
                 pollfds[nfds] = .{ .fd = stderr_fd.?, .events = events, .revents = 0 };
                 nfds += 1;
             }
@@ -955,46 +976,44 @@ fn runExecSession(session: *ExecSession) !void {
 
         if (session.wake_read_fd) |wake_fd| {
             wake_index = nfds;
-            pollfds[nfds] = .{ .fd = wake_fd, .events = std.posix.POLL.IN, .revents = 0 };
+            pollfds[nfds] = .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 };
             nfds += 1;
         }
 
         if (nfds > 0) {
-            _ = try std.posix.poll(pollfds[0..nfds], 100);
+            _ = try posix.poll(pollfds[0..nfds], 100);
         } else {
             if (status == null) {
-                const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
+                const res = posix.waitpid(pid, posix.W.NOHANG);
                 if (res.pid != 0) {
                     status = res.status;
                 } else {
                     // Avoid a tight busy loop when the child stays alive after
                     // closing stdout/stderr early.
-                    std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
+                    posix.nanosleep(0, 1 * std.time.ns_per_ms);
                 }
             } else {
                 // The child is already dead. If output remains but credits are
                 // exhausted, wait until new control messages arrive.
-                session.mutex.lock();
-                _ = session.control_cv.timedWait(&session.mutex, 10 * std.time.ns_per_ms) catch {};
-                session.mutex.unlock();
+                posix.nanosleep(0, 10 * std.time.ns_per_ms);
             }
             continue;
         }
 
         if (wake_index) |windex| {
             const revents = pollfds[windex].revents;
-            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+            if ((revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR)) != 0) {
                 drainExecWakeFd(pollfds[windex].fd);
             }
         }
 
         if (stdout_index) |sindex| {
             const revents = pollfds[sindex].revents;
-            if ((revents & std.posix.POLL.HUP) != 0) stdout_hup_seen = true;
+            if ((revents & posix.POLL.HUP) != 0) stdout_hup_seen = true;
 
-            if (stdout_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+            if (stdout_credit > 0 and (revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stdout_credit);
-                const n = std.posix.read(stdout_fd.?, buffer[0..max_read]) catch |err| blk: {
+                const n = posix.read(stdout_fd.?, buffer[0..max_read]) catch |err| blk: {
                     if (use_pty and err == error.InputOutput) {
                         break :blk 0;
                     }
@@ -1002,7 +1021,7 @@ fn runExecSession(session: *ExecSession) !void {
                 };
                 if (n == 0) {
                     stdout_open = false;
-                    if (stdout_fd) |fd| std.posix.close(fd);
+                    if (stdout_fd) |fd| posix.close(fd);
                     stdout_fd = null;
                     if (use_pty) {
                         pty_master = null;
@@ -1022,12 +1041,12 @@ fn runExecSession(session: *ExecSession) !void {
                     defer session.allocator.free(payload);
                     try session.tx.sendPayload(payload);
                 }
-            } else if ((revents & std.posix.POLL.HUP) != 0) {
+            } else if ((revents & posix.POLL.HUP) != 0) {
                 if (stdout_fd) |fd| {
                     if (bytesAvailable(fd)) |avail| {
                         if (avail == 0) {
                             stdout_open = false;
-                            std.posix.close(fd);
+                            posix.close(fd);
                             stdout_fd = null;
                             if (use_pty) {
                                 pty_master = null;
@@ -1044,14 +1063,14 @@ fn runExecSession(session: *ExecSession) !void {
 
         if (stderr_index) |sindex| {
             const revents = pollfds[sindex].revents;
-            if ((revents & std.posix.POLL.HUP) != 0) stderr_hup_seen = true;
+            if ((revents & posix.POLL.HUP) != 0) stderr_hup_seen = true;
 
-            if (stderr_credit > 0 and (revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+            if (stderr_credit > 0 and (revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
                 const max_read: usize = @min(buffer.len, stderr_credit);
-                const n = try std.posix.read(stderr_fd.?, buffer[0..max_read]);
+                const n = try posix.read(stderr_fd.?, buffer[0..max_read]);
                 if (n == 0) {
                     stderr_open = false;
-                    if (stderr_fd) |fd| std.posix.close(fd);
+                    if (stderr_fd) |fd| posix.close(fd);
                     stderr_fd = null;
                 } else {
                     stderr_credit -= n;
@@ -1059,12 +1078,12 @@ fn runExecSession(session: *ExecSession) !void {
                     defer session.allocator.free(payload);
                     try session.tx.sendPayload(payload);
                 }
-            } else if ((revents & std.posix.POLL.HUP) != 0) {
+            } else if ((revents & posix.POLL.HUP) != 0) {
                 if (stderr_fd) |fd| {
                     if (bytesAvailable(fd)) |avail| {
                         if (avail == 0) {
                             stderr_open = false;
-                            std.posix.close(fd);
+                            posix.close(fd);
                             stderr_fd = null;
                         }
                     }
@@ -1073,12 +1092,12 @@ fn runExecSession(session: *ExecSession) !void {
         }
 
         if (status == null) {
-            const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
+            const res = posix.waitpid(pid, posix.W.NOHANG);
             if (res.pid != 0) {
                 status = res.status;
 
                 if (use_pty and pty_master != null and pty_close_deadline_ms == null) {
-                    pty_close_deadline_ms = std.time.milliTimestamp() + 250;
+                    pty_close_deadline_ms = milliTimestamp() + 250;
                     pty_exit_drain_remaining = 64 * 1024;
                 }
             }
@@ -1086,11 +1105,11 @@ fn runExecSession(session: *ExecSession) !void {
     }
 
     if (!use_pty) {
-        if (stdin_fd) |fd| std.posix.close(fd);
+        if (stdin_fd) |fd| posix.close(fd);
     }
 
     if (status == null) {
-        status = std.posix.waitpid(pid, 0).status;
+        status = posix.waitpid(pid, 0).status;
     }
 
     const term = parseStatus(status.?);
@@ -1099,7 +1118,7 @@ fn runExecSession(session: *ExecSession) !void {
     try session.tx.sendPayload(response);
 }
 
-fn bytesAvailable(fd: std.posix.fd_t) ?usize {
+fn bytesAvailable(fd: posix.fd_t) ?usize {
     var n: c_int = 0;
 
     // ioctl(FIONREAD) can fail transiently (e.g. EINTR).  If it fails we return
@@ -1109,7 +1128,7 @@ fn bytesAvailable(fd: std.posix.fd_t) ?usize {
     while (true) : (attempts += 1) {
         const rc = c.ioctl(fd, c.FIONREAD, &n);
         if (rc == 0) break;
-        const err = std.posix.errno(rc);
+        const err = posix.errno(rc);
         if (err == .INTR and attempts < 3) continue;
         return null;
     }
@@ -1118,7 +1137,7 @@ fn bytesAvailable(fd: std.posix.fd_t) ?usize {
     return @intCast(n);
 }
 
-fn applyPtyResize(fd: std.posix.fd_t, rows: u32, cols: u32) void {
+fn applyPtyResize(fd: posix.fd_t, rows: u32, cols: u32) void {
     const Field = @TypeOf(@as(c.struct_winsize, undefined).ws_row);
     const max = std.math.maxInt(Field);
     const safe_rows: Field = @intCast(if (rows > max) max else rows);
@@ -1133,29 +1152,29 @@ fn applyPtyResize(fd: std.posix.fd_t, rows: u32, cols: u32) void {
     _ = c.ioctl(fd, c.TIOCSWINSZ, &winsize);
 }
 
-fn flushWriter(virtio_fd: std.posix.fd_t, writer: *protocol.FrameWriter) !void {
+fn flushWriter(virtio_fd: posix.fd_t, writer: *protocol.FrameWriter) !void {
     while (writer.hasPending()) {
-        var pollfds: [1]std.posix.pollfd = .{.{
+        var pollfds: [1]posix.pollfd = .{.{
             .fd = virtio_fd,
-            .events = std.posix.POLL.OUT,
+            .events = posix.POLL.OUT,
             .revents = 0,
         }};
 
-        _ = try std.posix.poll(pollfds[0..], 100);
+        _ = try posix.poll(pollfds[0..], 100);
         const revents = pollfds[0].revents;
-        if ((revents & std.posix.POLL.OUT) != 0) {
+        if ((revents & posix.POLL.OUT) != 0) {
             try writer.flush(virtio_fd);
         }
-        if ((revents & std.posix.POLL.HUP) != 0) return error.EndOfStream;
+        if ((revents & posix.POLL.HUP) != 0) return error.EndOfStream;
     }
 }
 
 fn parseStatus(status: u32) Termination {
-    if (std.posix.W.IFEXITED(status)) {
-        return .{ .exit_code = @as(i32, @intCast(std.posix.W.EXITSTATUS(status))), .signal = null };
+    if (posix.W.IFEXITED(status)) {
+        return .{ .exit_code = @as(i32, @intCast(posix.W.EXITSTATUS(status))), .signal = null };
     }
-    if (std.posix.W.IFSIGNALED(status)) {
-        const sig = @as(i32, @intCast(std.posix.W.TERMSIG(status)));
+    if (posix.W.IFSIGNALED(status)) {
+        const sig = @as(i32, @intCast(@intFromEnum(posix.W.TERMSIG(status))));
         return .{ .exit_code = 128 + sig, .signal = sig };
     }
     return .{ .exit_code = 1, .signal = null };
@@ -1181,35 +1200,36 @@ fn buildEnvp(
     env: []const []const u8,
 ) ![*:null]const ?[*:0]const u8 {
     if (env.len == 0) {
-        return std.c.environ;
+        return @ptrCast(std.c.environ);
     }
 
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
+    var entries = std.ArrayList(?[*:0]const u8).empty;
+    defer entries.deinit(allocator);
+
+    var current_idx: usize = 0;
+    while (std.c.environ[current_idx]) |entry_z| : (current_idx += 1) {
+        const entry = std.mem.span(entry_z);
+        if (isEnvOverridden(entry, env)) continue;
+        try entries.append(allocator, entry_z);
+    }
 
     for (env) |entry| {
-        const sep = std.mem.indexOfScalar(u8, entry, '=') orelse return protocol.ProtocolError.InvalidValue;
-        const key = entry[0..sep];
-        const value = entry[sep + 1 ..];
-        try env_map.put(key, value);
+        if (std.mem.findScalar(u8, entry, '=') == null) return protocol.ProtocolError.InvalidValue;
+        const entry_z = try arena.dupeZ(u8, entry);
+        try entries.append(allocator, entry_z.ptr);
     }
 
-    const total: usize = @intCast(env_map.count());
-    const envp_buf = try arena.allocSentinel(?[*:0]const u8, total, null);
-
-    var it = env_map.iterator();
-    var idx: usize = 0;
-    while (it.next()) |entry| : (idx += 1) {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-        const full_len = key.len + 1 + value.len;
-        var pair = try arena.alloc(u8, full_len + 1);
-        std.mem.copyForwards(u8, pair[0..key.len], key);
-        pair[key.len] = '=';
-        std.mem.copyForwards(u8, pair[key.len + 1 .. key.len + 1 + value.len], value);
-        pair[full_len] = 0;
-        envp_buf[idx] = pair[0..full_len :0].ptr;
-    }
-
+    const envp_buf = try arena.allocSentinel(?[*:0]const u8, entries.items.len, null);
+    @memcpy(envp_buf[0..entries.items.len], entries.items);
     return envp_buf.ptr;
+}
+
+fn isEnvOverridden(entry: []const u8, overrides: []const []const u8) bool {
+    const sep = std.mem.findScalar(u8, entry, '=') orelse return false;
+    const key = entry[0..sep];
+    for (overrides) |override| {
+        if (override.len <= key.len or override[key.len] != '=') continue;
+        if (std.mem.eql(u8, override[0..key.len], key)) return true;
+    }
+    return false;
 }

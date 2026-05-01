@@ -103,36 +103,36 @@ repro-sandbox: $(OUT_DIR)/sandbox-repro
 $(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 $(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 $(OUT_DIR)/sandbox-fuzz: sandbox_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
 		--dep sandboxd --dep file_requests -Mmain=$< \
 		-Msandboxd=../src/root.zig \
 		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 $(OUT_DIR)/cbor-repro: cbor_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 $(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
 		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 $(OUT_DIR)/sandbox-repro: sandbox_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
 		--dep sandboxd --dep file_requests -Mmain=$< \
 		-Msandboxd=../src/root.zig \
 		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
-		-femit-bin=$@
+		-lc -femit-bin=$@
 
 run-cbor: $(OUT_DIR)/cbor-fuzz
 	@rm -rf $(CACHE_DIR)/v

@@ -5,6 +5,7 @@ const sandboxd = @import("sandboxd");
 
 const protocol = sandboxd.protocol;
 const request_path = sandboxd.request_path;
+const posix = sandboxd.posix;
 
 pub fn handleFileRead(
     allocator: std.mem.Allocator,
@@ -15,15 +16,15 @@ pub fn handleFileRead(
     const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
     defer allocator.free(resolved_path);
 
-    var file = try std.fs.openFileAbsolute(resolved_path, .{});
-    defer file.close();
+    const fd = try posix.open(resolved_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    defer posix.close(fd);
 
     const chunk_size: usize = @intCast(req.chunk_size);
     const buffer = try allocator.alloc(u8, chunk_size);
     defer allocator.free(buffer);
 
     while (true) {
-        const n = try file.read(buffer);
+        const n = try posix.read(fd, buffer);
         if (n == 0) break;
 
         const payload = try protocol.encodeFileReadData(allocator, req.id, buffer[0..n]);
@@ -38,7 +39,7 @@ pub fn handleFileRead(
 
 pub fn handleFileWrite(
     allocator: std.mem.Allocator,
-    virtio_fd: std.posix.fd_t,
+    virtio_fd: posix.fd_t,
     tx: anytype,
     root_dir: []const u8,
     req: protocol.FileWriteRequest,
@@ -46,8 +47,13 @@ pub fn handleFileWrite(
     const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
     defer allocator.free(resolved_path);
 
-    var file = try std.fs.createFileAbsolute(resolved_path, .{ .truncate = req.truncate });
-    defer file.close();
+    const fd = try posix.open(resolved_path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = req.truncate,
+        .CLOEXEC = true,
+    }, 0o666);
+    defer posix.close(fd);
 
     while (true) {
         const frame = try protocol.readFrame(allocator, virtio_fd);
@@ -55,7 +61,7 @@ pub fn handleFileWrite(
 
         const input = try protocol.decodeFileWriteData(allocator, frame, req.id);
         if (input.data.len > 0) {
-            try file.writeAll(input.data);
+            try protocol.writeAll(fd, input.data);
         }
         if (input.eof) break;
     }
@@ -75,14 +81,11 @@ pub fn handleFileDelete(
     defer allocator.free(resolved_path);
 
     if (req.recursive) {
-        std.fs.deleteTreeAbsolute(resolved_path) catch |err| switch (err) {
-            error.FileNotFound => {
-                if (!req.force) return err;
-            },
-            else => return err,
-        };
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        const io = threaded.io();
+        std.Io.Dir.cwd().deleteTree(io, resolved_path) catch |err| return err;
     } else {
-        std.fs.deleteFileAbsolute(resolved_path) catch |err| switch (err) {
+        posix.unlink(resolved_path) catch |err| switch (err) {
             error.FileNotFound => {
                 if (!req.force) return err;
             },

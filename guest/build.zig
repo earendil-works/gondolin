@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("sandboxd", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .link_libc = true,
     });
 
     const exe = b.addExecutable(.{
@@ -18,12 +19,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxd/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
             },
         }),
     });
-    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -33,12 +34,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxfs/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
             },
         }),
     });
-    fs_exe.linkLibC();
     b.installArtifact(fs_exe);
 
     const ssh_exe = b.addExecutable(.{
@@ -47,12 +48,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxssh/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
             },
         }),
     });
-    ssh_exe.linkLibC();
     b.installArtifact(ssh_exe);
 
     const ingress_exe = b.addExecutable(.{
@@ -61,12 +62,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxingress/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
             },
         }),
     });
-    ingress_exe.linkLibC();
     b.installArtifact(ingress_exe);
 
     const mod_tests = b.addTest(.{

@@ -4,7 +4,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 
 fn validateNoNul(path: []const u8) !void {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return protocol.ProtocolError.InvalidValue;
+    if (std.mem.findScalar(u8, path, 0) != null) return protocol.ProtocolError.InvalidValue;
 }
 
 fn isPathWithinRoot(path: []const u8, root: []const u8) bool {
@@ -55,7 +55,7 @@ pub fn resolveRequestPathInRoot(
     if (request_path.len == 0) return protocol.ProtocolError.InvalidValue;
     try validateNoNul(request_path);
     if (std.fs.path.isAbsolute(request_path)) {
-        const rel = std.mem.trimLeft(u8, request_path, "/");
+        const rel = std.mem.trimStart(u8, request_path, "/");
         const resolved = try std.fs.path.resolve(allocator, &[_][]const u8{ root_dir, rel });
         if (!isPathWithinRoot(resolved, root_dir)) {
             allocator.free(resolved);

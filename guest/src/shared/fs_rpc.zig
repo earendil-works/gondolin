@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = @import("posix_compat.zig");
 const cbor = @import("cbor.zig");
 const protocol = @import("protocol.zig");
 
@@ -43,11 +44,11 @@ pub const FsRpcClient = struct {
     /// allocator used for request/response buffers
     allocator: std.mem.Allocator,
     /// virtio-serial fd
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     /// next request id
     next_id: u32 = 1,
 
-    pub fn init(allocator: std.mem.Allocator, fd: std.posix.fd_t) FsRpcClient {
+    pub fn init(allocator: std.mem.Allocator, fd: posix.fd_t) FsRpcClient {
         return .{ .allocator = allocator, .fd = fd };
     }
 
@@ -111,7 +112,7 @@ fn encodeRequest(allocator: std.mem.Allocator, id: u32, op: []const u8, fields: 
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);

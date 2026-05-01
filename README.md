@@ -104,7 +104,7 @@ sudo apt install \
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-# install Zig 0.15.2 for your Linux architecture
+# install Zig 0.16.0 for your Linux architecture
 ```
 
 When `vmm=krun` is selected, Gondolin requires krun boot assets from the selected

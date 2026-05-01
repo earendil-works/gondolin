@@ -43,15 +43,14 @@ const CliConfig = struct {
     configPath: []const u8,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const cli = try parseArgs(allocator);
+    const cli = try parseArgs(allocator, init.io, args);
     defer allocator.free(cli.configPath);
 
-    const config_bytes = try std.fs.cwd().readFileAlloc(allocator, cli.configPath, 1024 * 1024);
+    const config_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, cli.configPath, allocator, .limited(1024 * 1024));
     defer allocator.free(config_bytes);
 
     const parsed = try std.json.parseFromSlice(Config, allocator, config_bytes, .{
@@ -62,22 +61,19 @@ pub fn main() !void {
     try runVm(allocator, parsed.value);
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !CliConfig {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
+fn parseArgs(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !CliConfig {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        try std.fs.File.stdout().writeAll("gondolin-krun-runner 0.1.0\n");
+        try std.Io.File.stdout().writeStreamingAll(io, "gondolin-krun-runner 0.1.0\n");
         std.process.exit(0);
     }
 
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        try std.fs.File.stdout().writeAll("usage: gondolin-krun-runner --config <path>\n");
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: gondolin-krun-runner --config <path>\n");
         std.process.exit(0);
     }
 
     if (args.len != 3 or !std.mem.eql(u8, args[1], "--config")) {
-        try std.fs.File.stderr().writeAll("usage: gondolin-krun-runner --config <path>\n");
+        try std.Io.File.stderr().writeStreamingAll(io, "usage: gondolin-krun-runner --config <path>\n");
         return error.InvalidArguments;
     }
 
@@ -214,11 +210,13 @@ fn connectUnixStream(socket_path: []const u8) !c_int {
 }
 
 fn detectKernelFormat(kernel_path: []const u8) !u32 {
-    var file = try std.fs.cwd().openFile(kernel_path, .{});
-    defer file.close();
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().openFile(io, kernel_path, .{});
+    defer file.close(io);
 
     var header: [4]u8 = .{ 0, 0, 0, 0 };
-    const n = try file.readAll(&header);
+    const n = try file.readPositionalAll(io, &header, 0);
 
     if (n >= 2 and header[0] == 'M' and header[1] == 'Z') {
         return c.KRUN_KERNEL_FORMAT_PE_GZ;

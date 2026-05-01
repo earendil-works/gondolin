@@ -6,6 +6,7 @@
 //! directions with basic backpressure.
 
 const std = @import("std");
+const posix = @import("posix_compat.zig");
 const protocol = @import("protocol.zig");
 
 const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
@@ -18,7 +19,7 @@ const BackendReadResult = enum {
 };
 
 const Conn = struct {
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     /// pending bytes to write to tcp socket
     pending: std.ArrayList(u8),
     /// whether the host half-closed the write side
@@ -28,22 +29,20 @@ const Conn = struct {
 };
 
 pub fn run(virtio_port_name: []const u8, log: anytype) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     log.info("starting", .{});
 
-    var virtio = try openVirtioPort(virtio_port_name, log);
-    defer virtio.close();
-    const virtio_fd: std.posix.fd_t = virtio.handle;
+    const virtio_fd = try openVirtioPort(virtio_port_name, log);
+    defer posix.close(virtio_fd);
 
     // Non-blocking virtio makes the event loop easier.
-    const original_flags = try std.posix.fcntl(virtio_fd, std.posix.F.GETFL, 0);
-    const nonblock_flag_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_flag: usize = @intCast(nonblock_flag_u32);
-    _ = try std.posix.fcntl(virtio_fd, std.posix.F.SETFL, original_flags | nonblock_flag);
-    defer _ = std.posix.fcntl(virtio_fd, std.posix.F.SETFL, original_flags) catch {};
+    const original_flags = try posix.fcntl(virtio_fd, posix.F.GETFL, 0);
+    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = try posix.fcntl(virtio_fd, posix.F.SETFL, original_flags | nonblock_flag);
+    defer _ = posix.fcntl(virtio_fd, posix.F.SETFL, original_flags) catch {};
 
     var reader = protocol.FrameReader.init(allocator);
     defer reader.deinit();
@@ -55,7 +54,7 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
     defer {
         var it = conns.iterator();
         while (it.next()) |entry| {
-            std.posix.close(entry.value_ptr.fd);
+            posix.close(entry.value_ptr.fd);
             entry.value_ptr.pending.deinit(allocator);
         }
         conns.deinit();
@@ -65,11 +64,11 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
 
     while (true) {
         // Build pollfds: virtio + each tcp fd
-        var pollfds = std.ArrayList(std.posix.pollfd).empty;
+        var pollfds = std.ArrayList(posix.pollfd).empty;
         defer pollfds.deinit(allocator);
 
-        var virtio_events: i16 = std.posix.POLL.IN;
-        if (writer.hasPending()) virtio_events |= std.posix.POLL.OUT;
+        var virtio_events: i16 = posix.POLL.IN;
+        if (writer.hasPending()) virtio_events |= posix.POLL.OUT;
         try pollfds.append(allocator, .{ .fd = virtio_fd, .events = virtio_events, .revents = 0 });
 
         // Backpressure: if virtio writer is too backed up, stop reading from tcp sockets.
@@ -86,30 +85,30 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
 
             var events: i16 = 0;
             if (!backpressure_virtio) {
-                events |= std.posix.POLL.IN;
+                events |= posix.POLL.IN;
             }
             if (conn.pending.items.len > 0) {
-                events |= std.posix.POLL.OUT;
+                events |= posix.POLL.OUT;
             }
             // Always watch HUP/ERR
-            events |= std.posix.POLL.HUP;
+            events |= posix.POLL.HUP;
             try pollfds.append(allocator, .{ .fd = conn.fd, .events = events, .revents = 0 });
         }
 
-        _ = std.posix.poll(pollfds.items, 100) catch |err| {
+        _ = posix.poll(pollfds.items, 100) catch |err| {
             log.err("poll failed: {s}", .{@errorName(err)});
             continue;
         };
 
         // virtio ready
         const v_revents = pollfds.items[0].revents;
-        if ((v_revents & std.posix.POLL.OUT) != 0) {
+        if ((v_revents & posix.POLL.OUT) != 0) {
             writer.flush(virtio_fd) catch |err| {
                 log.err("virtio flush failed: {s}", .{@errorName(err)});
             };
         }
 
-        if ((v_revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+        if ((v_revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
             while (true) {
                 const frame = reader.readFrame(virtio_fd) catch |err| {
                     if (err == error.EndOfStream) return;
@@ -147,7 +146,7 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
                             // Only half-close the backend after we've flushed all pending bytes.
                             if (!conn.backend_shutdown and conn.pending.items.len == 0) {
                                 conn.backend_shutdown = true;
-                                _ = std.posix.shutdown(conn.fd, .send) catch {};
+                                _ = posix.shutdown(conn.fd, posix.SHUT.WR) catch {};
                             }
                         }
                     },
@@ -167,8 +166,8 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
 
             const conn_ptr = conns.getPtr(id) orelse continue;
 
-            if ((revents & std.posix.POLL.OUT) != 0 and conn_ptr.pending.items.len > 0) {
-                const n = std.posix.write(conn_ptr.fd, conn_ptr.pending.items) catch |err| blk: {
+            if ((revents & posix.POLL.OUT) != 0 and conn_ptr.pending.items.len > 0) {
+                const n = posix.write(conn_ptr.fd, conn_ptr.pending.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk @as(usize, 0);
                     // Remote closed
                     try closeConn(allocator, &conns, &writer, id);
@@ -185,12 +184,12 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
 
                 if (active_conn.pending.items.len == 0 and active_conn.host_eof and !active_conn.backend_shutdown) {
                     active_conn.backend_shutdown = true;
-                    _ = std.posix.shutdown(active_conn.fd, .send) catch {};
+                    _ = posix.shutdown(active_conn.fd, posix.SHUT.WR) catch {};
                 }
             }
 
-            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
-                const should_drain_backend = (revents & std.posix.POLL.HUP) != 0;
+            if ((revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
+                const should_drain_backend = (revents & posix.POLL.HUP) != 0;
 
                 while (writer.pendingBytes() < MAX_BUFFERED_VIRTIO) {
                     switch (try forwardBackendReadChunk(
@@ -218,13 +217,13 @@ fn forwardBackendReadChunk(
     allocator: std.mem.Allocator,
     conns: *std.AutoHashMap(u32, Conn),
     writer: *protocol.FrameWriter,
-    virtio_fd: std.posix.fd_t,
+    virtio_fd: posix.fd_t,
     log: anytype,
     id: u32,
-    backend_fd: std.posix.fd_t,
+    backend_fd: posix.fd_t,
     buffer: []u8,
 ) !BackendReadResult {
-    const n = std.posix.read(backend_fd, buffer) catch |err| {
+    const n = posix.read(backend_fd, buffer) catch |err| {
         if (err == error.WouldBlock) return .would_block;
         try closeConn(allocator, conns, writer, id);
         return .closed;
@@ -241,7 +240,7 @@ fn forwardBackendPayload(
     allocator: std.mem.Allocator,
     conns: *std.AutoHashMap(u32, Conn),
     writer: *protocol.FrameWriter,
-    virtio_fd: std.posix.fd_t,
+    virtio_fd: posix.fd_t,
     log: anytype,
     id: u32,
     payload_bytes: []const u8,
@@ -271,7 +270,7 @@ fn closeConn(
     id: u32,
 ) !void {
     if (conns.fetchRemove(id)) |entry| {
-        std.posix.close(entry.value.fd);
+        posix.close(entry.value.fd);
         var pending = entry.value.pending;
         pending.deinit(allocator);
 
@@ -297,14 +296,14 @@ test "forwardBackendPayload closes connection when encoding fails after read" {
     defer {
         var it = conns.iterator();
         while (it.next()) |entry| {
-            std.posix.close(entry.value_ptr.fd);
+            posix.close(entry.value_ptr.fd);
             entry.value_ptr.pending.deinit(allocator);
         }
         conns.deinit();
     }
 
-    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
-    defer std.posix.close(pipe_fds[1]);
+    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer posix.close(pipe_fds[1]);
 
     try conns.put(7, .{
         .fd = pipe_fds[0],
@@ -343,14 +342,14 @@ test "forwardBackendPayload propagates close failure when tcp_close cannot be en
     defer {
         var it = conns.iterator();
         while (it.next()) |entry| {
-            std.posix.close(entry.value_ptr.fd);
+            posix.close(entry.value_ptr.fd);
             entry.value_ptr.pending.deinit(allocator);
         }
         conns.deinit();
     }
 
-    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
-    defer std.posix.close(pipe_fds[1]);
+    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer posix.close(pipe_fds[1]);
 
     try conns.put(9, .{
         .fd = pipe_fds[0],
@@ -378,7 +377,7 @@ fn handleOpen(
     allocator: std.mem.Allocator,
     conns: *std.AutoHashMap(u32, Conn),
     writer: *protocol.FrameWriter,
-    virtio_fd: std.posix.fd_t,
+    virtio_fd: posix.fd_t,
     open: protocol.TcpOpen,
 ) !void {
     // Only allow loopback
@@ -390,18 +389,15 @@ fn handleOpen(
     // Close existing
     try closeConn(allocator, conns, writer, open.id);
 
-    const addr = try std.net.Address.parseIp("127.0.0.1", open.port);
-    const stream = std.net.tcpConnectToAddress(addr) catch |err| {
+    const fd = posix.tcpConnectLoopback(open.port) catch |err| {
         try sendOpened(allocator, writer, virtio_fd, open.id, false, @errorName(err));
         return;
     };
-    const fd = stream.handle;
 
     // Set nonblocking
-    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    const nonblock_flag_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_flag: usize = @intCast(nonblock_flag_u32);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | nonblock_flag);
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = try posix.fcntl(fd, posix.F.SETFL, flags | nonblock_flag);
 
     const pending = std.ArrayList(u8).empty;
     try conns.put(open.id, .{ .fd = fd, .pending = pending, .host_eof = false, .backend_shutdown = false });
@@ -412,7 +408,7 @@ fn handleOpen(
 fn sendOpened(
     allocator: std.mem.Allocator,
     writer: *protocol.FrameWriter,
-    virtio_fd: std.posix.fd_t,
+    virtio_fd: posix.fd_t,
     id: u32,
     ok: bool,
     message: ?[]const u8,
@@ -423,32 +419,33 @@ fn sendOpened(
     try writer.flush(virtio_fd);
 }
 
-fn tryOpenVirtioPath(path: []const u8) !?std.fs.File {
-    const fd = std.posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+fn tryOpenVirtioPath(path: []const u8) !?posix.fd_t {
+    const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
         error.FileNotFound, error.NoDevice => return null,
         else => return err,
     };
 
     // switch to blocking
-    const original_flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    const nonblock_flag_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_flag: usize = @intCast(nonblock_flag_u32);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, original_flags & ~nonblock_flag);
+    const original_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = try posix.fcntl(fd, posix.F.SETFL, original_flags & ~nonblock_flag);
 
-    return std.fs.File{ .handle = fd };
+    return fd;
 }
 
-fn scanVirtioPorts(virtio_port_name: []const u8) !?std.fs.File {
-    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close();
+fn scanVirtioPorts(virtio_port_name: []const u8) !?posix.fd_t {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
+    defer dev_dir.close(io);
 
     var it = dev_dir.iterate();
     var path_buf: [64]u8 = undefined;
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
         if (!virtioPortMatches(entry.name, virtio_port_name)) continue;
         const path = try std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name});
-        if (try tryOpenVirtioPath(path)) |file| return file;
+        if (try tryOpenVirtioPath(path)) |fd| return fd;
     }
 
     return null;
@@ -457,16 +454,16 @@ fn scanVirtioPorts(virtio_port_name: []const u8) !?std.fs.File {
 fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
     var path_buf: [128]u8 = undefined;
     const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    var file = std.fs.openFileAbsolute(sys_path, .{}) catch return false;
-    defer file.close();
+    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
+    defer posix.close(fd);
 
     var name_buf: [64]u8 = undefined;
-    const size = file.readAll(&name_buf) catch return false;
+    const size = posix.read(fd, &name_buf) catch return false;
     const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
     return std.mem.eql(u8, trimmed, expected);
 }
 
-fn openVirtioPort(virtio_port_name: []const u8, log: anytype) !std.fs.File {
+fn openVirtioPort(virtio_port_name: []const u8, log: anytype) !posix.fd_t {
     var path_buf: [128]u8 = undefined;
     const direct_path = try std.fmt.bufPrint(&path_buf, "/dev/virtio-ports/{s}", .{virtio_port_name});
 
@@ -481,6 +478,6 @@ fn openVirtioPort(virtio_port_name: []const u8, log: anytype) !std.fs.File {
             warned = true;
         }
 
-        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
 }

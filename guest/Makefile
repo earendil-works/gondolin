@@ -27,7 +27,6 @@ HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -s)
 
 # macOS-specific toolchain/path compatibility:
-# - Zig 0.15.x can fail to link build runners with newer Xcode SDKs
 # - Homebrew e2fsprogs is keg-only (mke2fs not on PATH by default)
 ifeq ($(HOST_OS),Darwin)
 ifeq ($(origin DEVELOPER_DIR), undefined)
