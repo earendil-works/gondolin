@@ -489,6 +489,14 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
     - Default image selector used by `VM.create()` / `gondolin bash` when no explicit image is set
     - Default: `alpine-base:latest`
 
+- `GONDOLIN_VMM`
+    - Default VM backend when `--vmm` / `sandbox.vmm` is not set
+    - Values: `qemu`, `krun` (default: `qemu`)
+
+- `GONDOLIN_CPU`
+    - QEMU CPU model override when `sandbox.cpu` is not set, for example `cortex-a72`
+    - Ignored by `krun`
+
 - `GONDOLIN_IMAGE_REGISTRY_URL`
     - Override builtin image registry JSON URL
     - Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json`

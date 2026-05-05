@@ -848,6 +848,8 @@ export function resolveSandboxServerOptions(
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
+  const envCpu = process.env.GONDOLIN_CPU?.trim() || undefined;
+  const cpu = vmm === "qemu" ? (options.cpu ?? envCpu) : options.cpu;
   let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
   const resolveDefaultKrunRunnerPathFn =
     deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
@@ -988,7 +990,7 @@ export function resolveSandboxServerOptions(
     debug,
     machineType: options.machineType,
     accel: options.accel,
-    cpu: options.cpu,
+    cpu,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
