@@ -17,7 +17,7 @@ export type SecretDefinition = {
 };
 
 export type CreateHttpHooksOptions = {
-  /** allowed host patterns (empty = allow all) */
+  /** allowed host patterns (omitted = allow all, explicit empty = deny all) */
   allowedHosts?: string[];
   /** host patterns allowed to resolve to internal ip ranges */
   allowedInternalHosts?: string[];
@@ -39,6 +39,33 @@ export type CreateHttpHooksOptions = {
   onResponse?: HttpHooks["onResponse"];
 };
 
+export type UpdateSecretOptions = {
+  /** updated secret value */
+  value?: string;
+  /** updated host patterns this secret may be sent to */
+  hosts?: string[];
+};
+
+export type SecretManagerEntry = {
+  /** env var name */
+  name: string;
+  /** guest-visible placeholder value */
+  placeholder: string;
+  /** allowed host patterns */
+  hosts: string[];
+  /** whether placeholder substitution yields an empty string */
+  deleted: boolean;
+};
+
+export type SecretManager = {
+  /** list configured secrets */
+  listSecrets(): SecretManagerEntry[];
+  /** update an existing secret */
+  updateSecret(name: string, options: UpdateSecretOptions): void;
+  /** replace an existing secret with an empty string */
+  deleteSecret(name: string): void;
+};
+
 export type CreateHttpHooksResult = {
   /** http hook implementation */
   httpHooks: HttpHooks;
@@ -46,44 +73,95 @@ export type CreateHttpHooksResult = {
   env: Record<string, string>;
   /** resolved allowed hosts */
   allowedHosts: string[];
+  /** runtime manager for configured secrets */
+  secretManager: SecretManager;
 };
 
 type SecretEntry = {
   name: string;
   placeholder: string;
   value: string;
+  revokedValues: string[];
   hosts: string[];
+  deleted: boolean;
 };
 
 export function createHttpHooks(
   options: CreateHttpHooksOptions = {},
 ): CreateHttpHooksResult {
   const env: Record<string, string> = {};
-  const secretEntries: SecretEntry[] = [];
   const blockInternalRanges = options.blockInternalRanges ?? true;
+  const configuredAllowedHosts =
+    options.allowedHosts === undefined ? ["*"] : uniqueHosts(options.allowedHosts);
+  const secretEntries = new Map<string, SecretEntry>();
 
   for (const [name, secret] of Object.entries(options.secrets ?? {})) {
     const placeholder = `GONDOLIN_SECRET_${crypto.randomBytes(24).toString("hex")}`;
     env[name] = placeholder;
-    secretEntries.push({
+    secretEntries.set(name, {
       name,
       placeholder,
       value: secret.value,
-      hosts: secret.hosts.map(normalizeHostnamePattern),
+      revokedValues: [],
+      hosts: uniqueHosts(secret.hosts),
+      deleted: false,
     });
   }
 
   const allowedInternalHosts = uniqueHosts(options.allowedInternalHosts ?? []);
+  const allowedHosts = mergeAllowedHosts(
+    configuredAllowedHosts,
+    allowedInternalHosts,
+  );
 
-  const allowedHosts = uniqueHosts([
-    ...(options.allowedHosts ?? []),
-    ...allowedInternalHosts,
-    ...secretEntries.flatMap((entry) => entry.hosts),
-  ]);
+  const getSecretEntries = (): SecretEntry[] => Array.from(secretEntries.values());
+
+  const getSecretEntry = (name: string): SecretEntry => {
+    const entry = secretEntries.get(name);
+    if (!entry) {
+      throw new Error(`unknown secret: ${name}`);
+    }
+    return entry;
+  };
+
+  const secretManager: SecretManager = {
+    listSecrets() {
+      return getSecretEntries().map((entry) => ({
+        name: entry.name,
+        placeholder: entry.placeholder,
+        hosts: [...entry.hosts],
+        deleted: entry.deleted,
+      }));
+    },
+    updateSecret(name, update) {
+      const entry = getSecretEntry(name);
+      if (entry.deleted) {
+        throw new Error(`secret deleted: ${name}`);
+      }
+      if (update.hosts !== undefined) {
+        entry.hosts = uniqueHosts(update.hosts);
+      }
+      if (update.value !== undefined && update.value !== entry.value) {
+        entry.revokedValues = addUniqueString(entry.revokedValues, entry.value);
+        entry.value = update.value;
+        entry.revokedValues = entry.revokedValues.filter(
+          (value) => value !== entry.value,
+        );
+      }
+    },
+    deleteSecret(name) {
+      const entry = getSecretEntry(name);
+      if (entry.deleted) {
+        return;
+      }
+      entry.deleted = true;
+    },
+  };
 
   const applySecretsToRequest = (request: Request): Request => {
     assertRequestShape(request);
     const hostname = getHostname(request.url);
+    const entries = getSecretEntries();
 
     // Defense-in-depth: if the request already contains real secret values (eg: because
     // it was constructed from a redirected hop), make sure we still enforce per-secret
@@ -91,19 +169,19 @@ export function createHttpHooks(
     assertSecretValuesAllowedForHost(
       request,
       hostname,
-      secretEntries,
+      entries,
       options.replaceSecretsInQuery ?? false,
     );
 
     const headers = replaceSecretPlaceholdersInHeaders(
       request.headers,
       hostname,
-      secretEntries,
+      entries,
     );
     const url = replaceSecretPlaceholdersInUrlParameters(
       request.url,
       hostname,
-      secretEntries,
+      entries,
       options.replaceSecretsInQuery ?? false,
     );
 
@@ -152,9 +230,10 @@ export function createHttpHooks(
       return true;
     },
     isIpAllowed: async (info) => {
-      const hostnameAllowedByHostList =
-        allowedHosts.length === 0 ||
-        matchesAnyHost(info.hostname, allowedHosts);
+      const hostnameAllowedByHostList = matchesAnyHost(
+        info.hostname,
+        allowedHosts,
+      );
       if (!hostnameAllowedByHostList) {
         return false;
       }
@@ -176,7 +255,7 @@ export function createHttpHooks(
     onResponse: options.onResponse,
   };
 
-  return { httpHooks, env, allowedHosts };
+  return { httpHooks, env, allowedHosts, secretManager };
 }
 
 function cloneRequestWith(
@@ -280,17 +359,64 @@ function assertSecretValuesAllowedForHost(
   if (entries.length === 0) return;
 
   for (const entry of entries) {
+    if (
+      requestContainsRevokedOrDeletedSecretValuesInHeaders(
+        request.headers,
+        entry.revokedValues,
+        entry.deleted ? [] : [entry.value],
+      ) ||
+      (checkQuery &&
+        requestContainsRevokedOrDeletedSecretValuesInQuery(
+          request.url,
+          entry.revokedValues,
+          entry.deleted ? [] : [entry.value],
+        ))
+    ) {
+      throw new HttpRequestBlockedError(
+        `secret ${entry.name} revoked for host: ${hostname || "unknown"}`,
+      );
+    }
+
+    if (entry.deleted) {
+      if (
+        requestContainsRevokedOrDeletedSecretValuesInHeaders(
+          request.headers,
+          [entry.value],
+          [],
+        )
+      ) {
+        throw new HttpRequestBlockedError(
+          `secret ${entry.name} deleted for host: ${hostname || "unknown"}`,
+        );
+      }
+
+      if (
+        checkQuery &&
+        requestContainsRevokedOrDeletedSecretValuesInQuery(
+          request.url,
+          [entry.value],
+          [],
+        )
+      ) {
+        throw new HttpRequestBlockedError(
+          `secret ${entry.name} deleted for host: ${hostname || "unknown"}`,
+        );
+      }
+
+      continue;
+    }
+
     // If the destination is allowed for this secret, we don't care whether the secret
     // value already appears in the request.
     if (matchesAnyHost(hostname, entry.hosts)) continue;
 
-    if (requestContainsSecretValueInHeaders(request.headers, entry)) {
+    if (requestContainsSecretValuesInHeaders(request.headers, [entry.value])) {
       throw new HttpRequestBlockedError(
         `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
       );
     }
 
-    if (checkQuery && requestContainsSecretValueInQuery(request.url, entry)) {
+    if (checkQuery && requestContainsSecretValuesInQuery(request.url, [entry.value])) {
       throw new HttpRequestBlockedError(
         `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
       );
@@ -298,26 +424,83 @@ function assertSecretValuesAllowedForHost(
   }
 }
 
-function requestContainsSecretValueInHeaders(
+function requestContainsSecretValuesInHeaders(
   headers: Headers,
-  entry: SecretEntry,
+  values: string[],
 ): boolean {
-  if (!entry.value) return false;
+  const nonEmptyValues = values.filter(Boolean);
+  if (nonEmptyValues.length === 0) return false;
 
   for (const [headerName, headerValue] of headers.entries()) {
     if (!headerValue) continue;
 
-    // Plaintext match (eg: Authorization: Bearer <token>)
-    if (headerValue.includes(entry.value)) {
-      return true;
-    }
-
-    // Basic auth uses base64 encoding
-    if (/^(authorization|proxy-authorization)$/i.test(headerName)) {
-      const decoded = decodeBasicAuth(headerValue);
-      if (decoded && decoded.includes(entry.value)) {
+    for (const value of nonEmptyValues) {
+      // Plaintext match (eg: Authorization: Bearer <token>)
+      if (headerValue.includes(value)) {
         return true;
       }
+
+      // Basic auth uses base64 encoding
+      if (/^(authorization|proxy-authorization)$/i.test(headerName)) {
+        const decoded = decodeBasicAuth(headerValue);
+        if (decoded && decoded.includes(value)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function requestContainsRevokedOrDeletedSecretValuesInHeaders(
+  headers: Headers,
+  forbiddenValues: string[],
+  allowedValues: string[],
+): boolean {
+  const nonEmptyForbiddenValues = forbiddenValues.filter(Boolean);
+  const nonEmptyAllowedValues = allowedValues.filter(Boolean);
+  if (nonEmptyForbiddenValues.length === 0) return false;
+
+  for (const [headerName, headerValue] of headers.entries()) {
+    if (!headerValue) continue;
+
+    if (/^(authorization|proxy-authorization)$/i.test(headerName)) {
+      const decoded = decodeBasicAuthStrict(headerValue);
+      if (decoded) {
+        if (
+          containsForbiddenValueOutsideAllowedRanges(
+            decoded,
+            nonEmptyForbiddenValues,
+            nonEmptyAllowedValues,
+          )
+        ) {
+          return true;
+        }
+        continue;
+      }
+
+      if (
+        containsForbiddenValueOutsideAllowedRanges(
+          headerValue,
+          nonEmptyForbiddenValues,
+          nonEmptyAllowedValues,
+        )
+      ) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (
+      containsForbiddenValueOutsideAllowedRanges(
+        headerValue,
+        nonEmptyForbiddenValues,
+        nonEmptyAllowedValues,
+      )
+    ) {
+      return true;
     }
   }
 
@@ -336,11 +519,38 @@ function decodeBasicAuth(value: string): string | null {
   }
 }
 
-function requestContainsSecretValueInQuery(
+function decodeBasicAuthStrict(value: string): string | null {
+  const match = value.match(/^(Basic)(\s+)(\S+)(\s*)$/i);
+  if (!match) return null;
+
+  const token = match[3];
+  if (!token || !/^[A-Za-z0-9+/]+={0,2}$/.test(token)) {
+    return null;
+  }
+
+  if (token.length % 4 === 1) {
+    return null;
+  }
+
+  const decoded = Buffer.from(token, "base64").toString("utf8");
+  const normalizedToken = stripBase64Padding(token);
+  const normalizedDecoded = stripBase64Padding(
+    Buffer.from(decoded, "utf8").toString("base64"),
+  );
+
+  if (normalizedDecoded !== normalizedToken) {
+    return null;
+  }
+
+  return decoded;
+}
+
+function requestContainsSecretValuesInQuery(
   url: string,
-  entry: SecretEntry,
+  values: string[],
 ): boolean {
-  if (!entry.value) return false;
+  const nonEmptyValues = values.filter(Boolean);
+  if (nonEmptyValues.length === 0) return false;
 
   let parsed: URL;
   try {
@@ -352,12 +562,100 @@ function requestContainsSecretValueInQuery(
   if (!parsed.search) return false;
 
   for (const [name, value] of parsed.searchParams.entries()) {
-    if (name.includes(entry.value) || value.includes(entry.value)) {
+    for (const secretValue of nonEmptyValues) {
+      if (name.includes(secretValue) || value.includes(secretValue)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function requestContainsRevokedOrDeletedSecretValuesInQuery(
+  url: string,
+  forbiddenValues: string[],
+  allowedValues: string[],
+): boolean {
+  const nonEmptyForbiddenValues = forbiddenValues.filter(Boolean);
+  const nonEmptyAllowedValues = allowedValues.filter(Boolean);
+  if (nonEmptyForbiddenValues.length === 0) return false;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  if (!parsed.search) return false;
+
+  for (const [name, value] of parsed.searchParams.entries()) {
+    if (
+      containsForbiddenValueOutsideAllowedRanges(
+        name,
+        nonEmptyForbiddenValues,
+        nonEmptyAllowedValues,
+      ) ||
+      containsForbiddenValueOutsideAllowedRanges(
+        value,
+        nonEmptyForbiddenValues,
+        nonEmptyAllowedValues,
+      )
+    ) {
       return true;
     }
   }
 
   return false;
+}
+
+function containsForbiddenValueOutsideAllowedRanges(
+  container: string,
+  forbiddenValues: string[],
+  allowedValues: string[],
+): boolean {
+  if (!container) return false;
+
+  const allowedRanges = allowedValues.flatMap((value) =>
+    collectStringMatchRanges(container, value),
+  );
+
+  for (const forbiddenValue of forbiddenValues) {
+    for (const range of collectStringMatchRanges(container, forbiddenValue)) {
+      if (!isRangeCoveredByAllowedValue(range, allowedRanges)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function collectStringMatchRanges(
+  container: string,
+  search: string,
+): Array<{ start: number; end: number }> {
+  if (!search) return [];
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  let start = container.indexOf(search);
+
+  while (start !== -1) {
+    ranges.push({ start, end: start + search.length });
+    start = container.indexOf(search, start + 1);
+  }
+
+  return ranges;
+}
+
+function isRangeCoveredByAllowedValue(
+  candidate: { start: number; end: number },
+  allowedRanges: Array<{ start: number; end: number }>,
+): boolean {
+  return allowedRanges.some(
+    (allowed) => allowed.start <= candidate.start && allowed.end >= candidate.end,
+  );
 }
 
 function replaceSecretPlaceholdersInHeaders(
@@ -483,6 +781,11 @@ function replaceSecretPlaceholdersInString(
 
   for (const entry of entries) {
     if (!updated.includes(entry.placeholder)) continue;
+    if (entry.deleted) {
+      updated = replaceAll(updated, entry.placeholder, "");
+      continue;
+    }
+
     assertSecretAllowedForHost(entry, hostname);
     updated = replaceAll(updated, entry.placeholder, entry.value);
   }
@@ -543,6 +846,10 @@ function isPrivateIPv6(ip: string): boolean {
   return false;
 }
 
+function stripBase64Padding(value: string): string {
+  return value.replace(/=+$/g, "");
+}
+
 function uniqueHosts(hosts: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -555,6 +862,24 @@ function uniqueHosts(hosts: string[]): string[] {
   }
 
   return result;
+}
+
+function mergeAllowedHosts(
+  configuredAllowedHosts: string[],
+  allowedInternalHosts: string[],
+): string[] {
+  if (configuredAllowedHosts.includes("*")) {
+    return ["*"];
+  }
+
+  return uniqueHosts([...configuredAllowedHosts, ...allowedInternalHosts]);
+}
+
+function addUniqueString(values: string[], value: string): string[] {
+  if (!value || values.includes(value)) {
+    return values;
+  }
+  return [...values, value];
 }
 
 function replaceAll(
