@@ -71,8 +71,11 @@ pub fn handleFileWrite(
     try tx.sendPayload(done_payload);
 }
 
-fn ensureRecursiveDeleteTargetAllowed(resolved_path: []const u8) !void {
-    if (std.mem.eql(u8, resolved_path, "/")) return error.CannotDeleteRootDirectory;
+fn ensureRecursiveDeleteTargetAllowed(allocator: std.mem.Allocator, resolved_path: []const u8) !void {
+    const normalized_path = try std.fs.path.resolve(allocator, &.{resolved_path});
+    defer allocator.free(normalized_path);
+
+    if (std.mem.eql(u8, normalized_path, "/")) return error.CannotDeleteRootDirectory;
 }
 
 pub fn handleFileDelete(
@@ -85,7 +88,7 @@ pub fn handleFileDelete(
     defer allocator.free(resolved_path);
 
     if (req.recursive) {
-        try ensureRecursiveDeleteTargetAllowed(resolved_path);
+        try ensureRecursiveDeleteTargetAllowed(allocator, resolved_path);
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
         const cwd = std.Io.Dir.cwd();
@@ -108,9 +111,16 @@ pub fn handleFileDelete(
     try tx.sendPayload(done_payload);
 }
 
-test "recursive delete rejects filesystem root" {
-    try std.testing.expectError(error.CannotDeleteRootDirectory, ensureRecursiveDeleteTargetAllowed("/"));
-    try ensureRecursiveDeleteTargetAllowed("/tmp/gondolin-delete-root-test");
+test "recursive delete rejects filesystem root equivalents" {
+    const allocator = std.testing.allocator;
+
+    const root_equivalent_paths = [_][]const u8{ "/", "/.", "//", "/tmp/.." };
+    for (root_equivalent_paths) |path| {
+        try std.testing.expectError(error.CannotDeleteRootDirectory, ensureRecursiveDeleteTargetAllowed(allocator, path));
+    }
+
+    try ensureRecursiveDeleteTargetAllowed(allocator, "/tmp/gondolin-delete-root-test");
+    try ensureRecursiveDeleteTargetAllowed(allocator, "/tmp/../tmp/gondolin-delete-root-test");
 }
 
 test "recursive delete reports missing path unless forced" {

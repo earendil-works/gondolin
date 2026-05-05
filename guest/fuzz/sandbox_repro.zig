@@ -56,8 +56,11 @@ pub fn main(init: std.process.Init) !void {
     const data = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, .limited(1 << 20));
     defer allocator.free(data);
 
-    // Keep behavior consistent with the fuzz harness.
-    const slice = if (data.len > 64 * 1024) data[0 .. 64 * 1024] else data;
+    // Keep behavior consistent with the fuzz harness: corpus files are Smith-encoded.
+    var smith: std.testing.Smith = .{ .in = data };
+    var input: [64 * 1024]u8 = undefined;
+    const len = smith.slice(&input);
+    const slice = input[0..len];
 
     // Ensure root exists once during setup. The input may delete it.
     std.Io.Dir.cwd().createDirPath(init.io, root_dir) catch {};
