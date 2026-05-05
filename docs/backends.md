@@ -31,6 +31,7 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
 - Guest architecture must match the selected QEMU binary (`qemu-system-aarch64` vs `qemu-system-x86_64`)
 - QEMU binary precedence: explicit `sandbox.qemuPath` → manifest-derived default when guest arch is known → host-arch default fallback
+- CPU model precedence: explicit `sandbox.cpu` → `GONDOLIN_CPU` → backend-specific auto selection
 - Kernel/initrd/rootfs come from selected guest assets
 
 ### krun

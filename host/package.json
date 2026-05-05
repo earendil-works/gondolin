@@ -1,6 +1,6 @@
 {
   "name": "@earendil-works/gondolin",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Alpine Linux sandbox for running untrusted code with controlled filesystem and network access",
   "type": "module",
   "main": "./dist/src/index.js",
@@ -11,7 +11,8 @@
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
-      "import": "./dist/src/index.js"
+      "import": "./dist/src/index.js",
+      "require": "./dist/src/index.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -53,8 +54,8 @@
     "undici": "^6.21.0"
   },
   "optionalDependencies": {
-    "@earendil-works/gondolin-krun-runner-darwin-arm64": "0.8.0",
-    "@earendil-works/gondolin-krun-runner-linux-x64": "0.8.0"
+    "@earendil-works/gondolin-krun-runner-darwin-arm64": "0.8.1",
+    "@earendil-works/gondolin-krun-runner-linux-x64": "0.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

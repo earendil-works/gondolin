@@ -125,6 +125,30 @@ test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {
   }
 });
 
+test("resolveSandboxServerOptions applies GONDOLIN_CPU with explicit override precedence", () => {
+  const dir = makeTempAssetsDir("aarch64");
+  const prevCpu = process.env.GONDOLIN_CPU;
+  process.env.GONDOLIN_CPU = " cortex-a72 ";
+
+  try {
+    const base = {
+      imagePath: dir,
+      qemuPath: "qemu-system-aarch64",
+      vmm: "qemu" as const,
+    };
+
+    assert.equal(resolveSandboxServerOptions(base).cpu, "cortex-a72");
+    assert.equal(
+      resolveSandboxServerOptions({ ...base, cpu: "max" }).cpu,
+      "max",
+    );
+  } finally {
+    if (prevCpu === undefined) delete process.env.GONDOLIN_CPU;
+    else process.env.GONDOLIN_CPU = prevCpu;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const otherArch = hostArch === "aarch64" ? "x86_64" : "aarch64";

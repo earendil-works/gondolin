@@ -64,13 +64,14 @@ Not substituted:
 Each secret has its own host pattern allowlist (`secrets.NAME.hosts`).  Patterns
 are case-insensitive and support `*` wildcards.
 
-`createHttpHooks` also builds the final network host allowlist as:
+`createHttpHooks` keeps the global network host allowlist separate from per-secret
+substitution scopes:
 
-- `allowedHosts` from options
-- plus all hosts referenced by `secrets.*.hosts`
+- `allowedHosts` controls global egress policy (`undefined` = allow all, explicit `[]` = deny all)
+- `secrets.*.hosts` only controls where that specific secret may be substituted
 
-So if you omit `allowedHosts` but define secrets, those secret host patterns are
-still added to the allowed host set.
+So configuring a secret does not narrow or expand the global host allowlist on
+its own.
 
 ## Hook Ordering
 

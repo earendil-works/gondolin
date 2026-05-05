@@ -81,6 +81,9 @@ export {
   type CreateHttpHooksOptions,
   type CreateHttpHooksResult,
   type SecretDefinition,
+  type SecretManager,
+  type SecretManagerEntry,
+  type UpdateSecretOptions,
 } from "./http/hooks.ts";
 
 // Network types

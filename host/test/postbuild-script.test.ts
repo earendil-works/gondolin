@@ -75,6 +75,10 @@ test("postbuild: finds guest sources via GONDOLIN_GUEST_SRC", () => {
       fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.d.ts"), "utf8"),
       'export { foo } from "./foo.js";\nexport type Bar = import("./bar.js").Bar;\n',
     );
+    assert.equal(
+      fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.cjs"), "utf8"),
+      '"use strict";\nmodule.exports = require("./index.js");\n',
+    );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

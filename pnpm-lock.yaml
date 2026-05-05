@@ -35,10 +35,10 @@ importers:
         version: 6.23.0
     optionalDependencies:
       '@earendil-works/gondolin-krun-runner-darwin-arm64':
-        specifier: 0.8.0
+        specifier: 0.8.1
         version: link:../packages/gondolin-krun-runner-darwin-arm64
       '@earendil-works/gondolin-krun-runner-linux-x64':
-        specifier: 0.8.0
+        specifier: 0.8.1
         version: link:../packages/gondolin-krun-runner-linux-x64
     devDependencies:
       '@types/node':

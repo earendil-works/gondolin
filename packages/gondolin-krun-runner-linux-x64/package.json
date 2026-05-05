@@ -1,6 +1,6 @@
 {
   "name": "@earendil-works/gondolin-krun-runner-linux-x64",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Prebuilt gondolin-krun-runner binary for Linux x64",
   "license": "Apache-2.0",
   "repository": {

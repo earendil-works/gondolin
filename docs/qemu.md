@@ -142,7 +142,12 @@ use.
 
 QEMU has different machine models depending on architecture and platform.
 Gondolin selects machine types and CPU models that are supported by the host
-QEMU build and that work well with virtio devices.
+QEMU build and that work well with virtio devices. To override the selected CPU
+model, set `sandbox.cpu` or the `GONDOLIN_CPU` environment variable:
+
+```bash
+GONDOLIN_CPU=cortex-a72 gondolin bash
+```
 
 You should generally not rely on a specific QEMU machine type as part of the
 public API. The important guarantee is that the guest boots quickly and exposes
