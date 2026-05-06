@@ -15,6 +15,9 @@ jobs:
   create-release:
     name: Create Package Release
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.version }}
+      npm_version: ${{ steps.npm_version.outputs.version }}
     permissions:
       contents: write
     steps:
@@ -56,15 +59,29 @@ jobs:
 
             Platform runner packages are published as optional dependencies for supported krun targets.
 
+            ### Sandbox Helpers
+
+            Sandbox helper binary bundles are published to `sandbox-helpers--${{ steps.npm_version.outputs.version }}` and registered in `builtin-sandbox-helper-registry.json`.
+
             ### Guest Images
 
             Guest images are published independently via the Image Release workflow.
 
             Runtime image resolution uses `builtin-image-registry.json` from the main branch.
 
+  publish-sandbox-helpers:
+    name: Publish sandbox helpers
+    needs: [create-release]
+    uses: ./.github/workflows/sandbox-helpers-release.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ needs.create-release.outputs.npm_version }}
+      source_ref: ${{ needs.create-release.outputs.release_tag }}
+
   publish-krun-runner:
     name: Publish krun runner (${{ matrix.package_name }})
-    needs: [create-release]
+    needs: [create-release, publish-sandbox-helpers]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -166,7 +183,7 @@ jobs:
 
   publish-npm:
     name: Publish main package to NPM
-    needs: [create-release, publish-krun-runner]
+    needs: [create-release, publish-sandbox-helpers, publish-krun-runner]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -1,0 +1,238 @@
+name: Sandbox Helpers Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Gondolin version (e.g. 0.8.1 or v0.8.1)"
+        required: true
+        type: string
+      source_ref:
+        description: "Git ref to build from (defaults to v<version>)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: "Gondolin version (e.g. 0.8.1 or v0.8.1)"
+        required: true
+        type: string
+      source_ref:
+        description: "Git ref to build from (defaults to v<version>)"
+        required: false
+        type: string
+
+concurrency:
+  group: sandbox-helpers-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve helper release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+    steps:
+      - name: Resolve metadata
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          node - <<'NODE'
+          const versionInput = (process.env.INPUT_VERSION || '').trim();
+          const sourceRefInput = (process.env.INPUT_SOURCE_REF || '').trim();
+
+          if (!versionInput) {
+            throw new Error('version is required');
+          }
+
+          const version = versionInput.replace(/^v/, '');
+          const versionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+          if (!versionPattern.test(version)) {
+            throw new Error(`invalid version: ${versionInput}`);
+          }
+
+          const sourceRef = sourceRefInput || `v${version}`;
+          const releaseTag = `sandbox-helpers--${version}`;
+
+          const output = require('fs').createWriteStream(process.env.GITHUB_OUTPUT, {
+            flags: 'a',
+          });
+          output.write(`version=${version}\n`);
+          output.write(`source_ref=${sourceRef}\n`);
+          output.write(`release_tag=${releaseTag}\n`);
+          output.end();
+          NODE
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Resolve source commit
+        id: source
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-helper-archive:
+    name: Build helper archive (${{ matrix.arch }})
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            zig_target: aarch64-linux-musl
+          - arch: x86_64
+            zig_target: x86_64-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          "$PWD/zig-x86_64-linux-0.16.0/zig" version
+
+      - name: Verify package version matches helper release
+        run: |
+          PKG_VERSION=$(node -p "require('./host/package.json').version")
+          VERSION="${{ needs.prepare.outputs.version }}"
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "❌ Version mismatch: host/package.json has $PKG_VERSION but helper release is $VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches: $PKG_VERSION"
+
+      - name: Build guest helper binaries
+        run: |
+          cd guest
+          zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.zig_target }}
+
+      - name: Package helper archive
+        run: |
+          node scripts/package-sandbox-helpers.mjs \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --arch "${{ matrix.arch }}" \
+            --target "${{ matrix.zig_target }}" \
+            --source-ref "${{ needs.prepare.outputs.source_ref }}" \
+            --output-dir "$PWD"
+
+      - name: Upload helper archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-helpers-${{ matrix.arch }}
+          path: |
+            gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}.tar.gz
+            gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}.tar.gz.sha256
+            gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}.tar.gz.meta.json
+          retention-days: 7
+
+  publish-helper-release:
+    name: Publish sandbox helper release
+    needs: [prepare, build-helper-archive]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: helper-artifacts
+
+      - name: Flatten artifacts
+        run: |
+          find helper-artifacts -mindepth 2 -type f -name 'gondolin-sandbox-helpers-*' -exec mv -f {} helper-artifacts/ \;
+
+      - name: Create sandbox helper release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          target_commitish: ${{ needs.prepare.outputs.source_sha }}
+          name: Sandbox helpers ${{ needs.prepare.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          make_latest: "false"
+          files: |
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-aarch64.tar.gz
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-aarch64.tar.gz.sha256
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-aarch64.tar.gz.meta.json
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-x86_64.tar.gz
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-x86_64.tar.gz.sha256
+            helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-x86_64.tar.gz.meta.json
+          body: |
+            ## Gondolin sandbox helpers ${{ needs.prepare.outputs.version }}
+
+            Helper binaries for `gondolin build`, built from `${{ needs.prepare.outputs.source_ref }}`.
+            `builtin-sandbox-helper-registry.json` is updated automatically by this workflow.
+
+  update-registry:
+    name: Update sandbox helper registry
+    needs: [prepare, publish-helper-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: helper-artifacts
+
+      - name: Flatten metadata artifacts
+        run: |
+          find helper-artifacts -mindepth 2 -type f -name '*.tar.gz.meta.json' -exec mv -f {} helper-artifacts/ \;
+
+      - name: Update builtin sandbox helper registry
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          node scripts/update-sandbox-helper-registry.mjs \
+            --version "$VERSION" \
+            --release-tag "$RELEASE_TAG" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --registry builtin-sandbox-helper-registry.json \
+            --metadata-dir "$PWD/helper-artifacts"
+
+      - name: Commit registry update
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet -- builtin-sandbox-helper-registry.json; then
+            echo "No registry update needed"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add builtin-sandbox-helper-registry.json
+          git commit -m "chore(helpers): update registry for gondolin:${VERSION}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+
+      - name: Summary
+        run: |
+          echo "### Sandbox helper registry updated" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Updated \`builtin-sandbox-helper-registry.json\` on \`${{ github.event.repository.default_branch }}\` for \`gondolin:${{ needs.prepare.outputs.version }}\`." >> "$GITHUB_STEP_SUMMARY"
