@@ -11,6 +11,10 @@ const c = @cImport({
 
 const log = std.log.scoped(.sandboxd);
 
+test {
+    _ = file_requests;
+}
+
 fn syncIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
