@@ -4,6 +4,11 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.8.1
+
+- Fixed CommonJS consumers by restoring the `require` export entrypoint #97
+- Updated the built-in image registry so `alpine-base:latest` points to `alpine-base:0.2.0`
+
 ## 0.8.0
 
 - Fixed checkpoint resume to avoid overwriting the source checkpoint when resuming into the same path
