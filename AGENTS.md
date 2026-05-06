@@ -27,6 +27,20 @@ cd host && node --test test/specific.test.ts  # Single test
 
 Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build/alpine.ts`).
 
+## Version Updates & Releases
+
+When preparing a package release, keep all package versions in sync with the release tag:
+
+1. Move relevant `CHANGELOG.md` entries from `## Unreleased` into a new `## X.Y.Z` section, leaving `## Unreleased` in place at the top.
+2. Update `host/package.json` `version` to `X.Y.Z`.
+3. Update `host/package.json` `optionalDependencies` for `@earendil-works/gondolin-krun-runner-*` to `X.Y.Z`.
+4. Update `packages/gondolin-krun-runner-darwin-arm64/package.json` and `packages/gondolin-krun-runner-linux-x64/package.json` `version` fields to `X.Y.Z`.
+5. Run `pnpm install --lockfile-only` from the repo root to refresh `pnpm-lock.yaml`.
+6. Run at least `make check`; run `make test` when practical.
+7. Commit the version/changelog/lockfile changes, then create and push the tag `vX.Y.Z`.
+
+The package release workflow is tag-driven (`.github/workflows/release.yml`) and verifies that package versions match `vX.Y.Z` before publishing. Image releases are separate and are run via the Image Release workflow; do not update package versions for image-only releases. If a release was already published without a changelog entry, add a follow-up `CHANGELOG.md` commit on `main` instead of retagging or republishing.
+
 ## Key Conventions
 
 - **TypeScript:** The host package uses Node's strip-only TypeScript support for running `.ts` files directly; see `host/tsconfig.json` (`erasableSyntaxOnly`). Tests use Node's built-in test runner (`node:test`).
