@@ -471,6 +471,183 @@ async function extractKrunKernelFromArchive(
   }
 }
 
+function extractKernelBundleFromCSource(source: string): Buffer {
+  const assignment = /\bKERNEL_BUNDLE\s*\[\s*\]\s*=/.exec(source);
+  if (!assignment) {
+    throw new Error("libkrunfw kernel.c does not define KERNEL_BUNDLE");
+  }
+
+  const chunks: Buffer[] = [];
+  let current: number[] = [];
+  let cursor = assignment.index + assignment[0].length;
+  let sawString = false;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    chunks.push(Buffer.from(current));
+    current = [];
+  };
+  const pushByte = (value: number) => {
+    current.push(value & 0xff);
+    if (current.length >= 64 * 1024) flush();
+  };
+
+  while (cursor < source.length) {
+    cursor = skipCWhitespaceAndComments(source, cursor);
+    const ch = source[cursor];
+    if (ch === ";") break;
+    if (ch !== '"') {
+      throw new Error(
+        "libkrunfw kernel.c KERNEL_BUNDLE is not a string literal",
+      );
+    }
+    sawString = true;
+    cursor = parseCStringLiteral(source, cursor, pushByte);
+  }
+
+  if (!sawString) {
+    throw new Error("libkrunfw kernel.c KERNEL_BUNDLE has no string data");
+  }
+
+  flush();
+  return Buffer.concat(chunks);
+}
+
+function skipCWhitespaceAndComments(source: string, offset: number): number {
+  let cursor = offset;
+
+  while (cursor < source.length) {
+    const ch = source[cursor];
+    if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+      cursor += 1;
+      continue;
+    }
+
+    if (source.startsWith("//", cursor)) {
+      const newline = source.indexOf("\n", cursor + 2);
+      cursor = newline === -1 ? source.length : newline + 1;
+      continue;
+    }
+
+    if (source.startsWith("/*", cursor)) {
+      const end = source.indexOf("*/", cursor + 2);
+      if (end === -1) {
+        throw new Error("unterminated comment in libkrunfw kernel.c");
+      }
+      cursor = end + 2;
+      continue;
+    }
+
+    break;
+  }
+
+  return cursor;
+}
+
+function parseCStringLiteral(
+  source: string,
+  offset: number,
+  pushByte: (value: number) => void,
+): number {
+  let cursor = offset + 1;
+
+  while (cursor < source.length) {
+    const code = source.charCodeAt(cursor);
+    cursor += 1;
+
+    if (code === 0x22) {
+      return cursor;
+    }
+
+    if (code !== 0x5c) {
+      pushByte(code);
+      continue;
+    }
+
+    if (cursor >= source.length) break;
+    const escape = source[cursor];
+    cursor += 1;
+
+    switch (escape) {
+      case "'":
+      case '"':
+      case "?":
+      case "\\":
+        pushByte(escape.charCodeAt(0));
+        break;
+      case "a":
+        pushByte(0x07);
+        break;
+      case "b":
+        pushByte(0x08);
+        break;
+      case "f":
+        pushByte(0x0c);
+        break;
+      case "n":
+        pushByte(0x0a);
+        break;
+      case "r":
+        pushByte(0x0d);
+        break;
+      case "t":
+        pushByte(0x09);
+        break;
+      case "v":
+        pushByte(0x0b);
+        break;
+      case "\n":
+        break;
+      case "\r":
+        if (source[cursor] === "\n") cursor += 1;
+        break;
+      case "x": {
+        const start = cursor;
+        while (
+          cursor < source.length &&
+          isHexDigit(source.charCodeAt(cursor))
+        ) {
+          cursor += 1;
+        }
+        if (cursor === start) {
+          throw new Error("invalid hex escape in libkrunfw kernel.c");
+        }
+        pushByte(Number.parseInt(source.slice(start, cursor), 16));
+        break;
+      }
+      default:
+        if (isOctalDigit(escape.charCodeAt(0))) {
+          let value = escape.charCodeAt(0) - 0x30;
+          for (let i = 0; i < 2 && cursor < source.length; i++) {
+            const next = source.charCodeAt(cursor);
+            if (!isOctalDigit(next)) break;
+            value = value * 8 + (next - 0x30);
+            cursor += 1;
+          }
+          pushByte(value);
+          break;
+        }
+        throw new Error(
+          `unsupported C string escape in libkrunfw kernel.c: \\${escape}`,
+        );
+    }
+  }
+
+  throw new Error("unterminated string literal in libkrunfw kernel.c");
+}
+
+function isHexDigit(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x46) ||
+    (code >= 0x61 && code <= 0x66)
+  );
+}
+
+function isOctalDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x37;
+}
+
 function extractKernelFromPrebuiltArchive(extractDir: string): Buffer {
   const kernelCPath = path.join(extractDir, "libkrunfw", "kernel.c");
   if (!fs.existsSync(kernelCPath)) {
@@ -479,49 +656,12 @@ function extractKernelFromPrebuiltArchive(extractDir: string): Buffer {
     );
   }
 
-  const buildDir = path.join(extractDir, "build-prebuilt");
-  fs.mkdirSync(buildDir, { recursive: true });
-
-  const extractorPath = path.join(buildDir, "extract-kernel");
-  const sourcePath = path.join(buildDir, "extract-kernel.c");
-  fs.writeFileSync(
-    sourcePath,
-    [
-      "#include <stdio.h>",
-      "#include <stddef.h>",
-      "#ifndef ABI_VERSION",
-      "#define ABI_VERSION 0",
-      "#endif",
-      '#include "libkrunfw/kernel.c"',
-      "int main(void) {",
-      "  size_t load_addr = 0, entry_addr = 0, size = 0;",
-      "  char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);",
-      "  (void)load_addr;",
-      "  (void)entry_addr;",
-      "  if (!kernel || size == 0) {",
-      "    return 1;",
-      "  }",
-      "  return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;",
-      "}",
-      "",
-    ].join("\n"),
+  const kernel = extractKernelBundleFromCSource(
+    fs.readFileSync(kernelCPath, "utf8"),
   );
-
-  execFileSync(
-    "zig",
-    ["cc", "-O2", `-I${extractDir}`, sourcePath, "-o", extractorPath],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-
-  const kernel = execFileSync(extractorPath, [], {
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 512 * 1024 * 1024,
-  });
 
   if (kernel.length === 0) {
-    throw new Error("libkrunfw prebuilt extractor produced an empty kernel");
+    throw new Error("libkrunfw prebuilt archive contains an empty kernel");
   }
 
   return kernel;
@@ -545,29 +685,24 @@ function extractKernelFromSharedArchive(
     );
   }
 
-  const hostArch = hostKrunArch();
   const sharedLib = fs.readFileSync(sharedLibPath);
-
-  if (hostArch === archName) {
-    try {
-      return extractKernelFromSharedArchiveByExecution(sharedLibPath, archName);
-    } catch (execErr) {
-      try {
-        return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
-      } catch (parseErr) {
-        throw new Error(
-          `failed to extract kernel bundle from libkrunfw shared archive for ${archName}; execution path failed (${formatExecError(execErr)}); parser fallback failed (${formatExecError(parseErr)})`,
-        );
-      }
-    }
-  }
-
   try {
     return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
   } catch (parseErr) {
-    throw new Error(
-      `failed to extract kernel bundle from libkrunfw shared archive for ${archName}: ${formatExecError(parseErr)}`,
-    );
+    const hostArch = hostKrunArch();
+    if (hostArch !== archName) {
+      throw new Error(
+        `failed to extract kernel bundle from libkrunfw shared archive for ${archName}: ${formatExecError(parseErr)}`,
+      );
+    }
+
+    try {
+      return extractKernelFromSharedArchiveByExecution(sharedLibPath, archName);
+    } catch (execErr) {
+      throw new Error(
+        `failed to extract kernel bundle from libkrunfw shared archive for ${archName}; parser path failed (${formatExecError(parseErr)}); execution fallback failed (${formatExecError(execErr)})`,
+      );
+    }
   }
 }
 
@@ -971,5 +1106,6 @@ function sha256(buf: Buffer): string {
 
 export const __test = {
   downloadKrunArchive,
+  extractKernelBundleFromCSource,
   extractKernelBundleFromSharedLibraryBytes,
 };
