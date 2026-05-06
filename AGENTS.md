@@ -38,8 +38,9 @@ When preparing a package release, keep all package versions in sync with the rel
 5. Run `pnpm install --lockfile-only` from the repo root to refresh `pnpm-lock.yaml`.
 6. Run at least `make check`; run `make test` when practical.
 7. Commit the version/changelog/lockfile changes, then create and push the tag `vX.Y.Z`.
+8. Watch the Release workflow complete. It creates the package release, publishes sandbox helper bundles to `sandbox-helpers--X.Y.Z`, updates `builtin-sandbox-helper-registry.json` on `main`, publishes optional krun runner packages, then publishes the main npm package.
 
-The package release workflow is tag-driven (`.github/workflows/release.yml`) and verifies that package versions match `vX.Y.Z` before publishing. Image releases are separate and are run via the Image Release workflow; do not update package versions for image-only releases. If a release was already published without a changelog entry, add a follow-up `CHANGELOG.md` commit on `main` instead of retagging or republishing.
+The package release workflow is tag-driven (`.github/workflows/release.yml`) and verifies that package versions match `vX.Y.Z` before publishing. The main package must not be published until the exact `gondolin:X.Y.Z` sandbox helper registry entry exists; the workflow enforces this by making npm publish depend on the sandbox helper release and registry update. If the helper/registry step needs recovery, dispatch `.github/workflows/sandbox-helpers-release.yml` for `X.Y.Z`/`vX.Y.Z` and wait for the registry commit on `main` before rerunning npm publication. Image releases are separate and are run via the Image Release workflow; do not update package versions for image-only releases. If a release was already published without a changelog entry, add a follow-up `CHANGELOG.md` commit on `main` instead of retagging or republishing.
 
 ## Key Conventions
 
