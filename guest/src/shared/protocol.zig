@@ -20,6 +20,7 @@
 //! Errors: error
 
 const std = @import("std");
+const posix = @import("posix_compat.zig");
 const cbor = @import("cbor.zig");
 
 /// maximum frame size in `bytes`
@@ -179,7 +180,7 @@ pub const FrameReader = struct {
         }
     }
 
-    pub fn readFrame(self: *FrameReader, fd: std.posix.fd_t) !?[]u8 {
+    pub fn readFrame(self: *FrameReader, fd: posix.fd_t) !?[]u8 {
         while (true) {
             if (self.frame == null) {
                 const n = try self.readNonBlocking(fd, self.len_buf[self.len_read..]);
@@ -223,9 +224,9 @@ pub const FrameReader = struct {
         }
     }
 
-    fn readNonBlocking(self: *FrameReader, fd: std.posix.fd_t, buf: []u8) !?usize {
+    fn readNonBlocking(self: *FrameReader, fd: posix.fd_t, buf: []u8) !?usize {
         _ = self;
-        const n = std.posix.read(fd, buf) catch |err| {
+        const n = posix.read(fd, buf) catch |err| {
             if (err == error.WouldBlock) return null;
             return err;
         };
@@ -273,9 +274,9 @@ pub const FrameWriter = struct {
         try self.buffer.appendSlice(self.allocator, payload);
     }
 
-    pub fn flush(self: *FrameWriter, fd: std.posix.fd_t) !void {
+    pub fn flush(self: *FrameWriter, fd: posix.fd_t) !void {
         while (self.offset < self.buffer.items.len) {
-            const n = std.posix.write(fd, self.buffer.items[self.offset..]) catch |err| {
+            const n = posix.write(fd, self.buffer.items[self.offset..]) catch |err| {
                 if (err == error.WouldBlock) return;
                 return err;
             };
@@ -386,7 +387,7 @@ pub fn encodeExecOutput(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -413,7 +414,7 @@ pub fn encodeExecResponse(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     const map_len: usize = if (signal == null) 1 else 2;
 
     try cbor.writeMapStart(w, 4);
@@ -443,7 +444,7 @@ pub fn encodeStdinWindow(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -461,7 +462,7 @@ pub fn encodeStdinWindow(
 
 pub fn sendStdinWindow(
     allocator: std.mem.Allocator,
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     id: u32,
     stdin: u32,
 ) !void {
@@ -478,7 +479,7 @@ pub fn encodeFileReadData(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -498,7 +499,7 @@ pub fn encodeFileReadDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -516,7 +517,7 @@ pub fn encodeFileWriteDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -534,7 +535,7 @@ pub fn encodeFileDeleteDone(allocator: std.mem.Allocator, id: u32) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -552,7 +553,7 @@ pub fn encodeVfsReady(allocator: std.mem.Allocator) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -570,7 +571,7 @@ pub fn encodeVfsError(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -595,7 +596,7 @@ pub fn encodeTcpOpened(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -624,7 +625,7 @@ pub fn encodeTcpData(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -644,7 +645,7 @@ pub fn encodeTcpClose(allocator: std.mem.Allocator, id: u32) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -658,7 +659,7 @@ pub fn encodeTcpClose(allocator: std.mem.Allocator, id: u32) ![]u8 {
     return try buf.toOwnedSlice(allocator);
 }
 
-pub fn sendVfsReady(allocator: std.mem.Allocator, fd: std.posix.fd_t) !void {
+pub fn sendVfsReady(allocator: std.mem.Allocator, fd: posix.fd_t) !void {
     const payload = try encodeVfsReady(allocator);
     defer allocator.free(payload);
     try writeFrame(fd, payload);
@@ -666,7 +667,7 @@ pub fn sendVfsReady(allocator: std.mem.Allocator, fd: std.posix.fd_t) !void {
 
 pub fn sendVfsError(
     allocator: std.mem.Allocator,
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     message: []const u8,
 ) !void {
     const payload = try encodeVfsError(allocator, message);
@@ -683,7 +684,7 @@ pub fn encodeError(
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
-    const w = buf.writer(allocator);
+    const w = cbor.arrayListWriter(allocator, &buf);
     try cbor.writeMapStart(w, 4);
     try cbor.writeText(w, "v");
     try cbor.writeUInt(w, 1);
@@ -703,7 +704,7 @@ pub fn encodeError(
 
 pub fn sendError(
     allocator: std.mem.Allocator,
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     id: u32,
     code: []const u8,
     message: []const u8,
@@ -713,7 +714,7 @@ pub fn sendError(
     try writeFrame(fd, payload);
 }
 
-pub fn readFrame(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
+pub fn readFrame(allocator: std.mem.Allocator, fd: posix.fd_t) ![]u8 {
     var len_buf: [4]u8 = undefined;
     try readExact(fd, len_buf[0..]);
 
@@ -730,7 +731,7 @@ pub fn readFrame(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
     return frame;
 }
 
-pub fn writeFrame(fd: std.posix.fd_t, payload: []const u8) !void {
+pub fn writeFrame(fd: posix.fd_t, payload: []const u8) !void {
     if (payload.len > @as(usize, max_frame_len)) return error.FrameTooLarge;
 
     const len: u32 = @intCast(payload.len);
@@ -745,19 +746,19 @@ pub fn writeFrame(fd: std.posix.fd_t, payload: []const u8) !void {
     try writeAll(fd, payload);
 }
 
-pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
+pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const n = try std.posix.read(fd, buf[offset..]);
+        const n = try posix.read(fd, buf[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
 }
 
-pub fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
     var offset: usize = 0;
     while (offset < data.len) {
-        const n = try std.posix.write(fd, data[offset..]);
+        const n = try posix.write(fd, data[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }

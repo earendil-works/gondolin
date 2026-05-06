@@ -1,7 +1,7 @@
 .{
     .name = .sandboxd,
     .version = "0.0.0",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .paths = .{""},
     .fingerprint = 0x4bed54c661e7a5d9,
 }

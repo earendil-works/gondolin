@@ -8,17 +8,9 @@ const CacheDirArg = "--cache-dir=";
 
 fn ensureFuzzTmpDir() void {
     @disableInstrumentation();
-    var it = std.process.args();
-    _ = it.next();
-    while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, CacheDirArg)) {
-            const cache_dir = arg[CacheDirArg.len..];
-            var dir = std.fs.cwd().makeOpenPath(cache_dir, .{ .iterate = true }) catch return;
-            defer dir.close();
-            dir.makePath("tmp") catch {};
-            return;
-        }
-    }
+    _ = CacheDirArg;
+    std.Io.Dir.cwd().createDirPath(std.testing.io, "/workspace/guest/fuzz/cache/tmp") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, "cache/tmp") catch {};
 }
 
 // Seed corpus entries (CBOR payload frames)
@@ -33,6 +25,13 @@ const seed_file_read_request = [_]u8{
 const seed_tcp_open = [_]u8{
     0xA4, 0x61, 0x76, 0x01, 0x61, 0x74, 0x68, 0x74, 0x63, 0x70, 0x5F, 0x6F, 0x70, 0x65, 0x6E, 0x62, 0x69, 0x64, 0x03, 0x61, 0x70, 0xA2, 0x64, 0x68, 0x6F, 0x73, 0x74, 0x69, 0x31, 0x32, 0x37, 0x2E, 0x30, 0x2E, 0x30, 0x2E, 0x31, 0x64, 0x70, 0x6F, 0x72, 0x74, 0x18, 0x50,
 };
+
+fn smithSliceSeed(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, 4 + data.len);
+    std.mem.writeInt(u32, out[0..4], @intCast(data.len), .little);
+    @memcpy(out[4..], data);
+    return out;
+}
 
 // Fuzz protocol decoding (guest/src/shared/protocol.zig)
 //
@@ -49,12 +48,14 @@ test "protocol decode" {
         ensureFuzzTmpDir();
     }
 
-    const seeds: []const []const u8 = &.{
-        &seed_exec_request,
-        &seed_file_read_request,
-        &seed_tcp_open,
+    var seed_inputs = [_][]u8{
+        try smithSliceSeed(std.testing.allocator, &seed_exec_request),
+        try smithSliceSeed(std.testing.allocator, &seed_file_read_request),
+        try smithSliceSeed(std.testing.allocator, &seed_tcp_open),
     };
+    defer for (seed_inputs) |seed| std.testing.allocator.free(seed);
 
+    const seeds: []const []const u8 = &seed_inputs;
     try std.testing.fuzz({}, testOne, .{ .corpus = seeds });
 }
 
@@ -66,8 +67,10 @@ fn beU32Prefix(input: []const u8) u32 {
         @as(u32, input[3]);
 }
 
-fn testOne(_: void, input: []const u8) anyerror!void {
-    const slice = if (input.len > 16 * 1024) input[0 .. 16 * 1024] else input;
+fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [16 * 1024]u8 = undefined;
+    const len = smith.slice(&input);
+    const slice = input[0..len];
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

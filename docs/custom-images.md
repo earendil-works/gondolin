@@ -58,7 +58,7 @@ Building custom images requires the following tools:
 
 | Tool | Purpose |
 |------|---------|
-| **Zig 0.15.2** | Cross-compiling sandboxd/sandboxfs binaries |
+| **Zig 0.16.0** | Cross-compiling sandboxd/sandboxfs binaries |
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating/extending ext4 rootfs images (mke2fs, debugfs) |
@@ -67,7 +67,8 @@ Building custom images requires the following tools:
 ### macOS
 
 ```bash
-brew install zig@0.15 lz4 e2fsprogs
+# Install Zig 0.16.0 from https://ziglang.org/download/
+brew install lz4 e2fsprogs
 ```
 
 The build tries to locate `mke2fs` automatically (including common Homebrew locations). If you still see `mke2fs: command not found`, make sure `mke2fs` is available on your `PATH` (you can check where Homebrew installed it with `brew --prefix e2fsprogs`).
@@ -75,7 +76,7 @@ The build tries to locate `mke2fs` automatically (including common Homebrew loca
 ### Linux (Debian/Ubuntu)
 
 ```bash
-# Install Zig 0.15.2 from https://ziglang.org/download/
+# Install Zig 0.16.0 from https://ziglang.org/download/
 sudo apt install lz4 cpio e2fsprogs
 
 # OCI rootfs ownership fixups may also need debugfs (Ubuntu/Debian include it in e2fsprogs)

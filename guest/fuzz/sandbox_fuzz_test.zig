@@ -5,23 +5,16 @@ const file_requests = @import("file_requests");
 
 const protocol = sandboxd.protocol;
 const cbor = sandboxd.cbor;
+const posix = sandboxd.posix;
 
 const CacheDirArg = "--cache-dir=";
 
 fn ensureFuzzTmpDir() void {
     @disableInstrumentation();
 
-    var it = std.process.args();
-    _ = it.next();
-    while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, CacheDirArg)) {
-            const cache_dir = arg[CacheDirArg.len..];
-            var dir = std.fs.cwd().makeOpenPath(cache_dir, .{ .iterate = true }) catch return;
-            defer dir.close();
-            dir.makePath("tmp") catch {};
-            return;
-        }
-    }
+    _ = CacheDirArg;
+    std.Io.Dir.cwd().createDirPath(std.testing.io, "/workspace/guest/fuzz/cache/tmp") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, "cache/tmp") catch {};
 }
 
 const TxSink = struct {
@@ -62,6 +55,13 @@ fn sanitizeFramedInput(buf: []u8, max_frame: usize) void {
     }
 }
 
+fn smithSliceSeed(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, 4 + data.len);
+    std.mem.writeInt(u32, out[0..4], @intCast(data.len), .little);
+    @memcpy(out[4..], data);
+    return out;
+}
+
 fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
 
@@ -77,7 +77,7 @@ fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
     // file_write_request(id=1, path="hello.txt", cwd=root_dir)
     {
         var payload = std.ArrayList(u8).empty;
-        const w = payload.writer(allocator);
+        const w = cbor.arrayListWriter(allocator, &payload);
         try cbor.writeMapStart(w, 4);
         try cbor.writeText(w, "v");
         try cbor.writeUInt(w, 1);
@@ -102,7 +102,7 @@ fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
     // file_write_data(id=1, data="hi", eof=true)
     {
         var payload = std.ArrayList(u8).empty;
-        const w = payload.writer(allocator);
+        const w = cbor.arrayListWriter(allocator, &payload);
         try cbor.writeMapStart(w, 4);
         try cbor.writeText(w, "v");
         try cbor.writeUInt(w, 1);
@@ -125,7 +125,7 @@ fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
     // file_read_request(id=2, path="hello.txt", cwd=root_dir, chunk_size=1024)
     {
         var payload = std.ArrayList(u8).empty;
-        const w = payload.writer(allocator);
+        const w = cbor.arrayListWriter(allocator, &payload);
         try cbor.writeMapStart(w, 4);
         try cbor.writeText(w, "v");
         try cbor.writeUInt(w, 1);
@@ -150,7 +150,7 @@ fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
     // file_delete_request(id=3, path="hello.txt", cwd=root_dir, force=true)
     {
         var payload = std.ArrayList(u8).empty;
-        const w = payload.writer(allocator);
+        const w = cbor.arrayListWriter(allocator, &payload);
         try cbor.writeMapStart(w, 4);
         try cbor.writeText(w, "v");
         try cbor.writeUInt(w, 1);
@@ -193,18 +193,22 @@ test "sandbox behavior (file requests)" {
     // Ensure root exists once during setup. Individual iterations may delete it.
     {
         @disableInstrumentation();
-        try std.fs.cwd().makePath(root_dir);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
     }
 
     const seed_stream = try buildSeedStream(std.testing.allocator, root_dir);
     defer std.testing.allocator.free(seed_stream);
+    const seed_input = try smithSliceSeed(std.testing.allocator, seed_stream);
+    defer std.testing.allocator.free(seed_input);
 
-    const seeds: []const []const u8 = &.{seed_stream};
+    const seeds: []const []const u8 = &.{seed_input};
     try std.testing.fuzz({}, testOne, .{ .corpus = seeds });
 }
 
-fn testOne(_: void, input: []const u8) anyerror!void {
-    const slice = if (input.len > 64 * 1024) input[0 .. 64 * 1024] else input;
+fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [64 * 1024]u8 = undefined;
+    const len = smith.slice(&input);
+    const slice = input[0..len];
 
     // Sanitize the framed input to avoid OOM / blocking reads due to bogus length prefixes.
     //
@@ -223,14 +227,14 @@ fn testOne(_: void, input: []const u8) anyerror!void {
     // Recreate root if a prior iteration deleted it.
     {
         @disableInstrumentation();
-        std.fs.cwd().makePath(root_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir) catch {};
     }
 
-    const pipe_fds = try std.posix.pipe2(.{ .CLOEXEC = true });
-    defer std.posix.close(pipe_fds[0]);
+    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true });
+    defer posix.close(pipe_fds[0]);
 
     protocol.writeAll(pipe_fds[1], owned) catch {};
-    std.posix.close(pipe_fds[1]);
+    posix.close(pipe_fds[1]);
 
     var tx = TxSink{};
 

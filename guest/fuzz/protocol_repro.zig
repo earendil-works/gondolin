@@ -11,14 +11,9 @@ fn beU32Prefix(input: []const u8) u32 {
         @as(u32, input[3]);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 2) {
         std.debug.print("usage: {s} <input-file>\n", .{args[0]});
@@ -26,7 +21,7 @@ pub fn main() !void {
     }
 
     const input_path = args[1];
-    const data = try std.fs.cwd().readFileAlloc(allocator, input_path, 1 << 20);
+    const data = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, .limited(1 << 20));
     defer allocator.free(data);
 
     // Keep behavior consistent with the fuzz harness.

@@ -24,7 +24,7 @@ Zig `sandboxd` supervisor and the Alpine initramfs image builder.
 
 | macOS | Linux (Debian/Ubuntu) |
 |-------|----------------------|
-| `brew install zig lz4 e2fsprogs` | `sudo apt install zig lz4 cpio curl e2fsprogs` |
+| Install Zig 0.16.0, then `brew install lz4 e2fsprogs` | Install Zig 0.16.0, then `sudo apt install lz4 cpio curl e2fsprogs` |
 
 The `make build` target invokes the shared `gondolin build` pipeline through
 the host CLI. Make sure host Node dependencies are installed (e.g., `pnpm install`

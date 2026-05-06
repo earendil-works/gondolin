@@ -28,6 +28,23 @@ pub const Entry = struct {
     value: Value,
 };
 
+pub const Writer = struct {
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+
+    pub fn writeByte(self: Writer, byte: u8) !void {
+        try self.buf.append(self.allocator, byte);
+    }
+
+    pub fn writeAll(self: Writer, bytes: []const u8) !void {
+        try self.buf.appendSlice(self.allocator, bytes);
+    }
+};
+
+pub fn arrayListWriter(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) Writer {
+    return .{ .allocator = allocator, .buf = buf };
+}
+
 pub const Decoder = struct {
     /// allocator used for arrays/maps
     allocator: std.mem.Allocator,
@@ -298,7 +315,7 @@ test "encode/decode simple map" {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(testing.allocator);
 
-    const w = buf.writer(testing.allocator);
+    const w = arrayListWriter(testing.allocator, &buf);
     try writeMapStart(w, 2);
     try writeText(w, "t");
     try writeText(w, "exec_request");

@@ -218,7 +218,19 @@ main().catch((err) => {
 set -eu
 
 # Minimal build toolchain
-apk add --no-cache nodejs zig lz4 cpio e2fsprogs bash
+apk add --no-cache nodejs lz4 cpio e2fsprogs bash curl xz
+
+zig_version=0.16.0
+case "$(uname -m)" in
+  x86_64) zig_arch=x86_64 ;;
+  aarch64|arm64) zig_arch=aarch64 ;;
+  *) echo "unsupported container architecture for Zig: $(uname -m)" >&2; exit 1 ;;
+esac
+zig_dir="/work/zig-\${zig_arch}-linux-\${zig_version}"
+if [ ! -x "\${zig_dir}/zig" ]; then
+  curl -fsSL "https://ziglang.org/download/\${zig_version}/zig-\${zig_arch}-linux-\${zig_version}.tar.xz" | tar -xJ -C /work
+fi
+export PATH="\${zig_dir}:$PATH"
 
 # Keep Zig caches on the writable /work mount. This avoids permission issues
 # with rootless container bind mounts (for example Podman + user namespaces).

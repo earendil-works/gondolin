@@ -11,23 +11,22 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-
-    exe.linkLibC();
 
     if (libkrun_prefix.len > 0) {
         const include_dir = std.fs.path.join(b.allocator, &.{ libkrun_prefix, "include" }) catch @panic("OOM");
         const lib_dir = std.fs.path.join(b.allocator, &.{ libkrun_prefix, "lib" }) catch @panic("OOM");
         const lib64_dir = std.fs.path.join(b.allocator, &.{ libkrun_prefix, "lib64" }) catch @panic("OOM");
 
-        exe.addIncludePath(.{ .cwd_relative = include_dir });
+        exe.root_module.addIncludePath(.{ .cwd_relative = include_dir });
 
         const preferred_lib_dir = switch (target.result.os.tag) {
             .macos => lib_dir,
             else => lib64_dir,
         };
-        exe.addLibraryPath(.{ .cwd_relative = preferred_lib_dir });
+        exe.root_module.addLibraryPath(.{ .cwd_relative = preferred_lib_dir });
     }
 
     switch (target.result.os.tag) {
@@ -35,7 +34,7 @@ pub fn build(b: *std.Build) void {
         else => exe.root_module.addRPathSpecial("$ORIGIN/../lib"),
     }
 
-    exe.linkSystemLibrary("krun");
+    exe.root_module.linkSystemLibrary("krun", .{});
 
     b.installArtifact(exe);
 

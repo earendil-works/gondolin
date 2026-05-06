@@ -76,13 +76,13 @@ jobs:
           - runner: ubuntu-latest
             package_dir: packages/gondolin-krun-runner-linux-x64
             package_name: '@earendil-works/gondolin-krun-runner-linux-x64'
-            zig_archive: zig-x86_64-linux-0.15.1.tar.xz
-            zig_url: https://ziglang.org/download/0.15.1/zig-x86_64-linux-0.15.1.tar.xz
+            zig_archive: zig-x86_64-linux-0.16.0.tar.xz
+            zig_url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
           - runner: macos-14
             package_dir: packages/gondolin-krun-runner-darwin-arm64
             package_name: '@earendil-works/gondolin-krun-runner-darwin-arm64'
-            zig_archive: zig-aarch64-macos-0.15.1.tar.xz
-            zig_url: https://ziglang.org/download/0.15.1/zig-aarch64-macos-0.15.1.tar.xz
+            zig_archive: zig-aarch64-macos-0.16.0.tar.xz
+            zig_url: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
     steps:
       - uses: actions/checkout@v4
         with:

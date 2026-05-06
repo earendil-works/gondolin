@@ -1,6 +1,8 @@
 const std = @import("std");
-const cbor = @import("sandboxd").cbor;
-const fs_rpc = @import("sandboxd").fs_rpc;
+const sandboxd = @import("sandboxd");
+const cbor = sandboxd.cbor;
+const fs_rpc = sandboxd.fs_rpc;
+const posix = sandboxd.posix;
 const log = std.log.scoped(.sandboxfs);
 
 const FUSE_ROOT_ID: u64 = 1;
@@ -267,11 +269,11 @@ const DefaultTtls = struct {
 
 const SandboxFs = struct {
     allocator: std.mem.Allocator,
-    fuse_fd: std.posix.fd_t,
+    fuse_fd: posix.fd_t,
     rpc: ?fs_rpc.FsRpcClient,
     unsupported_opcode_logged: [256]bool,
 
-    pub fn init(allocator: std.mem.Allocator, fuse_fd: std.posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
+    pub fn init(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
         return .{
             .allocator = allocator,
             .fuse_fd = fuse_fd,
@@ -792,7 +794,7 @@ const SandboxFs = struct {
         // request into multiple RPC calls and concatenating the results.
         const read_in = try parseRead(payload);
 
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
 
         var offset: u64 = read_in.offset;
@@ -1042,13 +1044,9 @@ const SandboxFs = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var mount_point: []const u8 = "/data";
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
@@ -1067,8 +1065,8 @@ pub fn main() !void {
         }
     }
 
-    const fuse_fd = try std.posix.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
-    defer std.posix.close(fuse_fd);
+    const fuse_fd = try posix.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+    defer posix.close(fuse_fd);
 
     const rpc_fd = openRpcPort(rpc_path);
     var rpc_client: ?fs_rpc.FsRpcClient = null;
@@ -1091,7 +1089,7 @@ pub fn main() !void {
     };
 }
 
-fn mountFuse(allocator: std.mem.Allocator, fuse_fd: std.posix.fd_t, mount_point: []const u8) !void {
+fn mountFuse(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, mount_point: []const u8) !void {
     const data = try std.fmt.allocPrint(allocator, "fd={d},rootmode=40000,user_id=0,group_id=0,default_permissions", .{fuse_fd});
     defer allocator.free(data);
     const data_z = try makeZ(allocator, data);
@@ -1104,7 +1102,7 @@ fn mountFuse(allocator: std.mem.Allocator, fuse_fd: std.posix.fd_t, mount_point:
     defer allocator.free(fstype_z);
 
     const rc = std.os.linux.mount(source_z.ptr, mount_z.ptr, fstype_z.ptr, std.os.linux.MS.NOSUID | std.os.linux.MS.NODEV, @intFromPtr(data_z.ptr));
-    const err = std.os.linux.E.init(rc);
+    const err = std.os.linux.errno(rc);
     if (err != .SUCCESS) {
         log.err("mount failed: {s}", .{@tagName(err)});
         return error.MountFailed;
@@ -1118,31 +1116,33 @@ fn makeZ(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
     return buf[0..text.len :0];
 }
 
-fn openRpcPort(path: []const u8) ?std.posix.fd_t {
+fn openRpcPort(path: []const u8) ?posix.fd_t {
     const expected = std.fs.path.basename(path);
     var attempts: usize = 0;
     while (attempts < 50) : (attempts += 1) {
-        if (std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
+        if (posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
             return fd;
         } else |_| {
             if (openVirtioPortByName(expected)) |fd| return fd;
         }
-        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
     return null;
 }
 
-fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {
-    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close();
+fn openVirtioPortByName(expected: []const u8) ?posix.fd_t {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
+    defer dev_dir.close(io);
 
     var it = dev_dir.iterate();
     var path_buf: [64]u8 = undefined;
-    while (it.next() catch null) |entry| {
+    while (it.next(io) catch null) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
         if (!virtioPortMatches(entry.name, expected)) continue;
         const path = std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name}) catch continue;
-        return std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch continue;
+        return posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch continue;
     }
 
     return null;
@@ -1151,21 +1151,21 @@ fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {
 fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
     var path_buf: [128]u8 = undefined;
     const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    var file = std.fs.openFileAbsolute(sys_path, .{}) catch return false;
-    defer file.close();
+    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
+    defer posix.close(fd);
 
     var name_buf: [64]u8 = undefined;
-    const size = file.readAll(&name_buf) catch return false;
+    const size = posix.read(fd, &name_buf) catch return false;
     const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
     return std.mem.eql(u8, trimmed, expected);
 }
 
-fn readFuseRequest(fd: std.posix.fd_t, buffer: []u8) ![]u8 {
+fn readFuseRequest(fd: posix.fd_t, buffer: []u8) ![]u8 {
     var total: usize = 0;
     var expected: ?usize = null;
     while (true) {
         if (total >= buffer.len) return error.BufferTooSmall;
-        const n = try std.posix.read(fd, buffer[total..]);
+        const n = try posix.read(fd, buffer[total..]);
         if (n == 0) return error.EndOfStream;
         total += n;
         if (expected == null and total >= 4) {
@@ -1378,7 +1378,7 @@ fn parseCopyFileRange(payload: []const u8) !FuseCopyFileRangeIn {
 }
 
 fn parseName(payload: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, payload, 0)) |idx| {
+    if (std.mem.findScalar(u8, payload, 0)) |idx| {
         return payload[0..idx];
     }
     return payload;
@@ -1393,7 +1393,7 @@ fn errnoFromResponse(err: i32) std.os.linux.E {
     return @enumFromInt(@as(u16, @intCast(code)));
 }
 
-fn sendError(fd: std.posix.fd_t, unique: u64, err: std.os.linux.E) !void {
+fn sendError(fd: posix.fd_t, unique: u64, err: std.os.linux.E) !void {
     var out = FuseOutHeader{
         .len = @sizeOf(FuseOutHeader),
         .@"error" = -@as(i32, @intCast(@intFromEnum(err))),
@@ -1402,7 +1402,7 @@ fn sendError(fd: std.posix.fd_t, unique: u64, err: std.os.linux.E) !void {
     try writeAll(fd, std.mem.asBytes(&out));
 }
 
-fn sendResponse(fd: std.posix.fd_t, unique: u64, err: i32, payload: []const u8) !void {
+fn sendResponse(fd: posix.fd_t, unique: u64, err: i32, payload: []const u8) !void {
     var out = FuseOutHeader{
         .len = @intCast(@sizeOf(FuseOutHeader) + payload.len),
         .@"error" = err,
@@ -1414,24 +1414,24 @@ fn sendResponse(fd: std.posix.fd_t, unique: u64, err: i32, payload: []const u8) 
         return;
     }
 
-    var iovecs = [_]std.posix.iovec_const{
+    var iovecs = [_]posix.iovec_const{
         .{ .base = std.mem.asBytes(&out).ptr, .len = @sizeOf(FuseOutHeader) },
         .{ .base = payload.ptr, .len = payload.len },
     };
     try writevAll(fd, &iovecs);
 }
 
-fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+fn writeAll(fd: posix.fd_t, data: []const u8) !void {
     var offset: usize = 0;
     while (offset < data.len) {
-        const n = try std.posix.write(fd, data[offset..]);
+        const n = try posix.write(fd, data[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
 }
 
-fn writevAll(fd: std.posix.fd_t, iovecs: []const std.posix.iovec_const) !void {
-    var local_iovecs: [2]std.posix.iovec_const = undefined;
+fn writevAll(fd: posix.fd_t, iovecs: []const posix.iovec_const) !void {
+    var local_iovecs: [2]posix.iovec_const = undefined;
     if (iovecs.len > local_iovecs.len) return error.InvalidRequest;
 
     for (iovecs, 0..) |vec, idx| {
@@ -1445,7 +1445,7 @@ fn writevAll(fd: std.posix.fd_t, iovecs: []const std.posix.iovec_const) !void {
     }
 
     while (remaining > 0) {
-        const written = try std.posix.writev(fd, slice);
+        const written = try posix.writev(fd, slice);
         if (written == 0) return error.EndOfStream;
         remaining -= written;
 
