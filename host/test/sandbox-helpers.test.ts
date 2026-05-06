@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import type { Architecture } from "../src/build/config.ts";
+import type { Architecture, BuildConfig } from "../src/build/config.ts";
 import {
   SANDBOX_HELPER_BINARY_NAMES,
   __test,
@@ -15,6 +15,7 @@ import {
   type SandboxHelperChecksums,
   type SandboxHelperManifest,
 } from "../src/build/sandbox-helpers.ts";
+import { resolveSandboxBinaryPaths } from "../src/build/shared.ts";
 
 function sha256(data: Buffer | string): string {
   return createHash("sha256").update(data).digest("hex");
@@ -85,6 +86,33 @@ function createHelperArchive(bundleDir: string, tmpDir: string): {
 
 function restoreFetch(prevFetch: typeof globalThis.fetch): void {
   (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = prevFetch;
+}
+
+function setEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+function hostPackageVersion(): string {
+  const pkgPath = path.join(import.meta.dirname, "..", "package.json");
+  const parsed = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+    version?: unknown;
+  };
+  assert.equal(typeof parsed.version, "string");
+  return parsed.version;
+}
+
+function buildConfig(arch: Architecture): BuildConfig {
+  return {
+    arch,
+    distro: "alpine",
+    alpine: {
+      version: "3.23.0",
+    },
+  };
 }
 
 test("sandbox helpers: registry parser normalizes refs and sources", () => {
@@ -294,6 +322,290 @@ test("sandbox helpers: archive sha256 mismatch fails before extraction", async (
     assert.equal(fs.existsSync(path.join(storeDir, "objects", buildId)), false);
   } finally {
     restoreFetch(prevFetch);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const storeDir = path.join(tmpDir, "store");
+  const emptyPathDir = path.join(tmpDir, "empty-path");
+  const bundleDir = path.join(tmpDir, "bundle");
+  fs.mkdirSync(emptyPathDir, { recursive: true });
+  fs.mkdirSync(bundleDir, { recursive: true });
+
+  const version = hostPackageVersion();
+  const { buildId } = createHelperBundle(bundleDir, "x86_64", version);
+  const archive = createHelperArchive(bundleDir, tmpDir);
+  const registryUrl =
+    "https://example.invalid/builtin-sandbox-helper-registry.json";
+  const archiveUrl = "https://example.invalid/helpers-x86_64.tar.gz";
+  const registry = {
+    schema: 1,
+    refs: {
+      [`gondolin:${version}`]: {
+        x86_64: buildId,
+      },
+    },
+    builds: {
+      [buildId]: {
+        arch: "x86_64",
+        url: archiveUrl,
+        sha256: archive.sha256,
+        gondolinVersion: version,
+      },
+    },
+  };
+
+  const prevFetch = globalThis.fetch;
+  const prevPath = process.env.PATH;
+  const prevRegistryUrl = process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL;
+  const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
+  const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+  let archiveFetches = 0;
+
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async (
+    url: string | URL | Request,
+  ) => {
+    const href = String(url);
+    if (href === registryUrl) {
+      return new Response(JSON.stringify(registry), { status: 200 });
+    }
+    if (href === archiveUrl) {
+      archiveFetches += 1;
+      return new Response(archive.data, { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    process.env.PATH = emptyPathDir;
+    process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
+    process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
+    delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+    delete process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+
+    const paths = await resolveSandboxBinaryPaths(
+      buildConfig("x86_64"),
+      { outputDir: path.join(tmpDir, "out"), verbose: false },
+      () => {},
+    );
+
+    assert.equal(archiveFetches, 1);
+    assert.equal(
+      fs.readFileSync(paths.sandboxdPath, "utf8"),
+      "#!/bin/sh\necho sandboxd-x86_64\n",
+    );
+  } finally {
+    restoreFetch(prevFetch);
+    setEnv("PATH", prevPath);
+    setEnv("GONDOLIN_SANDBOX_HELPER_REGISTRY_URL", prevRegistryUrl);
+    setEnv("GONDOLIN_SANDBOX_HELPER_STORE", prevStore);
+    setEnv("GONDOLIN_SANDBOX_HELPERS_DIR", prevHelpersDir);
+    setEnv("GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE", prevSourceBuild);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxBinaryPaths: custom helper paths must be complete", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const sandboxdPath = path.join(tmpDir, "sandboxd");
+  fs.writeFileSync(sandboxdPath, "#!/bin/sh\n", { mode: 0o755 });
+
+  try {
+    await assert.rejects(
+      () =>
+        resolveSandboxBinaryPaths(
+          {
+            ...buildConfig("x86_64"),
+            sandboxdPath,
+          },
+          { outputDir: path.join(tmpDir, "out"), verbose: false },
+          () => {},
+        ),
+      /Partial sandbox helper path overrides are not supported/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxBinaryPaths: all custom helper paths bypass registry", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const binPaths = Object.fromEntries(
+    SANDBOX_HELPER_BINARY_NAMES.map((name) => {
+      const filePath = path.join(tmpDir, name);
+      fs.writeFileSync(filePath, `#!/bin/sh\necho custom-${name}\n`, {
+        mode: 0o755,
+      });
+      return [`${name}Path`, filePath];
+    }),
+  ) as Pick<
+    BuildConfig,
+    "sandboxdPath" | "sandboxfsPath" | "sandboxsshPath" | "sandboxingressPath"
+  >;
+
+  const prevFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () => {
+    fetchCalls += 1;
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const paths = await resolveSandboxBinaryPaths(
+      {
+        ...buildConfig("x86_64"),
+        ...binPaths,
+      },
+      { outputDir: path.join(tmpDir, "out"), verbose: false },
+      () => {},
+    );
+
+    assert.equal(paths.sandboxfsPath, binPaths.sandboxfsPath);
+    assert.equal(fetchCalls, 0);
+  } finally {
+    restoreFetch(prevFetch);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxBinaryPaths: registry failures do not source-build by default", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const guestDir = path.join(tmpDir, "guest");
+  const stubDir = path.join(tmpDir, "bin");
+  const storeDir = path.join(tmpDir, "store");
+  const markerPath = path.join(tmpDir, "zig-called");
+  fs.mkdirSync(guestDir, { recursive: true });
+  fs.mkdirSync(stubDir, { recursive: true });
+  fs.writeFileSync(path.join(guestDir, "build.zig"), "// test\n");
+  fs.writeFileSync(
+    path.join(stubDir, "zig"),
+    `#!${process.execPath}\n` +
+      `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "called");\n`,
+    { mode: 0o755 },
+  );
+
+  const registryUrl =
+    "https://example.invalid/builtin-sandbox-helper-registry.json";
+  const prevFetch = globalThis.fetch;
+  const prevPath = process.env.PATH;
+  const prevRegistryUrl = process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL;
+  const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
+  const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+  const prevGuestSrc = process.env.GONDOLIN_GUEST_SRC;
+  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () =>
+    new Response("not found", { status: 404, statusText: "Not Found" });
+
+  try {
+    process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
+    process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
+    process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
+    process.env.GONDOLIN_GUEST_SRC = guestDir;
+    delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+    delete process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+
+    await assert.rejects(
+      () =>
+        resolveSandboxBinaryPaths(
+          buildConfig("x86_64"),
+          { outputDir: path.join(tmpDir, "out"), verbose: false },
+          () => {},
+        ),
+      /GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1/,
+    );
+    assert.equal(fs.existsSync(markerPath), false);
+  } finally {
+    restoreFetch(prevFetch);
+    setEnv("PATH", prevPath);
+    setEnv("GONDOLIN_SANDBOX_HELPER_REGISTRY_URL", prevRegistryUrl);
+    setEnv("GONDOLIN_SANDBOX_HELPER_STORE", prevStore);
+    setEnv("GONDOLIN_SANDBOX_HELPERS_DIR", prevHelpersDir);
+    setEnv("GONDOLIN_GUEST_SRC", prevGuestSrc);
+    setEnv("GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE", prevSourceBuild);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const guestDir = path.join(tmpDir, "guest");
+  const stubDir = path.join(tmpDir, "bin");
+  const storeDir = path.join(tmpDir, "store");
+  fs.mkdirSync(guestDir, { recursive: true });
+  fs.mkdirSync(stubDir, { recursive: true });
+  fs.writeFileSync(path.join(guestDir, "build.zig"), "// test\n");
+
+  const zigStubPath = path.join(stubDir, "zig");
+  fs.writeFileSync(
+    zigStubPath,
+    `#!${process.execPath}\n` +
+      `const fs = require("node:fs");\n` +
+      `const path = require("node:path");\n` +
+      `fs.writeFileSync(path.join(process.cwd(), "zig-args.json"), JSON.stringify(process.argv.slice(2)));\n` +
+      `const binDir = path.join(process.cwd(), "zig-out", "bin");\n` +
+      `fs.mkdirSync(binDir, { recursive: true });\n` +
+      `for (const name of ${JSON.stringify(SANDBOX_HELPER_BINARY_NAMES)}) {\n` +
+      `  const filePath = path.join(binDir, name);\n` +
+      `  fs.writeFileSync(filePath, "#!/bin/sh\\necho source-" + name + "\\n", { mode: 0o755 });\n` +
+      `}\n`,
+    { mode: 0o755 },
+  );
+
+  const registryUrl =
+    "https://example.invalid/builtin-sandbox-helper-registry.json";
+  const prevFetch = globalThis.fetch;
+  const prevPath = process.env.PATH;
+  const prevRegistryUrl = process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL;
+  const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
+  const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+  const prevGuestSrc = process.env.GONDOLIN_GUEST_SRC;
+  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+  let fetchCalls = 0;
+
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () => {
+    fetchCalls += 1;
+    return new Response("not found", { status: 404, statusText: "Not Found" });
+  };
+
+  try {
+    process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
+    process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
+    process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
+    process.env.GONDOLIN_GUEST_SRC = guestDir;
+    process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE = "1";
+    delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+
+    const paths = await resolveSandboxBinaryPaths(
+      buildConfig("x86_64"),
+      { outputDir: path.join(tmpDir, "out"), verbose: false },
+      () => {},
+    );
+
+    assert.equal(fetchCalls, 1);
+    assert.equal(
+      fs.readFileSync(paths.sandboxsshPath, "utf8"),
+      "#!/bin/sh\necho source-sandboxssh\n",
+    );
+    const zigArgs = JSON.parse(
+      fs.readFileSync(path.join(guestDir, "zig-args.json"), "utf8"),
+    ) as string[];
+    assert.deepEqual(zigArgs, [
+      "build",
+      "-Doptimize=ReleaseSmall",
+      "-Dtarget=x86_64-linux-musl",
+    ]);
+  } finally {
+    restoreFetch(prevFetch);
+    setEnv("PATH", prevPath);
+    setEnv("GONDOLIN_SANDBOX_HELPER_REGISTRY_URL", prevRegistryUrl);
+    setEnv("GONDOLIN_SANDBOX_HELPER_STORE", prevStore);
+    setEnv("GONDOLIN_SANDBOX_HELPERS_DIR", prevHelpersDir);
+    setEnv("GONDOLIN_GUEST_SRC", prevGuestSrc);
+    setEnv("GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE", prevSourceBuild);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

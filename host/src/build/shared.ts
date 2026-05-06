@@ -9,6 +9,7 @@ import {
   type AssetManifest,
 } from "../assets.ts";
 import type { BuildConfig, Architecture } from "./config.ts";
+import { ensureSandboxHelperBinaries } from "./sandbox-helpers.ts";
 
 /** Fixed output filenames for assets */
 export const KERNEL_FILENAME = "vmlinuz-virt";
@@ -22,6 +23,9 @@ const ZIG_TARGETS: Record<Architecture, string> = {
   aarch64: "aarch64-linux-musl",
   x86_64: "x86_64-linux-musl",
 };
+
+const BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV =
+  "GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE";
 
 export const DEFAULT_ROOTFS_PACKAGES = [
   "linux-virt",
@@ -58,7 +62,7 @@ export interface BuildOptions {
   verbose?: boolean;
   /** working directory for the build (default: temp directory) */
   workDir?: string;
-  /** whether to skip building sandboxd/sandboxfs binaries */
+  /** whether to skip building sandbox helper binaries */
   skipBinaries?: boolean;
 }
 
@@ -297,6 +301,79 @@ export type SandboxBinaryPaths = {
   sandboxingressPath: string;
 };
 
+function envFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function assertSandboxBinaryPathsExist(paths: SandboxBinaryPaths): void {
+  for (const [name, filePath] of Object.entries(paths)) {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(
+        `${name.replace(/Path$/, "")} binary not found: ${filePath}`,
+      );
+    }
+  }
+}
+
+function guestZigOutBinaryPaths(guestDir: string): SandboxBinaryPaths {
+  const binDir = path.join(guestDir, "zig-out", "bin");
+  return {
+    sandboxdPath: path.join(binDir, "sandboxd"),
+    sandboxfsPath: path.join(binDir, "sandboxfs"),
+    sandboxsshPath: path.join(binDir, "sandboxssh"),
+    sandboxingressPath: path.join(binDir, "sandboxingress"),
+  };
+}
+
+function resolveExistingGuestZigOutBinaryPaths(): SandboxBinaryPaths {
+  const guestDir = findGuestDir();
+  if (!guestDir) {
+    throw new Error(
+      "Could not find existing sandbox helper binaries. " +
+        "When skipBinaries=true, provide all four sandbox helper paths or " +
+        "set GONDOLIN_GUEST_SRC to a guest source directory with " +
+        "zig-out/bin helpers.",
+    );
+  }
+
+  return guestZigOutBinaryPaths(guestDir);
+}
+
+async function buildSandboxBinaryPathsFromSource(
+  arch: Architecture,
+  log: (msg: string) => void,
+): Promise<SandboxBinaryPaths> {
+  const guestDir = findGuestDir();
+  if (!guestDir) {
+    throw new Error(
+      `Cannot build sandbox helpers from source because ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1 was set, ` +
+        "but guest sources were not found. Use a Gondolin checkout or set " +
+        "GONDOLIN_GUEST_SRC. " +
+        "This contributor path requires Zig 0.16.0.",
+    );
+  }
+
+  log(`Using guest sources from: ${guestDir}`);
+  log("Building sandbox helpers from Zig sources...");
+  try {
+    await buildGuestBinaries(guestDir, arch, log);
+  } catch (error) {
+    throw new Error(
+      "Failed to build sandbox helpers from Zig sources. " +
+        "Install Zig 0.16.0 or unset " +
+        `${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV} to use published helpers.\n` +
+        `Cause: ${errorMessage(error)}`,
+    );
+  }
+
+  return guestZigOutBinaryPaths(guestDir);
+}
+
 /** Resolve/build sandbox binaries used in image assembly */
 export async function resolveSandboxBinaryPaths(
   config: BuildConfig,
@@ -305,79 +382,97 @@ export async function resolveSandboxBinaryPaths(
 ): Promise<SandboxBinaryPaths> {
   const configDir = options.configDir;
 
-  let sandboxdPath = config.sandboxdPath
-    ? resolveConfigPath(config.sandboxdPath, configDir)
-    : undefined;
-  let sandboxfsPath = config.sandboxfsPath
-    ? resolveConfigPath(config.sandboxfsPath, configDir)
-    : undefined;
-  let sandboxsshPath = config.sandboxsshPath
-    ? resolveConfigPath(config.sandboxsshPath, configDir)
-    : undefined;
-  let sandboxingressPath = config.sandboxingressPath
-    ? resolveConfigPath(config.sandboxingressPath, configDir)
-    : undefined;
+  const customPaths: Partial<SandboxBinaryPaths> = {
+    sandboxdPath: config.sandboxdPath
+      ? resolveConfigPath(config.sandboxdPath, configDir)
+      : undefined,
+    sandboxfsPath: config.sandboxfsPath
+      ? resolveConfigPath(config.sandboxfsPath, configDir)
+      : undefined,
+    sandboxsshPath: config.sandboxsshPath
+      ? resolveConfigPath(config.sandboxsshPath, configDir)
+      : undefined,
+    sandboxingressPath: config.sandboxingressPath
+      ? resolveConfigPath(config.sandboxingressPath, configDir)
+      : undefined,
+  };
 
-  if (!options.skipBinaries && !sandboxdPath && !sandboxfsPath) {
-    const guestDir = findGuestDir();
-    if (!guestDir) {
+  const providedCustomPaths = Object.entries(customPaths).filter(
+    ([, value]) => value !== undefined,
+  );
+  if (providedCustomPaths.length === 4) {
+    const paths = customPaths as SandboxBinaryPaths;
+    assertSandboxBinaryPathsExist(paths);
+    return paths;
+  }
+
+  if (providedCustomPaths.length > 0) {
+    const provided = providedCustomPaths.map(([name]) => name).join(", ");
+    const missing = Object.entries(customPaths)
+      .filter(([, value]) => value === undefined)
+      .map(([name]) => name)
+      .join(", ");
+    throw new Error(
+      "Partial sandbox helper path overrides are not supported. " +
+        "Provide all four build config fields: sandboxdPath, " +
+        "sandboxfsPath, sandboxsshPath, sandboxingressPath. " +
+        `Provided: ${provided}. Missing: ${missing}.`,
+    );
+  }
+
+  const explicitHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR?.trim();
+  if (explicitHelpersDir && explicitHelpersDir.length > 0) {
+    try {
+      const resolved = await ensureSandboxHelperBinaries({
+        arch: config.arch,
+        log,
+      });
+      assertSandboxBinaryPathsExist(resolved.paths);
+      return resolved.paths;
+    } catch (error) {
       throw new Error(
-        "Could not find guest directory for Zig build. Either:\n" +
-          "  1. Use a gondolin checkout or reinstall a package version that bundles guest sources, or\n" +
-          "  2. Set GONDOLIN_GUEST_SRC to the guest directory, or\n" +
-          "  3. Provide sandboxdPath and sandboxfsPath in the build config.",
+        "Could not use sandbox helpers from " +
+          `GONDOLIN_SANDBOX_HELPERS_DIR=${explicitHelpersDir}: ` +
+          errorMessage(error),
       );
     }
-    log(`Using guest sources from: ${guestDir}`);
-    log("Building guest binaries...");
-    await buildGuestBinaries(guestDir, config.arch, log);
-    sandboxdPath = path.join(guestDir, "zig-out", "bin", "sandboxd");
-    sandboxfsPath = path.join(guestDir, "zig-out", "bin", "sandboxfs");
-    sandboxsshPath = path.join(guestDir, "zig-out", "bin", "sandboxssh");
-    sandboxingressPath = path.join(
-      guestDir,
-      "zig-out",
-      "bin",
-      "sandboxingress",
+  }
+
+  if (options.skipBinaries) {
+    const paths = resolveExistingGuestZigOutBinaryPaths();
+    assertSandboxBinaryPathsExist(paths);
+    return paths;
+  }
+
+  try {
+    const resolved = await ensureSandboxHelperBinaries({
+      arch: config.arch,
+      log,
+    });
+    assertSandboxBinaryPathsExist(resolved.paths);
+    return resolved.paths;
+  } catch (error) {
+    if (!envFlagEnabled(BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV)) {
+      throw new Error(
+        `Could not resolve published sandbox helper binaries for ${config.arch}.\n` +
+          "Set GONDOLIN_SANDBOX_HELPERS_DIR to a directory containing " +
+          "bin/sandboxd, bin/sandboxfs, bin/sandboxssh, and " +
+          "bin/sandboxingress, or provide all four sandbox helper paths " +
+          "in the build config.\n" +
+          `Contributors can set ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1 to build helpers from Zig sources instead.\n` +
+          `Cause: ${errorMessage(error)}`,
+      );
+    }
+
+    log(`Could not resolve published sandbox helpers: ${errorMessage(error)}`);
+    log(
+      `Falling back to Zig source build because ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1`,
     );
-  } else if (
-    !sandboxdPath ||
-    !sandboxfsPath ||
-    !sandboxsshPath ||
-    !sandboxingressPath
-  ) {
-    const guestDir = findGuestDir();
-    sandboxdPath =
-      sandboxdPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxd");
-    sandboxfsPath =
-      sandboxfsPath ?? path.join(guestDir ?? "", "zig-out", "bin", "sandboxfs");
-    sandboxsshPath =
-      sandboxsshPath ??
-      path.join(guestDir ?? "", "zig-out", "bin", "sandboxssh");
-    sandboxingressPath =
-      sandboxingressPath ??
-      path.join(guestDir ?? "", "zig-out", "bin", "sandboxingress");
   }
 
-  if (!fs.existsSync(sandboxdPath)) {
-    throw new Error(`sandboxd binary not found: ${sandboxdPath}`);
-  }
-  if (!fs.existsSync(sandboxfsPath)) {
-    throw new Error(`sandboxfs binary not found: ${sandboxfsPath}`);
-  }
-  if (!fs.existsSync(sandboxsshPath)) {
-    throw new Error(`sandboxssh binary not found: ${sandboxsshPath}`);
-  }
-  if (!fs.existsSync(sandboxingressPath)) {
-    throw new Error(`sandboxingress binary not found: ${sandboxingressPath}`);
-  }
-
-  return {
-    sandboxdPath,
-    sandboxfsPath,
-    sandboxsshPath,
-    sandboxingressPath,
-  };
+  const paths = await buildSandboxBinaryPathsFromSource(config.arch, log);
+  assertSandboxBinaryPathsExist(paths);
+  return paths;
 }
 
 async function buildGuestBinaries(
