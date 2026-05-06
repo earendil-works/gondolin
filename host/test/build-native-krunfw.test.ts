@@ -151,6 +151,24 @@ function buildFakeSharedLib(
   return buf;
 }
 
+test("extractKernelBundleFromCSource decodes generated kernel source", () => {
+  const source = [
+    "#include <stddef.h>",
+    "char KERNEL_BUNDLE[] =",
+    '"\\x41\\0"',
+    '"B\\n\\123"',
+    '"";',
+    "char * krunfw_get_kernel(size_t *load_addr, size_t *entry_addr, size_t *size) {",
+    "  *size = sizeof(KERNEL_BUNDLE) - 1;",
+    "  return &KERNEL_BUNDLE[0];",
+    "}",
+  ].join("\n");
+
+  const extracted = nativeBuildTest.extractKernelBundleFromCSource(source);
+
+  assert.deepEqual(extracted, Buffer.from([0x41, 0x00, 0x42, 0x0a, 0o123]));
+});
+
 test("extractKernelBundleFromSharedLibraryBytes extracts x86_64 bundle", () => {
   const payload = Buffer.from("x86-kernel-bundle", "utf8");
   const fake = buildFakeSharedLib(62, payload);

@@ -26,8 +26,9 @@ GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
 `manifest.json`.
 
-Published `@earendil-works/gondolin` builds bundle guest Zig sources in the
-package, so custom image builds do not require a separate gondolin checkout.
+During image builds, Gondolin resolves exact-version prebuilt sandbox helper
+binaries (`sandboxd`, `sandboxfs`, `sandboxssh`, and `sandboxingress`) and
+caches them locally. Zig is not required for ordinary custom image builds.
 
 Prebuilt example config with `postBuild.commands` (installs `llm` + plugin via pip):
 
@@ -54,20 +55,22 @@ gondolin build --config host/examples/oci-debian.json --output ./oci-assets
 
 ## Build Requirements
 
-Building custom images requires the following tools:
+Building custom images normally requires the following host tools:
 
 | Tool | Purpose |
 |------|---------|
-| **Zig 0.16.0** | Cross-compiling sandboxd/sandboxfs binaries |
 | **cpio** | Creating initramfs archives |
 | **lz4** | Initramfs compression |
 | **e2fsprogs** | Creating/extending ext4 rootfs images (mke2fs, debugfs) |
 | **Docker or Podman** *(optional)* | Pull/export OCI rootfs images (`oci.image`) |
 
+Gondolin downloads prebuilt sandbox helper binaries automatically. Zig 0.16.0 is
+only required for contributors or custom forks that explicitly build sandbox
+helpers from source.
+
 ### macOS
 
 ```bash
-# Install Zig 0.16.0 from https://ziglang.org/download/
 brew install lz4 e2fsprogs
 ```
 
@@ -76,7 +79,6 @@ The build tries to locate `mke2fs` automatically (including common Homebrew loca
 ### Linux (Debian/Ubuntu)
 
 ```bash
-# Install Zig 0.16.0 from https://ziglang.org/download/
 sudo apt install lz4 cpio e2fsprogs
 
 # OCI rootfs ownership fixups may also need debugfs (Ubuntu/Debian include it in e2fsprogs)
@@ -154,6 +156,23 @@ The file has the following structure:
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
 | `sandboxsshPath` | string | Path to custom sandboxssh binary |
 | `sandboxingressPath` | string | Path to custom sandboxingress binary |
+
+### Sandbox Helper Binaries
+
+By default, `gondolin build` resolves published sandbox helper binaries for the
+exact installed package version and target architecture. Advanced users can
+override this in two ways:
+
+- Set `GONDOLIN_SANDBOX_HELPERS_DIR` to a directory containing
+  `bin/sandboxd`, `bin/sandboxfs`, `bin/sandboxssh`, and `bin/sandboxingress`.
+- Set all four build config fields: `sandboxdPath`, `sandboxfsPath`,
+  `sandboxsshPath`, and `sandboxingressPath`. Partial overrides are rejected to
+  avoid mixing helper versions.
+
+Contributor source builds are opt-in. To build sandbox helpers from a local
+checkout instead of using published helpers, install Zig 0.16.0 and set
+`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1`. If running outside the checkout,
+set `GONDOLIN_GUEST_SRC` to the local `guest/` directory.
 
 #### Baked-in environment (`env`)
 
@@ -385,11 +404,18 @@ That pass needs `debugfs` from e2fsprogs.
 - Debian/Ubuntu: included in `e2fsprogs`
 - Alpine host: install `e2fsprogs-extra`
 
-### `Could not find guest directory for Zig build`
+### Sandbox Helper Resolution Fails
 
-This usually means you are using an older package version that did not bundle
-guest build sources. Upgrade to a newer `@earendil-works/gondolin` release, or
-set `GONDOLIN_GUEST_SRC` to a local checkout `guest/` directory.
+By default, `gondolin build` downloads published sandbox helpers. If that fails,
+set `GONDOLIN_SANDBOX_HELPERS_DIR` to a directory containing the four helper
+binaries, or provide all four custom helper paths in the build config.
+
+### `Cannot build sandbox helpers from source`
+
+This contributor path only runs when
+`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` is set. Install Zig 0.16.0 and run
+from a Gondolin checkout, or set `GONDOLIN_GUEST_SRC` to a local `guest/`
+directory. Unset the environment variable to use published helpers instead.
 
 ### Build Times Out / VM Doesn't Boot
 

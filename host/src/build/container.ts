@@ -8,9 +8,9 @@ import {
   detectContainerRuntime,
   runCommand,
   ensureHostDistBuilt,
-  findGuestDir,
   findHostPackageRoot,
   resolveConfigPath,
+  resolveSandboxBinaryPaths,
   type BuildOptions,
   type BuildResult,
 } from "./shared.ts";
@@ -28,12 +28,7 @@ export async function buildInContainer(
   log(`Using container runtime: ${runtime}`);
   log(`Container image: ${image}`);
 
-  const guestDir = findGuestDir();
-  if (!guestDir) {
-    throw new Error(
-      "Could not find guest directory. Use a gondolin checkout, reinstall a package version that bundles guest sources, or set GONDOLIN_GUEST_SRC.",
-    );
-  }
+  const sandboxHelpers = await resolveSandboxBinaryPaths(config, options, log);
 
   const hostPkgRoot = findHostPackageRoot();
   if (!hostPkgRoot) {
@@ -156,34 +151,14 @@ export async function buildInContainer(
     );
     containerConfig.init.rootfsInitExtra = "/work/rootfs-init-extra";
   }
-  if (containerConfig.sandboxdPath) {
-    copyExecutable(
-      resolveConfigPath(containerConfig.sandboxdPath, options.configDir),
-      "sandboxd",
-    );
-    containerConfig.sandboxdPath = "/work/sandboxd";
-  }
-  if (containerConfig.sandboxfsPath) {
-    copyExecutable(
-      resolveConfigPath(containerConfig.sandboxfsPath, options.configDir),
-      "sandboxfs",
-    );
-    containerConfig.sandboxfsPath = "/work/sandboxfs";
-  }
-  if (containerConfig.sandboxsshPath) {
-    copyExecutable(
-      resolveConfigPath(containerConfig.sandboxsshPath, options.configDir),
-      "sandboxssh",
-    );
-    containerConfig.sandboxsshPath = "/work/sandboxssh";
-  }
-  if (containerConfig.sandboxingressPath) {
-    copyExecutable(
-      resolveConfigPath(containerConfig.sandboxingressPath, options.configDir),
-      "sandboxingress",
-    );
-    containerConfig.sandboxingressPath = "/work/sandboxingress";
-  }
+  copyExecutable(sandboxHelpers.sandboxdPath, "sandboxd");
+  containerConfig.sandboxdPath = "/work/sandboxd";
+  copyExecutable(sandboxHelpers.sandboxfsPath, "sandboxfs");
+  containerConfig.sandboxfsPath = "/work/sandboxfs";
+  copyExecutable(sandboxHelpers.sandboxsshPath, "sandboxssh");
+  containerConfig.sandboxsshPath = "/work/sandboxssh";
+  copyExecutable(sandboxHelpers.sandboxingressPath, "sandboxingress");
+  containerConfig.sandboxingressPath = "/work/sandboxingress";
 
   fs.writeFileSync(configPath, JSON.stringify(containerConfig, null, 2));
 
@@ -218,28 +193,7 @@ main().catch((err) => {
 set -eu
 
 # Minimal build toolchain
-apk add --no-cache nodejs lz4 cpio e2fsprogs bash curl xz
-
-zig_version=0.16.0
-case "$(uname -m)" in
-  x86_64) zig_arch=x86_64 ;;
-  aarch64|arm64) zig_arch=aarch64 ;;
-  *) echo "unsupported container architecture for Zig: $(uname -m)" >&2; exit 1 ;;
-esac
-zig_dir="/work/zig-\${zig_arch}-linux-\${zig_version}"
-if [ ! -x "\${zig_dir}/zig" ]; then
-  curl -fsSL "https://ziglang.org/download/\${zig_version}/zig-\${zig_arch}-linux-\${zig_version}.tar.xz" | tar -xJ -C /work
-fi
-export PATH="\${zig_dir}:$PATH"
-
-# Keep Zig caches on the writable /work mount. This avoids permission issues
-# with rootless container bind mounts (for example Podman + user namespaces).
-mkdir -p /work/zig-cache/local /work/zig-cache/global
-export ZIG_LOCAL_CACHE_DIR=/work/zig-cache/local
-export ZIG_GLOBAL_CACHE_DIR=/work/zig-cache/global
-
-# Make guest sources discoverable for Zig compilation
-export GONDOLIN_GUEST_SRC=/guest
+apk add --no-cache nodejs lz4 cpio e2fsprogs bash ca-certificates
 
 node /work/run-build.mjs
 `;
@@ -255,8 +209,6 @@ node /work/run-build.mjs
   }
 
   containerArgs.push(
-    "-v",
-    `${guestDir}:/guest`,
     "-v",
     `${outputDir}:/output`,
     "-v",
