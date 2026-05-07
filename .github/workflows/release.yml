@@ -108,9 +108,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

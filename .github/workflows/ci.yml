@@ -66,9 +66,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install dependencies
         run: |
@@ -122,9 +120,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install dependencies
         run: pnpm install
@@ -185,10 +181,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
+      - uses: actions/setup-node@v4
         with:
-          version: 0.16.0
+          node-version: '24'
+
+      - name: Install Zig
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -218,9 +216,7 @@ jobs:
           node-version: '24'
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -281,9 +277,7 @@ jobs:
           touch guest/image/out/*
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -354,9 +348,7 @@ jobs:
           touch guest/image/out/*
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Install system dependencies
         run: |

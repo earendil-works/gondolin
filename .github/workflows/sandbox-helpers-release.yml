@@ -100,9 +100,7 @@ jobs:
           node-version: "24"
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: scripts/install-zig.sh 0.16.0
 
       - name: Verify package version matches helper release
         run: |
