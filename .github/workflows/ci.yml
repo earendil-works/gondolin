@@ -87,7 +87,9 @@ jobs:
         run: |
           NODE_BIN="$(node -p 'process.execPath')"
           cd guest
-          ALPINE_ARCH=${{ matrix.arch }} make build NODE="$NODE_BIN"
+          ALPINE_ARCH=${{ matrix.arch }} \
+            GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" \
+            make build NODE="$NODE_BIN"
 
       - name: Package assets
         run: |
@@ -159,7 +161,8 @@ jobs:
             },
             "sandboxdPath": "./guest/zig-out/bin/sandboxd",
             "sandboxfsPath": "./guest/zig-out/bin/sandboxfs",
-            "sandboxsshPath": "./guest/zig-out/bin/sandboxssh"
+            "sandboxsshPath": "./guest/zig-out/bin/sandboxssh",
+            "sandboxingressPath": "./guest/zig-out/bin/sandboxingress"
           }
           JSON
 
