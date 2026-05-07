@@ -100,10 +100,9 @@ jobs:
           node-version: "24"
 
       - name: Install Zig
-        run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
-          "$PWD/zig-x86_64-linux-0.16.0/zig" version
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Verify package version matches helper release
         run: |
