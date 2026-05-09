@@ -127,7 +127,7 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
   - optional guest -> upstream allowlisted SSH egress (proxied, exec-oriented)
 - **Disk checkpoints (snapshots)** with resume support
 - **Custom image builds** (Alpine-based build pipeline, optional OCI rootfs source)
-- **Configurable DNS behavior** (`synthetic`, `trusted`, `open`) and rootfs modes (`readonly`, `memory`, `cow`)
+- **Configurable DNS behavior** (`synthetic`, `trusted`, `open`), rootfs modes (`readonly`, `memory`, `cow`), and runtime rootfs sizing
 
 ## Documentation
 

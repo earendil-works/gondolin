@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Added runtime rootfs sizing via `rootfs.size` / `--rootfs-size`, growing the writable disk and running `resize2fs` in the guest. #94
+
 ## 0.9.1
 
 - Replace deprecated `UV_NATIVE_TLS` with `UV_SYSTEM_CERTS` in guest init environments #98

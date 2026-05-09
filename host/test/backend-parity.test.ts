@@ -64,6 +64,7 @@ function backendSandboxOptions(backend: BackendName) {
 }
 
 let qemuRuntimeSkipCheck: Promise<string | false> | null = null;
+const resize2fsSkipChecks = new Map<BackendName, Promise<string | false>>();
 
 async function getQemuRuntimeSkipReason(): Promise<string | false> {
   if (!qemuRuntimeSkipCheck) {
@@ -129,6 +130,35 @@ async function skipIfBackendUnavailable(
   return true;
 }
 
+async function getResize2fsSkipReason(
+  backend: BackendName,
+): Promise<string | false> {
+  let check = resize2fsSkipChecks.get(backend);
+  if (!check) {
+    check = (async () => {
+      const vm = await VM.create({
+        startTimeoutMs: backendStartTimeoutMs,
+        sandbox: backendSandboxOptions(backend),
+      });
+
+      try {
+        const probe = await vm.exec([
+          "/bin/sh",
+          "-lc",
+          "command -v resize2fs >/dev/null 2>&1",
+        ]);
+        return probe.exitCode === 0
+          ? false
+          : "guest image does not include resize2fs";
+      } finally {
+        await vm.close();
+      }
+    })();
+    resize2fsSkipChecks.set(backend, check);
+  }
+  return await check;
+}
+
 function hasSshClient(): boolean {
   try {
     execFileSync("ssh", ["-V"], { stdio: "ignore" });
@@ -163,6 +193,43 @@ for (const backend of backends) {
       const result = await vm.exec("echo backend-ok");
       assert.equal(result.exitCode, 0);
       assert.equal(result.stdout.trim(), "backend-ok");
+    },
+  );
+
+  test(
+    `backend parity (${backend}): rootfs size grows filesystem`,
+    { timeout: timeoutMs },
+    async (t) => {
+      if (await skipIfBackendUnavailable(t, backend)) return;
+
+      const resize2fsSkipReason = await getResize2fsSkipReason(backend);
+      if (resize2fsSkipReason) {
+        t.skip(resize2fsSkipReason);
+        return;
+      }
+
+      const vm = await VM.create({
+        startTimeoutMs: backendStartTimeoutMs,
+        sandbox: backendSandboxOptions(backend),
+        rootfs: { size: "768M" },
+      });
+
+      t.after(async () => {
+        await vm.close();
+      });
+
+      const result = await vm.exec([
+        "/bin/sh",
+        "-lc",
+        "df -k / | awk 'NR == 2 { print $2 }'",
+      ]);
+      assert.equal(result.exitCode, 0, result.stderr);
+
+      const sizeKb = Number(result.stdout.trim());
+      assert.ok(
+        Number.isFinite(sizeKb) && sizeKb >= 700 * 1024,
+        `expected rootfs >= 700MiB, got ${result.stdout.trim()} KiB`,
+      );
     },
   );
 

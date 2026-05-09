@@ -62,6 +62,10 @@ options for configuring filesystem mounts and mediated network egress policy.
 - `--vmm BACKEND`
     - Select backend per command: `qemu` or `krun`
 
+- `--rootfs-size SIZE`
+    - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
+    - Requires `resize2fs` in the guest image (`e2fsprogs` on Alpine)
+
 Examples:
 
 ```bash

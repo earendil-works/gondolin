@@ -8,6 +8,7 @@ import { PassThrough } from "stream";
 import { fileURLToPath } from "url";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
+import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
 import { VM } from "../src/vm/core.ts";
 import type { VirtualProvider } from "../src/vfs/node/index.ts";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
@@ -252,6 +253,9 @@ function bashUsage() {
   console.log(
     "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
   );
+  console.log(
+    "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
+  );
   console.log();
   console.log("VFS Options:");
   console.log(
@@ -409,6 +413,9 @@ function execUsage() {
   console.log(
     "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
   );
+  console.log(
+    "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
+  );
   console.log();
   console.log("Network Options (VM mode only):");
   console.log("  --allow-host HOST               Allow HTTP requests to host");
@@ -482,6 +489,9 @@ type CommonOptions = {
 
   /** vm backend selection */
   vmm?: "qemu" | "krun";
+
+  /** minimum rootfs virtual disk size */
+  rootfsSize?: string;
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
@@ -733,6 +743,20 @@ function parseVmmOption(value: string): "qemu" | "krun" {
   throw new Error("--vmm must be one of: qemu, krun");
 }
 
+function parseRootfsSizeOption(
+  value: string | undefined,
+  fail: (message: string) => never,
+): string {
+  if (!value) fail("--rootfs-size requires an argument");
+  try {
+    parseDiskSizeToBytes(value);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    fail(`invalid --rootfs-size: ${message}`);
+  }
+  return value;
+}
+
 function parseListenSpec(spec: string): { host: string; port: number } {
   const trimmed = spec.trim();
   if (!trimmed) {
@@ -946,6 +970,13 @@ function buildVmOptions(common: CommonOptions) {
     };
   }
 
+  if (common.rootfsSize !== undefined) {
+    vmOptions.rootfs = {
+      ...(vmOptions.rootfs ?? {}),
+      size: common.rootfsSize,
+    };
+  }
+
   if (common.disableWebSockets) {
     vmOptions.allowWebSockets = false;
   }
@@ -993,6 +1024,13 @@ function parseExecArgs(argv: string[]): ExecArgs {
       args.common.vmm = parseVmmOption(raw);
       return i;
     }
+    if (arg.startsWith("--rootfs-size=")) {
+      args.common.rootfsSize = parseRootfsSizeOption(
+        arg.slice("--rootfs-size=".length),
+        fail,
+      );
+      return i;
+    }
 
     switch (arg) {
       case "--mount-hostfs": {
@@ -1017,6 +1055,10 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const value = optionArgs[++i];
         if (!value) fail("--vmm requires an argument");
         args.common.vmm = parseVmmOption(value);
+        return i;
+      }
+      case "--rootfs-size": {
+        args.common.rootfsSize = parseRootfsSizeOption(optionArgs[++i], fail);
         return i;
       }
       case "--allow-host": {
@@ -1400,6 +1442,12 @@ function parseBashArgs(argv: string[]): BashArgs {
     env: [],
   };
 
+  const fail = (message: string): never => {
+    console.error(message);
+    bashUsage();
+    process.exit(1);
+  };
+
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
 
@@ -1411,6 +1459,14 @@ function parseBashArgs(argv: string[]): BashArgs {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
+      continue;
+    }
+
+    if (arg.startsWith("--rootfs-size=")) {
+      args.rootfsSize = parseRootfsSizeOption(
+        arg.slice("--rootfs-size=".length),
+        fail,
+      );
       continue;
     }
 
@@ -1462,6 +1518,10 @@ function parseBashArgs(argv: string[]): BashArgs {
           console.error(err instanceof Error ? err.message : String(err));
           process.exit(1);
         }
+        break;
+      }
+      case "--rootfs-size": {
+        args.rootfsSize = parseRootfsSizeOption(argv[++i], fail);
         break;
       }
       case "--allow-host": {

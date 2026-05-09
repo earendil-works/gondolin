@@ -30,6 +30,70 @@ export function inferDiskFormatFromPath(diskPath: string): "raw" | "qcow2" {
   return "raw";
 }
 
+/** Parse a disk size string into `bytes`. */
+export function parseDiskSizeToBytes(value: string | number): number {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(
+        `invalid disk size: ${String(value)} (expected a positive integer byte count)`,
+      );
+    }
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(
+      `invalid disk size: ${String(value)} (expected a string like "2G")`,
+    );
+  }
+
+  const trimmed = value.trim();
+  const match = /^(\d+)\s*([a-zA-Z]*)$/.exec(trimmed);
+  if (!match) {
+    throw new Error(
+      `invalid disk size: ${JSON.stringify(value)} (expected a positive integer with optional K/M/G/T/P/E suffix)`,
+    );
+  }
+
+  const amount = BigInt(match[1]!);
+  if (amount <= 0n) {
+    throw new Error(
+      `invalid disk size: ${JSON.stringify(value)} (expected a positive integer)`,
+    );
+  }
+
+  let suffix = match[2]!.toLowerCase();
+  if (suffix.endsWith("ib")) {
+    suffix = suffix.slice(0, -2);
+  } else if (suffix.endsWith("b")) {
+    suffix = suffix.slice(0, -1);
+  }
+
+  const exponents: Record<string, number> = {
+    "": 0,
+    byte: 0,
+    bytes: 0,
+    k: 1,
+    m: 2,
+    g: 3,
+    t: 4,
+    p: 5,
+    e: 6,
+  };
+  const exponent = exponents[suffix];
+  if (exponent === undefined) {
+    throw new Error(
+      `invalid disk size suffix: ${JSON.stringify(match[2])} (expected K/M/G/T/P/E)`,
+    );
+  }
+
+  const bytes = amount * 1024n ** BigInt(exponent);
+  if (bytes > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`disk size is too large: ${JSON.stringify(value)}`);
+  }
+  return Number(bytes);
+}
+
 function createQcow2Overlay(opts: Qcow2CreateOptions): void {
   const dir = path.dirname(opts.path);
   fs.mkdirSync(dir, { recursive: true });
@@ -61,8 +125,13 @@ export function createTempQcow2Overlay(
     tmpDir(),
     `gondolin-disk-${randomUUID().slice(0, 8)}.qcow2`,
   );
-  createQcow2Overlay({ path: overlayPath, backingPath, backingFormat });
-  return overlayPath;
+  try {
+    createQcow2Overlay({ path: overlayPath, backingPath, backingFormat });
+    return overlayPath;
+  } catch (err) {
+    fs.rmSync(overlayPath, { force: true });
+    throw err;
+  }
 }
 
 /**
@@ -113,6 +182,32 @@ function extractBackingFilename(info: any): string | null {
 export function getQcow2BackingFilename(imagePath: string): string | null {
   const info = qemuImgInfoJson(imagePath);
   return extractBackingFilename(info);
+}
+
+/** Return the image virtual size in `bytes`. */
+export function getImageVirtualSizeBytes(imagePath: string): number {
+  const info = qemuImgInfoJson(imagePath);
+  const value = info["virtual-size"];
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(
+      `qemu-img info did not report a valid virtual size for ${imagePath}`,
+    );
+  }
+  return value as number;
+}
+
+/** Grow an image's virtual size to at least `bytes`. */
+export function ensureDiskImageMinimumSize(
+  imagePath: string,
+  sizeBytes: number,
+): void {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+    throw new Error(`invalid disk resize target: ${String(sizeBytes)}`);
+  }
+  if (getImageVirtualSizeBytes(imagePath) >= sizeBytes) return;
+  execFileSync("qemu-img", ["resize", imagePath, String(sizeBytes)], {
+    stdio: "ignore",
+  });
 }
 
 /** Resolve qcow2 backing metadata into an absolute path when present. */

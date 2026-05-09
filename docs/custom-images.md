@@ -113,6 +113,7 @@ The file has the following structure:
       "bash",
       "ca-certificates",
       "curl",
+      "e2fsprogs",
       "nodejs",
       "npm",
       "uv",

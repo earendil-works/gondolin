@@ -21,6 +21,8 @@ export type VmVfsOptions = {
 export type VmRootfsOptions = {
   /** rootfs write mode */
   mode?: RootfsMode;
+  /** minimum virtual disk size (`bytes`, or `K`/`M`/`G`/`T` suffix) */
+  size?: string | number;
 };
 
 export type VMOptions = {

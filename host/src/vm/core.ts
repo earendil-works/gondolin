@@ -10,9 +10,11 @@ import { AsyncSingleflight } from "../utils/async.ts";
 
 import {
   createTempQcow2Overlay,
+  ensureDiskImageMinimumSize,
   ensureQemuImgAvailable,
   inferDiskFormatFromPath,
   moveFile,
+  parseDiskSizeToBytes,
   rebaseQcow2InPlace,
   resolveQcow2BackingPath,
 } from "../qemu/img.ts";
@@ -259,6 +261,8 @@ export class VM {
   private readonly shortcutBindMounts: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
+  private rootfsGuestResizePending = false;
+  private rootfsGuestResizeDone = false;
   private vmmChecked = false;
   private debugLog: DebugLogFn | null = null;
   private debugListener:
@@ -279,6 +283,10 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
+    if (options.rootfs?.size !== undefined) {
+      parseDiskSizeToBytes(options.rootfs.size);
+    }
+
     // Resolve sandbox options with async asset fetching
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
 
@@ -351,6 +359,10 @@ export class VM {
     this.autoStart = options.autoStart ?? true;
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
     this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
+    const rootfsSizeBytes =
+      options.rootfs?.size === undefined
+        ? null
+        : parseDiskSizeToBytes(options.rootfs.size);
     const mitmMounts = resolveMitmMounts(
       options.vfs,
       options.sandbox?.mitmCertDir,
@@ -489,111 +501,42 @@ export class VM {
     const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
     const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
 
-    // Prepare root disk:
-    // - Explicit sandbox.rootDisk* options win.
-    // - Otherwise, use rootfs mode from VM options/manifest/default.
-    if (hasUserRootDiskConfig) {
-      const rootDiskPath = sandboxOptions.rootDiskPath ?? resolved.rootDiskPath;
-      const format =
-        sandboxOptions.rootDiskFormat ??
-        resolved.rootDiskFormat ??
-        inferDiskFormatFromPath(rootDiskPath);
-      const snapshot = false;
-      const readOnly =
-        sandboxOptions.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false;
-      const deleteOnClose = sandboxOptions.rootDiskDeleteOnClose ?? false;
-
-      if (
-        deleteOnClose &&
-        sandboxOptions.rootDiskPath === undefined &&
-        rootDiskPath === resolved.rootfsPath
-      ) {
-        throw new Error(
-          "sandbox.rootDiskDeleteOnClose requires sandbox.rootDiskPath (refusing to delete base rootfs)",
-        );
-      }
-
-      resolved.rootDiskPath = rootDiskPath;
-      resolved.rootDiskFormat = format;
-      resolved.rootDiskReadOnly = readOnly;
-
-      this.rootDisk = {
-        path: rootDiskPath,
-        format,
-        snapshot,
-        readOnly,
-        deleteOnClose,
-      };
-    } else if (rootfsMode === "readonly") {
-      const format = inferDiskFormatFromPath(resolved.rootfsPath);
-
-      resolved.rootDiskPath = resolved.rootfsPath;
-      resolved.rootDiskFormat = format;
-      resolved.rootDiskReadOnly = true;
-
-      this.rootDisk = {
-        path: resolved.rootfsPath,
-        format,
-        snapshot: false,
-        readOnly: true,
-        deleteOnClose: false,
-      };
-    } else if (rootfsMode === "memory") {
-      if (supportsSnapshotRootDisk) {
-        const format = inferDiskFormatFromPath(resolved.rootfsPath);
-
-        resolved.rootDiskPath = resolved.rootfsPath;
-        resolved.rootDiskFormat = format;
-        resolved.rootDiskReadOnly = false;
-
-        this.rootDisk = {
-          path: resolved.rootfsPath,
-          format,
-          snapshot: true,
-          readOnly: false,
-          deleteOnClose: false,
-        };
-      } else {
-        ensureQemuImgAvailable();
-        const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
-        const overlayPath = createTempQcow2Overlay(
-          resolved.rootfsPath,
-          backingFormat,
-        );
-
-        resolved.rootDiskPath = overlayPath;
-        resolved.rootDiskFormat = "qcow2";
-        resolved.rootDiskReadOnly = false;
-
-        this.rootDisk = {
-          path: overlayPath,
-          format: "qcow2",
+    try {
+      // Prepare root disk:
+      // - Explicit sandbox.rootDisk* options win.
+      // - Otherwise, use rootfs mode from VM options/manifest/default.
+      if (hasUserRootDiskConfig) {
+        this.rootDisk = prepareConfiguredRootDisk(resolved, sandboxOptions);
+      } else if (rootfsMode === "readonly") {
+        this.rootDisk = prepareBaseRootDisk(resolved, {
+          readOnly: true,
           snapshot: false,
-          readOnly: false,
-          deleteOnClose: true,
-        };
+        });
+      } else if (rootfsMode === "memory") {
+        this.rootDisk =
+          supportsSnapshotRootDisk && rootfsSizeBytes === null
+            ? prepareBaseRootDisk(resolved, {
+                readOnly: false,
+                snapshot: true,
+              })
+            : prepareOverlayRootDisk(resolved);
+      } else if (rootfsMode === "cow") {
+        this.rootDisk = prepareOverlayRootDisk(resolved);
+      } else {
+        throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
-    } else if (rootfsMode === "cow") {
-      ensureQemuImgAvailable();
-      const backingFormat = inferDiskFormatFromPath(resolved.rootfsPath);
-      const overlayPath = createTempQcow2Overlay(
-        resolved.rootfsPath,
-        backingFormat,
-      );
 
-      resolved.rootDiskPath = overlayPath;
-      resolved.rootDiskFormat = "qcow2";
-      resolved.rootDiskReadOnly = false;
-
-      this.rootDisk = {
-        path: overlayPath,
-        format: "qcow2",
-        snapshot: false,
-        readOnly: false,
-        deleteOnClose: true,
-      };
-    } else {
-      throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
+      if (rootfsSizeBytes !== null) {
+        prepareRootDiskResize(
+          this.rootDisk,
+          resolved.rootfsPath,
+          rootfsSizeBytes,
+        );
+        this.rootfsGuestResizePending = true;
+      }
+    } catch (err) {
+      this.cleanupRootDiskSync();
+      throw err;
     }
 
     this.resolvedSandboxOptions = resolved;
@@ -1260,6 +1203,9 @@ fi
         await this.ensureRunning();
 
         this.ensureStartupGeneration(startupGeneration);
+        await this.ensureRootfsResized();
+
+        this.ensureStartupGeneration(startupGeneration);
         // If VFS is configured, also wait for mounts to be ready.
         await this.ensureVfsReady();
 
@@ -1396,6 +1342,15 @@ fi
     }
   }
 
+  private cleanupRootDiskSync() {
+    if (!this.rootDisk?.deleteOnClose) return;
+    try {
+      fs.rmSync(this.rootDisk.path, { force: true });
+    } catch {
+      // ignore
+    }
+  }
+
   private async closeInternal(options?: {
     /** keep session attach IPC server open */
     keepSessionIpc?: boolean;
@@ -1446,14 +1401,7 @@ fi
     await this.disconnect();
     this.vfsReadyPromise = null;
 
-    // Cleanup ephemeral root disk
-    if (this.rootDisk && this.rootDisk.deleteOnClose) {
-      try {
-        fs.rmSync(this.rootDisk.path, { force: true });
-      } catch {
-        // ignore
-      }
-    }
+    this.cleanupRootDiskSync();
   }
 
   private allocateId(): number {
@@ -1646,6 +1594,32 @@ fi
     if (nextState === "running") return;
 
     await this.waitForState("running");
+  }
+
+  private async ensureRootfsResized() {
+    if (!this.rootfsGuestResizePending || this.rootfsGuestResizeDone) return;
+
+    const result = await this.execInternalNoVfsWait([
+      "/bin/sh",
+      "-c",
+      [
+        "if ! command -v resize2fs >/dev/null 2>&1; then",
+        "  echo 'rootfs.size requires resize2fs in the guest image (install e2fsprogs)' >&2;",
+        "  exit 127;",
+        "fi;",
+        "resize2fs /dev/vda",
+      ].join("\n"),
+    ]);
+
+    if (result.exitCode !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      const suffix = detail ? `: ${detail}` : "";
+      throw new Error(
+        `failed to resize rootfs inside guest (exit ${result.exitCode})${suffix}`,
+      );
+    }
+
+    this.rootfsGuestResizeDone = true;
   }
 
   private async ensureVfsReady() {
@@ -2079,6 +2053,111 @@ fi
 
 registerVmCreate((options) => VM.create(options));
 
+function installRootDisk(
+  resolved: ResolvedSandboxServerOptions,
+  rootDisk: RootDiskState,
+): RootDiskState {
+  resolved.rootDiskPath = rootDisk.path;
+  resolved.rootDiskFormat = rootDisk.format;
+  resolved.rootDiskReadOnly = rootDisk.readOnly;
+  return rootDisk;
+}
+
+function prepareConfiguredRootDisk(
+  resolved: ResolvedSandboxServerOptions,
+  options: SandboxServerOptions,
+): RootDiskState {
+  const rootDiskPath = options.rootDiskPath ?? resolved.rootDiskPath;
+  const deleteOnClose = options.rootDiskDeleteOnClose ?? false;
+
+  if (
+    deleteOnClose &&
+    options.rootDiskPath === undefined &&
+    rootDiskPath === resolved.rootfsPath
+  ) {
+    throw new Error(
+      "sandbox.rootDiskDeleteOnClose requires sandbox.rootDiskPath (refusing to delete base rootfs)",
+    );
+  }
+
+  return installRootDisk(resolved, {
+    path: rootDiskPath,
+    format:
+      options.rootDiskFormat ??
+      resolved.rootDiskFormat ??
+      inferDiskFormatFromPath(rootDiskPath),
+    snapshot: false,
+    readOnly: options.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false,
+    deleteOnClose,
+  });
+}
+
+function prepareBaseRootDisk(
+  resolved: ResolvedSandboxServerOptions,
+  opts: Pick<RootDiskState, "readOnly" | "snapshot">,
+): RootDiskState {
+  return installRootDisk(resolved, {
+    path: resolved.rootfsPath,
+    format: inferDiskFormatFromPath(resolved.rootfsPath),
+    snapshot: opts.snapshot,
+    readOnly: opts.readOnly,
+    deleteOnClose: false,
+  });
+}
+
+function prepareOverlayRootDisk(
+  resolved: ResolvedSandboxServerOptions,
+): RootDiskState {
+  ensureQemuImgAvailable();
+  return installRootDisk(resolved, {
+    path: createTempQcow2Overlay(
+      resolved.rootfsPath,
+      inferDiskFormatFromPath(resolved.rootfsPath),
+    ),
+    format: "qcow2",
+    snapshot: false,
+    readOnly: false,
+    deleteOnClose: true,
+  });
+}
+
+function isSameExistingFile(a: string, b: string): boolean {
+  const resolvedA = path.resolve(a);
+  const resolvedB = path.resolve(b);
+  if (resolvedA === resolvedB) return true;
+
+  try {
+    const statA = fs.statSync(resolvedA);
+    const statB = fs.statSync(resolvedB);
+    return statA.dev === statB.dev && statA.ino === statB.ino;
+  } catch {
+    return false;
+  }
+}
+
+function prepareRootDiskResize(
+  rootDisk: RootDiskState | null,
+  rootfsPath: string,
+  sizeBytes: number,
+): void {
+  if (!rootDisk) {
+    throw new Error("rootfs.size requires a root disk");
+  }
+  if (rootDisk.readOnly) {
+    throw new Error(
+      "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)",
+    );
+  }
+  if (isSameExistingFile(rootDisk.path, rootfsPath)) {
+    throw new Error(
+      "rootfs.size refuses to resize the base rootfs image; use rootfs.mode='cow' or provide a separate sandbox.rootDiskPath",
+    );
+  }
+
+  ensureQemuImgAvailable();
+  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes);
+}
+
 function resolveManifestRootfsMode(
   resolved: ResolvedSandboxServerOptions,
 ): RootfsMode | undefined {
@@ -2160,4 +2239,5 @@ export const __test = {
   parseEnvEntry,
   mapToEnvArray,
   normalizeStartTimeoutMs,
+  parseDiskSizeToBytes,
 };

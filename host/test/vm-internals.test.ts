@@ -9,6 +9,7 @@ import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
 import { createExecSession } from "../src/exec.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
+import { getImageVirtualSizeBytes } from "../src/qemu/img.ts";
 import type { RootfsMode } from "../src/build/config.ts";
 
 function makeTempResolvedServerOptions() {
@@ -23,10 +24,15 @@ function makeTempResolvedServerOptions() {
   return {
     dir,
     resolved: {
+      vmm: "qemu" as const,
       qemuPath: "qemu-system-aarch64",
+      krunRunnerPath: "gondolin-krun-runner",
       kernelPath,
       initrdPath,
       rootfsPath,
+      rootDiskPath: rootfsPath,
+      rootDiskFormat: "raw" as const,
+      rootDiskReadOnly: false,
       memory: "256M",
       cpus: 1,
       virtioSocketPath: path.join(dir, "virtio.sock"),
@@ -100,6 +106,24 @@ function makeVm(options: VMOptions = {}) {
   };
 }
 
+test("vm internals: parses rootfs size strings", () => {
+  assert.equal(__test.parseDiskSizeToBytes("2G"), 2 * 1024 * 1024 * 1024);
+  assert.equal(__test.parseDiskSizeToBytes("512MiB"), 512 * 1024 * 1024);
+  assert.equal(__test.parseDiskSizeToBytes(4096), 4096);
+  assert.throws(() => __test.parseDiskSizeToBytes("0"), /invalid disk size/);
+  assert.throws(
+    () => __test.parseDiskSizeToBytes("1GBps"),
+    /invalid disk size suffix/,
+  );
+});
+
+test("vm internals: VM.create validates rootfs size before asset resolution", async () => {
+  await assert.rejects(
+    () => VM.create({ rootfs: { size: "1GBps" } }),
+    /invalid disk size suffix/,
+  );
+});
+
 test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -118,6 +142,55 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   } finally {
     await vm.close();
     cleanup();
+  }
+});
+
+test("vm internals: rootfs size rejects readonly mode", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: null,
+            rootfs: { mode: "readonly", size: "2G" },
+          },
+          resolved as any,
+        ),
+      /rootfs\.size requires a writable root disk/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: constructor cleans delete-on-close root disk after resize setup failure", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const rootDiskPath = path.join(dir, "root-disk.qcow2");
+  fs.writeFileSync(rootDiskPath, "temporary root disk");
+
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: null,
+            rootfs: { size: "64M" },
+            sandbox: {
+              rootDiskPath,
+              rootDiskReadOnly: true,
+              rootDiskDeleteOnClose: true,
+            },
+          },
+          resolved as any,
+        ),
+      /rootfs\.size requires a writable root disk/,
+    );
+    assert.equal(fs.existsSync(rootDiskPath), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -191,6 +264,105 @@ test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => 
   } finally {
     await vm.close();
     cleanup();
+  }
+});
+
+test("vm internals: rootfs size grows cow overlay before boot", async (t) => {
+  if (!hasQemuImg()) {
+    t.skip("qemu-img unavailable");
+    return;
+  }
+
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "cow", size: "64M" },
+  });
+
+  try {
+    const resolved = (vm as any).resolvedSandboxOptions;
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal((vm as any).rootfsGuestResizePending, true);
+    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: rootfs size uses resized overlay for qemu memory mode", async (t) => {
+  if (!hasQemuImg()) {
+    t.skip("qemu-img unavailable");
+    return;
+  }
+
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "memory", size: "64M" },
+  });
+
+  try {
+    const resolved = (vm as any).resolvedSandboxOptions;
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
+    assert.equal(resolved.rootDiskFormat, "qcow2");
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.deleteOnClose, true);
+    assert.equal((vm as any).rootfsGuestResizePending, true);
+    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: rootfs size refuses to mutate base image", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: null,
+            rootfs: { size: "64M" },
+            sandbox: { rootDiskFormat: "raw" },
+          },
+          resolved as any,
+        ),
+      /rootfs\.size refuses to resize the base rootfs image/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: rootfs size refuses symlink to base image", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const rootDiskPath = path.join(dir, "rootfs-link");
+  fs.symlinkSync(resolved.rootfsPath, rootDiskPath);
+
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: null,
+            rootfs: { size: "64M" },
+            sandbox: { rootDiskPath, rootDiskFormat: "raw" },
+          },
+          resolved as any,
+        ),
+      /rootfs\.size refuses to resize the base rootfs image/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

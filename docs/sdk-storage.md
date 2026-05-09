@@ -115,6 +115,28 @@ const vm = await VM.create({
 If the guest asset `manifest.json` contains `runtimeDefaults.rootfsMode`, that
 value is used as the default when `rootfs.mode` is not provided.
 
+## Runtime Rootfs Size
+
+Use `rootfs.size` to ensure the effective root disk has at least the requested
+size without rebuilding the base image:
+
+```ts
+const vm = await VM.create({
+  rootfs: { size: "2G" },
+});
+```
+
+Gondolin grows the writable root disk image on the host with `qemu-img resize`
+(no shrinking) and then runs `resize2fs /dev/vda` in the guest before
+`VM.start()` completes.
+The base rootfs image is not modified when using the default `cow` mode. When
+combined with `rootfs.mode="memory"`, Gondolin uses a temporary qcow2 overlay so
+the guest-side filesystem resize survives for the lifetime of that VM.
+
+The guest image must include `resize2fs` (Alpine package: `e2fsprogs`). Newer
+`alpine-base` images include it; custom images should add it to
+`alpine.rootfsPackages` when using `rootfs.size`.
+
 ## Disk Checkpoints (qcow2)
 
 Gondolin supports **disk-only checkpoints** of the VM root filesystem.
@@ -160,8 +182,9 @@ Notes:
   (reload with `VmCheckpoint.load(checkpointPath)`)
 - Checkpoints require guest assets with a `manifest.json` that includes a
   deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
-- QEMU `rootfs.mode="memory"` uses backend snapshot mode and is not checkpointable;
-  use `rootfs.mode="cow"` when you need a writable qcow2 layer
+- QEMU `rootfs.mode="memory"` uses backend snapshot mode and is not checkpointable
+  unless combined with `rootfs.size`; use `rootfs.mode="cow"` when you need a
+  writable qcow2 layer explicitly
 - Cross-backend resume (`qemu` ↔ `krun`) requires guest assets with krun boot
   artifacts (`manifest.assets.krunKernel`)
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`); writes under those paths are not part of disk checkpoints

@@ -20,8 +20,9 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 | `sandbox.cpus`                                                 | ✓      | ✓      | Shared high-level CPU count option                                                                                           |
 | `sandbox.memory`                                               | ✓      | ✓      | `krun` parses memory and passes MiB to `libkrun`                                                                             |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓      | ✓      | Supported on both backends                                                                                                   |
-| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses backend snapshot mode; krun emulates this with a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
 | `rootfs.mode = "cow"`                                          | ✓      | ✓      | Writable qcow2 copy-on-write overlay on both backends; the overlay does not modify the original rootfs image                |
+| `rootfs.size`                                                   | ✓      | ✓      | Ensures the effective writable root disk is at least the requested size before boot and runs `resize2fs` in the guest; requires `resize2fs` in the image |
 | `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |
 | Exec/VFS/network mediation/SSH/ingress APIs                    | ✓      | ✓      | Same host-side control plane and policy stack                                                                                |
 
