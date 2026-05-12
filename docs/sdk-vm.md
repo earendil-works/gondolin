@@ -44,6 +44,19 @@ Advanced users can access the registry/attach helpers directly:
 - `gcSessions()`
 - `connectToSession()`
 
+## Runtime Network Policy
+
+A live VM's outbound egress can be changed without rebooting:
+
+```ts
+vm.setOutboundEgressEnabled(false); // block DNS, web, SSH, and mapped TCP egress
+vm.setNetworkPolicy({ egress: "allow" }); // re-open the runtime gate
+vm.getNetworkPolicy(); // { egress: "allow" }
+```
+
+See [SDK: Network Access](./sdk-network.md#runtime-egress-switch) for semantics
+and the CLI equivalent (`gondolin network`).
+
 ## `vm.exec()`
 
 This is the most common operation. It returns an `ExecProcess` (a running

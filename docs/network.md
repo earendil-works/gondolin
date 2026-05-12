@@ -253,6 +253,52 @@ To make this work, the guest must trust the host-generated CA:
 
 Policy enforcement happens on the host and is designed to be robust against common evasion tricks.
 
+### Runtime Egress Policy
+
+A live VM has a mutable, host-enforced runtime network policy:
+
+- `egress: "deny"` blocks all guest-initiated host egress, including DNS
+  forwarding, HTTP/HTTPS/WebSocket egress, optional SSH egress, and explicit
+  mapped TCP egress.
+
+The policy is enforced in the host network backend before creating new upstream
+host sockets. It does not rely on guest firewall state, so root inside the guest
+cannot turn it back on.
+
+SDK example:
+
+```ts
+const vm = await VM.create();
+
+// Hard cutoff: block every egress class and close active sessions.
+vm.setNetworkPolicy({ egress: "deny" });
+
+// Re-open the runtime egress gate.
+vm.setNetworkPolicy({ egress: "allow" });
+
+console.log(vm.getNetworkPolicy()); // { egress: "allow" }
+```
+
+CLI example for an existing session:
+
+```bash
+gondolin list
+gondolin network off <session-id>
+```
+
+Important semantics:
+
+- `egress: "deny"` is the security-oriented cutoff for VM-mediated
+  guest-initiated egress.
+- `egress: "allow"` re-opens the runtime gate; configured allowlists, hooks,
+  SSH/TCP mappings, and other network policy still apply.
+- Setting `egress: "deny"` closes existing affected sessions.
+- Host-to-guest control paths such as `exec`, `attach`, snapshots, VFS, and
+  ingress listeners are not guest-initiated egress and remain usable.
+- Host-side hook code is outside this VM egress path: if `onRequest` performs
+  its own `fetch()` or other network I/O, runtime egress policy does not
+  intercept that host-side I/O.
+
 ### Allowlist by Hostname
 
 A typical setup uses an allowlist of hostnames (often with `*` wildcards).

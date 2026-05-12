@@ -76,6 +76,15 @@ export type HttpHooks = {
 
 export type DnsMode = "open" | "trusted" | "synthetic";
 
+export type NetworkPolicyAction = "allow" | "deny";
+
+export type RuntimeNetworkPolicy = {
+  /** guest-initiated host egress policy */
+  egress?: NetworkPolicyAction;
+};
+
+export type EffectiveNetworkPolicy = Required<RuntimeNetworkPolicy>;
+
 export type SyntheticDnsHostMappingMode = "single" | "per-host";
 
 export type DnsOptions = {
@@ -171,5 +180,7 @@ export type QemuNetworkBackend<
   flush(): void;
   waitForFlowResume(key: string): Promise<void>;
   settleFlowResume(key: string, err?: Error): void;
+  getNetworkPolicy(): EffectiveNetworkPolicy;
+  isEgressAllowed(): boolean;
   abortTcpSession(key: string, session: TSession, reason: string): void;
 };

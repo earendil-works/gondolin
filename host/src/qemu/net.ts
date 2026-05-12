@@ -54,6 +54,7 @@ import {
 } from "../http/utils.ts";
 
 import {
+  cleanupStreamingBodyState,
   handlePlainHttpData,
   handleTlsHttpData,
   updateQemuRxPauseState,
@@ -64,8 +65,11 @@ import {
   createGuestClosedError,
   type DnsMode,
   type DnsOptions,
+  type EffectiveNetworkPolicy,
   type HttpFetch,
   type HttpHooks,
+  type NetworkPolicyAction,
+  type RuntimeNetworkPolicy,
   type SyntheticDnsHostMappingMode,
 } from "./contracts.ts";
 import { QemuIcmpTracker, type IcmpTiming } from "./icmp.ts";
@@ -185,6 +189,10 @@ export type TcpSession = {
   ws?: WebSocketState;
 };
 
+const DEFAULT_NETWORK_POLICY: EffectiveNetworkPolicy = {
+  egress: "allow",
+};
+
 /** @internal */
 export type QemuHttpInternals = {
   /** max intercepted http request body size in `bytes` */
@@ -208,9 +216,12 @@ export type QemuHttpInternals = {
 export type {
   DnsMode,
   DnsOptions,
+  EffectiveNetworkPolicy,
   HttpFetch,
   HttpHooks,
   HttpIpAllowInfo,
+  NetworkPolicyAction,
+  RuntimeNetworkPolicy,
   SyntheticDnsHostMappingMode,
 } from "./contracts.ts";
 export type { TcpOptions } from "./tcp.ts";
@@ -359,6 +370,7 @@ export class QemuNetworkBackend extends EventEmitter {
   };
   private readonly syntheticDnsHostMapping: SyntheticDnsHostMappingMode;
   private readonly syntheticDnsHostMap: SyntheticDnsHostMap | null;
+  private networkPolicy: EffectiveNetworkPolicy = { ...DEFAULT_NETWORK_POLICY };
 
   constructor(options: QemuNetworkOptions) {
     super();
@@ -458,6 +470,39 @@ export class QemuNetworkBackend extends EventEmitter {
     this.server.listen(this.options.socketPath);
   }
 
+  getNetworkPolicy(): EffectiveNetworkPolicy {
+    return { ...this.networkPolicy };
+  }
+
+  setNetworkPolicy(policy: RuntimeNetworkPolicy): EffectiveNetworkPolicy {
+    for (const key of Object.keys(policy)) {
+      if (key !== "egress") {
+        throw new Error(`unknown network policy field: ${key}`);
+      }
+    }
+    if (policy.egress !== undefined && !isNetworkPolicyAction(policy.egress)) {
+      throw new Error("network policy egress must be 'allow' or 'deny'");
+    }
+
+    const next: EffectiveNetworkPolicy = {
+      egress: policy.egress ?? this.networkPolicy.egress,
+    };
+
+    this.networkPolicy = next;
+
+    if (this.options.debug) {
+      this.emitDebug(`network policy egress=${next.egress}`);
+    }
+
+    this.closeSessionsDeniedByPolicy();
+
+    return this.getNetworkPolicy();
+  }
+
+  isEgressAllowed(): boolean {
+    return this.networkPolicy.egress === "allow";
+  }
+
   async close(): Promise<void> {
     this.detachSocket();
     closeSharedDispatchers(this);
@@ -551,11 +596,11 @@ export class QemuNetworkBackend extends EventEmitter {
       allowTcpFlow: (info) => {
         if (info.protocol === "tcp") {
           const session = this.tcpSessions.get(info.key);
-          const allowed = Boolean(session?.mappedTcp);
+          const allowed = Boolean(session?.mappedTcp) && this.isEgressAllowed();
           if (!allowed) {
             if (this.options.debug) {
               this.emitDebug(
-                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol}${this.isEgressAllowed() ? "" : ", runtime egress policy"})`,
               );
             }
             return false;
@@ -568,16 +613,13 @@ export class QemuNetworkBackend extends EventEmitter {
         }
 
         if (info.protocol === "ssh") {
-          const allowed = isSshFlowAllowed(
-            this,
-            info.key,
-            info.dstIP,
-            info.dstPort,
-          );
+          const allowed =
+            this.isEgressAllowed() &&
+            isSshFlowAllowed(this, info.key, info.dstIP, info.dstPort);
           if (!allowed) {
             if (this.options.debug) {
               this.emitDebug(
-                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
+                `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol}${this.isEgressAllowed() ? "" : ", runtime egress policy"})`,
               );
             }
             return false;
@@ -594,6 +636,15 @@ export class QemuNetworkBackend extends EventEmitter {
           if (this.options.debug) {
             this.emitDebug(
               `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`,
+            );
+          }
+          return false;
+        }
+
+        if (!this.isEgressAllowed()) {
+          if (this.options.debug) {
+            this.emitDebug(
+              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol}, runtime egress policy)`,
             );
           }
           return false;
@@ -679,13 +730,42 @@ export class QemuNetworkBackend extends EventEmitter {
 
     for (const session of this.tcpSessions.values()) {
       try {
+        session.http?.activeFetchAbort?.abort();
+      } catch {
+        // ignore
+      }
+      try {
         session.socket?.destroy();
+      } catch {
+        // ignore
+      }
+      try {
+        session.tls?.socket.destroy();
       } catch {
         // ignore
       }
       cleanupSshTcpSession(this, session);
     }
     this.tcpSessions.clear();
+  }
+
+  private closeSessionsDeniedByPolicy() {
+    if (this.isEgressAllowed()) return;
+
+    closeSharedDispatchers(this);
+
+    for (const session of this.udpSessions.values()) {
+      try {
+        session.socket.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.udpSessions.clear();
+
+    for (const [key, session] of [...this.tcpSessions.entries()]) {
+      this.abortTcpSession(key, session, "runtime-network-policy");
+    }
   }
 
   private pickTrustedDnsServer(): string {
@@ -742,6 +822,15 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private handleUdpSend(message: UdpSendMessage) {
+    if (!this.isEgressAllowed()) {
+      if (this.options.debug) {
+        this.emitDebug(
+          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (runtime egress policy)`,
+        );
+      }
+      return;
+    }
+
     if (message.dstPort !== 53) {
       if (this.options.debug) {
         this.emitDebug(
@@ -901,8 +990,21 @@ export class QemuNetworkBackend extends EventEmitter {
       );
     }
 
+    if (session.http) {
+      cleanupStreamingBodyState(this, session.http, GUEST_CLOSED_ERR);
+    }
+    try {
+      session.http?.activeFetchAbort?.abort();
+    } catch {
+      // ignore
+    }
     try {
       session.socket?.destroy();
+    } catch {
+      // ignore
+    }
+    try {
+      session.tls?.socket.destroy();
     } catch {
       // ignore
     }
@@ -1368,6 +1470,10 @@ export class QemuNetworkBackend extends EventEmitter {
       return { keyPem, certPem };
     }
   }
+}
+
+function isNetworkPolicyAction(value: unknown): value is NetworkPolicyAction {
+  return value === "allow" || value === "deny";
 }
 
 function formatError(err: unknown): string {

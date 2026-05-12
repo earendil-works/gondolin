@@ -1,3 +1,8 @@
+import type {
+  EffectiveNetworkPolicy,
+  RuntimeNetworkPolicy,
+} from "../qemu/net.ts";
+
 /**
  * Sandbox control protocol.
  *
@@ -11,12 +16,14 @@
  * - pty_resize { type: "pty_resize", id, rows, cols }
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
  * - snapshot { type: "snapshot", id, path }
+ * - network_policy { type: "network_policy", id, policy }
  * - boot { type: "boot", fuseMount?, fuseBinds? }
  *
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
  * - exec_response { type: "exec_response", id, exit_code, signal? }
  * - snapshot_response { type: "snapshot_response", id, path, name }
+ * - network_policy_response { type: "network_policy_response", id, policy }
  * - error { type: "error", id?, code, message }
  *
  * Binary output frame:
@@ -82,6 +89,14 @@ export type SnapshotCommandMessage = {
   path: string;
 };
 
+export type NetworkPolicyCommandMessage = {
+  type: "network_policy";
+  /** request id */
+  id: number;
+  /** partial runtime policy update */
+  policy?: RuntimeNetworkPolicy;
+};
+
 export type BootCommandMessage = {
   type: "boot";
   /** guest mountpoint for fuse (defaults to server config) */
@@ -107,7 +122,8 @@ export type ClientMessage =
   | PtyResizeCommandMessage
   | ExecWindowCommandMessage
   | LifecycleCommandMessage
-  | SnapshotCommandMessage;
+  | SnapshotCommandMessage
+  | NetworkPolicyCommandMessage;
 
 export type ExecResponseMessage = {
   type: "exec_response";
@@ -139,6 +155,14 @@ export type SnapshotResponseMessage = {
   name: string;
 };
 
+export type NetworkPolicyResponseMessage = {
+  type: "network_policy_response";
+  /** request id */
+  id: number;
+  /** effective runtime network policy */
+  policy: EffectiveNetworkPolicy;
+};
+
 export type StatusMessage = {
   type: "status";
   /** sandbox state */
@@ -149,6 +173,7 @@ export type ServerMessage =
   | ExecResponseMessage
   | ErrorMessage
   | SnapshotResponseMessage
+  | NetworkPolicyResponseMessage
   | StatusMessage;
 
 export type OutputStream = "stdout" | "stderr";

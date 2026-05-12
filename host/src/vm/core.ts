@@ -66,6 +66,10 @@ import {
   type DebugComponent,
   type DebugLogFn,
 } from "../debug.ts";
+import type {
+  EffectiveNetworkPolicy,
+  RuntimeNetworkPolicy,
+} from "../qemu/net.ts";
 import {
   IngressGateway,
   type EnableIngressOptions,
@@ -164,6 +168,10 @@ export type {
   VmFsDeleteOptions,
 } from "./fs.ts";
 export type { VMOptions, VmRootfsOptions, VmVfsOptions } from "./types.ts";
+export type {
+  EffectiveNetworkPolicy,
+  RuntimeNetworkPolicy,
+} from "../qemu/net.ts";
 
 export type ShellOptions = {
   /** command to run (default: /bin/bash) */
@@ -593,6 +601,33 @@ export class VM {
    */
   async close() {
     return this.closeSingleflight.run(() => this.closeInternal());
+  }
+
+  /**
+   * Return the current host-enforced runtime network egress policy.
+   */
+  getNetworkPolicy(): EffectiveNetworkPolicy {
+    const server = this.server;
+    if (!server) throw new Error("VM is closed");
+    return server.getNetworkPolicy();
+  }
+
+  /**
+   * Update the host-enforced runtime network egress policy.
+   *
+   * `egress: "deny"` blocks VM-mediated guest-initiated host egress, including
+   * DNS, HTTP/HTTPS/WebSocket traffic, SSH, and mapped TCP. Existing egress
+   * sessions are always closed when the policy changes to deny.
+   */
+  setNetworkPolicy(policy: RuntimeNetworkPolicy): EffectiveNetworkPolicy {
+    const server = this.server;
+    if (!server) throw new Error("VM is closed");
+    return server.setNetworkPolicy(policy);
+  }
+
+  /** Enable or disable the runtime gate for VM-mediated guest-initiated egress. */
+  setOutboundEgressEnabled(enabled: boolean): EffectiveNetworkPolicy {
+    return this.setNetworkPolicy({ egress: enabled ? "allow" : "deny" });
   }
 
   /**
@@ -1314,6 +1349,13 @@ fi
                 await this.close();
               },
             };
+          },
+          onNetworkPolicy: async (message) => {
+            const policy = message.policy ?? {};
+            if (message.policy) {
+              return this.setNetworkPolicy(policy);
+            }
+            return this.getNetworkPolicy();
           },
         },
       );

@@ -30,7 +30,11 @@ import {
   type SandboxLogStream,
 } from "./controller.ts";
 import { KrunController, type KrunConfig } from "./krun-controller.ts";
-import { QemuNetworkBackend } from "../qemu/net.ts";
+import {
+  QemuNetworkBackend,
+  type EffectiveNetworkPolicy,
+  type RuntimeNetworkPolicy,
+} from "../qemu/net.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
 import { SandboxVfsProvider } from "../vfs/provider.ts";
@@ -304,6 +308,19 @@ export class SandboxServer extends EventEmitter {
   /** @internal resolved qemu binary path */
   getQemuPath(): string {
     return this.options.qemuPath;
+  }
+
+  /** current runtime network egress policy */
+  getNetworkPolicy(): EffectiveNetworkPolicy {
+    return this.network?.getNetworkPolicy() ?? { egress: "deny" };
+  }
+
+  /** update runtime network egress policy */
+  setNetworkPolicy(policy: RuntimeNetworkPolicy): EffectiveNetworkPolicy {
+    if (!this.network) {
+      throw new Error("networking is disabled for this VM");
+    }
+    return this.network.setNetworkPolicy(policy);
   }
 
   /**

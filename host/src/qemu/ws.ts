@@ -122,12 +122,33 @@ export async function bridgeWebSocketUpgrade(
     throw new Error("internal error: websocket state missing");
   }
 
-  const upstream = await connectWebSocketUpstream(backend, {
-    protocol: info.protocol,
-    hostname: info.parsedUrl.hostname,
-    address: info.address,
-    port: info.port,
-  });
+  if (!backend.isEgressAllowed()) {
+    abortWebSocketSession(backend, key, session, "runtime-egress-policy");
+    return false;
+  }
+
+  const upstream = await connectWebSocketUpstream(
+    backend,
+    {
+      protocol: info.protocol,
+      hostname: info.parsedUrl.hostname,
+      address: info.address,
+      port: info.port,
+    },
+    (socket) => {
+      session.socket = socket;
+    },
+  );
+
+  if (!backend.isEgressAllowed()) {
+    try {
+      upstream.destroy();
+    } catch {
+      // ignore
+    }
+    abortWebSocketSession(backend, key, session, "runtime-egress-policy");
+    return false;
+  }
 
   ws.upstream = upstream;
 
@@ -266,6 +287,7 @@ export async function connectWebSocketUpstream(
     address: string;
     port: number;
   },
+  onSocket?: (socket: net.Socket) => void,
 ): Promise<net.Socket> {
   const timeoutMs = backend.http.webSocketUpstreamConnectTimeoutMs;
 
@@ -276,6 +298,7 @@ export async function connectWebSocketUpstream(
       servername: info.hostname,
       ALPNProtocols: ["http/1.1"],
     });
+    onSocket?.(socket);
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -288,6 +311,7 @@ export async function connectWebSocketUpstream(
         }
         socket.off("error", onError);
         socket.off("secureConnect", onConnect);
+        socket.off("close", onClose);
       };
 
       const settleResolve = () => {
@@ -312,6 +336,10 @@ export async function connectWebSocketUpstream(
         settleResolve();
       };
 
+      const onClose = () => {
+        settleReject(new Error("websocket upstream closed before connect"));
+      };
+
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timer = setTimeout(() => {
           const err = new Error(
@@ -328,12 +356,14 @@ export async function connectWebSocketUpstream(
 
       socket.once("error", onError);
       socket.once("secureConnect", onConnect);
+      socket.once("close", onClose);
     });
 
     return socket;
   }
 
   const socket = new net.Socket();
+  onSocket?.(socket);
   socket.connect(info.port, info.address);
 
   await new Promise<void>((resolve, reject) => {
@@ -347,6 +377,7 @@ export async function connectWebSocketUpstream(
       }
       socket.off("error", onError);
       socket.off("connect", onConnect);
+      socket.off("close", onClose);
     };
 
     const settleResolve = () => {
@@ -371,6 +402,10 @@ export async function connectWebSocketUpstream(
       settleResolve();
     };
 
+    const onClose = () => {
+      settleReject(new Error("websocket upstream closed before connect"));
+    };
+
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => {
         const err = new Error(
@@ -387,6 +422,7 @@ export async function connectWebSocketUpstream(
 
     socket.once("error", onError);
     socket.once("connect", onConnect);
+    socket.once("close", onClose);
   });
 
   return socket;

@@ -89,6 +89,41 @@ Notable consequences:
   policy; the host enforces policy against the HTTP `Host` header and does its own
   resolution to prevent DNS rebinding attacks
 
+### Runtime Egress Switch
+
+You can change the host-enforced egress policy of a live VM without rebooting:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create();
+
+// Emergency cutoff: block DNS, web, SSH egress, and mapped TCP.
+// Existing affected sessions are closed when egress is denied.
+vm.setOutboundEgressEnabled(false);
+
+// Equivalent lower-level form.
+vm.setNetworkPolicy({ egress: "deny" });
+
+// Re-open the runtime egress gate later.
+vm.setNetworkPolicy({ egress: "allow" });
+
+console.log(vm.getNetworkPolicy()); // { egress: "allow" }
+```
+
+Details:
+
+- `egress: "deny"` blocks all VM-mediated guest-initiated host egress and is
+  the exfiltration cutoff.
+- `egress: "allow"` re-opens the runtime gate; configured allowlists, hooks,
+  SSH/TCP mappings, and other network policy still apply.
+- Existing sessions affected by `egress: "deny"` are always closed.
+- Host-to-guest features (`exec`, `attach`, VFS, snapshots, ingress) remain
+  available because they are not guest-initiated outbound egress.
+- Host-side hook code is outside the VM egress path: if `onRequest` performs its
+  own `fetch()` or other network I/O, runtime egress policy does not intercept
+  that host-side I/O.
+
 For deeper conceptual background, see [Network stack](./network.md).
 
 ## Mapped TCP Egress (Optional)

@@ -234,6 +234,193 @@ test("qemu-net: synthetic per-host dns mapping does not throw on mapping exhaust
   assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
 });
 
+test("qemu-net: runtime network policy defaults and validates updates", () => {
+  const backend = makeBackend();
+
+  assert.deepEqual(backend.getNetworkPolicy(), {
+    egress: "allow",
+  });
+
+  assert.deepEqual(backend.setNetworkPolicy({ egress: "deny" }), {
+    egress: "deny",
+  });
+  assert.equal(backend.isEgressAllowed(), false);
+
+  assert.throws(
+    () => backend.setNetworkPolicy({ egress: "bogus" as any }),
+    /egress must be 'allow' or 'deny'/,
+  );
+  assert.throws(
+    () => backend.setNetworkPolicy({ unknown: "deny" } as any),
+    /unknown network policy field/,
+  );
+});
+
+test("qemu-net: runtime egress deny blocks upstream HTTP bridge", async () => {
+  const backend = makeBackend({
+    fetch: async () => {
+      throw new Error("fetch should not be called");
+    },
+  });
+  backend.setNetworkPolicy({ egress: "deny" });
+
+  await assert.rejects(
+    fetchHookAndRespond(
+      backend,
+      {
+        method: "GET",
+        target: "/",
+        version: "HTTP/1.1",
+        headers: { host: "example.com" },
+        body: Buffer.alloc(0),
+      },
+      "http",
+      () => {},
+    ),
+    /blocked by runtime egress policy/,
+  );
+});
+
+test("qemu-net: active HTTP response fetch remains abortable", async () => {
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let fetchCalled = false;
+  const backend = makeBackend({
+    fetch: async (_url, init: any) => {
+      fetchCalled = true;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+          init.signal.addEventListener("abort", () => {
+            controller.error(new Error("fetch aborted"));
+          });
+        },
+      });
+      return new UndiciResponse(body as any, { status: 200 }) as any;
+    },
+  });
+  const httpSession: qemuHttp.HttpSession = {
+    buffer: new HttpReceiveBuffer(),
+    processing: false,
+    closed: false,
+    upstreamTainted: false,
+    upstreamOriginKey: null,
+    sentContinue: false,
+  };
+
+  const request = qemuHttp.fetchHookRequestAndRespond(backend, {
+    request: {
+      method: "GET",
+      url: "http://example.com/stream",
+      headers: { host: "example.com" },
+      body: null,
+    },
+    httpVersion: "HTTP/1.1",
+    write: () => {},
+    httpSession,
+  });
+
+  while (!fetchCalled || !bodyController) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.ok(httpSession.activeFetchAbort);
+  httpSession.activeFetchAbort.abort();
+  await assert.rejects(request, /fetch aborted/);
+  assert.equal(httpSession.activeFetchAbort, undefined);
+});
+
+test("qemu-net: runtime egress deny closes existing sessions by default", () => {
+  const backend = makeBackend();
+  let destroyed = false;
+  let aborted = false;
+
+  (backend as any).tcpSessions.set("flow", {
+    socket: { destroy: () => void (destroyed = true) },
+    srcIP: "192.168.127.3",
+    srcPort: 1234,
+    dstIP: "198.51.100.1",
+    dstPort: 443,
+    connectIP: "198.51.100.1",
+    connectPort: 443,
+    syntheticHostname: null,
+    mappedTcp: null,
+    flowControlPaused: false,
+    protocol: "tls",
+    connected: true,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+    http: { activeFetchAbort: { abort: () => void (aborted = true) } },
+  });
+
+  backend.setNetworkPolicy({ egress: "deny" });
+
+  assert.equal(destroyed, true);
+  assert.equal(aborted, true);
+  assert.equal((backend as any).tcpSessions.has("flow"), false);
+});
+
+test("qemu-net: runtime egress deny closes shared HTTP dispatchers", () => {
+  const backend = makeBackend();
+  let closed = false;
+
+  backend.http.sharedDispatchers.set("http://example.com:80", {
+    dispatcher: { close: () => void (closed = true) } as any,
+    lastUsedAt: Date.now(),
+  });
+
+  backend.setNetworkPolicy({ egress: "deny" });
+
+  assert.equal(closed, true);
+  assert.equal(backend.http.sharedDispatchers.size, 0);
+});
+
+test("qemu-net: runtime egress deny clears paused streaming upload state", () => {
+  const backend = makeBackend();
+  let resumed = false;
+  backend.socket = { resume: () => void (resumed = true) } as any;
+  backend.http.qemuRxPausedForHttpStreaming = true;
+
+  (backend as any).tcpSessions.set("flow", {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 1234,
+    dstIP: "198.51.100.1",
+    dstPort: 443,
+    connectIP: "198.51.100.1",
+    connectPort: 443,
+    syntheticHostname: null,
+    mappedTcp: null,
+    flowControlPaused: false,
+    protocol: "http",
+    connected: true,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+    http: {
+      buffer: new HttpReceiveBuffer(),
+      processing: true,
+      closed: false,
+      upstreamTainted: false,
+      upstreamOriginKey: null,
+      streamingBody: {
+        remaining: 1024,
+        controller: null,
+        done: false,
+        dropRemainingBody: false,
+        pipelineBytes: 0,
+        pending: [Buffer.alloc(512 * 1024)],
+        pendingBytes: 512 * 1024,
+        closeAfterPending: false,
+        drain: () => {},
+      },
+    },
+  });
+
+  backend.setNetworkPolicy({ egress: "deny" });
+
+  assert.equal(resumed, true);
+  assert.equal(backend.http.qemuRxPausedForHttpStreaming, false);
+});
+
 test("qemu-net: parseHttpRequest parses content-length and preserves remaining", async () => {
   let captured: any = null;
 
@@ -2128,6 +2315,86 @@ test("qemu-net: fetchAndRespond rejects websocket upgrade requests", async () =>
   assert.equal(finished, true);
   const responseText = Buffer.concat(writes).toString("utf8");
   assert.match(responseText, /^HTTP\/1\.1 501 /);
+});
+
+test("qemu-net: websocket runtime egress deny skips DNS resolution", async () => {
+  let dnsLookups = 0;
+  const backend = makeBackend({
+    allowWebSockets: true,
+    httpHooks: {
+      onRequest() {
+        backend.setNetworkPolicy({ egress: "deny" });
+      },
+    },
+  });
+  backend.options.dnsLookup = ((_hostname: string, _options: any, cb: any) => {
+    dnsLookups += 1;
+    cb(null, [{ address: "127.0.0.1", family: 4 }]);
+  }) as any;
+
+  const key = "TCP:1.1.1.1:1234:2.2.2.2:80";
+  const session: any = {
+    socket: null,
+    srcIP: "1.1.1.1",
+    srcPort: 1234,
+    dstIP: "2.2.2.2",
+    dstPort: 80,
+    connectIP: "2.2.2.2",
+    flowControlPaused: false,
+    protocol: "http",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+  backend.tcpSessions.set(key, session);
+
+  const writes: Buffer[] = [];
+  let finished = false;
+  await qemuHttp.handleHttpDataWithWriter(
+    backend,
+    key,
+    session,
+    Buffer.from(
+      "GET /chat HTTP/1.1\r\n" +
+        "Host: example.com\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Sec-WebSocket-Key: x\r\n" +
+        "Sec-WebSocket-Version: 13\r\n" +
+        "\r\n",
+    ),
+    {
+      scheme: "http",
+      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+      finish: () => {
+        finished = true;
+      },
+    },
+  );
+
+  assert.equal(finished, true);
+  assert.equal(dnsLookups, 0);
+  assert.match(Buffer.concat(writes).toString("utf8"), /^HTTP\/1\.1 403 /);
+});
+
+test("qemu-net: websocket upstream connect rejects when destroyed before connect", async () => {
+  const backend = makeBackend({ webSocketUpstreamConnectTimeoutMs: 0 });
+
+  await assert.rejects(
+    qemuWs.connectWebSocketUpstream(
+      backend,
+      {
+        protocol: "http",
+        hostname: "example.com",
+        address: "192.0.2.1",
+        port: 80,
+      },
+      (socket) => {
+        setImmediate(() => socket.destroy());
+      },
+    ),
+    /closed before connect/,
+  );
 });
 
 test("qemu-net: websocket upgrades are tunneled when enabled", async () => {

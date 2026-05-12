@@ -12,6 +12,8 @@ import {
   type ExecCommandMessage,
   type ExecResponseMessage,
   type ExecWindowCommandMessage,
+  type NetworkPolicyCommandMessage,
+  type NetworkPolicyResponseMessage,
   type PtyResizeCommandMessage,
   type ServerMessage,
   type SnapshotCommandMessage,
@@ -312,6 +314,10 @@ type SessionIpcServerHandlers = {
   onSnapshot?: (
     message: SnapshotCommandMessage,
   ) => Promise<SessionSnapshotResult>;
+  /** update or read runtime network policy for a running session */
+  onNetworkPolicy?: (
+    message: NetworkPolicyCommandMessage,
+  ) => Promise<NetworkPolicyResponseMessage["policy"]>;
 };
 
 export class SessionIpcServer {
@@ -584,9 +590,16 @@ export class SessionIpcServer {
       }
     };
 
+    const assertRequestId = (id: number, label: string): boolean => {
+      if (!Number.isInteger(id) || id < 0) {
+        sendError(socket, "invalid_request", `${label} requires a uint32 id`);
+        return false;
+      }
+      return true;
+    };
+
     const handleSnapshot = (message: SnapshotCommandMessage): void => {
-      if (!Number.isInteger(message.id) || message.id < 0) {
-        sendError(socket, "invalid_request", "snapshot requires a uint32 id");
+      if (!assertRequestId(message.id, "snapshot")) {
         return;
       }
 
@@ -641,6 +654,39 @@ export class SessionIpcServer {
         });
     };
 
+    const handleNetworkPolicy = (
+      message: NetworkPolicyCommandMessage,
+    ): void => {
+      if (!assertRequestId(message.id, "network_policy")) {
+        return;
+      }
+
+      if (!this.handlers.onNetworkPolicy) {
+        sendError(
+          socket,
+          "unsupported",
+          "network policy actions are not supported for this session",
+          message.id,
+        );
+        return;
+      }
+
+      void this.handlers
+        .onNetworkPolicy(message)
+        .then((policy) => {
+          const response: NetworkPolicyResponseMessage = {
+            type: "network_policy_response",
+            id: message.id,
+            policy,
+          };
+          sendJson(socket, response);
+        })
+        .catch((err) => {
+          const detail = err instanceof Error ? err.message : String(err);
+          sendError(socket, "network_policy_failed", detail, message.id);
+        });
+    };
+
     const handleMessage = (message: ClientMessage): void => {
       if (message.type === "boot") {
         // Attach clients connect to an already-running VM; ignore boot requests.
@@ -669,6 +715,11 @@ export class SessionIpcServer {
 
       if (message.type === "snapshot") {
         handleSnapshot(message);
+        return;
+      }
+
+      if (message.type === "network_policy") {
+        handleNetworkPolicy(message);
         return;
       }
 

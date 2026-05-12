@@ -46,6 +46,7 @@ import {
 } from "../src/session-registry.ts";
 import {
   decodeOutputFrame,
+  type NetworkPolicyResponseMessage,
   type ServerMessage,
   type SnapshotResponseMessage,
 } from "../src/sandbox/control-protocol.ts";
@@ -218,6 +219,7 @@ function usage() {
   console.log("  list         List running VM sessions");
   console.log("  attach       Attach to a running VM session");
   console.log("  snapshot     Snapshot a running VM session");
+  console.log("  network      Inspect or change live session egress policy");
   console.log(
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
@@ -385,6 +387,20 @@ function snapshotUsage() {
   );
   console.log("  --name NAME     Snapshot name (default output path only)");
   console.log("  --help, -h      Show this help");
+}
+
+function networkUsage() {
+  console.log("Usage: gondolin network <action> <SESSION_ID>");
+  console.log();
+  console.log("Inspect or update host-enforced runtime egress policy.");
+  console.log();
+  console.log("Actions:");
+  console.log("  status      Show current policy");
+  console.log("  off         Block VM-mediated guest-initiated host egress");
+  console.log("  on          Re-open the runtime egress gate");
+  console.log();
+  console.log("Options:");
+  console.log("  --help, -h  Show this help");
 }
 
 function execUsage() {
@@ -2370,6 +2386,135 @@ async function runSnapshot(argv: string[]) {
   }
 }
 
+type NetworkAction = "status" | "off" | "on";
+
+type NetworkArgs = {
+  action: NetworkAction;
+  sessionId: string;
+};
+
+function isNetworkAction(value: string): value is NetworkAction {
+  return value === "status" || value === "off" || value === "on";
+}
+
+function parseNetworkArgs(argv: string[]): NetworkArgs {
+  if (argv.length === 0) {
+    networkUsage();
+    process.exit(1);
+  }
+
+  let action: NetworkAction | undefined;
+  let sessionId = "";
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+
+    if (arg === "--help" || arg === "-h") {
+      networkUsage();
+      process.exit(0);
+    }
+
+    if (!action && isNetworkAction(arg)) {
+      action = arg;
+      continue;
+    }
+
+    if (!sessionId && !arg.startsWith("-")) {
+      sessionId = arg;
+      continue;
+    }
+
+    console.error(`Unknown argument: ${arg}`);
+    networkUsage();
+    process.exit(1);
+  }
+
+  if (!action) {
+    console.error("network requires an action");
+    networkUsage();
+    process.exit(1);
+  }
+
+  if (!sessionId) {
+    console.error("network requires a session id");
+    networkUsage();
+    process.exit(1);
+  }
+
+  return { action, sessionId };
+}
+
+async function runNetwork(argv: string[]) {
+  const args = parseNetworkArgs(argv);
+
+  await gcSessions().catch(() => {
+    // ignore
+  });
+
+  const session = await findSession(args.sessionId);
+  if (!session || !session.alive) {
+    throw new Error(`session not found or not running: ${args.sessionId}`);
+  }
+
+  const requestId = 1;
+  let done = false;
+  let resolveDone!: (message: NetworkPolicyResponseMessage) => void;
+  let rejectDone!: (error: Error) => void;
+  const donePromise = new Promise<NetworkPolicyResponseMessage>(
+    (resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    },
+  );
+
+  const client = connectToSession(session.socketPath, {
+    onJson(message: ServerMessage) {
+      if (message.type === "status") return;
+
+      if (message.type === "network_policy_response") {
+        if (message.id !== requestId) return;
+        done = true;
+        resolveDone(message);
+        return;
+      }
+
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== requestId) return;
+        done = true;
+        rejectDone(new Error(`error ${message.code}: ${message.message}`));
+      }
+    },
+    onBinary() {
+      // network command does not stream binary data
+    },
+    onClose(error?: Error) {
+      if (done) return;
+      done = true;
+      rejectDone(error ?? new Error("session connection closed"));
+    },
+  });
+
+  const policy =
+    args.action === "off"
+      ? { egress: "deny" as const }
+      : args.action === "on"
+        ? { egress: "allow" as const }
+        : undefined;
+
+  client.send({
+    type: "network_policy",
+    id: requestId,
+    policy,
+  });
+
+  try {
+    const result = await donePromise;
+    console.log(`egress: ${result.policy.egress}`);
+  } finally {
+    client.close();
+  }
+}
+
 // ============================================================================
 // Build command
 // ============================================================================
@@ -2923,6 +3068,9 @@ async function main() {
       return;
     case "snapshot":
       await runSnapshot(args);
+      return;
+    case "network":
+      await runNetwork(args);
       return;
     case "build":
       await runBuild(args);

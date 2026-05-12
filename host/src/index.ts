@@ -10,6 +10,8 @@ export {
   VM,
   type VMOptions,
   type VMState,
+  type EffectiveNetworkPolicy,
+  type RuntimeNetworkPolicy,
   type EnableSshOptions,
   type SshAccess,
   type VmFs,
@@ -99,6 +101,7 @@ export {
 export type {
   DnsMode,
   DnsOptions,
+  NetworkPolicyAction,
   SyntheticDnsHostMappingMode,
   HttpIpAllowInfo,
   HttpHooks,

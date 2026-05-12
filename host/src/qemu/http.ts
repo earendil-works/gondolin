@@ -133,6 +133,9 @@ export type HttpSession = {
 
   /** whether we already sent an interim 100-continue response */
   sentContinue?: boolean;
+
+  /** active upstream fetch abort controller */
+  activeFetchAbort?: AbortController;
 };
 
 function resetTaintState(
@@ -293,7 +296,7 @@ function maybeSend100ContinueFromHead(
   }
 }
 
-function cleanupStreamingBodyState(
+export function cleanupStreamingBodyState(
   backend: QemuNetworkBackend,
   httpSession: HttpSession,
   cause?: Error,
@@ -1336,6 +1339,8 @@ export async function fetchHookRequestAndRespond(
     const requestLabel = `${currentRequest.method} ${currentUrl.toString()}`;
     const responseStart = Date.now();
 
+    ensureRuntimeEgressAllowed(backend);
+
     const canSkipFirstHopPolicyChecks =
       isFirstHop &&
       policyCheckedFirstHop &&
@@ -1345,6 +1350,8 @@ export async function fetchHookRequestAndRespond(
       await ensureRequestAllowed(backend, currentRequest);
       await ensureIpAllowed(backend, currentUrl, protocol, port);
     }
+
+    ensureRuntimeEgressAllowed(backend);
 
     const useDefaultFetch = backend.options.fetch === undefined;
     const originKey = useDefaultFetch
@@ -1366,12 +1373,15 @@ export async function fetchHookRequestAndRespond(
         : undefined;
 
     let response: FetchResponse;
+    const abortController = new AbortController();
+    httpSession.activeFetchAbort = abortController;
     try {
       response = await fetcher(currentUrl.toString(), {
         method: currentRequest.method,
         headers: currentRequest.headers,
         body: bodyInit as any,
         redirect: "manual",
+        signal: abortController.signal,
         ...(bodyStream ? { duplex: "half" } : {}),
         ...(dispatcher ? { dispatcher } : {}),
       } as any);
@@ -1385,178 +1395,198 @@ export async function fetchHookRequestAndRespond(
           `http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`,
         );
       }
+      clearActiveFetchAbort(httpSession, abortController);
       throw err;
     }
 
-    const redirectUrl = getRedirectUrl(response, currentUrl);
-    if (redirectUrl) {
-      if (response.body) {
-        await response.body.cancel();
-      }
+    try {
+      const redirectUrl = getRedirectUrl(response, currentUrl);
+      if (redirectUrl) {
+        if (response.body) {
+          await response.body.cancel();
+        }
 
-      if (redirectCount >= MAX_HTTP_REDIRECTS) {
-        throw new HttpRequestBlockedError(
-          "too many redirects",
-          508,
-          "Loop Detected",
-        );
-      }
+        if (redirectCount >= MAX_HTTP_REDIRECTS) {
+          throw new HttpRequestBlockedError(
+            "too many redirects",
+            508,
+            "Loop Detected",
+          );
+        }
 
-      if (bodyStream) {
-        // Streaming request bodies cannot be replayed on redirects.
-        const redirected = applyRedirectRequest(
-          {
-            method: currentRequest.method,
-            url: currentRequest.url,
-            headers: currentRequest.headers,
-            // Sentinel to indicate a non-empty body so redirect rewriting matches buffered semantics.
-            body: Buffer.alloc(1),
-          },
+        if (bodyStream) {
+          // Streaming request bodies cannot be replayed on redirects.
+          const redirected = applyRedirectRequest(
+            {
+              method: currentRequest.method,
+              url: currentRequest.url,
+              headers: currentRequest.headers,
+              // Sentinel to indicate a non-empty body so redirect rewriting matches buffered semantics.
+              body: Buffer.alloc(1),
+            },
+            response.status,
+            currentUrl,
+            redirectUrl,
+          );
+
+          if (redirected.body) {
+            throw new HttpRequestBlockedError(
+              "redirect requires replaying streamed request body",
+              502,
+              "Bad Gateway",
+            );
+          }
+
+          pendingRequest = {
+            method: redirected.method,
+            url: redirected.url,
+            headers: redirected.headers,
+            body: null,
+          };
+          continue;
+        }
+
+        pendingRequest = applyRedirectRequest(
+          currentRequest,
           response.status,
           currentUrl,
           redirectUrl,
         );
-
-        if (redirected.body) {
-          throw new HttpRequestBlockedError(
-            "redirect requires replaying streamed request body",
-            502,
-            "Bad Gateway",
-          );
-        }
-
-        pendingRequest = {
-          method: redirected.method,
-          url: redirected.url,
-          headers: redirected.headers,
-          body: null,
-        };
         continue;
       }
 
-      pendingRequest = applyRedirectRequest(
-        currentRequest,
-        response.status,
-        currentUrl,
-        redirectUrl,
-      );
-      continue;
-    }
-
-    if (backend.options.debug) {
-      backend.emitDebug(
-        `http bridge response ${response.status} ${response.statusText}`,
-      );
-    }
-
-    let responseHeaders = stripHopByHopHeaders(
-      responseHeadersToRecord(response.headers),
-    );
-    const contentEncodingValue = responseHeaders["content-encoding"];
-    const contentEncoding = Array.isArray(contentEncodingValue)
-      ? contentEncodingValue[0]
-      : contentEncodingValue;
-
-    const contentLengthValue = responseHeaders["content-length"];
-    const contentLength = Array.isArray(contentLengthValue)
-      ? contentLengthValue[0]
-      : contentLengthValue;
-
-    const parsedLength = contentLength ? Number(contentLength) : null;
-    const hasValidLength =
-      parsedLength !== null &&
-      Number.isFinite(parsedLength) &&
-      parsedLength >= 0;
-
-    if (contentEncoding) {
-      delete responseHeaders["content-encoding"];
-      delete responseHeaders["content-length"];
-    }
-    responseHeaders["connection"] = "close";
-
-    const responseBodyStream =
-      response.body as WebReadableStream<Uint8Array> | null;
-
-    const suppressBody =
-      currentRequest.method === "HEAD" ||
-      response.status === 204 ||
-      response.status === 205 ||
-      response.status === 304;
-
-    if (suppressBody) {
-      if (responseBodyStream) {
-        try {
-          await responseBodyStream.cancel();
-        } catch {
-          // ignore cancellation failures
-        }
+      if (backend.options.debug) {
+        backend.emitDebug(
+          `http bridge response ${response.status} ${response.statusText}`,
+        );
       }
 
-      // No message body is allowed for these responses.
-      delete responseHeaders["transfer-encoding"];
+      let responseHeaders = stripHopByHopHeaders(
+        responseHeadersToRecord(response.headers),
+      );
+      const contentEncodingValue = responseHeaders["content-encoding"];
+      const contentEncoding = Array.isArray(contentEncodingValue)
+        ? contentEncodingValue[0]
+        : contentEncodingValue;
 
-      if (
+      const contentLengthValue = responseHeaders["content-length"];
+      const contentLength = Array.isArray(contentLengthValue)
+        ? contentLengthValue[0]
+        : contentLengthValue;
+
+      const parsedLength = contentLength ? Number(contentLength) : null;
+      const hasValidLength =
+        parsedLength !== null &&
+        Number.isFinite(parsedLength) &&
+        parsedLength >= 0;
+
+      if (contentEncoding) {
+        delete responseHeaders["content-encoding"];
+        delete responseHeaders["content-length"];
+      }
+      responseHeaders["connection"] = "close";
+
+      const responseBodyStream =
+        response.body as WebReadableStream<Uint8Array> | null;
+
+      const suppressBody =
+        currentRequest.method === "HEAD" ||
         response.status === 204 ||
         response.status === 205 ||
-        response.status === 304
-      ) {
-        delete responseHeaders["content-encoding"];
-        responseHeaders["content-length"] = "0";
-      } else {
-        // HEAD: preserve Content-Length if present, otherwise be explicit.
-        if (!responseHeaders["content-length"])
+        response.status === 304;
+
+      if (suppressBody) {
+        if (responseBodyStream) {
+          try {
+            await responseBodyStream.cancel();
+          } catch {
+            // ignore cancellation failures
+          }
+        }
+
+        // No message body is allowed for these responses.
+        delete responseHeaders["transfer-encoding"];
+
+        if (
+          response.status === 204 ||
+          response.status === 205 ||
+          response.status === 304
+        ) {
+          delete responseHeaders["content-encoding"];
           responseHeaders["content-length"] = "0";
+        } else {
+          // HEAD: preserve Content-Length if present, otherwise be explicit.
+          if (!responseHeaders["content-length"])
+            responseHeaders["content-length"] = "0";
+        }
+
+        let hookResponse: InternalHttpResponse = {
+          status: response.status,
+          statusText: response.statusText || "OK",
+          headers: responseHeaders,
+          body: Buffer.alloc(0),
+        };
+
+        hookResponse = await applyResponseHooks(
+          backend,
+          hookResponse,
+          currentRequest,
+        );
+
+        sendHttpResponse(
+          write,
+          normalizeHookResponseForGuest(hookResponse, currentRequest.method),
+          httpVersion,
+        );
+        return;
       }
 
-      let hookResponse: InternalHttpResponse = {
-        status: response.status,
-        statusText: response.statusText || "OK",
-        headers: responseHeaders,
-        body: Buffer.alloc(0),
-      };
+      const canStream =
+        Boolean(responseBodyStream) && !backend.options.httpHooks?.onResponse;
 
-      hookResponse = await applyResponseHooks(
-        backend,
-        hookResponse,
-        currentRequest,
-      );
+      if (canStream && responseBodyStream) {
+        const allowChunked = httpVersion === "HTTP/1.1";
+        let streamedBytes = 0;
 
-      sendHttpResponse(
-        write,
-        normalizeHookResponseForGuest(hookResponse, currentRequest.method),
-        httpVersion,
-      );
-      return;
-    }
+        try {
+          if (contentEncoding || !hasValidLength) {
+            delete responseHeaders["content-length"];
 
-    const canStream =
-      Boolean(responseBodyStream) && !backend.options.httpHooks?.onResponse;
-
-    if (canStream && responseBodyStream) {
-      const allowChunked = httpVersion === "HTTP/1.1";
-      let streamedBytes = 0;
-
-      try {
-        if (contentEncoding || !hasValidLength) {
-          delete responseHeaders["content-length"];
-
-          if (allowChunked) {
-            responseHeaders["transfer-encoding"] = "chunked";
-            sendHttpResponseHead(
-              write,
-              {
-                status: response.status,
-                statusText: response.statusText || "OK",
-                headers: responseHeaders,
-              },
-              httpVersion,
-            );
-            streamedBytes = await sendChunkedBody(
-              responseBodyStream,
-              write,
-              waitForWritable,
-            );
+            if (allowChunked) {
+              responseHeaders["transfer-encoding"] = "chunked";
+              sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion,
+              );
+              streamedBytes = await sendChunkedBody(
+                responseBodyStream,
+                write,
+                waitForWritable,
+              );
+            } else {
+              delete responseHeaders["transfer-encoding"];
+              sendHttpResponseHead(
+                write,
+                {
+                  status: response.status,
+                  statusText: response.statusText || "OK",
+                  headers: responseHeaders,
+                },
+                httpVersion,
+              );
+              streamedBytes = await sendStreamBody(
+                responseBodyStream,
+                write,
+                waitForWritable,
+              );
+            }
           } else {
+            responseHeaders["content-length"] = parsedLength!.toString();
             delete responseHeaders["transfer-encoding"];
             sendHttpResponseHead(
               write,
@@ -1573,106 +1603,91 @@ export async function fetchHookRequestAndRespond(
               waitForWritable,
             );
           }
-        } else {
-          responseHeaders["content-length"] = parsedLength!.toString();
-          delete responseHeaders["transfer-encoding"];
-          sendHttpResponseHead(
-            write,
-            {
-              status: response.status,
-              statusText: response.statusText || "OK",
-              headers: responseHeaders,
-            },
-            httpVersion,
+        } catch (err) {
+          if (originKey) {
+            evictSharedDispatcher(backend, originKey);
+          }
+          try {
+            await responseBodyStream.cancel();
+          } catch {
+            // ignore cancellation failures
+          }
+          throw err;
+        }
+
+        if (backend.options.debug) {
+          const elapsed = Date.now() - responseStart;
+          backend.emitDebug(
+            `http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`,
           );
-          streamedBytes = await sendStreamBody(
-            responseBodyStream,
-            write,
-            waitForWritable,
-          );
         }
-      } catch (err) {
-        if (originKey) {
-          evictSharedDispatcher(backend, originKey);
-        }
-        try {
-          await responseBodyStream.cancel();
-        } catch {
-          // ignore cancellation failures
-        }
-        throw err;
+
+        return;
       }
 
-      if (backend.options.debug) {
-        const elapsed = Date.now() - responseStart;
-        backend.emitDebug(
-          `http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`,
+      const maxResponseBytes = backend.http.maxHttpResponseBodyBytes;
+
+      if (
+        hasValidLength &&
+        !contentEncoding &&
+        parsedLength! > maxResponseBytes
+      ) {
+        if (responseBodyStream) {
+          try {
+            await responseBodyStream.cancel();
+          } catch {
+            // ignore cancellation failures
+          }
+        }
+        throw new HttpRequestBlockedError(
+          `response body exceeds ${maxResponseBytes} bytes`,
+          502,
+          "Bad Gateway",
         );
       }
 
-      return;
-    }
+      const responseBody = responseBodyStream
+        ? await bufferResponseBodyWithLimit(responseBodyStream, maxResponseBytes)
+        : Buffer.from(await response.arrayBuffer());
 
-    const maxResponseBytes = backend.http.maxHttpResponseBodyBytes;
-
-    if (
-      hasValidLength &&
-      !contentEncoding &&
-      parsedLength! > maxResponseBytes
-    ) {
-      if (responseBodyStream) {
-        try {
-          await responseBodyStream.cancel();
-        } catch {
-          // ignore cancellation failures
-        }
+      if (responseBody.length > maxResponseBytes) {
+        throw new HttpRequestBlockedError(
+          `response body exceeds ${maxResponseBytes} bytes`,
+          502,
+          "Bad Gateway",
+        );
       }
-      throw new HttpRequestBlockedError(
-        `response body exceeds ${maxResponseBytes} bytes`,
-        502,
-        "Bad Gateway",
+
+      responseHeaders["content-length"] = responseBody.length.toString();
+
+      let hookResponse: InternalHttpResponse = {
+        status: response.status,
+        statusText: response.statusText || "OK",
+        headers: responseHeaders,
+        body: responseBody,
+      };
+
+      hookResponse = await applyResponseHooks(
+        backend,
+        hookResponse,
+        currentRequest,
       );
-    }
-
-    const responseBody = responseBodyStream
-      ? await bufferResponseBodyWithLimit(responseBodyStream, maxResponseBytes)
-      : Buffer.from(await response.arrayBuffer());
-
-    if (responseBody.length > maxResponseBytes) {
-      throw new HttpRequestBlockedError(
-        `response body exceeds ${maxResponseBytes} bytes`,
-        502,
-        "Bad Gateway",
+      hookResponse = normalizeHookResponseForGuest(
+        hookResponse,
+        currentRequest.method,
       );
+
+      sendHttpResponse(write, hookResponse, httpVersion);
+      if (backend.options.debug) {
+        const elapsed = Date.now() - responseStart;
+        backend.emitDebug(
+          `http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`,
+        );
+      }
+      return;
+    } finally {
+      clearActiveFetchAbort(httpSession, abortController);
     }
-
-    responseHeaders["content-length"] = responseBody.length.toString();
-
-    let hookResponse: InternalHttpResponse = {
-      status: response.status,
-      statusText: response.statusText || "OK",
-      headers: responseHeaders,
-      body: responseBody,
-    };
-
-    hookResponse = await applyResponseHooks(
-      backend,
-      hookResponse,
-      currentRequest,
-    );
-    hookResponse = normalizeHookResponseForGuest(
-      hookResponse,
-      currentRequest.method,
-    );
-
-    sendHttpResponse(write, hookResponse, httpVersion);
-    if (backend.options.debug) {
-      const elapsed = Date.now() - responseStart;
-      backend.emitDebug(
-        `http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`,
-      );
-    }
-    return;
   }
 }
 
@@ -1788,6 +1803,8 @@ async function handleWebSocketUpgrade(
   if (!Number.isFinite(port) || port <= 0) {
     throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
   }
+
+  ensureRuntimeEgressAllowed(backend);
 
   // Resolve all A/AAAA records and pick the first IP allowed by policy.
   // This pins the websocket tunnel to an allowed address and avoids rejecting
@@ -2032,6 +2049,20 @@ function shouldPrecheckRequestPolicies(backend: QemuNetworkBackend): boolean {
   }
 
   return onRequest[ON_REQUEST_EARLY_POLICY_SAFE] === true;
+}
+
+function ensureRuntimeEgressAllowed(backend: QemuNetworkBackend) {
+  if (backend.isEgressAllowed()) return;
+  throw new HttpRequestBlockedError("blocked by runtime egress policy");
+}
+
+function clearActiveFetchAbort(
+  httpSession: HttpSession,
+  abortController: AbortController,
+) {
+  if (httpSession.activeFetchAbort === abortController) {
+    httpSession.activeFetchAbort = undefined;
+  }
 }
 
 async function ensureRequestHeadPolicies(

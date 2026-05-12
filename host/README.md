@@ -70,6 +70,9 @@ npx @earendil-works/gondolin attach <session-id>
 # Snapshot a running VM session (stops that session)
 npx @earendil-works/gondolin snapshot <session-id>
 
+# Disable outbound egress for a live session
+npx @earendil-works/gondolin network off <session-id>
+
 # Resume from snapshot id/path
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```

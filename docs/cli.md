@@ -6,6 +6,7 @@ Gondolin ships with a small command line interface (CLI) that lets you:
 - list running VM sessions (`list`)
 - attach a new interactive command to an existing VM (`attach`)
 - snapshot a running VM session (`snapshot`)
+- inspect or change live session egress policy (`network`)
 - run one or more commands non-interactively (`exec`)
 - build and verify custom guest assets (`build`)
 - manage local image refs/objects (`image`)
@@ -364,6 +365,33 @@ gondolin snapshot 9e3a2e2d
 
 # Snapshot to an explicit path
 gondolin snapshot 9e3a2e2d --output ./my-snapshot.qcow2
+```
+
+### `gondolin network`
+
+Inspect or update runtime egress policy for a live VM session:
+
+```bash
+gondolin network <action> <SESSION_ID>
+```
+
+Actions:
+
+- `status` - print the current policy
+- `off` - block all VM-mediated guest-initiated host egress (DNS, web,
+  SSH, mapped TCP)
+- `on` - re-open the runtime egress gate (configured policies still apply)
+
+`off` closes existing egress sessions.
+
+Examples:
+
+```bash
+# Emergency cutoff: block VM-mediated outbound egress and close active sessions
+gondolin network off 9e3a2e2d
+
+# Re-open the runtime egress gate
+gondolin network on 9e3a2e2d
 ```
 
 ### `gondolin exec`

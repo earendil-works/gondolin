@@ -58,6 +58,22 @@ function makeTempResolvedServerOptions() {
   };
 }
 
+test("VM.setOutboundEgressEnabled(true) restores egress", () => {
+  let capturedPolicy: unknown = null;
+  const result = (VM.prototype.setOutboundEgressEnabled as any).call(
+    {
+      setNetworkPolicy(policy: unknown) {
+        capturedPolicy = policy;
+        return { egress: "allow" };
+      },
+    },
+    true,
+  );
+
+  assert.deepEqual(capturedPolicy, { egress: "allow" });
+  assert.deepEqual(result, { egress: "allow" });
+});
+
 function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
   fs.writeFileSync(
     path.join(dir, "manifest.json"),
