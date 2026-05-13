@@ -80,6 +80,39 @@ export class SandboxServerOps {
     return this.fsService?.metrics ?? null;
   }
 
+  resumeControllerForActivity(): Promise<void> | void {
+    return this.controller.resumeForActivity?.();
+  }
+
+  hasActiveGuestActivity(): boolean {
+    return (
+      this.inflight.size > 0 ||
+      this.startedExecs.size > 0 ||
+      this.execQueue.length > 0 ||
+      this.fileOps.size > 0 ||
+      this.activeFileOpId !== null ||
+      this.activeVfsRequests > 0 ||
+      Boolean(this.network?.hasActiveGuestActivity()) ||
+      this.tcpStreams.size > 0 ||
+      this.tcpOpenWaiters.size > 0 ||
+      this.ingressTcpStreams.size > 0 ||
+      this.ingressTcpOpenWaiters.size > 0
+    );
+  }
+
+  execPressure(): number {
+    let pressure = this.startedExecs.size;
+    for (const id of this.inflight.keys()) {
+      if (!this.startedExecs.has(id)) pressure += 1;
+    }
+    return pressure;
+  }
+
+  scheduleControllerIdlePause(): void {
+    if (this.hasActiveGuestActivity()) return;
+    this.controller.scheduleIdlePause?.();
+  }
+
   connect(
     onMessage: (data: Buffer | string, isBinary: boolean) => void,
     onClose?: () => void,
@@ -351,6 +384,8 @@ export class SandboxServerOps {
       throw new Error(`invalid guest port: ${port}`);
     }
 
+    await this.resumeControllerForActivity();
+
     // Allocate stream id
     let id = this.nextTcpStreamId;
     for (let i = 0; i < 0xffffffff; i++) {
@@ -371,6 +406,7 @@ export class SandboxServerOps {
           this.tcpOpenWaiters.delete(id);
           waiter.reject(new Error("tcp stream closed"));
         }
+        this.scheduleControllerIdlePause();
       },
     );
 
@@ -394,6 +430,7 @@ export class SandboxServerOps {
       this.tcpStreams.delete(id);
       this.tcpOpenWaiters.delete(id);
       stream.destroy();
+      this.scheduleControllerIdlePause();
       throw new Error("virtio tcp queue exceeded");
     }
 
@@ -411,6 +448,7 @@ export class SandboxServerOps {
       return stream;
     } catch (err) {
       stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      this.scheduleControllerIdlePause();
       throw err;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -440,6 +478,8 @@ export class SandboxServerOps {
       throw new Error(`invalid guest port: ${port}`);
     }
 
+    await this.resumeControllerForActivity();
+
     // Allocate stream id
     let id = this.nextIngressTcpStreamId;
     for (let i = 0; i < 0xffffffff; i++) {
@@ -464,6 +504,7 @@ export class SandboxServerOps {
           this.ingressTcpOpenWaiters.delete(id);
           waiter.reject(new Error("tcp stream closed"));
         }
+        this.scheduleControllerIdlePause();
       },
     );
 
@@ -487,6 +528,7 @@ export class SandboxServerOps {
       this.ingressTcpStreams.delete(id);
       this.ingressTcpOpenWaiters.delete(id);
       stream.destroy();
+      this.scheduleControllerIdlePause();
       throw new Error("virtio tcp queue exceeded");
     }
 
@@ -504,6 +546,7 @@ export class SandboxServerOps {
       return stream;
     } catch (err) {
       stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      this.scheduleControllerIdlePause();
       throw err;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -534,6 +577,7 @@ export class SandboxServerOps {
       this.status = "running";
       this.broadcastStatus(this.status);
     }
+    this.scheduleControllerIdlePause();
   }
 
   handleVfsError(message: string, code = "vfs_error") {
@@ -578,6 +622,7 @@ export class SandboxServerOps {
   }
 
   async closeInternal() {
+    this.controller.cancelIdlePause?.();
     this.failInflight("server_shutdown", "server is shutting down");
     this.closeAllClients();
 
@@ -657,6 +702,7 @@ export class SandboxServerOps {
 
   async waitForExecIdle(signal?: AbortSignal): Promise<void> {
     while (
+      this.inflight.size > 0 ||
       this.startedExecs.size > 0 ||
       this.activeFileOpId !== null ||
       this.execQueue.length > 0
@@ -719,7 +765,15 @@ export class SandboxServerOps {
     message: object,
     signal?: AbortSignal,
   ): Promise<void> {
-    while (!this.bridge.send(message)) {
+    if (signal?.aborted) {
+      throw new Error("operation aborted");
+    }
+    await this.resumeControllerForActivity();
+    for (;;) {
+      if (signal?.aborted) {
+        throw new Error("operation aborted");
+      }
+      if (this.bridge.send(message)) return;
       await this.waitForBridgeWritable(signal);
     }
   }
@@ -739,6 +793,7 @@ export class SandboxServerOps {
       this.activeFileOpId = null;
       this.pumpExecQueue();
     }
+    this.scheduleControllerIdlePause();
   }
 
   rejectFileOperation(id: number, err: Error): void {
@@ -758,6 +813,7 @@ export class SandboxServerOps {
       this.activeFileOpId = null;
       this.pumpExecQueue();
     }
+    this.scheduleControllerIdlePause();
   }
 
   failFileOperations(message: string): void {
@@ -773,6 +829,7 @@ export class SandboxServerOps {
     for (const [id, entry] of this.inflight.entries()) {
       if (entry === client) {
         this.inflight.delete(id);
+        this.pendingExecAdmissions.delete(id);
         this.stdinAllowed.delete(id);
         this.stdinCredits.delete(id);
         this.pendingExecWindows.delete(id);
@@ -834,7 +891,7 @@ export class SandboxServerOps {
     }
 
     if (message.type === "exec") {
-      this.handleExec(client, message);
+      void this.handleExec(client, message);
     } else if (message.type === "stdin") {
       this.handleStdin(client, message);
     } else if (message.type === "pty_resize") {
@@ -919,6 +976,7 @@ export class SandboxServerOps {
 
     if (!this.bridge.send(buildExecRequest(id, entry.payload))) {
       this.inflight.delete(id);
+      this.pendingExecAdmissions.delete(id);
       this.startedExecs.delete(id);
       this.stdinAllowed.delete(id);
       this.stdinCredits.delete(id);
@@ -931,6 +989,7 @@ export class SandboxServerOps {
         code: "queue_full",
         message: "virtio bridge queue exceeded",
       });
+      this.scheduleControllerIdlePause();
       return;
     }
 
@@ -970,7 +1029,7 @@ export class SandboxServerOps {
     }
   }
 
-  handleExec(client: SandboxClient, message: ExecCommandMessage) {
+  async handleExec(client: SandboxClient, message: ExecCommandMessage) {
     if (this.hasDebug("exec")) {
       const envKeys = (message.env ?? [])
         .map((entry) => String(entry).split("=", 1)[0])
@@ -1029,8 +1088,7 @@ export class SandboxServerOps {
       return;
     }
 
-    const execPressure = this.startedExecs.size + this.execQueue.length;
-    if (execPressure >= this.options.maxQueuedExecs) {
+    if (this.execPressure() >= this.options.maxQueuedExecs) {
       sendError(client, {
         type: "error",
         id: message.id,
@@ -1040,11 +1098,54 @@ export class SandboxServerOps {
       return;
     }
 
+    const admission = {};
     this.inflight.set(message.id, client);
+    this.pendingExecAdmissions.set(message.id, admission);
     if (message.stdin) {
       this.stdinAllowed.add(message.id);
       this.stdinCredits.set(message.id, 0);
     }
+
+    try {
+      const resume = this.resumeControllerForActivity();
+      if (resume) await resume;
+    } catch (err) {
+      const ownsAdmission =
+        this.pendingExecAdmissions.get(message.id) === admission;
+      const owner = ownsAdmission ? this.inflight.get(message.id) : undefined;
+      if (ownsAdmission) {
+        this.inflight.delete(message.id);
+        this.pendingExecAdmissions.delete(message.id);
+        this.stdinAllowed.delete(message.id);
+        this.stdinCredits.delete(message.id);
+        this.pendingExecWindows.delete(message.id);
+        this.clearQueuedStdin(message.id);
+        this.queuedPtyResize.delete(message.id);
+      }
+
+      if (owner) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        sendError(owner, {
+          type: "error",
+          id: message.id,
+          code: "sandbox_resume_failed",
+          message: error.message,
+        });
+      }
+      this.scheduleControllerIdlePause();
+      return;
+    }
+
+    const ownsAdmission =
+      this.pendingExecAdmissions.get(message.id) === admission;
+    if (!ownsAdmission || this.inflight.get(message.id) !== client) {
+      if (ownsAdmission) {
+        this.pendingExecAdmissions.delete(message.id);
+      }
+      this.scheduleControllerIdlePause();
+      return;
+    }
+    this.pendingExecAdmissions.delete(message.id);
 
     const payload = {
       cmd: message.cmd,
@@ -1157,6 +1258,7 @@ export class SandboxServerOps {
           // Cancel queued execs on stdin overflow to avoid running with partial
           // stdin once file-operation gating is lifted.
           this.inflight.delete(message.id);
+          this.pendingExecAdmissions.delete(message.id);
           this.startedExecs.delete(message.id);
           this.stdinAllowed.delete(message.id);
           this.stdinCredits.delete(message.id);
@@ -1512,6 +1614,7 @@ export class SandboxServerOps {
       });
     }
     this.inflight.clear();
+    this.pendingExecAdmissions.clear();
     this.startedExecs.clear();
     this.stdinAllowed.clear();
     this.pendingExecWindows.clear();

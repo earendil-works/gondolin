@@ -97,6 +97,36 @@ function stdinMessage(id: number, data: Buffer, eof = false) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function tcpSession(extra: Record<string, unknown> = {}) {
+  return {
+    socket: null,
+    srcIP: "192.168.127.2",
+    srcPort: 12345,
+    dstIP: "198.51.100.1",
+    dstPort: 443,
+    connectIP: "198.51.100.1",
+    connectPort: 443,
+    syntheticHostname: null,
+    mappedTcp: null,
+    flowControlPaused: false,
+    protocol: "tls",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+    ...extra,
+  };
+}
+
 test("exec requests are started concurrently when no file operation is active", () => {
   const server = new SandboxServer(makeResolvedOptions());
   const sent: any[] = [];
@@ -139,6 +169,242 @@ test("maxQueuedExecs caps total running plus queued exec pressure", () => {
     ),
     "expected queue_full once running+queued exec pressure reaches limit",
   );
+});
+
+test("exec admission reserves ids while controller resume is pending", async () => {
+  const server = new SandboxServer(makeResolvedOptions({ maxQueuedExecs: 1 }));
+  const sent: any[] = [];
+  const bridge = (server as any).bridge;
+  bridge.send = (msg: any) => {
+    sent.push(msg);
+    return true;
+  };
+
+  let resume!: () => void;
+  const resumePromise = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  (server as any).controller.resumeForActivity = () => resumePromise;
+
+  const a = makeClient();
+  const b = makeClient();
+  const c = makeClient();
+
+  const first = (server as any).handleExec(a.client, execMessage(1));
+  const duplicate = (server as any).handleExec(b.client, execMessage(1));
+  const overLimit = (server as any).handleExec(c.client, execMessage(2));
+
+  assert.ok((server as any).inflight.has(1));
+  assert.equal(sent.length, 0, "exec should not start before resume completes");
+  assert.ok(
+    b.captured.json.some(
+      (m) => m?.type === "error" && m?.id === 1 && m?.code === "duplicate_id",
+    ),
+    "expected duplicate_id while first exec is reserved",
+  );
+  assert.ok(
+    c.captured.json.some(
+      (m) => m?.type === "error" && m?.id === 2 && m?.code === "queue_full",
+    ),
+    "expected pending resume exec to count toward maxQueuedExecs",
+  );
+
+  resume();
+  await Promise.all([first, duplicate, overLimit]);
+
+  assert.equal(sent.filter((m) => m.t === "exec_request").length, 1);
+  assert.ok((server as any).startedExecs.has(1));
+  assert.ok(!(server as any).inflight.has(2));
+});
+
+test("idle pause waits for concurrent VFS requests to finish", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const responses: any[] = [];
+  const pending = [deferred<any>(), deferred<any>()];
+  let scheduleCalls = 0;
+  let cancelCalls = 0;
+
+  (server as any).controller.scheduleIdlePause = () => {
+    scheduleCalls += 1;
+  };
+  (server as any).controller.cancelIdlePause = () => {
+    cancelCalls += 1;
+  };
+  (server as any).fsBridge.send = (msg: any) => {
+    responses.push(msg);
+    return true;
+  };
+  (server as any).fsService = {
+    handleRequest: (message: any) => pending[message.id - 1]!.promise,
+  };
+
+  (server as any).fsBridge.onMessage({
+    v: 1,
+    t: "fs_request",
+    id: 1,
+    p: { op: "stat" },
+  });
+  (server as any).fsBridge.onMessage({
+    v: 1,
+    t: "fs_request",
+    id: 2,
+    p: { op: "stat" },
+  });
+
+  assert.equal(cancelCalls, 2);
+  assert.equal((server as any).activeVfsRequests, 2);
+
+  pending[0]!.resolve({ v: 1, t: "fs_response", id: 1, p: { op: "stat" } });
+  await pending[0]!.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(responses.length, 1);
+  assert.equal((server as any).activeVfsRequests, 1);
+  assert.equal(scheduleCalls, 0);
+
+  pending[1]!.resolve({ v: 1, t: "fs_response", id: 2, p: { op: "stat" } });
+  await pending[1]!.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(responses.length, 2);
+  assert.equal((server as any).activeVfsRequests, 0);
+  assert.equal(scheduleCalls, 1);
+});
+
+test("fs_request waits for controller resume before handling VFS request", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const resume = deferred<void>();
+  const responses: any[] = [];
+  let handled = false;
+  let scheduleCalls = 0;
+
+  (server as any).controller.resumeForActivity = () => resume.promise;
+  (server as any).controller.scheduleIdlePause = () => {
+    scheduleCalls += 1;
+  };
+  (server as any).fsBridge.send = (msg: any) => {
+    responses.push(msg);
+    return true;
+  };
+  (server as any).fsService = {
+    handleRequest: async (message: any) => {
+      handled = true;
+      return { v: 1, t: "fs_response", id: message.id, p: { op: "stat" } };
+    },
+  };
+
+  (server as any).fsBridge.onMessage({
+    v: 1,
+    t: "fs_request",
+    id: 1,
+    p: { op: "stat" },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal((server as any).activeVfsRequests, 1);
+  assert.equal(handled, false);
+  assert.equal(responses.length, 0);
+
+  resume.resolve();
+  await resume.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(handled, true);
+  assert.equal(responses.length, 1);
+  assert.equal((server as any).activeVfsRequests, 0);
+  assert.equal(scheduleCalls, 1);
+});
+
+test("network tcp sessions count as active guest activity", () => {
+  const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
+  const network = (server as any).network;
+  let resumeCalls = 0;
+  let scheduleCalls = 0;
+
+  (server as any).controller.resumeForActivity = () => {
+    resumeCalls += 1;
+  };
+  (server as any).controller.scheduleIdlePause = () => {
+    scheduleCalls += 1;
+  };
+
+  network.tcpSessions.set("flow", tcpSession());
+
+  assert.equal(resumeCalls, 1);
+  assert.equal((server as any).hasActiveGuestActivity(), true);
+
+  (server as any).scheduleControllerIdlePause();
+  assert.equal(scheduleCalls, 0);
+
+  network.tcpSessions.delete("flow");
+
+  assert.equal((server as any).hasActiveGuestActivity(), false);
+  assert.equal(scheduleCalls, 1);
+});
+
+test("network resume re-arms idle after a short-lived tcp session", async () => {
+  const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
+  const network = (server as any).network;
+  const controller = (server as any).controller;
+  const resume = deferred<void>();
+  let scheduleCalls = 0;
+
+  controller.pauseInProgress = true;
+  controller.resumeForActivity = () =>
+    resume.promise.finally(() => {
+      controller.pauseInProgress = false;
+    });
+  controller.scheduleIdlePause = () => {
+    if (!controller.pauseInProgress) scheduleCalls += 1;
+  };
+
+  network.tcpSessions.set("flow", tcpSession());
+  network.tcpSessions.delete("flow");
+  assert.equal(scheduleCalls, 0);
+
+  resume.resolve();
+  await resume.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(scheduleCalls, 1);
+});
+
+test("sendControlMessage aborts after waiting for resume", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const resume = deferred<void>();
+  const ac = new AbortController();
+  let sendCalls = 0;
+
+  (server as any).controller.resumeForActivity = () => resume.promise;
+  (server as any).bridge.send = () => {
+    sendCalls += 1;
+    return true;
+  };
+
+  const sending = (server as any).sendControlMessage({ v: 1 }, ac.signal);
+  ac.abort();
+  resume.resolve();
+
+  await assert.rejects(sending, /operation aborted/);
+  assert.equal(sendCalls, 0);
+});
+
+test("idle pause is armed when sandbox reaches running with no active work", () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  let scheduleCalls = 0;
+
+  (server as any).bridge.connect = () => {};
+  (server as any).fsBridge.connect = () => {};
+  (server as any).sshBridge.connect = () => {};
+  (server as any).ingressBridge.connect = () => {};
+  (server as any).controller.scheduleIdlePause = () => {
+    scheduleCalls += 1;
+  };
+
+  (server as any).controller.emit("state", "running");
+
+  assert.equal((server as any).status, "running");
+  assert.equal(scheduleCalls, 1);
 });
 
 test("started exec stdin replay keeps data buffered on queue pressure and retries", () => {

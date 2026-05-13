@@ -155,6 +155,34 @@ type TlsSession = {
   servername: string | null;
 };
 
+class ActivityMap<K, V> extends Map<K, V> {
+  private readonly onActivityChange: () => void;
+
+  constructor(onActivityChange: () => void) {
+    super();
+    this.onActivityChange = onActivityChange;
+  }
+
+  override set(key: K, value: V): this {
+    const hadKey = this.has(key);
+    super.set(key, value);
+    if (!hadKey) this.onActivityChange();
+    return this;
+  }
+
+  override delete(key: K): boolean {
+    const deleted = super.delete(key);
+    if (deleted) this.onActivityChange();
+    return deleted;
+  }
+
+  override clear(): void {
+    if (this.size === 0) return;
+    super.clear();
+    this.onActivityChange();
+  }
+}
+
 export type TcpSession = {
   socket: net.Socket | null;
   srcIP: string;
@@ -315,9 +343,12 @@ export class QemuNetworkBackend extends EventEmitter {
   stack: NetworkStack | null = null;
 
   private readonly udpSessions = new Map<string, UdpSession>();
+  private guestActivityActive = false;
 
   /** @internal */
-  readonly tcpSessions = new Map<string, TcpSession>();
+  readonly tcpSessions = new ActivityMap<string, TcpSession>(() =>
+    this.notifyGuestActivityChange(),
+  );
 
   private readonly mitmDir: string;
   private caPromise: Promise<CaCert> | null = null;
@@ -443,6 +474,17 @@ export class QemuNetworkBackend extends EventEmitter {
       dnsMode: this.dnsMode,
       syntheticHostMapping: this.syntheticDnsHostMapping,
     });
+  }
+
+  hasActiveGuestActivity(): boolean {
+    return this.tcpSessions.size > 0;
+  }
+
+  private notifyGuestActivityChange() {
+    const active = this.hasActiveGuestActivity();
+    if (active === this.guestActivityActive) return;
+    this.guestActivityActive = active;
+    this.emit("guest-activity-change", active);
   }
 
   start() {

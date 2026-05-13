@@ -111,6 +111,9 @@ type SandboxControllerLike = {
   start(): Promise<void>;
   close(): Promise<void>;
   restart(): Promise<void>;
+  resumeForActivity?(): Promise<void> | void;
+  scheduleIdlePause?(): void;
+  cancelIdlePause?(): void;
   on(event: "state", listener: (state: SandboxState) => void): unknown;
   on(
     event: "log",
@@ -242,9 +245,13 @@ export class SandboxServer extends EventEmitter {
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
+  /** VFS requests currently executing in the host filesystem service */
+  private activeVfsRequests = 0;
   private clients = new Set<SandboxClient>();
   private inflight = new Map<number, SandboxClient>();
   private stdinAllowed = new Set<number>();
+  /** exec admission tokens while host-side async resume is pending */
+  private pendingExecAdmissions = new Map<number, object>();
 
   // Exec requests that are accepted by the host API but not yet started on the
   // guest control channel (currently only used while a file operation is active)
@@ -426,6 +433,7 @@ export class SandboxServer extends EventEmitter {
         accel: this.options.accel,
         cpu: this.options.cpu,
         console: this.options.console,
+        qemuIdlePauseMs: this.options.qemuIdlePauseMs,
         autoRestart: this.options.autoRestart,
       };
       this.controller = new SandboxController(sandboxConfig);
@@ -495,6 +503,25 @@ export class SandboxServer extends EventEmitter {
       this.network.on("error", (err) => {
         this.emit("error", err);
       });
+      this.network.on("guest-activity-change", (active: boolean) => {
+        if (active) {
+          const resume = this.resumeControllerForActivity();
+          if (resume) {
+            void resume
+              .catch((err: unknown) => {
+                this.emit(
+                  "error",
+                  err instanceof Error ? err : new Error(String(err)),
+                );
+              })
+              .finally(() => {
+                this.scheduleControllerIdlePause();
+              });
+          }
+        } else {
+          this.scheduleControllerIdlePause();
+        }
+      });
     }
 
     this.controller.on("state", (state) => {
@@ -539,6 +566,9 @@ export class SandboxServer extends EventEmitter {
       }
 
       this.broadcastStatus(this.status);
+      if (this.status === "running") {
+        this.scheduleControllerIdlePause();
+      }
     });
 
     this.controller.on("exit", (info) => {
@@ -693,6 +723,7 @@ export class SandboxServer extends EventEmitter {
         this.pendingExecWindows.delete(message.id);
         this.clearQueuedStdin(message.id);
         this.queuedPtyResize.delete(message.id);
+        this.scheduleControllerIdlePause();
       } else if (message.t === "stdin_window") {
         const stdin = (message as any).p?.stdin;
         const credits = Number(stdin);
@@ -779,6 +810,7 @@ export class SandboxServer extends EventEmitter {
             new Error(`${message.p.code}: ${message.p.message}`),
           );
         }
+        this.scheduleControllerIdlePause();
       } else if (message.t === "vfs_ready") {
         this.handleVfsReady();
       } else if (message.t === "vfs_error") {
@@ -802,28 +834,32 @@ export class SandboxServer extends EventEmitter {
       if (message.t !== "fs_request") {
         return;
       }
-      if (!this.fsService) {
-        this.fsBridge.send({
-          v: 1,
-          t: "fs_response",
-          id: message.id,
-          p: {
-            op: message.p.op,
-            err: LINUX_ERRNO.ENOSYS,
-            message: "filesystem service unavailable",
-          },
-        });
-        return;
-      }
+      this.controller.cancelIdlePause?.();
+      this.activeVfsRequests += 1;
+      void (async () => {
+        try {
+          const resume = this.resumeControllerForActivity();
+          if (resume) await resume;
 
-      void this.fsService
-        .handleRequest(message)
-        .then((response) => {
+          if (!this.fsService) {
+            this.fsBridge.send({
+              v: 1,
+              t: "fs_response",
+              id: message.id,
+              p: {
+                op: message.p.op,
+                err: LINUX_ERRNO.ENOSYS,
+                message: "filesystem service unavailable",
+              },
+            });
+            return;
+          }
+
+          const response = await this.fsService.handleRequest(message);
           if (!this.fsBridge.send(response)) {
             this.emit("error", new Error("[fs] virtio bridge queue exceeded"));
           }
-        })
-        .catch((err) => {
+        } catch (err) {
           const detail =
             err instanceof Error ? err.message : "fs handler error";
           this.fsBridge.send({
@@ -837,7 +873,11 @@ export class SandboxServer extends EventEmitter {
             },
           });
           this.emit("error", err instanceof Error ? err : new Error(detail));
-        });
+        } finally {
+          this.activeVfsRequests = Math.max(0, this.activeVfsRequests - 1);
+          this.scheduleControllerIdlePause();
+        }
+      })();
     };
 
     this.sshBridge.onMessage = (message: any) => {
@@ -875,6 +915,7 @@ export class SandboxServer extends EventEmitter {
           stream?.openFailed(msg);
           this.tcpStreams.delete(message.id);
           waiter.reject(new Error(msg));
+          this.scheduleControllerIdlePause();
         }
         return;
       }
@@ -898,6 +939,7 @@ export class SandboxServer extends EventEmitter {
           waiter.reject(new Error("tcp stream closed"));
         }
         stream.remoteClose();
+        this.scheduleControllerIdlePause();
         return;
       }
     };
@@ -914,6 +956,7 @@ export class SandboxServer extends EventEmitter {
         stream.destroy(new Error("ssh virtio bridge error"));
       }
       this.tcpStreams.clear();
+      this.scheduleControllerIdlePause();
     };
 
     this.ingressBridge.onMessage = (message: any) => {
@@ -951,6 +994,7 @@ export class SandboxServer extends EventEmitter {
           stream?.openFailed(msg);
           this.ingressTcpStreams.delete(message.id);
           waiter.reject(new Error(msg));
+          this.scheduleControllerIdlePause();
         }
         return;
       }
@@ -974,6 +1018,7 @@ export class SandboxServer extends EventEmitter {
           waiter.reject(new Error("tcp stream closed"));
         }
         stream.remoteClose();
+        this.scheduleControllerIdlePause();
         return;
       }
     };
@@ -993,6 +1038,7 @@ export class SandboxServer extends EventEmitter {
         stream.destroy(new Error("ingress virtio bridge error"));
       }
       this.ingressTcpStreams.clear();
+      this.scheduleControllerIdlePause();
     };
 
     this.bridge.onError = (err) => {

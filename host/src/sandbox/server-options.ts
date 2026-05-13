@@ -51,6 +51,7 @@ const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
+const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
 
 /**
  * sandbox server options
@@ -131,6 +132,8 @@ export type SandboxServerOptions = {
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
   autoRestart?: boolean;
+  /** qemu idle pause timeout in `ms` (`0` disables) */
+  qemuIdlePauseMs?: number;
   /** kernel cmdline append string */
   append?: string;
 
@@ -221,6 +224,8 @@ export type ResolvedSandboxServerOptions = {
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
   autoRestart: boolean;
+  /** qemu idle pause timeout in `ms` (`undefined` disables) */
+  qemuIdlePauseMs?: number;
   /** kernel cmdline append string */
   append?: string;
 
@@ -343,6 +348,37 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   )
     return "x64";
   return null;
+}
+
+function normalizeQemuIdlePauseMs(value: number): number | undefined {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`invalid qemu idle pause timeout: ${value}`);
+  }
+  const ms = Math.trunc(value);
+  return ms > 0 ? ms : undefined;
+}
+
+function resolveQemuIdlePauseMs(
+  options: SandboxServerOptions,
+  vmm: SandboxVmm,
+): number | undefined {
+  if (options.qemuIdlePauseMs !== undefined) {
+    return normalizeQemuIdlePauseMs(options.qemuIdlePauseMs);
+  }
+
+  if (vmm !== "qemu" || process.platform !== "darwin") {
+    return undefined;
+  }
+
+  const accelName = (options.accel ?? "")
+    .split(",", 1)[0]!
+    .trim()
+    .toLowerCase();
+  if (accelName && accelName !== "hvf") {
+    return undefined;
+  }
+
+  return DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS;
 }
 
 function resolveLocalKrunRunnerPath(): string | null {
@@ -866,6 +902,8 @@ export function resolveSandboxServerOptions(
       unsupported.push("sandbox.machineType");
     if (options.accel !== undefined) unsupported.push("sandbox.accel");
     if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
+    if (options.qemuIdlePauseMs !== undefined)
+      unsupported.push("sandbox.qemuIdlePauseMs");
 
     if (unsupported.length > 0) {
       throw new Error(
@@ -993,6 +1031,7 @@ export function resolveSandboxServerOptions(
     cpu,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
+    qemuIdlePauseMs: resolveQemuIdlePauseMs(options, vmm),
     append: options.append,
     maxStdinBytes,
     maxQueuedStdinBytes,
