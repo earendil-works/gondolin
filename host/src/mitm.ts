@@ -43,6 +43,9 @@ export async function loadOrCreateMitmCa(mitmDir: string): Promise<MitmCa> {
     if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
     }
+    if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
+      throw new Error("persisted mitm ca cert is missing required key identifiers");
+    }
     return {
       key,
       cert,
@@ -72,6 +75,9 @@ export function loadOrCreateMitmCaSync(mitmDir: string): MitmCa {
     const cert = forge.pki.certificateFromPem(certPem);
     if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
+    }
+    if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
+      throw new Error("persisted mitm ca cert is missing required key identifiers");
     }
     return {
       key,
@@ -106,6 +112,78 @@ export function isNonNegativeSerialNumberHex(serialNumber: string): boolean {
   return parseInt(firstByteHex, 16) < 0x80;
 }
 
+export function getCertificateSubjectKeyIdentifierBytes(
+  cert: forge.pki.Certificate,
+): string | undefined {
+  const ext = cert.getExtension("subjectKeyIdentifier") as
+    | { subjectKeyIdentifier?: unknown }
+    | undefined;
+  if (typeof ext?.subjectKeyIdentifier !== "string") {
+    return undefined;
+  }
+
+  const expected = cert.generateSubjectKeyIdentifier().getBytes();
+  const actual = forge.util.hexToBytes(ext.subjectKeyIdentifier);
+  return actual === expected ? actual : undefined;
+}
+
+export function certificateHasAuthorityKeyIdentifier(
+  cert: forge.pki.Certificate,
+  expectedKeyIdentifierBytes: string,
+): boolean {
+  const ext = cert.getExtension("authorityKeyIdentifier") as
+    | { value?: unknown }
+    | undefined;
+  if (typeof ext?.value !== "string") {
+    return false;
+  }
+
+  try {
+    const value = forge.asn1.fromDer(ext.value);
+    if (
+      value.tagClass !== forge.asn1.Class.UNIVERSAL ||
+      value.type !== forge.asn1.Type.SEQUENCE ||
+      !Array.isArray(value.value)
+    ) {
+      return false;
+    }
+
+    return value.value.some(
+      (entry) =>
+        entry.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC &&
+        entry.type === 0 &&
+        entry.constructed === false &&
+        entry.value === expectedKeyIdentifierBytes,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function mitmCaHasRequiredKeyIdentifiers(
+  cert: forge.pki.Certificate,
+): boolean {
+  const subjectKeyIdentifier = getCertificateSubjectKeyIdentifierBytes(cert);
+  return (
+    subjectKeyIdentifier !== undefined &&
+    certificateHasAuthorityKeyIdentifier(cert, subjectKeyIdentifier)
+  );
+}
+
+export function mitmLeafHasRequiredKeyIdentifiers(
+  caCert: forge.pki.Certificate,
+  leafCert: forge.pki.Certificate,
+): boolean {
+  const caSubjectKeyIdentifier = getCertificateSubjectKeyIdentifierBytes(caCert);
+  if (caSubjectKeyIdentifier === undefined) {
+    return false;
+  }
+  return (
+    getCertificateSubjectKeyIdentifierBytes(leafCert) !== undefined &&
+    certificateHasAuthorityKeyIdentifier(leafCert, caSubjectKeyIdentifier)
+  );
+}
+
 function generateMitmCa(): MitmCa {
   const keys = forge.pki.rsa.generateKeyPair(2048);
   const cert = forge.pki.createCertificate();
@@ -129,6 +207,8 @@ function generateMitmCa(): MitmCa {
       cRLSign: true,
       critical: true,
     },
+    { name: "subjectKeyIdentifier" },
+    { name: "authorityKeyIdentifier", keyIdentifier: true },
   ]);
 
   cert.sign(keys.privateKey, forge.md.sha256.create());

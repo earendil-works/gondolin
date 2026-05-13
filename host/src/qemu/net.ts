@@ -14,8 +14,10 @@ import forge from "node-forge";
 
 import {
   generatePositiveSerialNumber,
+  getCertificateSubjectKeyIdentifierBytes,
   isNonNegativeSerialNumberHex,
   loadOrCreateMitmCa,
+  mitmLeafHasRequiredKeyIdentifiers,
   resolveMitmCertDir,
 } from "../mitm.ts";
 import {
@@ -1319,6 +1321,11 @@ export class QemuNetworkBackend extends EventEmitter {
       if (!caCertVerifiesLeaf(ca.cert, cert)) {
         throw new Error("persisted mitm leaf cert is not signed by current ca");
       }
+      if (!mitmLeafHasRequiredKeyIdentifiers(ca.cert, cert)) {
+        throw new Error(
+          "persisted mitm leaf cert is missing required key identifiers",
+        );
+      }
       if (!privateKeyMatchesLeafCert(keyPem, cert)) {
         throw new Error("persisted mitm leaf key does not match cert");
       }
@@ -1343,6 +1350,12 @@ export class QemuNetworkBackend extends EventEmitter {
       const altNames = net.isIP(servername)
         ? [{ type: 7, ip: servername }]
         : [{ type: 2, value: servername }];
+      const caSubjectKeyIdentifier = getCertificateSubjectKeyIdentifierBytes(
+        ca.cert,
+      );
+      if (caSubjectKeyIdentifier === undefined) {
+        throw new Error("mitm ca cert is missing required key identifiers");
+      }
 
       cert.setExtensions([
         { name: "basicConstraints", cA: false },
@@ -1353,6 +1366,11 @@ export class QemuNetworkBackend extends EventEmitter {
         },
         { name: "extKeyUsage", serverAuth: true },
         { name: "subjectAltName", altNames },
+        { name: "subjectKeyIdentifier" },
+        {
+          name: "authorityKeyIdentifier",
+          keyIdentifier: caSubjectKeyIdentifier,
+        },
       ]);
 
       cert.sign(ca.key, forge.md.sha256.create());

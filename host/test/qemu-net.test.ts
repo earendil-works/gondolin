@@ -30,6 +30,7 @@ import {
 import * as qemuHttp from "../src/qemu/http.ts";
 import * as qemuWs from "../src/qemu/ws.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
+import { mitmLeafHasRequiredKeyIdentifiers } from "../src/mitm.ts";
 import { EventEmitter } from "node:events";
 
 function makeBackend(
@@ -3083,6 +3084,10 @@ test("qemu-net: TLS MITM generates leaf certificates per host", async () => {
     );
     const certPem = fs.readFileSync(crtPath, "utf8");
     const cert = forge.pki.certificateFromPem(certPem);
+    const caCert = forge.pki.certificateFromPem(
+      fs.readFileSync(path.join(dir, "ca.crt"), "utf8"),
+    );
+    assert.equal(mitmLeafHasRequiredKeyIdentifiers(caCert, cert), true);
     const san = cert.getExtension("subjectAltName") as any;
     assert.ok(san);
     assert.ok(
@@ -3099,6 +3104,75 @@ test("qemu-net: TLS MITM generates leaf certificates per host", async () => {
       .readdirSync(hostsDir)
       .filter((f) => f.endsWith(".crt") || f.endsWith(".key"));
     assert.deepEqual(files2.sort(), files1.sort());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("qemu-net: regenerates legacy leaf certs missing key identifiers", async () => {
+  const dir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-mitm-legacy-leaf-test-"),
+  );
+  try {
+    const host = "legacy.example";
+
+    const backend1 = makeBackend({ mitmCertDir: dir });
+    await (backend1 as any).getTlsContextAsync(host);
+
+    const hostsDir = path.join(dir, "hosts");
+    const crtPath = path.join(
+      hostsDir,
+      fs.readdirSync(hostsDir).find((f) => f.endsWith(".crt"))!,
+    );
+    const keyPath = path.join(
+      hostsDir,
+      fs.readdirSync(hostsDir).find((f) => f.endsWith(".key"))!,
+    );
+
+    const caKey = forge.pki.privateKeyFromPem(
+      fs.readFileSync(path.join(dir, "ca.key"), "utf8"),
+    );
+    const caCert = forge.pki.certificateFromPem(
+      fs.readFileSync(path.join(dir, "ca.crt"), "utf8"),
+    );
+    const leafKeys = forge.pki.rsa.generateKeyPair(2048);
+    const legacyLeaf = forge.pki.createCertificate();
+    legacyLeaf.publicKey = leafKeys.publicKey;
+    legacyLeaf.serialNumber = "01";
+    const now = new Date(Date.now() - 5 * 60 * 1000);
+    legacyLeaf.validity.notBefore = now;
+    legacyLeaf.validity.notAfter = new Date(now);
+    legacyLeaf.validity.notAfter.setDate(
+      legacyLeaf.validity.notBefore.getDate() + 825,
+    );
+    legacyLeaf.setSubject([{ name: "commonName", value: host }]);
+    legacyLeaf.setIssuer(caCert.subject.attributes);
+    legacyLeaf.setExtensions([
+      { name: "basicConstraints", cA: false },
+      {
+        name: "keyUsage",
+        digitalSignature: true,
+        keyEncipherment: true,
+      },
+      { name: "extKeyUsage", serverAuth: true },
+      { name: "subjectAltName", altNames: [{ type: 2, value: host }] },
+    ]);
+    legacyLeaf.sign(caKey, forge.md.sha256.create());
+
+    fs.writeFileSync(keyPath, forge.pki.privateKeyToPem(leafKeys.privateKey));
+    const legacyLeafPem = forge.pki.certificateToPem(legacyLeaf);
+    fs.writeFileSync(crtPath, legacyLeafPem);
+
+    const backend2 = makeBackend({ mitmCertDir: dir });
+    await (backend2 as any).getTlsContextAsync(host);
+
+    const certPemAfter = fs.readFileSync(crtPath, "utf8");
+    assert.notEqual(certPemAfter, legacyLeafPem);
+    const regeneratedLeaf = forge.pki.certificateFromPem(certPemAfter);
+    assert.equal(
+      mitmLeafHasRequiredKeyIdentifiers(caCert, regeneratedLeaf),
+      true,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
