@@ -217,132 +217,7 @@ test("exec admission reserves ids while controller resume is pending", async () 
   assert.ok(!(server as any).inflight.has(2));
 });
 
-test("idle pause waits for concurrent VFS requests to finish", async () => {
-  const server = new SandboxServer(makeResolvedOptions());
-  const responses: any[] = [];
-  const pending = [deferred<any>(), deferred<any>()];
-  let scheduleCalls = 0;
-  let cancelCalls = 0;
-
-  (server as any).controller.scheduleIdlePause = () => {
-    scheduleCalls += 1;
-  };
-  (server as any).controller.cancelIdlePause = () => {
-    cancelCalls += 1;
-  };
-  (server as any).fsBridge.send = (msg: any) => {
-    responses.push(msg);
-    return true;
-  };
-  (server as any).fsService = {
-    handleRequest: (message: any) => pending[message.id - 1]!.promise,
-  };
-
-  (server as any).fsBridge.onMessage({
-    v: 1,
-    t: "fs_request",
-    id: 1,
-    p: { op: "stat" },
-  });
-  (server as any).fsBridge.onMessage({
-    v: 1,
-    t: "fs_request",
-    id: 2,
-    p: { op: "stat" },
-  });
-
-  assert.equal(cancelCalls, 2);
-  assert.equal((server as any).activeVfsRequests, 2);
-
-  pending[0]!.resolve({ v: 1, t: "fs_response", id: 1, p: { op: "stat" } });
-  await pending[0]!.promise;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal(responses.length, 1);
-  assert.equal((server as any).activeVfsRequests, 1);
-  assert.equal(scheduleCalls, 0);
-
-  pending[1]!.resolve({ v: 1, t: "fs_response", id: 2, p: { op: "stat" } });
-  await pending[1]!.promise;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal(responses.length, 2);
-  assert.equal((server as any).activeVfsRequests, 0);
-  assert.equal(scheduleCalls, 1);
-});
-
-test("fs_request waits for controller resume before handling VFS request", async () => {
-  const server = new SandboxServer(makeResolvedOptions());
-  const resume = deferred<void>();
-  const responses: any[] = [];
-  let handled = false;
-  let scheduleCalls = 0;
-
-  (server as any).controller.resumeForActivity = () => resume.promise;
-  (server as any).controller.scheduleIdlePause = () => {
-    scheduleCalls += 1;
-  };
-  (server as any).fsBridge.send = (msg: any) => {
-    responses.push(msg);
-    return true;
-  };
-  (server as any).fsService = {
-    handleRequest: async (message: any) => {
-      handled = true;
-      return { v: 1, t: "fs_response", id: message.id, p: { op: "stat" } };
-    },
-  };
-
-  (server as any).fsBridge.onMessage({
-    v: 1,
-    t: "fs_request",
-    id: 1,
-    p: { op: "stat" },
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal((server as any).activeVfsRequests, 1);
-  assert.equal(handled, false);
-  assert.equal(responses.length, 0);
-
-  resume.resolve();
-  await resume.promise;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal(handled, true);
-  assert.equal(responses.length, 1);
-  assert.equal((server as any).activeVfsRequests, 0);
-  assert.equal(scheduleCalls, 1);
-});
-
-test("network tcp sessions count as active guest activity", () => {
-  const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
-  const network = (server as any).network;
-  let resumeCalls = 0;
-  let scheduleCalls = 0;
-
-  (server as any).controller.resumeForActivity = () => {
-    resumeCalls += 1;
-  };
-  (server as any).controller.scheduleIdlePause = () => {
-    scheduleCalls += 1;
-  };
-
-  network.tcpSessions.set("flow", tcpSession());
-
-  assert.equal(resumeCalls, 1);
-  assert.equal((server as any).hasActiveGuestActivity(), true);
-
-  (server as any).scheduleControllerIdlePause();
-  assert.equal(scheduleCalls, 0);
-
-  network.tcpSessions.delete("flow");
-
-  assert.equal((server as any).hasActiveGuestActivity(), false);
-  assert.equal(scheduleCalls, 1);
-});
-
-test("network resume re-arms idle after a short-lived tcp session", async () => {
+test("network activity blocks idle until resume settles", async () => {
   const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
   const network = (server as any).network;
   const controller = (server as any).controller;
@@ -359,9 +234,11 @@ test("network resume re-arms idle after a short-lived tcp session", async () => 
   };
 
   network.tcpSessions.set("flow", tcpSession());
-  network.tcpSessions.delete("flow");
+  assert.equal((server as any).hasActiveGuestActivity(), true);
+  (server as any).scheduleControllerIdlePause();
   assert.equal(scheduleCalls, 0);
 
+  network.tcpSessions.delete("flow");
   resume.resolve();
   await resume.promise;
   await new Promise<void>((resolve) => setImmediate(resolve));

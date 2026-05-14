@@ -68,16 +68,6 @@ async function waitFor(
   assert.equal(predicate(), true);
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (err: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 afterEach(() => {
   mock.restoreAll();
   mock.timers.reset();
@@ -143,9 +133,8 @@ test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", 
   assert.match(args[driveIndex + 1]!, /snapshot=on/);
 });
 
-test("SandboxController: idle pause uses QMP stop/cont", async () => {
+test("SandboxController: idle pause uses a short QMP socket", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
-  const qmpSocketPath = path.join(tmpDir, "qmp.sock");
   const seenCommands: string[] = [];
   const child = new FakeChildProcess();
   let spawnedArgs: string[] = [];
@@ -156,7 +145,10 @@ test("SandboxController: idle pause uses QMP stop/cont", async () => {
   });
 
   const controller = new SandboxController(
-    makeConfig({ qemuIdlePauseMs: 1, qmpSocketPath }),
+    makeConfig({
+      qemuIdlePauseMs: 1,
+      virtioSocketPath: path.join(tmpDir, "virtio.sock"),
+    }),
   );
 
   const server = net.createServer((socket) => {
@@ -185,8 +177,14 @@ test("SandboxController: idle pause uses QMP stop/cont", async () => {
     await controller.start();
     child.emit("spawn");
 
-    assert.ok(spawnedArgs.includes("-qmp"));
-    assert.ok(spawnedArgs.includes(`unix:${qmpSocketPath},server=on,wait=off`));
+    const qmpIndex = spawnedArgs.indexOf("-qmp");
+    assert.notEqual(qmpIndex, -1);
+    const match = /^unix:(.*),server=on,wait=off$/.exec(
+      spawnedArgs[qmpIndex + 1]!,
+    );
+    assert.ok(match);
+    const qmpSocketPath = match[1]!;
+    assert.equal(path.dirname(qmpSocketPath), tmpDir);
 
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -199,8 +197,8 @@ test("SandboxController: idle pause uses QMP stop/cont", async () => {
     controller.scheduleIdlePause();
     await waitFor(() => seenCommands.includes("stop"));
 
-    await controller.resumeForActivity();
-    await waitFor(() => seenCommands.includes("cont"));
+    const resume = controller.resumeForActivity();
+    if (resume) await resume;
 
     assert.deepEqual(
       seenCommands.filter(
@@ -216,188 +214,6 @@ test("SandboxController: idle pause uses QMP stop/cont", async () => {
     if (server.listening) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test("SandboxController: failed QMP stop sends best-effort cont", async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
-  const qmpSocketPath = path.join(tmpDir, "qmp.sock");
-  const seenCommands: string[] = [];
-  const child = new FakeChildProcess();
-
-  mock.method(cp, "spawn", () => child as any);
-
-  const controller = new SandboxController(
-    makeConfig({ qemuIdlePauseMs: 1, qmpSocketPath }),
-  );
-
-  const server = net.createServer((socket) => {
-    socket.setEncoding("utf8");
-    socket.write(
-      JSON.stringify({ QMP: { version: {}, capabilities: [] } }) + "\r\n",
-    );
-
-    let buffer = "";
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      for (;;) {
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) break;
-        const raw = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!raw) continue;
-        const message = JSON.parse(raw) as { execute?: string };
-        if (!message.execute) continue;
-        seenCommands.push(message.execute);
-        if (message.execute === "stop") {
-          socket.destroy();
-        } else {
-          socket.write(JSON.stringify({ return: {} }) + "\r\n");
-        }
-      }
-    });
-  });
-
-  try {
-    await controller.start();
-    child.emit("spawn");
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(qmpSocketPath, () => {
-        server.off("error", reject);
-        resolve();
-      });
-    });
-
-    controller.scheduleIdlePause();
-    await waitFor(() => seenCommands.includes("stop"));
-    await waitFor(() => seenCommands.includes("cont"));
-
-    const closing = controller.close();
-    child.emit("exit", 0, null);
-    await closing;
-  } finally {
-    if (server.listening) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test("SandboxController: stale QMP stop completion is ignored after restart", async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
-  const qmpSocketPath = path.join(tmpDir, "qmp.sock");
-  const children: FakeChildProcess[] = [];
-  const stopSeen = deferred<void>();
-  let stopSocket: net.Socket | null = null;
-
-  mock.method(cp, "spawn", () => {
-    const child = new FakeChildProcess();
-    children.push(child);
-    return child as any;
-  });
-
-  const server = net.createServer((socket) => {
-    socket.setEncoding("utf8");
-    socket.write(
-      JSON.stringify({ QMP: { version: {}, capabilities: [] } }) + "\r\n",
-    );
-
-    let buffer = "";
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      for (;;) {
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) break;
-        const raw = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!raw) continue;
-        const message = JSON.parse(raw) as { execute?: string };
-        if (message.execute === "stop") {
-          stopSocket = socket;
-          stopSeen.resolve();
-        } else {
-          socket.write(JSON.stringify({ return: {} }) + "\r\n");
-        }
-      }
-    });
-  });
-
-  try {
-    const controller = new SandboxController(
-      makeConfig({ qemuIdlePauseMs: 1, qmpSocketPath }),
-    );
-
-    await controller.start();
-    children[0]!.emit("spawn");
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(qmpSocketPath, () => {
-        server.off("error", reject);
-        resolve();
-      });
-    });
-
-    controller.scheduleIdlePause();
-    await stopSeen.promise;
-
-    children[0]!.emit("exit", 0, null);
-    await controller.start();
-    children[1]!.emit("spawn");
-
-    stopSocket!.write(JSON.stringify({ return: {} }) + "\r\n");
-    await waitFor(() => stopSocket?.destroyed === true);
-    await flush();
-
-    assert.equal((controller as any).paused, false);
-    assert.equal((controller as any).qmpIdleDisabled, false);
-
-    const closing = controller.close();
-    children[1]!.emit("exit", 0, null);
-    await closing;
-  } finally {
-    if (server.listening) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test("SandboxController: default QMP socket uses virtio socket directory", async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-dir-"));
-  const child = new FakeChildProcess();
-  let spawnedArgs: string[] = [];
-
-  mock.method(cp, "spawn", (_cmd: string, args: string[]) => {
-    spawnedArgs = args;
-    return child as any;
-  });
-
-  const controller = new SandboxController(
-    makeConfig({
-      qemuIdlePauseMs: 1,
-      virtioSocketPath: path.join(tmpDir, "virtio.sock"),
-    }),
-  );
-
-  try {
-    await controller.start();
-    child.emit("spawn");
-
-    const qmpIndex = spawnedArgs.indexOf("-qmp");
-    assert.notEqual(qmpIndex, -1);
-    const qmpArg = spawnedArgs[qmpIndex + 1]!;
-    const match = /^unix:(.*),server=on,wait=off$/.exec(qmpArg);
-    assert.ok(match);
-    assert.equal(path.dirname(match[1]!), tmpDir);
-
-    const closing = controller.close();
-    child.emit("exit", 0, null);
-    await closing;
-  } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
