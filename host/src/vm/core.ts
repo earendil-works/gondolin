@@ -596,6 +596,13 @@ export class VM {
   }
 
   /**
+   * Return the host PID of the active VM runner process, if available.
+   */
+  getHostPid(): number | null {
+    return this.server?.getHostPid() ?? null;
+  }
+
+  /**
    * Execute a command in the sandbox.
    *
    * Returns an ExecProcess which can be:

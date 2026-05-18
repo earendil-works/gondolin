@@ -325,6 +325,10 @@ export class SandboxController extends EventEmitter {
     return this.state;
   }
 
+  getHostPid(): number | null {
+    return this.child?.pid ?? null;
+  }
+
   async start() {
     if (this.child) return;
 

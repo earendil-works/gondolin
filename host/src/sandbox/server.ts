@@ -108,6 +108,7 @@ type BridgeWritableWaiter = {
 type SandboxControllerLike = {
   setAppend(append: string): void;
   getState(): SandboxState;
+  getHostPid(): number | null;
   start(): Promise<void>;
   close(): Promise<void>;
   restart(): Promise<void>;

@@ -124,6 +124,20 @@ test("vm internals: VM.create validates rootfs size before asset resolution", as
   );
 });
 
+test("vm internals: getHostPid returns null before start", () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "readonly" },
+  });
+
+  try {
+    assert.equal(vm.getHostPid(), null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,

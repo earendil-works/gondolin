@@ -21,6 +21,7 @@ import {
 const cp: any = (child_process as any).default ?? (child_process as any);
 
 class FakeChildProcess extends EventEmitter {
+  pid = 12345;
   stdout = new PassThrough();
   stderr = new PassThrough();
   killedSignals: Array<string | undefined> = [];
@@ -117,6 +118,21 @@ test("SandboxController: start emits state transitions and forwards logs", async
 
   assert.equal(exits.length, 1);
   assert.deepEqual(exits[0], { code: 0, signal: null });
+});
+
+test("SandboxController: getHostPid reflects the active child process", async () => {
+  const child = new FakeChildProcess();
+  child.pid = 23456;
+  mock.method(cp, "spawn", () => child as any);
+
+  const controller = new SandboxController(makeConfig());
+  assert.equal(controller.getHostPid(), null);
+
+  await controller.start();
+  assert.equal(controller.getHostPid(), 23456);
+
+  child.emit("exit", 0, null);
+  assert.equal(controller.getHostPid(), null);
 });
 
 test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", () => {

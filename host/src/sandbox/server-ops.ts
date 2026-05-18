@@ -72,6 +72,13 @@ export class SandboxServerOps {
     return this.status;
   }
 
+  /**
+   * Return the host PID of the active VM runner process, if available.
+   */
+  getHostPid(): number | null {
+    return this.controller.getHostPid?.() ?? null;
+  }
+
   getVfsProvider() {
     return this.vfsProvider;
   }

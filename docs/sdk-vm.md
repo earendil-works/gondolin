@@ -44,6 +44,13 @@ Advanced users can access the registry/attach helpers directly:
 - `gcSessions()`
 - `connectToSession()`
 
+## Host Runner PID
+
+`vm.getHostPid()` returns the host PID of the active VM runner process, or
+`null` before the VM has started / after it has stopped. Callers can use this to
+sample host-side process metrics such as disk or memory usage with their own
+platform-specific tooling.
+
 ## `vm.exec()`
 
 This is the most common operation. It returns an `ExecProcess` (a running
