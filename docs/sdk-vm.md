@@ -46,10 +46,17 @@ Advanced users can access the registry/attach helpers directly:
 
 ## Host Runner PID
 
-`vm.getHostPid()` returns the host PID of the active VM runner process, or
-`null` before the VM has started / after it has stopped. Callers can use this to
-sample host-side process metrics such as disk or memory usage with their own
-platform-specific tooling.
+`vm.getHostPid()` returns the host PID of the active VM runner process. Callers
+can use this to sample host-side process metrics such as disk or memory usage
+with their own platform-specific tooling.
+
+The return value is `null` when there is no active runner process to report,
+including:
+
+- before the VM has started, such as with `VM.create({ autoStart: false })`
+- after the VM has been closed or the runner process has exited
+- while `vm.close()` is in progress, after Gondolin has released its runner handle
+- if a backend fails before spawning its runner, or a future backend does not expose a PID
 
 ## `vm.exec()`
 

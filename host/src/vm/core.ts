@@ -596,7 +596,7 @@ export class VM {
   }
 
   /**
-   * Return the host PID of the active VM runner process, if available.
+   * Return the host PID of the active VM runner process, or null when no runner is active.
    */
   getHostPid(): number | null {
     return this.server?.getHostPid() ?? null;
