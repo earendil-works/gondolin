@@ -108,6 +108,7 @@ type BridgeWritableWaiter = {
 type SandboxControllerLike = {
   setAppend(append: string): void;
   getState(): SandboxState;
+  getHostPid(): number | null;
   start(): Promise<void>;
   close(): Promise<void>;
   restart(): Promise<void>;
@@ -292,6 +293,11 @@ export class SandboxServer extends EventEmitter {
   /** @internal resolved VM backend name */
   getVmmBackend(): "qemu" | "krun" {
     return this.options.vmm;
+  }
+
+  /** @internal host PID of the active VM runner process */
+  getHostPid(): number | null {
+    return this.controller.getHostPid();
   }
 
   /** @internal resolved VM backend binary path */

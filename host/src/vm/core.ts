@@ -19,6 +19,10 @@ import {
   resolveQcow2BackingPath,
 } from "../qemu/img.ts";
 import {
+  getHostResourceStatsForPid,
+  type VMHostResourceStats,
+} from "../host/resource-stats.ts";
+import {
   VmCheckpoint,
   registerVmCreate,
   type VmCheckpointData,
@@ -201,6 +205,8 @@ export type SshAccess = {
   /** close the local forwarder and remove temporary key material */
   close(): Promise<void>;
 };
+
+export type { VMHostResourceStats } from "../host/resource-stats.ts";
 
 export type VMState = SandboxState | "unknown";
 
@@ -593,6 +599,14 @@ export class VM {
    */
   async close() {
     return this.closeSingleflight.run(() => this.closeInternal());
+  }
+
+  /**
+   * Return host-side resource usage for the active VM runner process.
+   */
+  async getHostResourceStats(): Promise<VMHostResourceStats> {
+    const pid = this.server?.getHostPid() ?? null;
+    return getHostResourceStatsForPid(pid);
   }
 
   /**

@@ -10,6 +10,7 @@ export {
   VM,
   type VMOptions,
   type VMState,
+  type VMHostResourceStats,
   type EnableSshOptions,
   type SshAccess,
   type VmFs,
