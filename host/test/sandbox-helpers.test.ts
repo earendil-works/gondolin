@@ -77,11 +77,12 @@ function createHelperArchive(
   data: Buffer;
   sha256: string;
 } {
-  const archivePath = path.join(tmpDir, "helpers.tar.gz");
+  const archiveName = "helpers.tar.gz";
+  const archivePath = path.join(tmpDir, archiveName);
   child_process.execFileSync(
     "tar",
-    ["-czf", archivePath, "manifest.json", "bin"],
-    { cwd: bundleDir, stdio: "pipe" },
+    ["-czf", archiveName, "-C", bundleDir, "manifest.json", "bin"],
+    { cwd: tmpDir, stdio: "pipe" },
   );
   const data = fs.readFileSync(archivePath);
   return { archivePath, data, sha256: sha256(data) };
@@ -98,6 +99,28 @@ function setEnv(name: string, value: string | undefined): void {
   } else {
     process.env[name] = value;
   }
+}
+
+function writeNodeCommand(binDir: string, name: string, script: string): void {
+  fs.mkdirSync(binDir, { recursive: true });
+
+  if (process.platform === "win32") {
+    const scriptPath = path.join(binDir, `${name}.js`);
+    fs.writeFileSync(scriptPath, script);
+    fs.writeFileSync(
+      path.join(binDir, `${name}.cmd`),
+      `@echo off\r\n"${process.execPath}" "%~dp0${name}.js" %*\r\n`,
+    );
+    return;
+  }
+
+  fs.writeFileSync(
+    path.join(binDir, name),
+    `#!${process.execPath}\n${script}`,
+    {
+      mode: 0o755,
+    },
+  );
 }
 
 function hostPackageVersion(): string {
@@ -507,11 +530,10 @@ test("resolveSandboxBinaryPaths: registry failures do not source-build by defaul
   fs.mkdirSync(guestDir, { recursive: true });
   fs.mkdirSync(stubDir, { recursive: true });
   fs.writeFileSync(path.join(guestDir, "build.zig"), "// test\n");
-  fs.writeFileSync(
-    path.join(stubDir, "zig"),
-    `#!${process.execPath}\n` +
-      `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "called");\n`,
-    { mode: 0o755 },
+  writeNodeCommand(
+    stubDir,
+    "zig",
+    `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "called");\n`,
   );
 
   const registryUrl =
@@ -530,7 +552,7 @@ test("resolveSandboxBinaryPaths: registry failures do not source-build by defaul
       new Response("not found", { status: 404, statusText: "Not Found" });
 
   try {
-    process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
+    process.env.PATH = `${stubDir}${path.delimiter}${prevPath ?? ""}`;
     process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
     process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
     process.env.GONDOLIN_GUEST_SRC = guestDir;
@@ -568,11 +590,10 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
   fs.mkdirSync(stubDir, { recursive: true });
   fs.writeFileSync(path.join(guestDir, "build.zig"), "// test\n");
 
-  const zigStubPath = path.join(stubDir, "zig");
-  fs.writeFileSync(
-    zigStubPath,
-    `#!${process.execPath}\n` +
-      `const fs = require("node:fs");\n` +
+  writeNodeCommand(
+    stubDir,
+    "zig",
+    `const fs = require("node:fs");\n` +
       `const path = require("node:path");\n` +
       `fs.writeFileSync(path.join(process.cwd(), "zig-args.json"), JSON.stringify(process.argv.slice(2)));\n` +
       `const binDir = path.join(process.cwd(), "zig-out", "bin");\n` +
@@ -581,7 +602,6 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
       `  const filePath = path.join(binDir, name);\n` +
       `  fs.writeFileSync(filePath, "#!/bin/sh\\necho source-" + name + "\\n", { mode: 0o755 });\n` +
       `}\n`,
-    { mode: 0o755 },
   );
 
   const registryUrl =
@@ -606,7 +626,7 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
     };
 
   try {
-    process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
+    process.env.PATH = `${stubDir}${path.delimiter}${prevPath ?? ""}`;
     process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
     process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
     process.env.GONDOLIN_GUEST_SRC = guestDir;
