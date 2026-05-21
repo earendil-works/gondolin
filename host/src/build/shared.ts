@@ -103,6 +103,75 @@ export function detectContainerRuntime(
   );
 }
 
+function getEnvValue(
+  env: NodeJS.ProcessEnv | undefined,
+  name: string,
+): string | undefined {
+  const source = env ?? process.env;
+  const direct = source[name];
+  if (direct !== undefined || process.platform !== "win32") return direct;
+  const lower = name.toLowerCase();
+  const key = Object.keys(source).find(
+    (entry) => entry.toLowerCase() === lower,
+  );
+  return key ? source[key] : undefined;
+}
+
+function quoteCmdArg(value: string): string {
+  return `"${value.replace(/["^&|<>()%]/g, (char) => `^${char}`)}"`;
+}
+
+function resolveWindowsCommandPath(
+  command: string,
+  env: NodeJS.ProcessEnv | undefined,
+): string {
+  if (/[\\/]/.test(command)) return command;
+
+  const pathEnv = getEnvValue(env, "PATH") ?? "";
+  const pathExt = getEnvValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
+  const extensions = path.extname(command)
+    ? [""]
+    : pathExt
+        .split(";")
+        .map((ext) => ext.trim())
+        .filter(Boolean);
+
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${command}${ext.toLowerCase()}`);
+      if (fs.existsSync(candidate)) return candidate;
+      const upperCandidate = path.join(dir, `${command}${ext.toUpperCase()}`);
+      if (fs.existsSync(upperCandidate)) return upperCandidate;
+    }
+  }
+
+  return command;
+}
+
+function resolveSpawnCommand(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
+  if (process.platform !== "win32") return { command, args };
+
+  const resolved = resolveWindowsCommandPath(command, options.env);
+  if (!/\.(bat|cmd)$/i.test(resolved)) {
+    return { command: resolved, args };
+  }
+
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: [
+      "/d",
+      "/c",
+      `call ${[resolved, ...args].map(quoteCmdArg).join(" ")}`,
+    ],
+    windowsVerbatimArguments: true,
+  };
+}
+
 /** Run a command and stream output */
 export async function runCommand(
   command: string,
@@ -113,8 +182,11 @@ export async function runCommand(
   return new Promise((resolve, reject) => {
     log(`Running: ${command} ${args.join(" ")}`);
 
-    const child = spawn(command, args, {
+    const resolved = resolveSpawnCommand(command, args, options);
+    const child = spawn(resolved.command, resolved.args, {
       ...options,
+      windowsVerbatimArguments:
+        resolved.windowsVerbatimArguments ?? options.windowsVerbatimArguments,
       stdio: ["inherit", "pipe", "pipe"],
     });
 

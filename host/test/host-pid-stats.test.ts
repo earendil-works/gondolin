@@ -12,7 +12,19 @@ const startTimeoutMs = Math.max(
   Number(process.env.GONDOLIN_HOST_PID_START_TIMEOUT_MS ?? 30000),
 );
 
-function readPsStats(pid: number): string {
+function readHostPidStats(pid: number): string {
+  if (process.platform === "win32") {
+    return execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object ProcessId,ParentProcessId,WorkingSetSize,VirtualSize,CommandLine | Format-List`,
+      ],
+      { encoding: "utf8" },
+    );
+  }
+
   return execFileSync(
     "ps",
     ["-o", "pid,ppid,rss,vsz,pcpu,pmem,etime,command", "-p", String(pid)],
@@ -20,12 +32,26 @@ function readPsStats(pid: number): string {
   );
 }
 
+function assertHostPidStats(stats: string, pid: number): void {
+  if (process.platform === "win32") {
+    assert.match(stats, new RegExp(`ProcessId\\s+:\\s+${pid}\\b`));
+    assert.match(stats, /CommandLine\s+:/);
+    return;
+  }
+
+  assert.match(
+    stats,
+    /^\s*PID\s+PPID\s+RSS\s+VSZ\s+%CPU\s+%MEM\s+ELAPSED\s+COMMAND/m,
+  );
+  assert.match(stats, new RegExp(`\\b${pid}\\b`));
+}
+
 test.after(() => {
   scheduleForceExit();
 });
 
 test(
-  "VM.getHostPid exposes a pid that can be sampled with ps",
+  "VM.getHostPid exposes a pid that can be sampled by host process tools",
   { skip: skipVmTests, timeout: timeoutMs },
   async () => {
     const vm = await VM.create({
@@ -40,11 +66,9 @@ test(
       assert.equal(typeof pid, "number");
       assert.ok(pid > 0, "expected a positive host pid");
 
-      const stats = readPsStats(pid);
-      console.log(`ps stats for VM host pid ${pid}:\n${stats}`);
-
-      assert.match(stats, /^\s*PID\s+PPID\s+RSS\s+VSZ\s+%CPU\s+%MEM\s+ELAPSED\s+COMMAND/m);
-      assert.match(stats, new RegExp(`\\b${pid}\\b`));
+      const stats = readHostPidStats(pid);
+      console.log(`host process stats for VM host pid ${pid}:\n${stats}`);
+      assertHostPidStats(stats, pid);
     } finally {
       await vm.close();
     }
