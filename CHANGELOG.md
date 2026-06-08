@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Add `pi install npm:@earendil-works/gondolin` support: the package now ships a pi extension (`extensions/gondolin.ts`) via `pi.extensions`, configurable through JSON files (`~/.pi/agent/extensions/gondolin.json` global, `<cwd>/.pi/gondolin.json` project). Config exposes allowedHosts, secrets, DNS, SSH egress, mapped TCP, WebSocket toggle, and VM resources; with no config the VM uses Gondolin defaults.
+
 ## 0.12.0
 
 - Add `VM.getHostPid()` to allow callers to collect host-side process metrics of the VM runner. #114
