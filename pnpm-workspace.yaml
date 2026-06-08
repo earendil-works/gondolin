@@ -2,7 +2,9 @@ packages:
   - "host"
   - "packages/*"
 allowBuilds:
+  "@google/genai": false
   cpu-features: true
+  protobufjs: false
   ssh2: true
 minimumReleaseAgeExclude:
   - "@biomejs/biome@2.5.15"

@@ -15,8 +15,15 @@
     },
     "./package.json": "./package.json"
   },
+  "pi": {
+    "extensions": [
+      "extensions/gondolin.ts"
+    ]
+  },
   "files": [
-    "dist/"
+    "dist/",
+    "examples/",
+    "extensions/"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && node ./scripts/postbuild.ts",
@@ -60,6 +67,7 @@
     "@earendil-works/gondolin-native-linux-x64": "0.14.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.2",
     "@types/node": "22.19.21",
     "@types/ssh2": "1.15.6",
     "ssh2": "^1.17.0",

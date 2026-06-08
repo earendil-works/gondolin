@@ -28,6 +28,7 @@
     "test/**/*.ts",
     "fuzz/**/*.ts",
     "examples/**/*.ts",
+    "extensions/**/*.ts",
     "bench/**/*.ts"
   ],
   "exclude": [
