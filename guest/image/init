@@ -38,6 +38,25 @@ mount -t tmpfs tmpfs /run || log "[init] mount tmpfs failed"
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# Sync the system clock from the hardware RTC as early as possible.
+#
+# The host issues short-lived MITM TLS certificates whose notBefore is the
+# host wall-clock time. If the guest system clock lags behind the host (which
+# can happen depending on how the kernel initialises time on boot), freshly
+# minted certificates are seen as "certificate is not yet valid" and every
+# HTTPS request through the egress proxy (curl, apk, language runtimes, ...)
+# fails. The QEMU-exposed RTC tracks host time, so seeding the system clock
+# from it keeps the guest within the certificate validity window.
+if command -v hwclock > /dev/null 2>&1; then
+  if hwclock --hctosys --utc > /dev/null 2>&1 || hwclock -s > /dev/null 2>&1; then
+    log "[init] synced system clock from RTC: $(date -u 2>/dev/null)"
+  else
+    log "[init] hwclock RTC sync failed"
+  fi
+else
+  log "[init] hwclock not available; skipping RTC clock sync"
+fi
+
 mkdir -p /tmp /var/tmp /var/cache /var/log /root /home
 mount -t tmpfs tmpfs /tmp || log "[init] mount tmpfs /tmp failed"
 mount -t tmpfs tmpfs /root || log "[init] mount tmpfs /root failed"
