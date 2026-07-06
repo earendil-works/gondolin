@@ -78,6 +78,9 @@ Requirements:
 | ------------------------ | --------------------------------------------- |
 | `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
 
+If you are behind a proxy, see
+[Proxy Support](docs/cli.md#proxy-support) for required configuration.
+
 Optional experimental libkrun backend setup:
 
 ```bash

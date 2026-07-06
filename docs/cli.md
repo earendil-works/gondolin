@@ -530,6 +530,35 @@ gondolin tools trufflehog --json
 - `GONDOLIN_DEBUG`
     - Enable debug logging (see [Debug Logging](./debug.md))
 
+## Proxy Support
+
+Gondolin downloads guest images and sandbox helpers using Node.js built-in
+`fetch`. Node.js does not automatically use `HTTP_PROXY` / `HTTPS_PROXY`
+environment variables — you must opt in explicitly.
+
+If you are behind a proxy, set:
+
+```bash
+export NODE_OPTIONS="--use-env-proxy"
+```
+
+This tells Node.js to route `fetch` requests through the proxy specified by
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
+
+You can combine this with your proxy settings:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+export NODE_OPTIONS="--use-env-proxy"
+
+npx @earendil-works/gondolin bash
+```
+
+> **Note:** This only affects host-side downloads (images, sandbox helpers).
+> Network traffic inside the VM is handled by Gondolin's own network stack
+> and is not subject to `NODE_OPTIONS`.
+
 
 ## Help
 
