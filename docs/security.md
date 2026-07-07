@@ -353,6 +353,8 @@ These are rules to not compromise the security guarantees of the system:
 
 5. **Treat `tcp.hosts` as a reduced-security exception path**
     - Keep mappings narrow (`HOST:PORT` when possible)
+    - Prefer exact hosts over wildcard subdomain keys
+    - If a wildcard key is necessary, use the narrowest suffix available; `*.example.com` does not match `example.com`
     - Prefer local/dev-only upstream targets
     - Use least-privilege, short-lived credentials on mapped services
     - Remember mapped TCP does not use HTTP hooks or header secret substitution

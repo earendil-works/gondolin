@@ -301,6 +301,9 @@ function bashUsage() {
     "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
   );
   console.log(
+    "                                  GUEST_HOST may be a subdomain wildcard like *.example.com",
+  );
+  console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
   );
   console.log(
@@ -443,6 +446,9 @@ function execUsage() {
   );
   console.log(
     "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
+  );
+  console.log(
+    "                                  GUEST_HOST may be a subdomain wildcard like *.example.com",
   );
   console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",

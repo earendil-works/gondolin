@@ -127,8 +127,12 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
 - `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
     - Add an explicit mapped TCP rule (repeatable)
     - `GUEST_HOST` (or `GUEST_HOST:PORT`) is matched using synthetic DNS host attribution
+    - `GUEST_HOST` may use a leading subdomain wildcard such as `*.example.com`
     - Traffic is forwarded as raw TCP to the explicit `UPSTREAM_HOST:PORT`
+    - Wildcards are only supported on the guest key side; upstream targets stay exact
+    - Exact mappings win over wildcard mappings
     - If both `GUEST_HOST` and `GUEST_HOST:PORT` are configured, the port-specific mapping wins
+    - If multiple wildcard mappings match, the longest matching suffix wins
 
 Examples:
 
@@ -160,6 +164,9 @@ gondolin bash --tcp-map pg.internal=127.0.0.1:5432
 Mapped TCP egress is an explicit exception path for non-HTTP protocols.
 
 - Rules are added with `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT`
+- `GUEST_HOST` may use a leading subdomain wildcard (`*.example.com[:PORT]`)
+    - `*.example.com` matches subdomains such as `api.example.com`
+    - `*.example.com` does not match the apex `example.com`
 - `--tcp-map` requires synthetic DNS with per-host mapping
     - the CLI auto-selects `--dns synthetic` and `--dns-synthetic-host-mapping per-host` when needed
 - Mapped TCP is raw forwarding to the explicit upstream target

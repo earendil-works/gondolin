@@ -3789,6 +3789,231 @@ test("qemu-net: tcp host mapping resolves host and host:port rules", () => {
   assert.equal(hostOnlySession.connectPort, 9999);
 });
 
+test("qemu-net: tcp host mapping resolves wildcard host rules", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: {
+      hosts: {
+        "*.discord.gg:443": "127.0.0.1:9443",
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 41126,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("gateway-us-east1-b.discord.gg", 0x4013),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const gatewayIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  const mapped = (backend as any).handleTcpConnect({
+    key: "tcp-map-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 50022,
+    dstIP: gatewayIp,
+    dstPort: 443,
+  });
+  const session = (backend as any).tcpSessions.get("tcp-map-wildcard");
+  assert.equal(mapped.allowRawTcp, true);
+  assert.equal(session.connectIP, "127.0.0.1");
+  assert.equal(session.connectPort, 9443);
+});
+
+test("qemu-net: tcp host wildcard does not match apex host", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: {
+      hosts: {
+        "*.discord.gg:443": "127.0.0.1:9443",
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-wildcard-apex",
+    srcIP: "192.168.127.3",
+    srcPort: 41127,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("discord.gg", 0x4014),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const apexIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  const mapped = (backend as any).handleTcpConnect({
+    key: "tcp-map-wildcard-apex",
+    srcIP: "192.168.127.3",
+    srcPort: 50023,
+    dstIP: apexIp,
+    dstPort: 443,
+  });
+  assert.equal(mapped.allowRawTcp, false);
+});
+
+test("qemu-net: tcp host mapping exact rules override wildcard rules", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: {
+      hosts: {
+        "*.discord.gg:443": "127.0.0.1:9443",
+        "gateway.discord.gg": "127.0.0.1:8443",
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-exact-over-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 41128,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("gateway.discord.gg", 0x4015),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const gatewayIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  const mapped = (backend as any).handleTcpConnect({
+    key: "tcp-map-exact-over-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 50024,
+    dstIP: gatewayIp,
+    dstPort: 443,
+  });
+  const session = (backend as any).tcpSessions.get(
+    "tcp-map-exact-over-wildcard",
+  );
+  assert.equal(mapped.allowRawTcp, true);
+  assert.equal(session.connectIP, "127.0.0.1");
+  assert.equal(session.connectPort, 8443);
+});
+
+test("qemu-net: tcp host mapping prefers most-specific wildcard suffix", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: {
+      hosts: {
+        "*.discord.gg:443": "127.0.0.1:9443",
+        "*.b.discord.gg:443": "127.0.0.1:7443",
+      },
+    },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-specific-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 41129,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("gateway.b.discord.gg", 0x4016),
+  });
+
+  const response = responses[0].data as Buffer;
+  const parts = [...response.subarray(response.length - 4)];
+  const gatewayIp = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+
+  const mapped = (backend as any).handleTcpConnect({
+    key: "tcp-map-specific-wildcard",
+    srcIP: "192.168.127.3",
+    srcPort: 50025,
+    dstIP: gatewayIp,
+    dstPort: 443,
+  });
+  const session = (backend as any).tcpSessions.get(
+    "tcp-map-specific-wildcard",
+  );
+  assert.equal(mapped.allowRawTcp, true);
+  assert.equal(session.connectIP, "127.0.0.1");
+  assert.equal(session.connectPort, 7443);
+});
+
+test("qemu-net: tcp host mapping rejects unsupported wildcard forms", () => {
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        tcp: {
+          hosts: {
+            "*:443": "127.0.0.1:9443",
+          },
+        },
+      }),
+    /tcp\.hosts key wildcard must be a leading subdomain pattern/i,
+  );
+
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        tcp: {
+          hosts: {
+            "*..discord.gg:443": "127.0.0.1:9443",
+          },
+        },
+      }),
+    /tcp\.hosts key wildcard must be a leading subdomain pattern/i,
+  );
+
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        tcp: {
+          hosts: {
+            "api.*.discord.gg:443": "127.0.0.1:9443",
+          },
+        },
+      }),
+    /tcp\.hosts key wildcard must be a leading subdomain pattern/i,
+  );
+
+  assert.throws(
+    () =>
+      makeBackend({
+        dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+        tcp: {
+          hosts: {
+            "*.discord.gg:443": "*.example.com:9443",
+          },
+        },
+      }),
+    /tcp\.hosts value does not support wildcard/i,
+  );
+});
+
 test("qemu-net: ssh egress requires synthetic dns mode", () => {
   assert.throws(
     () =>
