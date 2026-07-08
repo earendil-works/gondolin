@@ -8,6 +8,7 @@ guest/zig-cache/
 guest/zig-out/
 guest/.zig-cache/
 guest/image/out/
+image-out/
 guest/image/.cache/
 guest/fuzz/out/
 guest/fuzz/out-native/
