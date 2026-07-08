@@ -748,6 +748,36 @@ async function importSandboxHelpersFromSource(
   }
 }
 
+function resolveCachedSandboxHelperObject(
+  objectDir: string,
+  expectedBuildId: string,
+  expectedArch: Architecture,
+  expectedGondolinVersion: string | undefined,
+  log?: (msg: string) => void,
+): ResolvedSandboxHelpers {
+  try {
+    return resolveSandboxHelperDirectory(objectDir, {
+      expectedArch,
+      expectedGondolinVersion,
+      source: "cache",
+    });
+  } catch (strictError) {
+    const resolved = resolveSandboxHelperDirectory(objectDir, {
+      expectedArch,
+      source: "cache",
+    });
+
+    if (resolved.buildId !== expectedBuildId) {
+      throw strictError;
+    }
+
+    log?.(
+      `Using content-addressed sandbox helper cache object ${objectDir} despite metadata drift: ${strictError instanceof Error ? strictError.message : String(strictError)}`,
+    );
+    return resolved;
+  }
+}
+
 export async function ensureSandboxHelperBinaries(
   options: ResolveSandboxHelperOptions,
 ): Promise<ResolvedSandboxHelpers> {
@@ -773,12 +803,16 @@ export async function ensureSandboxHelperBinaries(
   );
 
   const objectDir = helperObjectDir(storeDir, buildId);
+  const expectedCachedGondolinVersion =
+    source.gondolinVersion ?? gondolinVersion;
   if (fs.existsSync(objectDir)) {
-    return resolveSandboxHelperDirectory(objectDir, {
-      expectedArch: options.arch,
-      expectedGondolinVersion: gondolinVersion,
-      source: "cache",
-    });
+    return resolveCachedSandboxHelperObject(
+      objectDir,
+      buildId,
+      options.arch,
+      expectedCachedGondolinVersion,
+      options.log,
+    );
   }
 
   options.log?.(`Downloading sandbox helpers for ${options.arch} (${ref})`);

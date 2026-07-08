@@ -234,6 +234,93 @@ test("sandbox helpers: ensureSandboxHelperBinaries downloads and caches helpers"
   }
 });
 
+test("sandbox helpers: cached helper metadata drift is accepted when build id matches registry source", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
+  const storeDir = path.join(tmpDir, "store");
+  const staleBundleDir = path.join(tmpDir, "stale-bundle");
+  const freshBundleDir = path.join(tmpDir, "fresh-bundle");
+  fs.mkdirSync(staleBundleDir, { recursive: true });
+  fs.mkdirSync(freshBundleDir, { recursive: true });
+
+  const { buildId } = createHelperBundle(staleBundleDir, "aarch64", "0.9.1");
+  createHelperBundle(freshBundleDir, "aarch64", "0.12.0");
+  const archive = createHelperArchive(freshBundleDir, tmpDir);
+  const objectDir = path.join(storeDir, "objects", buildId);
+  fs.mkdirSync(path.dirname(objectDir), { recursive: true });
+  fs.cpSync(staleBundleDir, objectDir, { recursive: true });
+
+  const registryUrl =
+    "https://example.invalid/builtin-sandbox-helper-registry.json";
+  const archiveUrl = "https://example.invalid/helpers-aarch64.tar.gz";
+  const registry = {
+    schema: 1,
+    refs: {
+      "gondolin:0.12.0": {
+        aarch64: buildId,
+      },
+    },
+    builds: {
+      [buildId]: {
+        arch: "aarch64",
+        url: archiveUrl,
+        sha256: archive.sha256,
+        gondolinVersion: "0.12.0",
+        target: "aarch64-linux-musl",
+        zigVersion: "0.16.0",
+      },
+    },
+  };
+
+  const prevFetch = globalThis.fetch;
+  let archiveFetches = 0;
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async (
+    url: string | URL | Request,
+  ) => {
+    const href = String(url);
+    if (href === registryUrl) {
+      return new Response(JSON.stringify(registry), { status: 200 });
+    }
+    if (href === archiveUrl) {
+      archiveFetches += 1;
+      return new Response(archive.data, { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const resolved = await ensureSandboxHelperBinaries({
+      arch: "aarch64",
+      gondolinVersion: "0.12.0",
+      registryUrl,
+      storeDir,
+    });
+
+    assert.equal(resolved.source, "cache");
+    assert.equal(resolved.buildId, buildId);
+    assert.equal(resolved.manifest?.gondolinVersion, "0.9.1");
+    assert.equal(archiveFetches, 0);
+
+    assert.equal(
+      fs
+        .readFileSync(path.join(objectDir, "manifest.json"), "utf8")
+        .includes("0.9.1"),
+      true,
+    );
+
+    const staleEntries = fs
+      .readdirSync(path.dirname(objectDir))
+      .filter((entry) => entry.startsWith(`${buildId}.stale-`));
+    const tmpEntries = fs
+      .readdirSync(path.dirname(objectDir))
+      .filter((entry) => entry.startsWith(`${buildId}.tmp-`));
+    assert.equal(staleEntries.length, 0);
+    assert.equal(tmpEntries.length, 0);
+  } finally {
+    restoreFetch(prevFetch);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("sandbox helpers: explicit helper directory bypasses registry fetch", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
   const bundleDir = path.join(tmpDir, "bundle");
