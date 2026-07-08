@@ -13,6 +13,6 @@
     "skipLibCheck": true,
     "stripInternal": true
   },
-  "include": ["src/**/*.ts", "bin/**/*.ts"],
+  "include": ["src/**/*.ts", "bin/**/*.ts", "examples/**/*.ts"],
   "exclude": ["test/**/*.ts"]
 }

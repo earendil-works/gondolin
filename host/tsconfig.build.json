@@ -8,5 +8,6 @@
     "sourceMap": true,
     "allowImportingTsExtensions": false,
     "rewriteRelativeImportExtensions": true
-  }
+  },
+  "exclude": ["test/**/*.ts", "examples/**/*.ts", "extensions/**/*.ts"]
 }
