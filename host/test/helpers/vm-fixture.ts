@@ -3,29 +3,19 @@ import path from "path";
 import { execFileSync, spawnSync } from "child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
-
-function windowsQemuCandidates(): string[] {
-  const candidates = ["qemu-system-x86_64", "qemu-system-x86_64w"];
-  const installRoots = [process.env.ProgramW6432, process.env.ProgramFiles].filter(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-
-  for (const root of installRoots) {
-    candidates.push(
-      path.join(root, "qemu", "qemu-system-x86_64.exe"),
-      path.join(root, "qemu", "qemu-system-x86_64w.exe"),
-    );
-  }
-
-  return Array.from(new Set(candidates));
-}
+import { buildQemuFamilyCandidates } from "../../src/qemu/locate-binary.ts";
 
 function hasWindowsWhpx(): boolean {
   if (process.arch !== "x64") {
     return false;
   }
 
-  for (const candidate of windowsQemuCandidates()) {
+  const candidates = buildQemuFamilyCandidates([
+    "qemu-system-x86_64",
+    "qemu-system-x86_64w",
+  ]);
+
+  for (const candidate of candidates) {
     try {
       const output = execFileSync(candidate, ["-accel", "help"], {
         encoding: "utf8",

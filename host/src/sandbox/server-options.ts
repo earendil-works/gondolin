@@ -12,6 +12,11 @@ import {
   type LocalEndpointInput,
 } from "../local-endpoint.ts";
 import {
+  buildQemuFamilyCandidates,
+  resolveFromQemuFamilyCandidates,
+  type ResolveQemuFamilyBinaryDeps,
+} from "../qemu/locate-binary.ts";
+import {
   debugFlagsToArray,
   parseDebugEnv,
   resolveDebugFlags,
@@ -388,73 +393,32 @@ function resolveQemuIdlePauseMs(
   return DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS;
 }
 
-type ResolveDefaultQemuPathDeps = {
-  platform?: NodeJS.Platform;
-  env?: NodeJS.ProcessEnv;
-  existsSync?: typeof fs.existsSync;
+type ResolveDefaultQemuPathDeps = ResolveQemuFamilyBinaryDeps & {
+  /** @deprecated use `probeBinary` */
   probeQemuBinary?: (candidatePath: string) => boolean;
 };
-
-function probeQemuBinary(candidatePath: string): boolean {
-  try {
-    execFileSync(candidatePath, ["--version"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function buildDefaultQemuCandidates(
   targetArch: "arm64" | "x64",
   deps: ResolveDefaultQemuPathDeps = {},
 ): string[] {
   const platform = deps.platform ?? process.platform;
-  const env = deps.env ?? process.env;
   const archName = targetArch === "arm64" ? "aarch64" : "x86_64";
   const baseName = `qemu-system-${archName}`;
+  const names = platform === "win32" ? [baseName, `${baseName}w`] : [baseName];
 
-  if (platform !== "win32") {
-    return [baseName];
-  }
-
-  const candidates = [baseName, `${baseName}w`];
-  const installRoots = [env.ProgramW6432, env.ProgramFiles].filter(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-  const joinWindowsPath = path.win32.join;
-
-  for (const root of installRoots) {
-    candidates.push(
-      joinWindowsPath(root, "qemu", `${baseName}.exe`),
-      joinWindowsPath(root, "qemu", `${baseName}w.exe`),
-    );
-  }
-
-  return Array.from(new Set(candidates));
+  return buildQemuFamilyCandidates(names, deps);
 }
 
 function resolveDefaultQemuPath(
   targetArch: "arm64" | "x64",
   deps: ResolveDefaultQemuPathDeps = {},
 ): string {
-  const existsSync = deps.existsSync ?? fs.existsSync;
-  const probeQemu = deps.probeQemuBinary ?? probeQemuBinary;
   const candidates = buildDefaultQemuCandidates(targetArch, deps);
-
-  for (const candidate of candidates) {
-    const isExplicitPath = /[\\/]/.test(candidate);
-    if (isExplicitPath && !existsSync(candidate)) {
-      continue;
-    }
-    if (probeQemu(candidate)) {
-      return candidate;
-    }
-  }
-
-  return candidates[0]!;
+  return resolveFromQemuFamilyCandidates(candidates, {
+    ...deps,
+    probeBinary: deps.probeBinary ?? deps.probeQemuBinary,
+  });
 }
 
 function resolveLocalKrunRunnerPath(): string | null {
@@ -1165,7 +1129,6 @@ export async function resolveSandboxServerOptionsAsync(
 }
 
 export const __test = {
-  probeQemuBinary,
   resolveDefaultQemuPath,
   probeKrunRunnerCandidate,
   resolvePackagedKrunRunnerPath,

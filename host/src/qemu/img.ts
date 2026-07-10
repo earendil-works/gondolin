@@ -4,6 +4,12 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 
+import {
+  buildQemuFamilyCandidates,
+  resolveFromQemuFamilyCandidates,
+  type ResolveQemuFamilyBinaryDeps,
+} from "./locate-binary.ts";
+
 type Qcow2CreateOptions = {
   /** overlay file path */
   path: string;
@@ -13,11 +19,9 @@ type Qcow2CreateOptions = {
   backingFormat: "raw" | "qcow2";
 };
 
-type ResolveQemuImgPathDeps = {
-  platform?: NodeJS.Platform;
-  env?: NodeJS.ProcessEnv;
+type ResolveQemuImgPathDeps = ResolveQemuFamilyBinaryDeps & {
   qemuPath?: string;
-  existsSync?: typeof fs.existsSync;
+  /** @deprecated use `probeBinary` */
   probeQemuImg?: (candidatePath: string) => boolean;
 };
 
@@ -25,18 +29,6 @@ function tmpDir(): string {
   // macOS has tighter unix socket path limits in the default temp dir and we
   // already standardize on /tmp elsewhere.
   return process.platform === "darwin" ? "/tmp" : os.tmpdir();
-}
-
-function probeQemuImgBinary(candidatePath: string): boolean {
-  try {
-    execFileSync(candidatePath, ["--version"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function qemuImgSiblingCandidate(
@@ -58,47 +50,21 @@ function buildDefaultQemuImgCandidates(
   deps: ResolveQemuImgPathDeps = {},
 ): string[] {
   const platform = deps.platform ?? process.platform;
-  const candidates: string[] = [];
-
   const siblingCandidate = qemuImgSiblingCandidate(deps.qemuPath, platform);
-  if (siblingCandidate) {
-    candidates.push(siblingCandidate);
-  }
-
-  if (platform !== "win32") {
-    candidates.push("qemu-img");
-    return Array.from(new Set(candidates));
-  }
-
-  const env = deps.env ?? process.env;
-  candidates.push("qemu-img", "qemu-img.exe");
-  const installRoots = [env.ProgramW6432, env.ProgramFiles].filter(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-
-  for (const root of installRoots) {
-    candidates.push(path.win32.join(root, "qemu", "qemu-img.exe"));
-  }
+  const candidates = [
+    ...(siblingCandidate ? [siblingCandidate] : []),
+    ...buildQemuFamilyCandidates(["qemu-img"], deps),
+  ];
 
   return Array.from(new Set(candidates));
 }
 
 function resolveQemuImgPath(deps: ResolveQemuImgPathDeps = {}): string {
-  const existsSync = deps.existsSync ?? fs.existsSync;
-  const probeQemuImg = deps.probeQemuImg ?? probeQemuImgBinary;
   const candidates = buildDefaultQemuImgCandidates(deps);
-
-  for (const candidate of candidates) {
-    const isExplicitPath = /[\\/]/.test(candidate);
-    if (isExplicitPath && !existsSync(candidate)) {
-      continue;
-    }
-    if (probeQemuImg(candidate)) {
-      return candidate;
-    }
-  }
-
-  return candidates[0]!;
+  return resolveFromQemuFamilyCandidates(candidates, {
+    ...deps,
+    probeBinary: deps.probeBinary ?? deps.probeQemuImg,
+  });
 }
 
 /** Ensure `qemu-img` can be invoked. */
