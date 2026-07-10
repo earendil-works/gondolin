@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 
 import {
   normalizeLocalEndpoint,
+  createNetConnectOptions,
   type LocalEndpoint,
   type LocalEndpointInput,
 } from "../local-endpoint.ts";
@@ -103,7 +104,7 @@ function formatQmpError(command: QmpCommand, message: QmpMessage) {
 }
 
 function executeQmpCommand(
-  socketPath: string,
+  endpoint: LocalEndpoint,
   command: QmpCommand,
 ): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
@@ -112,7 +113,7 @@ function executeQmpCommand(
     let commandSent = false;
     let stage: "greeting" | "capabilities" | "command" = "greeting";
 
-    const socket = net.createConnection(socketPath);
+    const socket = net.createConnection(createNetConnectOptions(endpoint));
     socket.setEncoding("utf8");
     let timer: NodeJS.Timeout;
 
@@ -224,17 +225,53 @@ function executeQmpCommand(
   });
 }
 
-function defaultQmpSocketPath(config: SandboxConfig) {
+function defaultUnixQmpEndpoint(config: SandboxConfig): LocalEndpoint {
   const endpoint = normalizeLocalEndpoint(
     config.virtioSocketPath,
     "sandbox.virtioSocketPath",
   );
   const dir =
     endpoint.transport === "unix" ? path.dirname(endpoint.path) : os.tmpdir();
-  return path.join(
-    path.resolve(dir),
-    `gondolin-qmp-${randomUUID().slice(0, 8)}.sock`,
-  );
+  return {
+    transport: "unix",
+    path: path.join(
+      path.resolve(dir),
+      `gondolin-qmp-${randomUUID().slice(0, 8)}.sock`,
+    ),
+  };
+}
+
+/**
+ * Reserve a loopback TCP port by binding to port 0 and immediately closing.
+ * There's an inherent (small, accepted) TOCTOU race between the close here
+ * and qemu's own bind, same tradeoff every "find a free port" helper makes.
+ */
+function reserveEphemeralTcpEndpoint(host: string): Promise<LocalEndpoint> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close(() => resolve({ transport: "tcp", host, port }));
+    });
+  });
+}
+
+/**
+ * Resolve the default QMP monitor endpoint. Off Windows this is a unix
+ * socket next to the virtio control socket (unchanged from before). On
+ * Windows there's no unix socket support, so a loopback TCP port is
+ * reserved instead - qemu's `-qmp` chardev supports `tcp:host:port` just as
+ * well as `unix:path`.
+ */
+async function resolveDefaultQmpEndpoint(
+  config: SandboxConfig,
+): Promise<LocalEndpoint> {
+  if (process.platform !== "win32") {
+    return defaultUnixQmpEndpoint(config);
+  }
+  return reserveEphemeralTcpEndpoint("127.0.0.1");
 }
 
 export type SandboxConfig = {
@@ -285,8 +322,8 @@ export type SandboxConfig = {
   netSocketPath?: LocalEndpointInput;
   /** guest mac address */
   netMac?: string;
-  /** qemu monitor socket path */
-  qmpSocketPath?: string;
+  /** qemu monitor endpoint */
+  qmpSocketPath?: LocalEndpointInput;
   /** qemu idle pause timeout in `ms` */
   qemuIdlePauseMs?: number;
   /** whether to restart the vm automatically on exit */
@@ -299,6 +336,7 @@ export type SandboxLogStream = "stdout" | "stderr";
 
 export class SandboxController extends EventEmitter {
   private child: ChildProcess | null = null;
+  private starting = false;
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
@@ -309,7 +347,7 @@ export class SandboxController extends EventEmitter {
   private qmpChain: Promise<void> = Promise.resolve();
   private qmpGeneration = 0;
   private readonly config: SandboxConfig;
-  private readonly qmpSocketPath: string | null;
+  private qmpEndpoint: LocalEndpoint | null = null;
   private readonly idlePauseMs: number | null;
 
   constructor(config: SandboxConfig) {
@@ -327,9 +365,26 @@ export class SandboxController extends EventEmitter {
 
     const idlePauseMs = Math.trunc(config.qemuIdlePauseMs ?? 0);
     this.idlePauseMs = idlePauseMs > 0 ? idlePauseMs : null;
-    this.qmpSocketPath = this.idlePauseMs
-      ? (config.qmpSocketPath ?? defaultQmpSocketPath(config))
-      : null;
+  }
+
+  /**
+   * Resolve (and cache) the QMP endpoint. Reserving a Windows loopback TCP
+   * port requires an async bind/close round trip, so this can't happen
+   * synchronously in the constructor the way the unix-socket path used to;
+   * `start()` awaits it before spawning qemu instead. The resolved endpoint
+   * is cached so restarts reuse the same one, matching prior behavior.
+   */
+  private async ensureQmpEndpoint(): Promise<LocalEndpoint | null> {
+    if (!this.idlePauseMs) return null;
+    if (this.qmpEndpoint) return this.qmpEndpoint;
+
+    this.qmpEndpoint = this.config.qmpSocketPath
+      ? normalizeLocalEndpoint(
+          this.config.qmpSocketPath,
+          "sandbox.qmpSocketPath",
+        )
+      : await resolveDefaultQmpEndpoint(this.config);
+    return this.qmpEndpoint;
   }
 
   setAppend(append: string) {
@@ -345,68 +400,90 @@ export class SandboxController extends EventEmitter {
   }
 
   async start() {
-    if (this.child) return;
+    if (this.child || this.starting) return;
+    this.starting = true;
 
-    this.cancelIdlePause();
-    this.qmpGeneration += 1;
-    this.paused = false;
-    this.pauseInProgress = false;
-    this.qmpIdleDisabled = false;
-    this.qmpChain = Promise.resolve();
-    this.manualStop = false;
-    this.setState("starting");
-
-    this.cleanupQmpSocket();
-
-    const args = buildQemuArgs({
-      ...this.config,
-      qmpSocketPath: this.qmpSocketPath ?? undefined,
-    });
-    this.child = child_process.spawn(this.config.qemuPath, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    trackChild(this.child);
-
-    this.child.stdout?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stdout" satisfies SandboxLogStream);
-    });
-
-    this.child.stderr?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stderr" satisfies SandboxLogStream);
-    });
-
-    this.child.on("spawn", () => {
-      this.setState("running");
-    });
-
-    this.child.on("error", (err) => {
+    try {
       this.cancelIdlePause();
       this.qmpGeneration += 1;
-      this.cleanupQmpSocket();
       this.paused = false;
       this.pauseInProgress = false;
-      this.child = null;
-      this.setState("stopped");
-      this.emit("exit", { code: null, signal: null, error: err });
-    });
+      this.qmpIdleDisabled = false;
+      this.qmpChain = Promise.resolve();
+      this.manualStop = false;
+      this.setState("starting");
 
-    this.child.on("exit", (code, signal) => {
-      this.cancelIdlePause();
-      this.qmpGeneration += 1;
       this.cleanupQmpSocket();
-      this.paused = false;
-      this.pauseInProgress = false;
-      this.child = null;
-      this.setState("stopped");
-      this.emit("exit", { code, signal });
-      if (this.manualStop) {
-        this.manualStop = false;
-        return;
-      }
-      if (this.config.autoRestart) {
-        this.scheduleRestart();
-      }
-    });
+
+      // The only await point in this method - resolving the QMP endpoint
+      // may need an async port reservation on Windows. Guarded by
+      // `this.starting` above so a concurrent start() call can't slip past
+      // the `this.child` check while this is in flight. Short-circuit
+      // (skip calling the async function entirely) when idle-pause isn't
+      // configured, so the common case stays fully synchronous like before.
+      const qmpEndpoint = this.idlePauseMs
+        ? await this.ensureQmpEndpoint()
+        : null;
+      const args = buildQemuArgs({
+        ...this.config,
+        qmpSocketPath: qmpEndpoint ?? undefined,
+      });
+      this.child = child_process.spawn(this.config.qemuPath, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      trackChild(this.child);
+
+      this.child.stdout?.on("data", (chunk) => {
+        this.emit(
+          "log",
+          chunk.toString(),
+          "stdout" satisfies SandboxLogStream,
+        );
+      });
+
+      this.child.stderr?.on("data", (chunk) => {
+        this.emit(
+          "log",
+          chunk.toString(),
+          "stderr" satisfies SandboxLogStream,
+        );
+      });
+
+      this.child.on("spawn", () => {
+        this.setState("running");
+      });
+
+      this.child.on("error", (err) => {
+        this.cancelIdlePause();
+        this.qmpGeneration += 1;
+        this.cleanupQmpSocket();
+        this.paused = false;
+        this.pauseInProgress = false;
+        this.child = null;
+        this.setState("stopped");
+        this.emit("exit", { code: null, signal: null, error: err });
+      });
+
+      this.child.on("exit", (code, signal) => {
+        this.cancelIdlePause();
+        this.qmpGeneration += 1;
+        this.cleanupQmpSocket();
+        this.paused = false;
+        this.pauseInProgress = false;
+        this.child = null;
+        this.setState("stopped");
+        this.emit("exit", { code, signal });
+        if (this.manualStop) {
+          this.manualStop = false;
+          return;
+        }
+        if (this.config.autoRestart) {
+          this.scheduleRestart();
+        }
+      });
+    } finally {
+      this.starting = false;
+    }
   }
 
   async close() {
@@ -540,7 +617,7 @@ export class SandboxController extends EventEmitter {
   }
 
   resumeForActivity(): Promise<void> | void {
-    if (!this.qmpSocketPath) return;
+    if (!this.idlePauseMs) return;
     this.cancelIdlePause();
     if (!this.paused && !this.pauseInProgress) return;
     return this.resumeForActivityAsync(this.qmpGeneration, this.child);
@@ -566,7 +643,7 @@ export class SandboxController extends EventEmitter {
 
   scheduleIdlePause() {
     if (
-      !this.qmpSocketPath ||
+      !this.idlePauseMs ||
       this.qmpIdleDisabled ||
       !this.child ||
       this.state !== "running" ||
@@ -592,7 +669,7 @@ export class SandboxController extends EventEmitter {
 
   private async pauseForIdle() {
     if (
-      !this.qmpSocketPath ||
+      !this.idlePauseMs ||
       this.qmpIdleDisabled ||
       !this.child ||
       this.state !== "running" ||
@@ -666,13 +743,14 @@ export class SandboxController extends EventEmitter {
   }
 
   private async runQmpCommand(command: QmpCommand): Promise<unknown> {
-    if (!this.qmpSocketPath) return;
+    if (!this.idlePauseMs || !this.qmpEndpoint) return;
+    const endpoint = this.qmpEndpoint;
 
     const run = this.qmpChain
       .catch(() => {
         // keep the command chain alive after a failed command
       })
-      .then(() => executeQmpCommand(this.qmpSocketPath!, command));
+      .then(() => executeQmpCommand(endpoint, command));
     this.qmpChain = run.then(
       () => {
         // keep the command chain alive after a completed command
@@ -685,9 +763,9 @@ export class SandboxController extends EventEmitter {
   }
 
   private cleanupQmpSocket() {
-    if (!this.qmpSocketPath) return;
+    if (!this.qmpEndpoint || this.qmpEndpoint.transport !== "unix") return;
     try {
-      fs.rmSync(this.qmpSocketPath, { force: true });
+      fs.rmSync(this.qmpEndpoint.path, { force: true });
     } catch {
       // ignore
     }
@@ -851,7 +929,16 @@ function buildQemuArgs(config: SandboxConfig) {
   }
 
   if (config.qmpSocketPath) {
-    args.push("-qmp", `unix:${config.qmpSocketPath},server=on,wait=off`);
+    const qmpEndpoint = normalizeLocalEndpoint(
+      config.qmpSocketPath,
+      "sandbox.qmpSocketPath",
+    );
+    args.push(
+      "-qmp",
+      qmpEndpoint.transport === "unix"
+        ? `unix:${qmpEndpoint.path},server=on,wait=off`
+        : `tcp:${qmpEndpoint.host}:${qmpEndpoint.port},server=on,wait=off`,
+    );
   }
 
   return args;
@@ -1124,6 +1211,10 @@ export const __test = {
   qemuSupportsAccel,
   qemuCanInitializeAccel,
   primeAccelProbeCache,
+  executeQmpCommand,
+  defaultUnixQmpEndpoint,
+  reserveEphemeralTcpEndpoint,
+  resolveDefaultQmpEndpoint,
   killActiveChildren,
   getActiveChildrenCount: () => activeChildren.size,
 };

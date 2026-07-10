@@ -15,6 +15,7 @@ import {
   __test,
 } from "../src/sandbox/controller.ts";
 import type { LocalEndpointInput } from "../src/local-endpoint.ts";
+import { makeTestEndpoint } from "./helpers/vm-fixture.ts";
 
 // In ESM, built-in modules expose live bindings via getters which cannot be
 // replaced with node:test mocks. The actual mutable exports object is on
@@ -156,99 +157,109 @@ test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", 
   assert.match(args[driveIndex + 1]!, /snapshot=on/);
 });
 
-test(
-  "SandboxController: idle pause uses a short QMP socket",
-  {
-    skip:
-      process.platform === "win32"
-        ? "QMP idle pause currently uses a Unix monitor socket"
-        : false,
-  },
-  async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
-    const seenCommands: string[] = [];
-    const child = new FakeChildProcess();
-    let spawnedArgs: string[] = [];
+test("SandboxController: idle pause uses a short QMP socket", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
+  const seenCommands: string[] = [];
+  const child = new FakeChildProcess();
+  let spawnedArgs: string[] = [];
 
-    mock.method(cp, "spawn", (_cmd: string, args: string[]) => {
-      spawnedArgs = args;
-      return child as any;
-    });
+  mock.method(cp, "spawn", (_cmd: string, args: string[]) => {
+    spawnedArgs = args;
+    return child as any;
+  });
 
-    const controller = new SandboxController(
-      makeConfig({
-        qemuIdlePauseMs: 1,
-        virtioSocketPath: path.join(tmpDir, "virtio.sock"),
-      }),
+  // On Windows a bare unix-socket path isn't a valid virtioSocketPath, and
+  // the default QMP endpoint is a reserved loopback TCP port instead of a
+  // unix socket next to it (see resolveDefaultQmpEndpoint in controller.ts).
+  const virtioSocketPath: LocalEndpointInput = makeTestEndpoint(
+    path.join(tmpDir, "virtio.sock"),
+  );
+
+  const controller = new SandboxController(
+    makeConfig({
+      qemuIdlePauseMs: 1,
+      virtioSocketPath,
+    }),
+  );
+
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.write(
+      JSON.stringify({ QMP: { version: {}, capabilities: [] } }) + "\r\n",
     );
 
-    const server = net.createServer((socket) => {
-      socket.setEncoding("utf8");
-      socket.write(
-        JSON.stringify({ QMP: { version: {}, capabilities: [] } }) + "\r\n",
-      );
-
-      let buffer = "";
-      socket.on("data", (chunk) => {
-        buffer += chunk;
-        for (;;) {
-          const newline = buffer.indexOf("\n");
-          if (newline === -1) break;
-          const raw = buffer.slice(0, newline).trim();
-          buffer = buffer.slice(newline + 1);
-          if (!raw) continue;
-          const message = JSON.parse(raw) as { execute?: string };
-          if (message.execute) seenCommands.push(message.execute);
-          socket.write(JSON.stringify({ return: {} }) + "\r\n");
-        }
-      });
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const raw = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!raw) continue;
+        const message = JSON.parse(raw) as { execute?: string };
+        if (message.execute) seenCommands.push(message.execute);
+        socket.write(JSON.stringify({ return: {} }) + "\r\n");
+      }
     });
+  });
 
-    try {
-      await controller.start();
-      child.emit("spawn");
+  try {
+    await controller.start();
+    child.emit("spawn");
 
-      const qmpIndex = spawnedArgs.indexOf("-qmp");
-      assert.notEqual(qmpIndex, -1);
-      const match = /^unix:(.*),server=on,wait=off$/.exec(
-        spawnedArgs[qmpIndex + 1]!,
-      );
-      assert.ok(match);
-      const qmpSocketPath = match[1]!;
-      assert.equal(path.dirname(qmpSocketPath), tmpDir);
+    const qmpIndex = spawnedArgs.indexOf("-qmp");
+    assert.notEqual(qmpIndex, -1);
+    const qmpArg = spawnedArgs[qmpIndex + 1]!;
 
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(qmpSocketPath, () => {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+
+      if (process.platform === "win32") {
+        const match = /^tcp:([^:]+):(\d+),server=on,wait=off$/.exec(qmpArg);
+        assert.ok(match, `expected a tcp qmp endpoint, got ${qmpArg}`);
+        const qmpHost = match[1]!;
+        const qmpPort = Number(match[2]);
+        server.listen(qmpPort, qmpHost, () => {
           server.off("error", reject);
           resolve();
         });
-      });
-
-      controller.scheduleIdlePause();
-      await waitFor(() => seenCommands.includes("stop"));
-
-      const resume = controller.resumeForActivity();
-      if (resume) await resume;
-
-      assert.deepEqual(
-        seenCommands.filter(
-          (command) => command === "stop" || command === "cont",
-        ),
-        ["stop", "cont"],
-      );
-
-      const closing = controller.close();
-      child.emit("exit", 0, null);
-      await closing;
-    } finally {
-      if (server.listening) {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        return;
       }
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+
+      const match = /^unix:(.*),server=on,wait=off$/.exec(qmpArg);
+      assert.ok(match, `expected a unix qmp endpoint, got ${qmpArg}`);
+      const qmpSocketPath = match[1]!;
+      assert.equal(path.dirname(qmpSocketPath), tmpDir);
+      server.listen(qmpSocketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    controller.scheduleIdlePause();
+    await waitFor(() => seenCommands.includes("stop"));
+
+    const resume = controller.resumeForActivity();
+    if (resume) await resume;
+
+    assert.deepEqual(
+      seenCommands.filter(
+        (command) => command === "stop" || command === "cont",
+      ),
+      ["stop", "cont"],
+    );
+
+    const closing = controller.close();
+    child.emit("exit", 0, null);
+    await closing;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  },
-);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 
 test("buildQemuArgs supports tcp-backed chardev and netdev endpoints", () => {
   const args = __test.buildQemuArgs(
