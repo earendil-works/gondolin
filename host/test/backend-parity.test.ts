@@ -100,10 +100,8 @@ async function skipIfBackendUnavailable(
   t: test.TestContext,
   backend: BackendName,
 ): Promise<boolean> {
-  if (process.platform === "win32") {
-    t.skip(
-      "backend parity is covered by the Linux parity job; Windows coverage uses the Windows QEMU suite",
-    );
+  if (process.platform === "win32" && backend === "krun") {
+    t.skip("krun is not supported on Windows hosts");
     return true;
   }
 
