@@ -4,6 +4,21 @@ import { execFileSync, spawnSync } from "child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 import { buildQemuFamilyCandidates } from "../../src/qemu/locate-binary.ts";
+import type { LocalEndpoint } from "../../src/local-endpoint.ts";
+
+/**
+ * Build a LocalEndpoint for test fixtures: a unix socket at `posixPath` off
+ * Windows, or a reserved-by-the-OS ephemeral loopback TCP endpoint on
+ * Windows (where a bare unix path isn't valid - see local-endpoint.ts). This
+ * is the one place tests should branch on win32 vs unix transport for a
+ * throwaway test endpoint; call sites that need the socket at a specific
+ * path (e.g. inside a temp dir they clean up themselves) pass that path in.
+ */
+export function makeTestEndpoint(posixPath: string): LocalEndpoint {
+  return process.platform === "win32"
+    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
+    : { transport: "unix", path: posixPath };
+}
 
 function hasWindowsWhpx(): boolean {
   if (process.arch !== "x64") {
