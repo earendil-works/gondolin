@@ -980,6 +980,75 @@ function qemuCanInitializeAccel(qemuPath: string, accel: string) {
   }
 }
 
+/**
+ * Async, non-blocking equivalent of `qemuCanInitializeAccel`, populating the
+ * same cache. `selectAccel` still uses the synchronous `spawnSync` probe
+ * (required to support the synchronous `SandboxServer` constructor), which
+ * blocks the event loop for up to 1.5s on an unwarmed cache entry. Callers on
+ * an async path (`resolveSandboxServerOptionsAsync`, `SandboxServer.create`)
+ * should await this first so that by the time the synchronous accel
+ * selection runs, the cache is already warm and returns instantly.
+ */
+export async function primeAccelProbeCache(
+  qemuPath: string,
+  accel: string,
+): Promise<void> {
+  const cacheKey = `${qemuPath}\0${accel.toLowerCase()}`;
+  if (accelRuntimeProbeCache.has(cacheKey)) {
+    return;
+  }
+
+  const available = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let child: ChildProcess;
+    try {
+      child = child_process.spawn(
+        qemuPath,
+        [
+          "-accel",
+          accel,
+          "-machine",
+          "none",
+          "-nodefaults",
+          "-display",
+          "none",
+          "-S",
+        ],
+        { windowsHide: true, stdio: "ignore" },
+      );
+    } catch {
+      resolve(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      // Matches the sync probe: a still-running QEMU after the timeout means
+      // the accelerator initialized and is idling at the `-S` stop, not that
+      // it failed.
+      resolve(true);
+    }, 1500);
+
+    child.on("error", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    });
+
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+
+  accelRuntimeProbeCache.set(cacheKey, available);
+}
+
 export function selectAccel(targetArch: string, qemuPath?: string) {
   const hostArch = getHostArch();
 
@@ -1054,6 +1123,7 @@ export const __test = {
   selectRngObject,
   qemuSupportsAccel,
   qemuCanInitializeAccel,
+  primeAccelProbeCache,
   killActiveChildren,
   getActiveChildrenCount: () => activeChildren.size,
 };

@@ -41,7 +41,7 @@ import {
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
-import { selectAccel } from "./controller.ts";
+import { selectAccel, primeAccelProbeCache } from "./controller.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -1110,6 +1110,18 @@ export function resolveSandboxServerOptions(
 export async function resolveSandboxServerOptionsAsync(
   options: SandboxServerOptions = {},
 ): Promise<ResolvedSandboxServerOptions> {
+  // WHPX is the only accelerator `selectAccel` probes at runtime, and only
+  // for x64 QEMU. Warm its probe cache asynchronously so the synchronous
+  // accel selection below (which must stay sync to support the sync
+  // `SandboxServer` constructor) doesn't block the event loop for up to 1.5s
+  // on the common case where this hint matches the eventually-resolved path.
+  // A mismatched guess is harmless: the cache entry simply goes unused and
+  // behavior falls back to today's synchronous probe.
+  if (process.platform === "win32" && (options.vmm ?? "qemu") === "qemu") {
+    const qemuPathHint = options.qemuPath ?? resolveDefaultQemuPath("x64");
+    await primeAccelProbeCache(qemuPathHint, "whpx");
+  }
+
   // Explicit object imagePath is already fully resolved.
   if (options.imagePath && typeof options.imagePath === "object") {
     return resolveSandboxServerOptions(options);
