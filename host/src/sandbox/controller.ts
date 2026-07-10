@@ -3,10 +3,20 @@ import child_process from "child_process";
 import type { ChildProcess } from "child_process";
 import fs from "fs";
 import net from "net";
+import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 
+import {
+  normalizeLocalEndpoint,
+  createNetConnectOptions,
+  type LocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
+
 const activeChildren = new Set<ChildProcess>();
+const accelSupportCache = new Map<string, Set<string>>();
+const accelRuntimeProbeCache = new Map<string, boolean>();
 let exitHookRegistered = false;
 
 function killActiveChildren() {
@@ -94,7 +104,7 @@ function formatQmpError(command: QmpCommand, message: QmpMessage) {
 }
 
 function executeQmpCommand(
-  socketPath: string,
+  endpoint: LocalEndpoint,
   command: QmpCommand,
 ): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
@@ -103,7 +113,7 @@ function executeQmpCommand(
     let commandSent = false;
     let stage: "greeting" | "capabilities" | "command" = "greeting";
 
-    const socket = net.createConnection(socketPath);
+    const socket = net.createConnection(createNetConnectOptions(endpoint));
     socket.setEncoding("utf8");
     let timer: NodeJS.Timeout;
 
@@ -215,11 +225,53 @@ function executeQmpCommand(
   });
 }
 
-function defaultQmpSocketPath(config: SandboxConfig) {
-  return path.join(
-    path.resolve(path.dirname(config.virtioSocketPath)),
-    `gondolin-qmp-${randomUUID().slice(0, 8)}.sock`,
+function defaultUnixQmpEndpoint(config: SandboxConfig): LocalEndpoint {
+  const endpoint = normalizeLocalEndpoint(
+    config.virtioSocketPath,
+    "sandbox.virtioSocketPath",
   );
+  const dir =
+    endpoint.transport === "unix" ? path.dirname(endpoint.path) : os.tmpdir();
+  return {
+    transport: "unix",
+    path: path.join(
+      path.resolve(dir),
+      `gondolin-qmp-${randomUUID().slice(0, 8)}.sock`,
+    ),
+  };
+}
+
+/**
+ * Reserve a loopback TCP port by binding to port 0 and immediately closing.
+ * There's an inherent (small, accepted) TOCTOU race between the close here
+ * and qemu's own bind, same tradeoff every "find a free port" helper makes.
+ */
+function reserveEphemeralTcpEndpoint(host: string): Promise<LocalEndpoint> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close(() => resolve({ transport: "tcp", host, port }));
+    });
+  });
+}
+
+/**
+ * Resolve the default QMP monitor endpoint. Off Windows this is a unix
+ * socket next to the virtio control socket (unchanged from before). On
+ * Windows there's no unix socket support, so a loopback TCP port is
+ * reserved instead - qemu's `-qmp` chardev supports `tcp:host:port` just as
+ * well as `unix:path`.
+ */
+async function resolveDefaultQmpEndpoint(
+  config: SandboxConfig,
+): Promise<LocalEndpoint> {
+  if (process.platform !== "win32") {
+    return defaultUnixQmpEndpoint(config);
+  }
+  return reserveEphemeralTcpEndpoint("127.0.0.1");
 }
 
 export type SandboxConfig = {
@@ -247,15 +299,15 @@ export type SandboxConfig = {
   memory: string;
   /** vm cpu count */
   cpus: number;
-  /** virtio-serial control socket path */
-  virtioSocketPath: string;
-  /** virtiofs/vfs socket path */
-  virtioFsSocketPath: string;
-  /** virtio-serial ssh socket path */
-  virtioSshSocketPath: string;
+  /** virtio-serial control endpoint */
+  virtioSocketPath: LocalEndpointInput;
+  /** virtiofs/vfs endpoint */
+  virtioFsSocketPath: LocalEndpointInput;
+  /** virtio-serial ssh endpoint */
+  virtioSshSocketPath: LocalEndpointInput;
 
-  /** virtio-serial ingress socket path */
-  virtioIngressSocketPath: string;
+  /** virtio-serial ingress endpoint */
+  virtioIngressSocketPath: LocalEndpointInput;
   /** kernel cmdline append string */
   append: string;
   /** qemu machine type */
@@ -266,12 +318,12 @@ export type SandboxConfig = {
   cpu?: string;
   /** guest console mode */
   console?: "stdio" | "none";
-  /** qemu net socket path */
-  netSocketPath?: string;
+  /** qemu net backend endpoint */
+  netSocketPath?: LocalEndpointInput;
   /** guest mac address */
   netMac?: string;
-  /** qemu monitor socket path */
-  qmpSocketPath?: string;
+  /** qemu monitor endpoint */
+  qmpSocketPath?: LocalEndpointInput;
   /** qemu idle pause timeout in `ms` */
   qemuIdlePauseMs?: number;
   /** whether to restart the vm automatically on exit */
@@ -284,6 +336,7 @@ export type SandboxLogStream = "stdout" | "stderr";
 
 export class SandboxController extends EventEmitter {
   private child: ChildProcess | null = null;
+  private starting = false;
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
@@ -294,7 +347,7 @@ export class SandboxController extends EventEmitter {
   private qmpChain: Promise<void> = Promise.resolve();
   private qmpGeneration = 0;
   private readonly config: SandboxConfig;
-  private readonly qmpSocketPath: string | null;
+  private qmpEndpoint: LocalEndpoint | null = null;
   private readonly idlePauseMs: number | null;
 
   constructor(config: SandboxConfig) {
@@ -312,9 +365,26 @@ export class SandboxController extends EventEmitter {
 
     const idlePauseMs = Math.trunc(config.qemuIdlePauseMs ?? 0);
     this.idlePauseMs = idlePauseMs > 0 ? idlePauseMs : null;
-    this.qmpSocketPath = this.idlePauseMs
-      ? (config.qmpSocketPath ?? defaultQmpSocketPath(config))
-      : null;
+  }
+
+  /**
+   * Resolve (and cache) the QMP endpoint. Reserving a Windows loopback TCP
+   * port requires an async bind/close round trip, so this can't happen
+   * synchronously in the constructor the way the unix-socket path used to;
+   * `start()` awaits it before spawning qemu instead. The resolved endpoint
+   * is cached so restarts reuse the same one, matching prior behavior.
+   */
+  private async ensureQmpEndpoint(): Promise<LocalEndpoint | null> {
+    if (!this.idlePauseMs) return null;
+    if (this.qmpEndpoint) return this.qmpEndpoint;
+
+    this.qmpEndpoint = this.config.qmpSocketPath
+      ? normalizeLocalEndpoint(
+          this.config.qmpSocketPath,
+          "sandbox.qmpSocketPath",
+        )
+      : await resolveDefaultQmpEndpoint(this.config);
+    return this.qmpEndpoint;
   }
 
   setAppend(append: string) {
@@ -330,68 +400,90 @@ export class SandboxController extends EventEmitter {
   }
 
   async start() {
-    if (this.child) return;
+    if (this.child || this.starting) return;
+    this.starting = true;
 
-    this.cancelIdlePause();
-    this.qmpGeneration += 1;
-    this.paused = false;
-    this.pauseInProgress = false;
-    this.qmpIdleDisabled = false;
-    this.qmpChain = Promise.resolve();
-    this.manualStop = false;
-    this.setState("starting");
-
-    this.cleanupQmpSocket();
-
-    const args = buildQemuArgs({
-      ...this.config,
-      qmpSocketPath: this.qmpSocketPath ?? undefined,
-    });
-    this.child = child_process.spawn(this.config.qemuPath, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    trackChild(this.child);
-
-    this.child.stdout?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stdout" satisfies SandboxLogStream);
-    });
-
-    this.child.stderr?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stderr" satisfies SandboxLogStream);
-    });
-
-    this.child.on("spawn", () => {
-      this.setState("running");
-    });
-
-    this.child.on("error", (err) => {
+    try {
       this.cancelIdlePause();
       this.qmpGeneration += 1;
-      this.cleanupQmpSocket();
       this.paused = false;
       this.pauseInProgress = false;
-      this.child = null;
-      this.setState("stopped");
-      this.emit("exit", { code: null, signal: null, error: err });
-    });
+      this.qmpIdleDisabled = false;
+      this.qmpChain = Promise.resolve();
+      this.manualStop = false;
+      this.setState("starting");
 
-    this.child.on("exit", (code, signal) => {
-      this.cancelIdlePause();
-      this.qmpGeneration += 1;
       this.cleanupQmpSocket();
-      this.paused = false;
-      this.pauseInProgress = false;
-      this.child = null;
-      this.setState("stopped");
-      this.emit("exit", { code, signal });
-      if (this.manualStop) {
-        this.manualStop = false;
-        return;
-      }
-      if (this.config.autoRestart) {
-        this.scheduleRestart();
-      }
-    });
+
+      // The only await point in this method - resolving the QMP endpoint
+      // may need an async port reservation on Windows. Guarded by
+      // `this.starting` above so a concurrent start() call can't slip past
+      // the `this.child` check while this is in flight. Short-circuit
+      // (skip calling the async function entirely) when idle-pause isn't
+      // configured, so the common case stays fully synchronous like before.
+      const qmpEndpoint = this.idlePauseMs
+        ? await this.ensureQmpEndpoint()
+        : null;
+      const args = buildQemuArgs({
+        ...this.config,
+        qmpSocketPath: qmpEndpoint ?? undefined,
+      });
+      this.child = child_process.spawn(this.config.qemuPath, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      trackChild(this.child);
+
+      this.child.stdout?.on("data", (chunk) => {
+        this.emit(
+          "log",
+          chunk.toString(),
+          "stdout" satisfies SandboxLogStream,
+        );
+      });
+
+      this.child.stderr?.on("data", (chunk) => {
+        this.emit(
+          "log",
+          chunk.toString(),
+          "stderr" satisfies SandboxLogStream,
+        );
+      });
+
+      this.child.on("spawn", () => {
+        this.setState("running");
+      });
+
+      this.child.on("error", (err) => {
+        this.cancelIdlePause();
+        this.qmpGeneration += 1;
+        this.cleanupQmpSocket();
+        this.paused = false;
+        this.pauseInProgress = false;
+        this.child = null;
+        this.setState("stopped");
+        this.emit("exit", { code: null, signal: null, error: err });
+      });
+
+      this.child.on("exit", (code, signal) => {
+        this.cancelIdlePause();
+        this.qmpGeneration += 1;
+        this.cleanupQmpSocket();
+        this.paused = false;
+        this.pauseInProgress = false;
+        this.child = null;
+        this.setState("stopped");
+        this.emit("exit", { code, signal });
+        if (this.manualStop) {
+          this.manualStop = false;
+          return;
+        }
+        if (this.config.autoRestart) {
+          this.scheduleRestart();
+        }
+      });
+    } finally {
+      this.starting = false;
+    }
   }
 
   async close() {
@@ -525,7 +617,7 @@ export class SandboxController extends EventEmitter {
   }
 
   resumeForActivity(): Promise<void> | void {
-    if (!this.qmpSocketPath) return;
+    if (!this.idlePauseMs) return;
     this.cancelIdlePause();
     if (!this.paused && !this.pauseInProgress) return;
     return this.resumeForActivityAsync(this.qmpGeneration, this.child);
@@ -551,7 +643,7 @@ export class SandboxController extends EventEmitter {
 
   scheduleIdlePause() {
     if (
-      !this.qmpSocketPath ||
+      !this.idlePauseMs ||
       this.qmpIdleDisabled ||
       !this.child ||
       this.state !== "running" ||
@@ -577,7 +669,7 @@ export class SandboxController extends EventEmitter {
 
   private async pauseForIdle() {
     if (
-      !this.qmpSocketPath ||
+      !this.idlePauseMs ||
       this.qmpIdleDisabled ||
       !this.child ||
       this.state !== "running" ||
@@ -651,13 +743,14 @@ export class SandboxController extends EventEmitter {
   }
 
   private async runQmpCommand(command: QmpCommand): Promise<unknown> {
-    if (!this.qmpSocketPath) return;
+    if (!this.idlePauseMs || !this.qmpEndpoint) return;
+    const endpoint = this.qmpEndpoint;
 
     const run = this.qmpChain
       .catch(() => {
         // keep the command chain alive after a failed command
       })
-      .then(() => executeQmpCommand(this.qmpSocketPath!, command));
+      .then(() => executeQmpCommand(endpoint, command));
     this.qmpChain = run.then(
       () => {
         // keep the command chain alive after a completed command
@@ -670,9 +763,9 @@ export class SandboxController extends EventEmitter {
   }
 
   private cleanupQmpSocket() {
-    if (!this.qmpSocketPath) return;
+    if (!this.qmpEndpoint || this.qmpEndpoint.transport !== "unix") return;
     try {
-      fs.rmSync(this.qmpSocketPath, { force: true });
+      fs.rmSync(this.qmpEndpoint.path, { force: true });
     } catch {
       // ignore
     }
@@ -699,6 +792,26 @@ export class SandboxController extends EventEmitter {
 }
 
 function buildQemuArgs(config: SandboxConfig) {
+  const virtioEndpoint = normalizeLocalEndpoint(
+    config.virtioSocketPath,
+    "sandbox.virtioSocketPath",
+  );
+  const virtioFsEndpoint = normalizeLocalEndpoint(
+    config.virtioFsSocketPath,
+    "sandbox.virtioFsSocketPath",
+  );
+  const virtioSshEndpoint = normalizeLocalEndpoint(
+    config.virtioSshSocketPath,
+    "sandbox.virtioSshSocketPath",
+  );
+  const virtioIngressEndpoint = normalizeLocalEndpoint(
+    config.virtioIngressSocketPath,
+    "sandbox.virtioIngressSocketPath",
+  );
+  const netEndpoint = config.netSocketPath
+    ? normalizeLocalEndpoint(config.netSocketPath, "sandbox.netSocketPath")
+    : null;
+
   const args: string[] = [
     "-nodefaults",
     "-no-reboot",
@@ -716,7 +829,7 @@ function buildQemuArgs(config: SandboxConfig) {
   ];
 
   const targetArch = detectTargetArch(config);
-  const accel = config.accel ?? selectAccel(targetArch);
+  const accel = config.accel ?? selectAccel(targetArch, config.qemuPath);
   const machineType =
     config.machineType ?? selectMachineType(targetArch, accel);
 
@@ -769,23 +882,26 @@ function buildQemuArgs(config: SandboxConfig) {
   const serialDev = useMmio ? "virtio-serial-device" : "virtio-serial-pci";
   const netDev = useMmio ? "virtio-net-device" : "virtio-net-pci";
 
-  args.push("-object", "rng-random,filename=/dev/urandom,id=rng0");
-  args.push("-device", `${rngDev},rng=rng0`);
+  const rngObject = selectRngObject();
+  if (rngObject) {
+    args.push("-object", rngObject);
+    args.push("-device", `${rngDev},rng=rng0`);
+  }
   args.push(
     "-chardev",
-    `socket,id=virtiocon0,path=${config.virtioSocketPath},server=off`,
+    buildQemuSocketChardevArg("virtiocon0", virtioEndpoint),
   );
   args.push(
     "-chardev",
-    `socket,id=virtiofs0,path=${config.virtioFsSocketPath},server=off`,
+    buildQemuSocketChardevArg("virtiofs0", virtioFsEndpoint),
   );
   args.push(
     "-chardev",
-    `socket,id=virtiossh0,path=${config.virtioSshSocketPath},server=off`,
+    buildQemuSocketChardevArg("virtiossh0", virtioSshEndpoint),
   );
   args.push(
     "-chardev",
-    `socket,id=virtioingress0,path=${config.virtioIngressSocketPath},server=off`,
+    buildQemuSocketChardevArg("virtioingress0", virtioIngressEndpoint),
   );
 
   args.push("-device", `${serialDev},id=virtio-serial0`);
@@ -806,17 +922,23 @@ function buildQemuArgs(config: SandboxConfig) {
     "virtserialport,chardev=virtioingress0,name=virtio-ingress,bus=virtio-serial0.0",
   );
 
-  if (config.netSocketPath) {
-    args.push(
-      "-netdev",
-      `stream,id=net0,server=off,addr.type=unix,addr.path=${config.netSocketPath}`,
-    );
+  if (netEndpoint) {
+    args.push("-netdev", buildQemuStreamNetdevArg("net0", netEndpoint));
     const mac = config.netMac ?? "02:00:00:00:00:01";
     args.push("-device", `${netDev},netdev=net0,mac=${mac}`);
   }
 
   if (config.qmpSocketPath) {
-    args.push("-qmp", `unix:${config.qmpSocketPath},server=on,wait=off`);
+    const qmpEndpoint = normalizeLocalEndpoint(
+      config.qmpSocketPath,
+      "sandbox.qmpSocketPath",
+    );
+    args.push(
+      "-qmp",
+      qmpEndpoint.transport === "unix"
+        ? `unix:${qmpEndpoint.path},server=on,wait=off`
+        : `tcp:${qmpEndpoint.host}:${qmpEndpoint.port},server=on,wait=off`,
+    );
   }
 
   return args;
@@ -846,11 +968,175 @@ function selectMachineType(targetArch: string, accel?: string) {
   return "q35";
 }
 
+function buildQemuSocketChardevArg(id: string, endpoint: LocalEndpoint) {
+  return endpoint.transport === "unix"
+    ? `socket,id=${id},path=${endpoint.path},server=off`
+    : `socket,id=${id},host=${endpoint.host},port=${endpoint.port},server=off`;
+}
+
+function buildQemuStreamNetdevArg(id: string, endpoint: LocalEndpoint) {
+  return endpoint.transport === "unix"
+    ? `stream,id=${id},server=off,addr.type=unix,addr.path=${endpoint.path}`
+    : `stream,id=${id},server=off,addr.type=inet,addr.host=${endpoint.host},addr.port=${endpoint.port}`;
+}
+
+function selectRngObject() {
+  if (process.platform === "win32") {
+    // No /dev/urandom-equivalent device path to hand QEMU on Windows; use
+    // QEMU's cross-platform builtin RNG backend instead (host getrandom()/
+    // BCryptGenRandom, no device file required, available since QEMU 5.0)
+    // rather than leaving the guest with no virtio-rng device at all.
+    return "rng-builtin,id=rng0";
+  }
+  return "rng-random,filename=/dev/urandom,id=rng0";
+}
+
 function getHostArch(): "arm64" | "x64" {
   return process.arch === "arm64" ? "arm64" : "x64";
 }
 
-function selectAccel(targetArch: string) {
+function readSupportedAccels(qemuPath: string): Set<string> | null {
+  const cached = accelSupportCache.get(qemuPath);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const result = child_process.spawnSync(qemuPath, ["-accel", "help"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const supported = new Set(
+      `${result.stdout ?? ""}`
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .filter(
+          (line) => line.length > 0 && !line.includes("accelerators supported"),
+        ),
+    );
+    accelSupportCache.set(qemuPath, supported);
+    return supported;
+  } catch {
+    return null;
+  }
+}
+
+function qemuSupportsAccel(qemuPath: string, accel: string) {
+  const supported = readSupportedAccels(qemuPath);
+  return supported?.has(accel.toLowerCase()) ?? false;
+}
+
+function qemuCanInitializeAccel(qemuPath: string, accel: string) {
+  const cacheKey = `${qemuPath}\0${accel.toLowerCase()}`;
+  const cached = accelRuntimeProbeCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const result = child_process.spawnSync(
+      qemuPath,
+      [
+        "-accel",
+        accel,
+        "-machine",
+        "none",
+        "-nodefaults",
+        "-display",
+        "none",
+        "-S",
+      ],
+      {
+        timeout: 1500,
+        windowsHide: true,
+        encoding: "utf8",
+      },
+    );
+    const available =
+      (result.error as NodeJS.ErrnoException | undefined)?.code ===
+        "ETIMEDOUT" || result.status === 0;
+    accelRuntimeProbeCache.set(cacheKey, available);
+    return available;
+  } catch {
+    accelRuntimeProbeCache.set(cacheKey, false);
+    return false;
+  }
+}
+
+/**
+ * Async, non-blocking equivalent of `qemuCanInitializeAccel`, populating the
+ * same cache. `selectAccel` still uses the synchronous `spawnSync` probe
+ * (required to support the synchronous `SandboxServer` constructor), which
+ * blocks the event loop for up to 1.5s on an unwarmed cache entry. Callers on
+ * an async path (`resolveSandboxServerOptionsAsync`, `SandboxServer.create`)
+ * should await this first so that by the time the synchronous accel
+ * selection runs, the cache is already warm and returns instantly.
+ */
+export async function primeAccelProbeCache(
+  qemuPath: string,
+  accel: string,
+): Promise<void> {
+  const cacheKey = `${qemuPath}\0${accel.toLowerCase()}`;
+  if (accelRuntimeProbeCache.has(cacheKey)) {
+    return;
+  }
+
+  const available = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let child: ChildProcess;
+    try {
+      child = child_process.spawn(
+        qemuPath,
+        [
+          "-accel",
+          accel,
+          "-machine",
+          "none",
+          "-nodefaults",
+          "-display",
+          "none",
+          "-S",
+        ],
+        { windowsHide: true, stdio: "ignore" },
+      );
+    } catch {
+      resolve(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      // Matches the sync probe: a still-running QEMU after the timeout means
+      // the accelerator initialized and is idling at the `-S` stop, not that
+      // it failed.
+      resolve(true);
+    }, 1500);
+
+    child.on("error", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    });
+
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+
+  accelRuntimeProbeCache.set(cacheKey, available);
+}
+
+export function selectAccel(targetArch: string, qemuPath?: string) {
   const hostArch = getHostArch();
 
   // Cross-arch emulation cannot use hardware acceleration.
@@ -869,6 +1155,14 @@ function selectAccel(targetArch: string) {
   }
 
   if (process.platform === "darwin") return "hvf";
+  if (process.platform === "win32") {
+    if (targetArch !== "x64") return "tcg";
+    if (!qemuPath) return "whpx";
+    if (!qemuSupportsAccel(qemuPath, "whpx")) {
+      return "tcg";
+    }
+    return qemuCanInitializeAccel(qemuPath, "whpx") ? "whpx" : "tcg";
+  }
   return "tcg";
 }
 
@@ -891,6 +1185,15 @@ function selectCpu(targetArch: string, accel?: string) {
     return accelName === "hvf" ? "host" : "max";
   }
 
+  if (process.platform === "win32") {
+    if (targetArch === "x64" && accelName === "whpx") {
+      // WHPX is more stable with a conservative named CPU model than with
+      // broad synthetic models like `max` on current QEMU/Windows builds.
+      return "qemu64";
+    }
+    return "max";
+  }
+
   return "max";
 }
 
@@ -898,10 +1201,20 @@ function selectCpu(targetArch: string, accel?: string) {
 // Expose internal helpers for unit tests. Not part of the public API.
 export const __test = {
   buildQemuArgs,
+  buildQemuSocketChardevArg,
+  buildQemuStreamNetdevArg,
   detectTargetArch,
   selectMachineType,
   selectAccel,
   selectCpu,
+  selectRngObject,
+  qemuSupportsAccel,
+  qemuCanInitializeAccel,
+  primeAccelProbeCache,
+  executeQmpCommand,
+  defaultUnixQmpEndpoint,
+  reserveEphemeralTcpEndpoint,
+  resolveDefaultQmpEndpoint,
   killActiveChildren,
   getActiveChildrenCount: () => activeChildren.size,
 };

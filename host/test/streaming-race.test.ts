@@ -6,15 +6,20 @@ import test from "node:test";
 
 import * as qemuHttp from "../src/qemu/http.ts";
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
+import { makeTestEndpoint } from "./helpers/vm-fixture.ts";
 
 function makeBackend(
   options?: Partial<ConstructorParameters<typeof QemuNetworkBackend>[0]>,
 ) {
-  return new QemuNetworkBackend({
-    socketPath: path.join(
+  const socketPath = makeTestEndpoint(
+    path.join(
       os.tmpdir(),
       `gondolin-net-test-${process.pid}-${crypto.randomUUID()}.sock`,
     ),
+  );
+
+  return new QemuNetworkBackend({
+    socketPath,
     ...options,
   });
 }

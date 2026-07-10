@@ -8,6 +8,12 @@ import readline from "node:readline/promises";
 import { PassThrough } from "stream";
 import { fileURLToPath } from "url";
 
+import {
+  normalizeCliHostPath,
+  parseMountSpec,
+  type MountSpec,
+} from "../src/cli/mount-spec.ts";
+
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
 import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
@@ -96,7 +102,7 @@ function sanitizeCheckpointName(name: string): string {
 
 function resolveSnapshotPath(args: { output?: string; name?: string }): string {
   if (args.output) {
-    return path.resolve(args.output);
+    return path.resolve(normalizeCliHostPath(args.output));
   }
 
   const checkpointDir = checkpointBaseDir();
@@ -136,18 +142,23 @@ async function waitForCheckpointReady(
 }
 
 function resolveResumeCheckpoint(resume: string): string {
-  const value = resume.trim();
-  if (!value) {
+  const rawValue = resume.trim();
+  if (!rawValue) {
     throw new Error("--resume requires a non-empty checkpoint id or path");
   }
 
+  const value = normalizeCliHostPath(rawValue);
   const resolvedPath = path.resolve(value);
   if (fs.existsSync(resolvedPath)) {
     return resolvedPath;
   }
 
-  if (value.includes(path.sep) || value.includes("/") || value.includes("\\")) {
-    throw new Error(`checkpoint not found: ${value}`);
+  if (
+    value.includes(path.sep) ||
+    value.includes("/") ||
+    value.includes("\\")
+  ) {
+    throw new Error(`checkpoint not found: ${rawValue}`);
   }
 
   const dir = checkpointBaseDir();
@@ -188,7 +199,23 @@ function renderCliError(err: unknown) {
     if (binary.includes("qemu")) {
       console.error(`Error: QEMU binary '${binary}' not found.`);
       console.error("Please install QEMU to run the sandbox.");
-      if (process.platform === "darwin") {
+      if (process.platform === "win32") {
+        console.error(
+          "  Install a Windows QEMU build with WHPX support, for example:",
+        );
+        console.error(
+          "  https://qemu.weilnetz.de/w64/2026/qemu-w64-setup-20260415.exe",
+        );
+        console.error(
+          "  Then ensure qemu-system-x86_64.exe or qemu-system-x86_64w.exe is on PATH, or set sandbox.qemuPath.",
+        );
+        console.error(
+          "  WHPX docs: https://www.qemu.org/docs/master/system/whpx.html",
+        );
+        console.error(
+          "  Enable Hypervisor Platform: DISM /online /Enable-Feature /FeatureName:HypervisorPlatform /All",
+        );
+      } else if (process.platform === "darwin") {
         console.error("  brew install qemu");
       } else {
         console.error(
@@ -209,6 +236,29 @@ function renderCliError(err: unknown) {
 
   const message = err instanceof Error ? err.message : String(err);
   console.error(message);
+}
+
+function renderCliBackendWarnings(vm: VM) {
+  if (process.platform !== "win32") return;
+
+  const backend = vm.getBackendInfo();
+  const accelName = backend.accel?.split(",", 1)[0]?.trim().toLowerCase();
+  if (backend.vmm !== "qemu" || accelName !== "tcg") {
+    return;
+  }
+
+  console.error(
+    `[gondolin] warning: using QEMU TCG software emulation on Windows (${backend.qemuPath}).`,
+  );
+  console.error(
+    "[gondolin] WHPX acceleration was not selected; startup and runtime performance will be much slower.",
+  );
+  console.error(
+    "[gondolin] WHPX docs: https://www.qemu.org/docs/master/system/whpx.html",
+  );
+  console.error(
+    "[gondolin] Enable Hypervisor Platform: DISM /online /Enable-Feature /FeatureName:HypervisorPlatform /All",
+  );
 }
 
 function usage() {
@@ -464,12 +514,6 @@ function execUsage() {
   );
 }
 
-type MountSpec = {
-  hostPath: string;
-  guestPath: string;
-  readonly: boolean;
-};
-
 type SecretSpec = {
   name: string;
   value: string;
@@ -537,47 +581,7 @@ type CommonOptions = {
 };
 
 function parseMount(spec: string): MountSpec {
-  const parts = spec.split(":");
-  if (parts.length < 2) {
-    throw new Error(`Invalid mount format: ${spec} (expected HOST:GUEST[:ro])`);
-  }
-
-  // Handle Windows paths like C:\path by checking if the second part looks like a path
-  let hostPath: string;
-  let rest: string[];
-
-  // Check if this looks like a Windows drive letter (single letter followed by nothing before the colon)
-  if (
-    parts[0].length === 1 &&
-    /^[a-zA-Z]$/.test(parts[0]) &&
-    parts.length >= 3
-  ) {
-    hostPath = `${parts[0]}:${parts[1]}`;
-    rest = parts.slice(2);
-  } else {
-    hostPath = parts[0];
-    rest = parts.slice(1);
-  }
-
-  if (rest.length === 0) {
-    throw new Error(`Invalid mount format: ${spec} (missing guest path)`);
-  }
-
-  // Similar check for guest path (though unlikely to be Windows in a VM)
-  let guestPath: string;
-  let options: string[];
-
-  if (rest[0].length === 1 && /^[a-zA-Z]$/.test(rest[0]) && rest.length >= 2) {
-    guestPath = `${rest[0]}:${rest[1]}`;
-    options = rest.slice(2);
-  } else {
-    guestPath = rest[0];
-    options = rest.slice(1);
-  }
-
-  const readonly = options.includes("ro");
-
-  return { hostPath, guestPath, readonly };
+  return parseMountSpec(spec);
 }
 
 function parseHostSecret(spec: string): SecretSpec {
@@ -1039,7 +1043,9 @@ function buildVmOptions(common: CommonOptions) {
     common.sshCredentials.length > 0
       ? Object.fromEntries(
           common.sshCredentials.map((credential) => {
-            const resolvedPath = path.resolve(credential.keyPath);
+            const resolvedPath = path.resolve(
+              normalizeCliHostPath(credential.keyPath),
+            );
             if (!fs.existsSync(resolvedPath)) {
               throw new Error(
                 `SSH key file does not exist: ${credential.keyPath}`,
@@ -1080,7 +1086,9 @@ function buildVmOptions(common: CommonOptions) {
             agent: common.sshAgent,
             knownHostsFile:
               common.sshKnownHostsFiles.length > 0
-                ? common.sshKnownHostsFiles
+                ? common.sshKnownHostsFiles.map((file) =>
+                    path.resolve(normalizeCliHostPath(file)),
+                  )
                 : undefined,
           }
         : undefined,
@@ -1096,7 +1104,9 @@ function buildVmOptions(common: CommonOptions) {
   if (common.image || common.vmm) {
     vmOptions.sandbox = {
       ...(vmOptions.sandbox ?? {}),
-      ...(common.image ? { imagePath: common.image } : {}),
+      ...(common.image
+        ? { imagePath: normalizeCliHostPath(common.image) }
+        : {}),
       ...(common.vmm ? { vmm: common.vmm } : {}),
     };
   }
@@ -1409,6 +1419,7 @@ async function runExecVm(args: ExecArgs) {
     vm = await VM.create({
       ...vmOptions,
     });
+    renderCliBackendWarnings(vm);
 
     for (const command of args.commands) {
       const result = await vm.exec([command.cmd, ...command.argv], {
@@ -1880,6 +1891,7 @@ async function runBash(argv: string[]) {
         ...vmOptions,
       });
     }
+    renderCliBackendWarnings(vm);
 
     if (args.ssh) {
       const access = await vm.enableSsh({
@@ -2200,7 +2212,7 @@ async function runAttach(argv: string[]) {
     },
   );
 
-  const client = connectToSession(session.socketPath, {
+  const client = connectToSession(session.endpoint, {
     onJson(message: ServerMessage) {
       if (message.type === "status") {
         return;
@@ -2434,7 +2446,7 @@ async function runSnapshot(argv: string[]) {
     },
   );
 
-  const client = connectToSession(session.socketPath, {
+  const client = connectToSession(session.endpoint, {
     onJson(message: ServerMessage) {
       if (message.type === "status") {
         return;
@@ -2660,7 +2672,7 @@ async function runBuild(argv: string[]) {
 
   // Handle --verify
   if (args.verify) {
-    const assetDir = path.resolve(args.verify);
+    const assetDir = path.resolve(normalizeCliHostPath(args.verify));
     const manifest = loadAssetManifest(assetDir);
 
     if (!manifest) {
@@ -2686,7 +2698,7 @@ async function runBuild(argv: string[]) {
   let config: BuildConfig;
   let configDir: string | undefined;
   if (args.configFile) {
-    const configPath = path.resolve(args.configFile);
+    const configPath = path.resolve(normalizeCliHostPath(args.configFile));
     configDir = path.dirname(configPath);
     if (!fs.existsSync(configPath)) {
       console.error(`Config file not found: ${configPath}`);
@@ -2711,7 +2723,9 @@ async function runBuild(argv: string[]) {
 
   const cleanupOutputDir = args.outputDir === undefined;
   const outputDir = path.resolve(
-    args.outputDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-build-")),
+    args.outputDir
+      ? normalizeCliHostPath(args.outputDir)
+      : fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-build-")),
   );
 
   // Run the build
@@ -2961,7 +2975,9 @@ async function runImage(argv: string[]) {
         throw new Error("image import requires <ASSET_DIR>");
       }
 
-      const imported = importImageFromDirectory(assetDir);
+      const imported = importImageFromDirectory(
+        normalizeCliHostPath(assetDir),
+      );
       console.log(`Imported buildId: ${imported.buildId}`);
       console.log(`  arch: ${imported.arch}`);
       console.log(`  object: ${imported.assetDir}`);
@@ -3012,7 +3028,7 @@ async function runImage(argv: string[]) {
         throw new Error("image tag requires <SOURCE> and <TARGET>");
       }
 
-      const updated = tagImage(source, target, arch);
+      const updated = tagImage(normalizeCliHostPath(source), target, arch);
       console.log(`Updated ${updated.reference}`);
       if (updated.targets.aarch64) {
         console.log(`  aarch64: ${updated.targets.aarch64}`);
@@ -3054,7 +3070,10 @@ async function runImage(argv: string[]) {
         throw new Error("image inspect requires <SELECTOR>");
       }
 
-      const resolved = await ensureImageSelector(selector, arch);
+      const resolved = await ensureImageSelector(
+        normalizeCliHostPath(selector),
+        arch,
+      );
       const manifest = loadAssetManifest(resolved.assetDir);
 
       console.log(`selector: ${resolved.selector}`);
@@ -3105,7 +3124,10 @@ async function runImage(argv: string[]) {
         throw new Error("image pull requires <SELECTOR>");
       }
 
-      const resolved = await ensureImageSelector(selector, arch);
+      const resolved = await ensureImageSelector(
+        normalizeCliHostPath(selector),
+        arch,
+      );
       console.log(`Pulled ${resolved.selector}`);
       console.log(`  assetDir: ${resolved.assetDir}`);
       if (resolved.buildId) {

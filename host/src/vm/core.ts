@@ -46,6 +46,7 @@ import type { SandboxConnection } from "../sandbox/client.ts";
 import type { SandboxState } from "../sandbox/controller.ts";
 import {
   SessionIpcServer,
+  createSessionEndpoint,
   gcSessions,
   registerSession,
   unregisterSession,
@@ -500,6 +501,7 @@ export class VM {
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
     const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
     const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
+    const qemuImgPathHint = resolved.qemuPath;
 
     try {
       // Prepare root disk:
@@ -519,9 +521,9 @@ export class VM {
                 readOnly: false,
                 snapshot: true,
               })
-            : prepareOverlayRootDisk(resolved);
+            : prepareOverlayRootDisk(resolved, qemuImgPathHint);
       } else if (rootfsMode === "cow") {
-        this.rootDisk = prepareOverlayRootDisk(resolved);
+        this.rootDisk = prepareOverlayRootDisk(resolved, qemuImgPathHint);
       } else {
         throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
@@ -531,6 +533,7 @@ export class VM {
           this.rootDisk,
           resolved.rootfsPath,
           rootfsSizeBytes,
+          qemuImgPathHint,
         );
         this.rootfsGuestResizePending = true;
       }
@@ -577,6 +580,19 @@ export class VM {
       };
       this.server.on("debug", this.debugListener);
     }
+  }
+
+  /**
+   * Return the resolved backend runtime settings for this VM
+   */
+  getBackendInfo() {
+    return {
+      vmm: this.resolvedSandboxOptions.vmm,
+      qemuPath: this.resolvedSandboxOptions.qemuPath,
+      accel: this.resolvedSandboxOptions.accel,
+      cpu: this.resolvedSandboxOptions.cpu,
+      machineType: this.resolvedSandboxOptions.machineType,
+    };
   }
 
   /**
@@ -1292,15 +1308,12 @@ fi
       this.ensureStartupGeneration(startupGeneration);
     }
 
-    const { socketPath } = registerSession({
-      id: this.id,
-      label: this.sessionLabel,
-    });
+    const sessionEndpoint = createSessionEndpoint(this.id);
 
     let sessionIpc: SessionIpcServer | null = null;
     try {
       sessionIpc = new SessionIpcServer(
-        socketPath,
+        sessionEndpoint,
         (onMessage, onClose) => {
           const server = this.server;
           if (!server) {
@@ -1329,7 +1342,13 @@ fi
         this.ensureStartupGeneration(startupGeneration);
       }
 
-      sessionIpc.start();
+      await sessionIpc.start();
+
+      registerSession({
+        id: this.id,
+        endpoint: sessionEndpoint,
+        label: this.sessionLabel,
+      });
 
       if (startupGeneration !== undefined) {
         this.ensureStartupGeneration(startupGeneration);
@@ -1966,19 +1985,24 @@ fi
     const resolvedCheckpointPath = path.resolve(checkpointPath);
 
     const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
-    const backingPath = resolveQcow2BackingPath(rootDisk.path);
+    const qemuImgPathHint = this.resolvedSandboxOptions.qemuPath;
+    const backingPath = resolveQcow2BackingPath(rootDisk.path, qemuImgPathHint);
     if (backingPath && backingPath !== rootfsPath) {
       // Collapse resume-generated checkpoint ancestry before we publish this
       // overlay as the new checkpoint file.
-      ensureQemuImgAvailable();
+      ensureQemuImgAvailable(qemuImgPathHint);
       rebaseQcow2InPlace(
         rootDisk.path,
         rootfsPath,
         inferDiskFormatFromPath(rootfsPath),
         "safe",
+        qemuImgPathHint,
       );
 
-      const rebasedBackingPath = resolveQcow2BackingPath(rootDisk.path);
+      const rebasedBackingPath = resolveQcow2BackingPath(
+        rootDisk.path,
+        qemuImgPathHint,
+      );
       if (rebasedBackingPath === resolvedCheckpointPath) {
         throw new Error(
           `cannot checkpoint: rebased overlay still points to destination checkpoint path (${resolvedCheckpointPath})`,
@@ -2114,12 +2138,14 @@ function prepareBaseRootDisk(
 
 function prepareOverlayRootDisk(
   resolved: ResolvedSandboxServerOptions,
+  qemuImgPathHint = resolved.qemuPath,
 ): RootDiskState {
-  ensureQemuImgAvailable();
+  ensureQemuImgAvailable(qemuImgPathHint);
   return installRootDisk(resolved, {
     path: createTempQcow2Overlay(
       resolved.rootfsPath,
       inferDiskFormatFromPath(resolved.rootfsPath),
+      qemuImgPathHint,
     ),
     format: "qcow2",
     snapshot: false,
@@ -2146,6 +2172,7 @@ function prepareRootDiskResize(
   rootDisk: RootDiskState | null,
   rootfsPath: string,
   sizeBytes: number,
+  qemuImgPathHint?: string,
 ): void {
   if (!rootDisk) {
     throw new Error("rootfs.size requires a root disk");
@@ -2161,8 +2188,8 @@ function prepareRootDiskResize(
     );
   }
 
-  ensureQemuImgAvailable();
-  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes);
+  ensureQemuImgAvailable(qemuImgPathHint);
+  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes, qemuImgPathHint);
 }
 
 function resolveManifestRootfsMode(

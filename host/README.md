@@ -2,22 +2,24 @@
 
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
-Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
-default, optional `krun` backend). The network stack and virtual filesystem are
-implemented in TypeScript, giving you complete programmatic control over what
-the sandbox can access and what secrets it can use.
+Gondolin runs lightweight micro-VMs on your Mac, Linux, or Windows machine
+(QEMU by default, optional `krun` backend on macOS/Linux). The network stack
+and virtual filesystem are implemented in TypeScript, giving you complete
+programmatic control over what the sandbox can access and what secrets it can
+use.
 
 ## Requirements
 
 You need QEMU installed to run the micro-VMs (default backend):
 
-| macOS               | Linux (Debian/Ubuntu)              |
-| ------------------- | ---------------------------------- |
-| `brew install qemu` | `sudo apt install qemu-system-arm` |
+| macOS               | Linux (Debian/Ubuntu)              | Windows x64 |
+| ------------------- | ---------------------------------- | ----------- |
+| `brew install qemu` | `sudo apt install qemu-system-arm` | Install a QEMU build with WHPX support and put `qemu-system-x86_64` or `qemu-system-x86_64w` on `PATH` |
 
 Optional experimental backend:
 
 - `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
+- `krun` is currently unsupported on Windows; use the default `qemu` backend there
 - `make krun-runner` from repo root stages dependencies locally and builds the runner
   - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
   - Gondolin auto-detects this local runner for `--vmm krun`
@@ -26,6 +28,7 @@ Optional experimental backend:
 - `gondolin bash --vmm krun` selects the backend per-command
 - `GONDOLIN_VMM=krun` still works as a global default
 - backend parity matrix: [docs/backends.md](../docs/backends.md)
+- Windows walkthrough: [docs/windows-showcase.md](../docs/windows-showcase.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 

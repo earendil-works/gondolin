@@ -1,4 +1,5 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { spawn } from "node:child_process";
 
@@ -75,7 +76,9 @@ async function runTrufflehogSecretDetection(
   secretValue: string,
 ): Promise<TrufflehogFinding[]> {
   const binaryPath = await ensureTrufflehogBinary();
-  const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "gondolin-secret-detect-"));
+  const tmpRoot = fs.mkdtempSync(
+    path.join(process.env.TMPDIR ?? os.tmpdir(), "gondolin-secret-detect-"),
+  );
   const filePath = path.join(tmpRoot, "secret.txt");
 
   try {

@@ -14,6 +14,8 @@ import {
   type SandboxState,
   __test,
 } from "../src/sandbox/controller.ts";
+import type { LocalEndpointInput } from "../src/local-endpoint.ts";
+import { makeTestEndpoint } from "./helpers/vm-fixture.ts";
 
 // In ESM, built-in modules expose live bindings via getters which cannot be
 // replaced with node:test mocks. The actual mutable exports object is on
@@ -32,6 +34,10 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
+function makeEndpoint(name: string): LocalEndpointInput {
+  return makeTestEndpoint(`/tmp/${name}.sock`);
+}
+
 function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
   return {
     qemuPath: "qemu-system-aarch64",
@@ -39,10 +45,10 @@ function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
     initrdPath: "/tmp/initrd",
     memory: "256M",
     cpus: 1,
-    virtioSocketPath: "/tmp/virtio.sock",
-    virtioFsSocketPath: "/tmp/virtiofs.sock",
-    virtioSshSocketPath: "/tmp/virtio-ssh.sock",
-    virtioIngressSocketPath: "/tmp/virtio-ingress.sock",
+    virtioSocketPath: makeEndpoint("virtio"),
+    virtioFsSocketPath: makeEndpoint("virtiofs"),
+    virtioSshSocketPath: makeEndpoint("virtio-ssh"),
+    virtioIngressSocketPath: makeEndpoint("virtio-ingress"),
     append: "console=ttyS0",
     machineType: "virt",
     accel: "tcg",
@@ -160,10 +166,17 @@ test("SandboxController: idle pause uses a short QMP socket", async () => {
     return child as any;
   });
 
+  // On Windows a bare unix-socket path isn't a valid virtioSocketPath, and
+  // the default QMP endpoint is a reserved loopback TCP port instead of a
+  // unix socket next to it (see resolveDefaultQmpEndpoint in controller.ts).
+  const virtioSocketPath: LocalEndpointInput = makeTestEndpoint(
+    path.join(tmpDir, "virtio.sock"),
+  );
+
   const controller = new SandboxController(
     makeConfig({
       qemuIdlePauseMs: 1,
-      virtioSocketPath: path.join(tmpDir, "virtio.sock"),
+      virtioSocketPath,
     }),
   );
 
@@ -195,15 +208,27 @@ test("SandboxController: idle pause uses a short QMP socket", async () => {
 
     const qmpIndex = spawnedArgs.indexOf("-qmp");
     assert.notEqual(qmpIndex, -1);
-    const match = /^unix:(.*),server=on,wait=off$/.exec(
-      spawnedArgs[qmpIndex + 1]!,
-    );
-    assert.ok(match);
-    const qmpSocketPath = match[1]!;
-    assert.equal(path.dirname(qmpSocketPath), tmpDir);
+    const qmpArg = spawnedArgs[qmpIndex + 1]!;
 
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
+
+      if (process.platform === "win32") {
+        const match = /^tcp:([^:]+):(\d+),server=on,wait=off$/.exec(qmpArg);
+        assert.ok(match, `expected a tcp qmp endpoint, got ${qmpArg}`);
+        const qmpHost = match[1]!;
+        const qmpPort = Number(match[2]);
+        server.listen(qmpPort, qmpHost, () => {
+          server.off("error", reject);
+          resolve();
+        });
+        return;
+      }
+
+      const match = /^unix:(.*),server=on,wait=off$/.exec(qmpArg);
+      assert.ok(match, `expected a unix qmp endpoint, got ${qmpArg}`);
+      const qmpSocketPath = match[1]!;
+      assert.equal(path.dirname(qmpSocketPath), tmpDir);
       server.listen(qmpSocketPath, () => {
         server.off("error", reject);
         resolve();
@@ -232,6 +257,41 @@ test("SandboxController: idle pause uses a short QMP socket", async () => {
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("buildQemuArgs supports tcp-backed chardev and netdev endpoints", () => {
+  const args = __test.buildQemuArgs(
+    makeConfig({
+      qemuPath: "qemu-system-x86_64",
+      machineType: "q35",
+      virtioSocketPath: { transport: "tcp", host: "127.0.0.1", port: 4101 },
+      virtioFsSocketPath: {
+        transport: "tcp",
+        host: "127.0.0.1",
+        port: 4102,
+      },
+      virtioSshSocketPath: {
+        transport: "tcp",
+        host: "127.0.0.1",
+        port: 4103,
+      },
+      virtioIngressSocketPath: {
+        transport: "tcp",
+        host: "127.0.0.1",
+        port: 4104,
+      },
+      netSocketPath: { transport: "tcp", host: "127.0.0.1", port: 4105 },
+    }),
+  );
+
+  assert.ok(
+    args.includes("socket,id=virtiocon0,host=127.0.0.1,port=4101,server=off"),
+  );
+  assert.ok(
+    args.includes(
+      "stream,id=net0,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port=4105",
+    ),
+  );
 });
 
 test("SandboxController: start is idempotent while running", async () => {
@@ -365,9 +425,10 @@ test("sandbox-controller: buildQemuArgs does not select -cpu host when using tcg
     initrdPath: "/tmp/initrd",
     memory: "256M",
     cpus: 1,
-    virtioSocketPath: "/tmp/virtio.sock",
-    virtioFsSocketPath: "/tmp/virtiofs.sock",
-    virtioSshSocketPath: "/tmp/virtiossh.sock",
+    virtioSocketPath: makeEndpoint("virtio"),
+    virtioFsSocketPath: makeEndpoint("virtiofs"),
+    virtioSshSocketPath: makeEndpoint("virtiossh"),
+    virtioIngressSocketPath: makeEndpoint("virtioingress"),
     append: "console=ttyS0",
     machineType: "q35",
     accel: "tcg",
@@ -390,12 +451,118 @@ test("sandbox-controller: selectCpu only uses host with matching hw accel", () =
     assert.equal((__test as any).selectCpu(hostArch, "kvm"), "host");
   } else if (process.platform === "darwin") {
     assert.equal((__test as any).selectCpu(hostArch, "hvf"), "host");
+  } else if (process.platform === "win32") {
+    assert.equal((__test as any).selectCpu(hostArch, "whpx"), "qemu64");
+    assert.equal((__test as any).selectCpu(hostArch, "tcg"), "max");
   } else {
     assert.equal((__test as any).selectCpu(hostArch, "kvm"), "max");
   }
 
   const otherArch = hostArch === "arm64" ? "x64" : "arm64";
   assert.equal((__test as any).selectCpu(otherArch, "kvm"), "max");
+});
+
+test("sandbox-controller: qemuSupportsAccel parses '-accel help' output", () => {
+  mock.method(cp, "spawnSync", () => ({
+    status: 0,
+    stdout: "Accelerators supported in QEMU binary:\r\ntcg\r\nwhpx\r\n",
+  }));
+
+  assert.equal(
+    (__test as any).qemuSupportsAccel("qemu-system-x86_64", "whpx"),
+    true,
+  );
+  assert.equal(
+    (__test as any).qemuSupportsAccel("qemu-system-x86_64", "hvf"),
+    false,
+  );
+});
+
+test("sandbox-controller: selectAccel falls back to tcg when WHPX cannot initialize", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("WHPX probing is Windows-specific");
+    return;
+  }
+
+  mock.method(cp, "spawnSync", (_bin: string, args: string[]) => {
+    if (args[1] === "help") {
+      return {
+        status: 0,
+        stdout: "Accelerators supported in QEMU binary:\r\ntcg\r\nwhpx\r\n",
+      };
+    }
+
+    return {
+      status: 1,
+      stdout: "",
+    };
+  });
+
+  assert.equal(
+    (__test as any).selectAccel("x64", "qemu-system-x86_64-runtime-fail"),
+    "tcg",
+  );
+});
+
+test("sandbox-controller: selectAccel keeps WHPX when runtime probe succeeds", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("WHPX probing is Windows-specific");
+    return;
+  }
+
+  mock.method(cp, "spawnSync", (_bin: string, args: string[]) => {
+    if (args[1] === "help") {
+      return {
+        status: 0,
+        stdout: "Accelerators supported in QEMU binary:\r\ntcg\r\nwhpx\r\n",
+      };
+    }
+
+    return {
+      status: null,
+      stdout: "",
+      error: { code: "ETIMEDOUT" },
+    };
+  });
+
+  assert.equal(
+    (__test as any).selectAccel("x64", "qemu-system-x86_64-runtime-ok"),
+    "whpx",
+  );
+});
+
+test("sandbox-controller: selectRngObject uses the cross-platform builtin RNG on Windows", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("this asserts the Windows-specific branch");
+    return;
+  }
+
+  assert.equal((__test as any).selectRngObject(), "rng-builtin,id=rng0");
+});
+
+test("sandbox-controller: selectRngObject uses /dev/urandom off Windows", (t) => {
+  if (process.platform === "win32") {
+    t.skip("this asserts the non-Windows branch");
+    return;
+  }
+
+  assert.equal(
+    (__test as any).selectRngObject(),
+    "rng-random,filename=/dev/urandom,id=rng0",
+  );
+});
+
+test("sandbox-controller: buildQemuArgs always emits a virtio-rng device (never silently drops RNG)", () => {
+  const args = __test.buildQemuArgs(makeConfig());
+
+  const objectIndex = args.indexOf("-object");
+  assert.notEqual(objectIndex, -1);
+  const rngObject = args[objectIndex + 1]!;
+  assert.match(rngObject, /^rng-(random|builtin),.*id=rng0/);
+
+  const deviceIndex = args.indexOf("-device");
+  assert.notEqual(deviceIndex, -1);
+  assert.match(args[deviceIndex + 1]!, /^virtio-rng-(pci|device),rng=rng0/);
 });
 
 test("sandbox-controller: selectMachineType avoids microvm for x64 tcg", () => {

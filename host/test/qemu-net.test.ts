@@ -32,15 +32,20 @@ import * as qemuWs from "../src/qemu/ws.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
 import { mitmLeafHasRequiredKeyIdentifiers } from "../src/mitm.ts";
 import { EventEmitter } from "node:events";
+import { makeTestEndpoint } from "./helpers/vm-fixture.ts";
 
 function makeBackend(
   options?: Partial<ConstructorParameters<typeof QemuNetworkBackend>[0]>,
 ) {
-  return new QemuNetworkBackend({
-    socketPath: path.join(
+  const socketPath = makeTestEndpoint(
+    path.join(
       os.tmpdir(),
       `gondolin-net-test-${process.pid}-${crypto.randomUUID()}.sock`,
     ),
+  );
+
+  return new QemuNetworkBackend({
+    socketPath,
     ...options,
   });
 }
