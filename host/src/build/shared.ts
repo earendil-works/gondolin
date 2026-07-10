@@ -151,19 +151,27 @@ function resolveWindowsCommandPath(
   const existsSync = deps.existsSync ?? fs.existsSync;
   const pathEnv = getEnvValue(env, "PATH", platform) ?? "";
   const pathExt = getEnvValue(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD";
-  const extensions = path.extname(command)
+  // Always resolve using Windows path semantics (`;`-delimited PATH,
+  // `\`-or-`/` separators), regardless of the host OS actually running this
+  // code - deps.platform lets callers (and tests) simulate Windows path
+  // resolution from a non-Windows host, which the native `path` module
+  // can't do since it's fixed to the real host platform's conventions.
+  const extensions = path.win32.extname(command)
     ? [""]
     : pathExt
         .split(";")
         .map((ext) => ext.trim())
         .filter(Boolean);
 
-  for (const dir of pathEnv.split(path.delimiter)) {
+  for (const dir of pathEnv.split(";")) {
     if (!dir) continue;
     for (const ext of extensions) {
-      const candidate = path.join(dir, `${command}${ext.toLowerCase()}`);
+      const candidate = path.win32.join(dir, `${command}${ext.toLowerCase()}`);
       if (existsSync(candidate)) return candidate;
-      const upperCandidate = path.join(dir, `${command}${ext.toUpperCase()}`);
+      const upperCandidate = path.win32.join(
+        dir,
+        `${command}${ext.toUpperCase()}`,
+      );
       if (existsSync(upperCandidate)) return upperCandidate;
     }
   }
