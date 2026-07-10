@@ -7,17 +7,11 @@ import test from "node:test";
 
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
 import { createExecSession } from "../src/exec.ts";
-import type { LocalEndpoint } from "../src/local-endpoint.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
 import { getImageVirtualSizeBytes } from "../src/qemu/img.ts";
 import type { RootfsMode } from "../src/build/config.ts";
-
-function makeEndpoint(filePath: string): LocalEndpoint {
-  return process.platform === "win32"
-    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
-    : { transport: "unix", path: filePath };
-}
+import { makeTestEndpoint as makeEndpoint } from "./helpers/vm-fixture.ts";
 
 function makeTempResolvedServerOptions() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-vm-test-"));

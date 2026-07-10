@@ -4,11 +4,10 @@ import test from "node:test";
 import { SandboxServer } from "../src/sandbox/server.ts";
 import type { ResolvedSandboxServerOptions } from "../src/sandbox/server-options.ts";
 import type { LocalEndpoint } from "../src/local-endpoint.ts";
+import { makeTestEndpoint } from "./helpers/vm-fixture.ts";
 
 function makeEndpoint(name: string): LocalEndpoint {
-  return process.platform === "win32"
-    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
-    : { transport: "unix", path: `/tmp/${name}.sock` };
+  return makeTestEndpoint(`/tmp/${name}.sock`);
 }
 
 function makeResolvedOptions(

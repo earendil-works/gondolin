@@ -35,9 +35,7 @@ class FakeChildProcess extends EventEmitter {
 }
 
 function makeEndpoint(name: string): LocalEndpointInput {
-  return process.platform === "win32"
-    ? { transport: "tcp", host: "127.0.0.1", port: 4000 }
-    : `/tmp/${name}.sock`;
+  return makeTestEndpoint(`/tmp/${name}.sock`);
 }
 
 function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
