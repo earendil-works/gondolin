@@ -103,13 +103,19 @@ export function detectContainerRuntime(
   );
 }
 
+type WindowsSpawnDeps = {
+  platform?: NodeJS.Platform;
+  existsSync?: (candidate: string) => boolean;
+};
+
 function getEnvValue(
   env: NodeJS.ProcessEnv | undefined,
   name: string,
+  platform: NodeJS.Platform,
 ): string | undefined {
   const source = env ?? process.env;
   const direct = source[name];
-  if (direct !== undefined || process.platform !== "win32") return direct;
+  if (direct !== undefined || platform !== "win32") return direct;
   const lower = name.toLowerCase();
   const key = Object.keys(source).find(
     (entry) => entry.toLowerCase() === lower,
@@ -118,17 +124,33 @@ function getEnvValue(
 }
 
 function quoteCmdArg(value: string): string {
-  return `"${value.replace(/["^&|<>()%]/g, (char) => `^${char}`)}"`;
+  if (value.includes('"')) {
+    // cmd.exe's batch-argument tokenizer has no reliable escape sequence for
+    // a literal double quote inside a quoted argument (verified empirically:
+    // both caret- and backslash-escaping corrupt the command line instead of
+    // producing a literal quote), so refuse rather than silently mis-invoking
+    // the command.
+    throw new Error(
+      `cannot safely pass an argument containing a double quote to a Windows .bat/.cmd command: ${JSON.stringify(value)}`,
+    );
+  }
+  // Quotes protect whitespace but not cmd.exe's own line-level metacharacters
+  // (&, |, <, >), which stay "live" even inside a quoted argument, so those
+  // must be caret-escaped individually.
+  return `"${value.replace(/(["^&|<>])/g, (char) => `^${char}`)}"`;
 }
 
 function resolveWindowsCommandPath(
   command: string,
   env: NodeJS.ProcessEnv | undefined,
+  deps: WindowsSpawnDeps = {},
 ): string {
   if (/[\\/]/.test(command)) return command;
 
-  const pathEnv = getEnvValue(env, "PATH") ?? "";
-  const pathExt = getEnvValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
+  const platform = deps.platform ?? process.platform;
+  const existsSync = deps.existsSync ?? fs.existsSync;
+  const pathEnv = getEnvValue(env, "PATH", platform) ?? "";
+  const pathExt = getEnvValue(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD";
   const extensions = path.extname(command)
     ? [""]
     : pathExt
@@ -140,9 +162,9 @@ function resolveWindowsCommandPath(
     if (!dir) continue;
     for (const ext of extensions) {
       const candidate = path.join(dir, `${command}${ext.toLowerCase()}`);
-      if (fs.existsSync(candidate)) return candidate;
+      if (existsSync(candidate)) return candidate;
       const upperCandidate = path.join(dir, `${command}${ext.toUpperCase()}`);
-      if (fs.existsSync(upperCandidate)) return upperCandidate;
+      if (existsSync(upperCandidate)) return upperCandidate;
     }
   }
 
@@ -153,21 +175,27 @@ function resolveSpawnCommand(
   command: string,
   args: string[],
   options: SpawnOptions,
+  deps: WindowsSpawnDeps = {},
 ): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
-  if (process.platform !== "win32") return { command, args };
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { command, args };
 
-  const resolved = resolveWindowsCommandPath(command, options.env);
+  const resolved = resolveWindowsCommandPath(command, options.env, deps);
   if (!/\.(bat|cmd)$/i.test(resolved)) {
     return { command: resolved, args };
   }
 
+  // cmd.exe can execute a .bat/.cmd file directly (no `call` needed - `call`
+  // is only required to preserve control flow *within* an already-running
+  // batch script, and its own argument re-parsing pass does not respect
+  // caret-escaped metacharacters the way a plain command line does).
+  // Wrapping the whole command line in one extra pair of quotes and passing
+  // `/s` makes cmd.exe strip only that outer pair before parsing, which is
+  // what makes the per-argument caret-escaping below actually take effect.
+  const inner = [resolved, ...args].map(quoteCmdArg).join(" ");
   return {
     command: process.env.ComSpec ?? "cmd.exe",
-    args: [
-      "/d",
-      "/c",
-      `call ${[resolved, ...args].map(quoteCmdArg).join(" ")}`,
-    ],
+    args: ["/d", "/s", "/c", `"${inner}"`],
     windowsVerbatimArguments: true,
   };
 }
@@ -627,3 +655,9 @@ export function writeAssetManifest(
 
   return { manifestPath, manifest };
 }
+
+export const __test = {
+  quoteCmdArg,
+  resolveWindowsCommandPath,
+  resolveSpawnCommand,
+};
