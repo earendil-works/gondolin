@@ -447,7 +447,11 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
     };
 
     args.push("-object".into());
-    args.push("rng-random,filename=/dev/urandom,id=rng0".into());
+    args.push(if cfg.host.os == "windows" {
+        "rng-builtin,id=rng0"
+    } else {
+        "rng-random,filename=/dev/urandom,id=rng0"
+    }.into());
     args.push("-device".into());
     args.push(format!("{rng_dev},rng=rng0"));
     let chardevs = [
