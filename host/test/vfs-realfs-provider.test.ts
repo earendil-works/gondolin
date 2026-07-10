@@ -21,6 +21,39 @@ function makeTempDir(t: TestContext, prefix = "gondolin-vfs-") {
   return dir;
 }
 
+let symlinkSupport: boolean | null = null;
+
+/**
+ * Probe (once, cached) whether this process can actually create symlinks,
+ * rather than assuming Windows can't: Developer Mode or an elevated/admin
+ * process can create them fine on Windows too, and skipping unconditionally
+ * by platform would leave RealFSProvider's symlink-escape security guards
+ * completely untested wherever it's actually capable of running them.
+ */
+function canCreateSymlinks(): boolean {
+  if (symlinkSupport !== null) return symlinkSupport;
+  if (process.platform !== "win32") {
+    symlinkSupport = true;
+    return symlinkSupport;
+  }
+
+  const probeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-symlink-probe-"),
+  );
+  try {
+    const target = path.join(probeDir, "target.txt");
+    const link = path.join(probeDir, "link.txt");
+    fs.writeFileSync(target, "probe");
+    fs.symlinkSync(target, link, "file");
+    symlinkSupport = true;
+  } catch {
+    symlinkSupport = false;
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+  return symlinkSupport;
+}
+
 test("RealFSProvider proxies filesystem operations (sync + async)", async (t) => {
   const root = makeTempDir(t);
   const provider = new RealFSProvider(root);
@@ -100,8 +133,10 @@ test("RealFSProvider blocks path traversal outside root", (t) => {
 });
 
 test("RealFSProvider symlink, readlink, lstat, realpath", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -126,8 +161,10 @@ test("RealFSProvider symlink, readlink, lstat, realpath", (t) => {
 });
 
 test("RealFSProvider blocks read via pre-existing escaping symlink", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -146,8 +183,10 @@ test("RealFSProvider blocks read via pre-existing escaping symlink", async (t) =
 });
 
 test("RealFSProvider blocks create under symlinked parent escaping root", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -169,8 +208,10 @@ test("RealFSProvider blocks create under symlinked parent escaping root", async 
 });
 
 test("RealFSProvider allows lstat/readlink/unlink on escaping symlink inside root", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -195,8 +236,10 @@ test("RealFSProvider allows lstat/readlink/unlink on escaping symlink inside roo
 });
 
 test("RealFSProvider blocks unlink through escaping intermediate symlink", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -213,8 +256,10 @@ test("RealFSProvider blocks unlink through escaping intermediate symlink", async
 });
 
 test("RealFSProvider allows in-root relative symlink", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -235,8 +280,10 @@ test("RealFSProvider allows in-root relative symlink", (t) => {
 });
 
 test("RealFSProvider allows in-root absolute symlink", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -259,8 +306,10 @@ test("RealFSProvider allows in-root absolute symlink", (t) => {
 });
 
 test("RealFSProvider blocks dangling escaping symlink on write", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -280,8 +329,10 @@ test("RealFSProvider blocks dangling escaping symlink on write", (t) => {
 });
 
 test("RealFSProvider blocks write via dangling symlink inside root", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -294,8 +345,10 @@ test("RealFSProvider blocks write via dangling symlink inside root", (t) => {
 });
 
 test("RealFSProvider blocks hard-link to escaping symlink target", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -310,8 +363,10 @@ test("RealFSProvider blocks hard-link to escaping symlink target", (t) => {
 });
 
 test("RealFSProvider blocks hard-link destination through escaping intermediate symlink", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -333,8 +388,10 @@ test("RealFSProvider blocks hard-link destination through escaping intermediate 
 });
 
 test("RealFSProvider blocks chained dangling symlink escape", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -353,8 +410,10 @@ test("RealFSProvider blocks chained dangling symlink escape", (t) => {
 });
 
 test("RealFSProvider blocks mkdir through escaping intermediate symlink", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -368,8 +427,10 @@ test("RealFSProvider blocks mkdir through escaping intermediate symlink", (t) =>
 });
 
 test("RealFSProvider blocks rename through escaping intermediate symlink", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
@@ -388,29 +449,42 @@ test("RealFSProvider blocks rename through escaping intermediate symlink", (t) =
 });
 
 test("RealFSProvider rmdir does not follow final symlink", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
   const root = makeTempDir(t);
   const provider = new RealFSProvider(root);
   fs.mkdirSync(path.join(root, "real-dir"));
-  fs.symlinkSync("real-dir", path.join(root, "dir-link"));
+  fs.symlinkSync("real-dir", path.join(root, "dir-link"), "dir");
 
-  assert.throws(() => provider.rmdirSync("/dir-link"), {
-    code: "ENOTDIR",
-  });
+  if (process.platform === "win32") {
+    // Windows' RemoveDirectory (unlike POSIX rmdir) doesn't refuse to
+    // operate on a directory symlink/junction - it removes the reparse
+    // point itself without following it, which is equally safe (the real
+    // target is never touched) but doesn't throw ENOTDIR the way POSIX does.
+    provider.rmdirSync("/dir-link");
+    assert.equal(fs.existsSync(path.join(root, "dir-link")), false);
+  } else {
+    assert.throws(() => provider.rmdirSync("/dir-link"), {
+      code: "ENOTDIR",
+    });
+    assert.equal(
+      fs.lstatSync(path.join(root, "dir-link")).isSymbolicLink(),
+      true,
+    );
+  }
   assert.equal(fs.existsSync(path.join(root, "real-dir")), true);
-  assert.equal(
-    fs.lstatSync(path.join(root, "dir-link")).isSymbolicLink(),
-    true,
-  );
 });
 
 test("RealFSProvider rename does not follow final symlink components", (t) => {
-  if (process.platform === "win32") {
-    t.skip("symlink semantics require elevated permissions on Windows");
+  if (!canCreateSymlinks()) {
+    t.skip(
+      "symlink creation is not permitted in this environment (Windows without Developer Mode/admin)",
+    );
     return;
   }
 
