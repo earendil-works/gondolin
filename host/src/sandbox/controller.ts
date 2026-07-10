@@ -895,7 +895,11 @@ function buildQemuStreamNetdevArg(id: string, endpoint: LocalEndpoint) {
 
 function selectRngObject() {
   if (process.platform === "win32") {
-    return null;
+    // No /dev/urandom-equivalent device path to hand QEMU on Windows; use
+    // QEMU's cross-platform builtin RNG backend instead (host getrandom()/
+    // BCryptGenRandom, no device file required, available since QEMU 5.0)
+    // rather than leaving the guest with no virtio-rng device at all.
+    return "rng-builtin,id=rng0";
   }
   return "rng-random,filename=/dev/urandom,id=rng0";
 }

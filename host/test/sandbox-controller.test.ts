@@ -522,6 +522,40 @@ test("sandbox-controller: selectAccel keeps WHPX when runtime probe succeeds", (
   );
 });
 
+test("sandbox-controller: selectRngObject uses the cross-platform builtin RNG on Windows", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("this asserts the Windows-specific branch");
+    return;
+  }
+
+  assert.equal((__test as any).selectRngObject(), "rng-builtin,id=rng0");
+});
+
+test("sandbox-controller: selectRngObject uses /dev/urandom off Windows", (t) => {
+  if (process.platform === "win32") {
+    t.skip("this asserts the non-Windows branch");
+    return;
+  }
+
+  assert.equal(
+    (__test as any).selectRngObject(),
+    "rng-random,filename=/dev/urandom,id=rng0",
+  );
+});
+
+test("sandbox-controller: buildQemuArgs always emits a virtio-rng device (never silently drops RNG)", () => {
+  const args = __test.buildQemuArgs(makeConfig());
+
+  const objectIndex = args.indexOf("-object");
+  assert.notEqual(objectIndex, -1);
+  const rngObject = args[objectIndex + 1]!;
+  assert.match(rngObject, /^rng-(random|builtin),.*id=rng0/);
+
+  const deviceIndex = args.indexOf("-device");
+  assert.notEqual(deviceIndex, -1);
+  assert.match(args[deviceIndex + 1]!, /^virtio-rng-(pci|device),rng=rng0/);
+});
+
 test("sandbox-controller: selectMachineType avoids microvm for x64 tcg", () => {
   const selectMachineType = (__test as any).selectMachineType as (
     targetArch: string,
