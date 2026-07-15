@@ -40,6 +40,7 @@ import {
   sendHttpResponseHead,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
+  stripRequestFramingHeaders,
 } from "../http/utils.ts";
 import type { HttpRequestData, LookupEntry } from "../http/utils.ts";
 import {
@@ -47,6 +48,8 @@ import {
   webResponseToInternalHttpResponse,
   internalHttpRequestToWebRequest,
   internalHttpResponseToWebResponse,
+  requestBodyByteLength,
+  requestHeadersToRecord,
   responseHeadersToRecord,
 } from "../internal/http-conversion.ts";
 
@@ -466,17 +469,21 @@ export async function handleHttpDataWithWriter(
       let contentLength = 0;
 
       const transferEncodingHeader = headers["transfer-encoding"];
+      const rawContentLength = rawHeaders["content-length"];
+      if (transferEncodingHeader && rawContentLength !== undefined) {
+        throw new HttpRequestBlockedError(
+          "transfer-encoding and content-length cannot be combined",
+          400,
+          "Bad Request",
+        );
+      }
       if (transferEncodingHeader) {
         const encodings = transferEncodingHeader
           .split(",")
           .map((value: string) => value.trim().toLowerCase())
           .filter(Boolean);
 
-        if (
-          encodings.length === 0 ||
-          encodings[encodings.length - 1] !== "chunked" ||
-          !encodings.every((encoding: string) => encoding === "chunked")
-        ) {
+        if (encodings.length !== 1 || encodings[0] !== "chunked") {
           throw new HttpRequestBlockedError(
             `unsupported transfer-encoding: ${transferEncodingHeader}`,
             501,
@@ -486,7 +493,6 @@ export async function handleHttpDataWithWriter(
 
         bodyMode = "chunked";
       } else {
-        const rawContentLength = rawHeaders["content-length"];
         const parsedContentLength = parseContentLength(rawContentLength);
 
         // If Content-Length is present but invalid, reject the request instead of
@@ -502,7 +508,6 @@ export async function handleHttpDataWithWriter(
 
         if (parsedContentLength !== null) {
           contentLength = parsedContentLength;
-          headers["content-length"] = String(contentLength);
         }
 
         if (contentLength > 0) {
@@ -557,10 +562,15 @@ export async function handleHttpDataWithWriter(
       const requestBase: InternalHttpRequest = {
         method: head.method,
         url,
-        headers: upgradeIsWebSocket
-          ? stripHopByHopHeadersForWebSocket(headers)
-          : stripHopByHopHeaders(headers),
-        body: null,
+        headers: stripRequestFramingHeaders(
+          upgradeIsWebSocket
+            ? stripHopByHopHeadersForWebSocket(headers)
+            : stripHopByHopHeaders(headers),
+        ),
+        body:
+          contentLength > 0
+            ? { kind: "metadata-only", byteLength: contentLength }
+            : { kind: "none" },
       };
 
       const maxBodyBytes = backend.http.maxHttpBodyBytes;
@@ -729,20 +739,12 @@ export async function handleHttpDataWithWriter(
       const request: InternalHttpRequest = {
         method: baseRequest.method,
         url: baseRequest.url,
-        headers: {
-          ...baseRequest.headers,
-          "content-length": body.length.toString(),
-        },
-        body: body.length > 0 ? body : null,
+        headers: { ...baseRequest.headers },
+        body:
+          body.length > 0
+            ? { kind: "buffered", bytes: body }
+            : { kind: "none" },
       };
-
-      request.headers = { ...request.headers };
-      delete request.headers["transfer-encoding"];
-      if (request.body) {
-        request.headers["content-length"] = request.body.length.toString();
-      } else {
-        delete request.headers["content-length"];
-      }
 
       httpSession.processing = true;
       let releaseHttpConcurrency: (() => void) | null = null;
@@ -754,7 +756,8 @@ export async function handleHttpDataWithWriter(
           httpVersion,
           write: options.write,
           waitForWritable: options.waitForWritable,
-          policyCheckedFirstHop: state.policyPrechecked,
+          // The parsed head did not know a chunked body's decoded length.
+          policyCheckedFirstHop: false,
           httpSession,
         });
       } finally {
@@ -894,18 +897,13 @@ export async function handleHttpDataWithWriter(
       const streamingRequest: InternalHttpRequest = {
         method: state.requestBase.method,
         url: state.requestBase.url,
-        headers: Object.fromEntries(
-          Object.entries(state.requestBase.headers).map(([key, value]) => [
-            key.toLowerCase(),
-            value,
-          ]),
-        ),
-        body: null,
+        headers: { ...state.requestBase.headers },
+        body: {
+          kind: "stream",
+          stream: bodyStream,
+          byteLength: contentLength,
+        },
       };
-
-      const expectedLength = contentLength.toString();
-      delete streamingRequest.headers["transfer-encoding"];
-      streamingRequest.headers["content-length"] = expectedLength;
 
       const safeWrite = (chunk: Buffer) => {
         if (httpSession.closed) return;
@@ -921,8 +919,6 @@ export async function handleHttpDataWithWriter(
             write: safeWrite,
             waitForWritable: options.waitForWritable,
             policyCheckedFirstHop: state.policyPrechecked,
-            initialBodyStream: bodyStream as any,
-            initialBodyStreamHasBody: true,
             httpSession,
           });
         } catch (err) {
@@ -1009,17 +1005,11 @@ export async function handleHttpDataWithWriter(
       method: baseRequest.method,
       url: baseRequest.url,
       headers: { ...baseRequest.headers },
-      body: body.length > 0 ? Buffer.from(body) : null,
+      body:
+        body.length > 0
+          ? { kind: "buffered", bytes: Buffer.from(body) }
+          : { kind: "none" },
     };
-
-    // Normalize framing headers for fetch.
-    request.headers = { ...request.headers };
-    delete request.headers["transfer-encoding"];
-    if (request.body) {
-      request.headers["content-length"] = request.body.length.toString();
-    } else {
-      delete request.headers["content-length"];
-    }
 
     httpSession.processing = true;
     let releaseHttpConcurrency: (() => void) | null = null;
@@ -1189,8 +1179,11 @@ function decodeChunkedBodyFromReceiveBuffer(
     }
 
     const sizeLine = sizeLineRaw.split(";")[0]!.trim();
-    const size = parseInt(sizeLine, 16);
-    if (!Number.isFinite(size) || size < 0) {
+    if (!/^[0-9a-fA-F]+$/.test(sizeLine)) {
+      throw new Error("invalid chunk size");
+    }
+    const size = Number.parseInt(sizeLine, 16);
+    if (!Number.isSafeInteger(size)) {
       throw new Error("invalid chunk size");
     }
 
@@ -1253,12 +1246,6 @@ export async function fetchHookRequestAndRespond(
     waitForWritable?: () => Promise<void>;
     /** whether first-hop request/ip policies already ran on parsed head */
     policyCheckedFirstHop?: boolean;
-
-    /** optional streaming request body for the initial hop */
-    initialBodyStream?: WebReadableStream<Uint8Array> | null;
-
-    /** whether the initial body stream carries a request body */
-    initialBodyStreamHasBody?: boolean;
     /** session state for dispatcher taint tracking */
     httpSession: HttpSession;
   },
@@ -1269,8 +1256,6 @@ export async function fetchHookRequestAndRespond(
     write,
     waitForWritable,
     policyCheckedFirstHop = false,
-    initialBodyStream = null,
-    initialBodyStreamHasBody = Boolean(initialBodyStream),
     httpSession,
   } = options;
 
@@ -1285,14 +1270,8 @@ export async function fetchHookRequestAndRespond(
   ) {
     const isFirstHop = redirectCount === 0;
 
-    const streamBodyThisHop =
-      isFirstHop && initialBodyStream && initialBodyStreamHasBody
-        ? initialBodyStream
-        : null;
-
     const requestHooked = await applyRequestHooks(backend, pendingRequest, {
       maxBodyBytes: backend.http.maxHttpBodyBytes,
-      bodyStream: streamBodyThisHop,
     });
 
     if (requestHooked.shortCircuitResponse) {
@@ -1305,7 +1284,8 @@ export async function fetchHookRequestAndRespond(
     }
 
     const currentRequest = requestHooked.request;
-    const bodyStream = requestHooked.bodyStream;
+    const bodyStream =
+      currentRequest.body.kind === "stream" ? currentRequest.body.stream : null;
 
     if (backend.options.debug) {
       backend.emitDebug(
@@ -1359,17 +1339,25 @@ export async function fetchHookRequestAndRespond(
         })
       : null;
 
-    const bodyInit = bodyStream
-      ? bodyStream
-      : currentRequest.body
-        ? new Uint8Array(currentRequest.body)
-        : undefined;
+    if (currentRequest.body.kind === "metadata-only") {
+      throw new Error("metadata-only request body cannot be dispatched");
+    }
+    const bodyInit =
+      currentRequest.body.kind === "stream"
+        ? currentRequest.body.stream
+        : currentRequest.body.kind === "buffered"
+          ? new Uint8Array(currentRequest.body.bytes)
+          : undefined;
+    const fetchHeaders = { ...currentRequest.headers };
+    if (currentRequest.body.kind === "stream") {
+      fetchHeaders["content-length"] = String(currentRequest.body.byteLength);
+    }
 
     let response: FetchResponse;
     try {
       response = await fetcher(currentUrl.toString(), {
         method: currentRequest.method,
-        headers: currentRequest.headers,
+        headers: fetchHeaders,
         body: bodyInit as any,
         redirect: "manual",
         ...(bodyStream ? { duplex: "half" } : {}),
@@ -1402,44 +1390,23 @@ export async function fetchHookRequestAndRespond(
         );
       }
 
-      if (bodyStream) {
-        // Streaming request bodies cannot be replayed on redirects.
-        const redirected = applyRedirectRequest(
-          {
-            method: currentRequest.method,
-            url: currentRequest.url,
-            headers: currentRequest.headers,
-            // Sentinel to indicate a non-empty body so redirect rewriting matches buffered semantics.
-            body: Buffer.alloc(1),
-          },
-          response.status,
-          currentUrl,
-          redirectUrl,
-        );
-
-        if (redirected.body) {
+      const redirected = applyRedirectRequest(
+        currentRequest,
+        response.status,
+        currentUrl,
+        redirectUrl,
+      );
+      if (currentRequest.body.kind === "stream") {
+        await cancelRequestBody(currentRequest);
+        if (redirected.body.kind === "stream") {
           throw new HttpRequestBlockedError(
             "redirect requires replaying streamed request body",
             502,
             "Bad Gateway",
           );
         }
-
-        pendingRequest = {
-          method: redirected.method,
-          url: redirected.url,
-          headers: redirected.headers,
-          body: null,
-        };
-        continue;
       }
-
-      pendingRequest = applyRedirectRequest(
-        currentRequest,
-        response.status,
-        currentUrl,
-        redirectUrl,
-      );
+      pendingRequest = redirected;
       continue;
     }
 
@@ -1722,7 +1689,6 @@ async function handleWebSocketUpgrade(
 
   const requestHooked = await applyRequestHooks(backend, baseRequest, {
     maxBodyBytes: 0,
-    bodyStream: null,
   });
 
   if (requestHooked.shortCircuitResponse) {
@@ -1760,7 +1726,7 @@ async function handleWebSocketUpgrade(
     );
   }
 
-  if (hookRequest.body && hookRequest.body.length > 0) {
+  if (hookRequest.body.kind !== "none") {
     throw new HttpRequestBlockedError(
       "websocket upgrade requests must not have a body",
       400,
@@ -2011,6 +1977,9 @@ function hasPolicyRelevantRequestHeadChange(
 ): boolean {
   if (before.method !== after.method) return true;
   if (before.url !== after.url) return true;
+  if (requestBodyByteLength(before) !== requestBodyByteLength(after)) {
+    return true;
+  }
 
   const beforeEntries = Object.entries(before.headers);
   const afterEntries = Object.entries(after.headers);
@@ -2071,11 +2040,8 @@ async function ensureRequestAllowed(
   if (!backend.options.httpHooks?.isRequestAllowed) return;
 
   // Request policy is head-only: never expose request body to this callback.
-  const headOnly = internalHttpRequestToWebRequest({
-    method: request.method,
-    url: request.url,
-    headers: request.headers,
-    body: null,
+  const headOnly = internalHttpRequestToWebRequest(request, {
+    includeBody: false,
   });
 
   const allowed = await backend.options.httpHooks.isRequestAllowed(headOnly);
@@ -2096,56 +2062,6 @@ async function ensureIpAllowed(
   // When using the default fetch, the guarded undici lookup will additionally
   // pin the actual connect to an allowed IP.
   await resolveHostname(backend, parsedUrl.hostname, { protocol, port });
-}
-
-function internalRequestToWebRequestWithBody(
-  request: InternalHttpRequest,
-  options: {
-    bodyStream: WebReadableStream<Uint8Array> | null;
-  },
-): Request {
-  const method = request.method.toUpperCase();
-  const hasBufferedBody = Boolean(request.body && request.body.length > 0);
-  const hasBody = hasBufferedBody || Boolean(options.bodyStream);
-  const canHaveBody = method !== "GET" && method !== "HEAD";
-
-  if (hasBody && !canHaveBody) {
-    throw new HttpRequestBlockedError(
-      `request body not allowed for ${method} in web hooks`,
-      400,
-      "Bad Request",
-    );
-  }
-
-  const body = options.bodyStream
-    ? options.bodyStream
-    : hasBufferedBody
-      ? new Uint8Array(request.body!)
-      : undefined;
-
-  return new Request(request.url, {
-    method: request.method,
-    headers: request.headers,
-    body: body as any,
-    ...(options.bodyStream ? ({ duplex: "half" } as const) : {}),
-  });
-}
-
-function webRequestHeadToInternalHttpRequest(
-  request: Request,
-  body: Buffer | null,
-): InternalHttpRequest {
-  const headers: Record<string, string> = {};
-  request.headers.forEach((value, key) => {
-    headers[key.toLowerCase()] = value;
-  });
-
-  return {
-    method: request.method,
-    url: request.url,
-    headers,
-    body,
-  };
 }
 
 type RequestHookOutcome =
@@ -2248,15 +2164,10 @@ function deriveRequestBodyPlan(
   return { kind: "materialize-buffered" };
 }
 
-async function cancelBodyStream(
-  stream: WebReadableStream<Uint8Array> | null,
-): Promise<void> {
-  if (!stream) {
-    return;
-  }
-
+async function cancelRequestBody(request: InternalHttpRequest): Promise<void> {
+  if (request.body.kind !== "stream") return;
   try {
-    await stream.cancel();
+    await request.body.stream.cancel();
   } catch {
     // ignore cancellation failures
   }
@@ -2265,13 +2176,9 @@ async function cancelBodyStream(
 async function applyRequestHooks(
   backend: QemuNetworkBackend,
   request: InternalHttpRequest,
-  options: {
-    maxBodyBytes: number | null;
-    bodyStream: WebReadableStream<Uint8Array> | null;
-  },
+  options: { maxBodyBytes: number | null },
 ): Promise<{
   request: InternalHttpRequest;
-  bodyStream: WebReadableStream<Uint8Array> | null;
   shortCircuitResponse: InternalHttpResponse | null;
 }> {
   const cloned: InternalHttpRequest = {
@@ -2282,17 +2189,10 @@ async function applyRequestHooks(
   };
 
   if (!backend.options.httpHooks?.onRequest) {
-    return {
-      request: cloned,
-      bodyStream: options.bodyStream,
-      shortCircuitResponse: null,
-    };
+    return { request: cloned, shortCircuitResponse: null };
   }
 
-  const hookRequest = internalRequestToWebRequestWithBody(cloned, {
-    bodyStream: options.bodyStream,
-  });
-
+  const hookRequest = internalHttpRequestToWebRequest(cloned);
   const hookResult = await normalizeRequestHookOutcome(
     await backend.options.httpHooks.onRequest(hookRequest),
     hookRequest,
@@ -2300,59 +2200,61 @@ async function applyRequestHooks(
   );
 
   if (hookResult.kind === "short-circuit") {
-    await cancelBodyStream(options.bodyStream);
+    await cancelRequestBody(cloned);
     return {
       request: cloned,
-      bodyStream: null,
       shortCircuitResponse: hookResult.response,
     };
   }
 
   const bodyPlan = deriveRequestBodyPlan(hookRequest, hookResult.request);
 
-  if (bodyPlan.kind !== "preserve-original") {
-    await cancelBodyStream(options.bodyStream);
-  }
-
   if (bodyPlan.kind === "preserve-original") {
-    const preservedBodyStream = options.bodyStream
-      ? (hookResult.request.body as WebReadableStream<Uint8Array> | null)
-      : null;
-
+    const body =
+      cloned.body.kind === "stream"
+        ? {
+            ...cloned.body,
+            stream: hookResult.request.body as ReadableStream<Uint8Array>,
+          }
+        : cloned.body;
     return {
-      request: webRequestHeadToInternalHttpRequest(
-        hookResult.request,
-        cloned.body,
-      ),
-      bodyStream: preservedBodyStream,
+      request: {
+        method: hookResult.request.method,
+        url: hookResult.request.url,
+        headers: requestHeadersToRecord(hookResult.request.headers),
+        body,
+      },
       shortCircuitResponse: null,
     };
   }
 
   if (bodyPlan.kind === "none") {
+    await cancelRequestBody(cloned);
     return {
-      request: webRequestHeadToInternalHttpRequest(hookResult.request, null),
-      bodyStream: null,
+      request: {
+        method: hookResult.request.method,
+        url: hookResult.request.url,
+        headers: requestHeadersToRecord(hookResult.request.headers),
+        body: { kind: "none" },
+      },
       shortCircuitResponse: null,
     };
   }
 
-  const materialized = await webRequestToInternalHttpRequest(
-    hookResult.request,
-    {
-      allowBody: true,
-      maxBodyBytes: options.maxBodyBytes,
-    },
-  );
-
-  return {
-    request: webRequestHeadToInternalHttpRequest(
+  try {
+    const materialized = await webRequestToInternalHttpRequest(
       hookResult.request,
-      materialized.body,
-    ),
-    bodyStream: null,
-    shortCircuitResponse: null,
-  };
+      {
+        allowBody: true,
+        maxBodyBytes: options.maxBodyBytes,
+      },
+    );
+    return { request: materialized, shortCircuitResponse: null };
+  } finally {
+    // Read a returned clone before cancelling the original tee branch. Cancelling
+    // first waits for the clone to settle and deadlocks the upload.
+    await cancelRequestBody(cloned);
+  }
 }
 
 async function applyResponseHooks(
@@ -2366,7 +2268,9 @@ async function applyResponseHooks(
 
   const updated = await backend.options.httpHooks.onResponse(
     internalHttpResponseToWebResponse(response),
-    internalHttpRequestToWebRequest(request),
+    internalHttpRequestToWebRequest(request, {
+      includeBody: request.body.kind === "buffered",
+    }),
   );
   if (!updated) return response;
 
