@@ -1620,11 +1620,8 @@ test("qemu-net: streaming onRequest clone-read preserves forwarded body", async 
 });
 
 test("qemu-net: buffered body drops content-length before fetch (undici duplicate guard)", async () => {
-  // Regression: forwarding our own content-length alongside a buffered body
-  // makes undici 6's fetch append a second one; on Node >= 24.17 (built-in
-  // undici >= 7.28) the duplicate is rejected with "invalid content-length
-  // header" and the request 502s. For buffered bodies fetch must derive the
-  // length itself, so no content-length header reaches it.
+  // undici 6 duplicates an explicit Content-Length for buffered bodies; built-in
+  // undici 7.28 rejects it, so Fetch must derive the length instead.
   let sentHeaders: Record<string, string> | undefined;
   let sentBodyLength: number | undefined;
   const session: any = { http: undefined };
@@ -1672,7 +1669,6 @@ test("qemu-net: buffered body drops content-length before fetch (undici duplicat
     [],
     "buffered body must not forward content-length to fetch",
   );
-  // undici derives the length from the buffered body, which is intact
   assert.equal(sentBodyLength, 5);
   assert.equal(sentHeaders.host, "example.com");
 });
