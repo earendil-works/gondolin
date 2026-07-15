@@ -1365,8 +1365,8 @@ export async function fetchHookRequestAndRespond(
         ? new Uint8Array(currentRequest.body)
         : undefined;
 
-    // Let fetch derive Content-Length for buffered bodies.
-    // Keep the original headers intact for redirects and hooks.
+    // Avoid duplicate Content-Length when Fetch derives framing for buffered bodies.
+    // Remove it from a copy so redirects and hooks keep the measured length.
     const fetchHeaders = { ...currentRequest.headers };
     if (bodyInit && !bodyStream) {
       delete fetchHeaders["content-length"];
