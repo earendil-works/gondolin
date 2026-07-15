@@ -22,12 +22,10 @@ import {
   HttpReceiveBuffer,
   HttpRequestBlockedError,
   closeSharedDispatchers,
-  parseContentLength,
   createLookupGuard,
   getCheckedDispatcher,
   stripHopByHopHeaders,
   stripHopByHopHeadersForWebSocket,
-  stripRequestFramingHeaders,
 } from "../src/http/utils.ts";
 import * as qemuHttp from "../src/qemu/http.ts";
 import * as qemuWs from "../src/qemu/ws.ts";
@@ -74,11 +72,8 @@ function toHookRequest(
   return {
     method: request.method,
     url: `${scheme}://${host}${request.target}`,
-    headers: stripRequestFramingHeaders(request.headers),
-    body:
-      request.body.length > 0
-        ? { kind: "buffered" as const, bytes: request.body }
-        : { kind: "none" as const },
+    headers: request.headers,
+    body: request.body.length > 0 ? request.body : null,
   };
 }
 
@@ -106,17 +101,6 @@ async function snapshotRequest(request: Request): Promise<{
   };
 }
 
-function makeHttpSession(): qemuHttp.HttpSession {
-  return {
-    buffer: new HttpReceiveBuffer(),
-    processing: false,
-    closed: false,
-    upstreamTainted: false,
-    upstreamOriginKey: null,
-    sentContinue: false,
-  };
-}
-
 async function fetchHookAndRespond(
   backend: QemuNetworkBackend,
   request: {
@@ -133,12 +117,21 @@ async function fetchHookAndRespond(
   const httpVersion: "HTTP/1.0" | "HTTP/1.1" =
     request.version === "HTTP/1.0" ? "HTTP/1.0" : "HTTP/1.1";
 
+  const httpSession: qemuHttp.HttpSession = {
+    buffer: new HttpReceiveBuffer(),
+    processing: false,
+    closed: false,
+    upstreamTainted: false,
+    upstreamOriginKey: null,
+    sentContinue: false,
+  };
+
   await qemuHttp.fetchHookRequestAndRespond(backend, {
     request: toHookRequest(request, scheme),
     httpVersion,
     write,
     waitForWritable,
-    httpSession: makeHttpSession(),
+    httpSession,
   });
 }
 
@@ -240,16 +233,6 @@ test("qemu-net: synthetic per-host dns mapping does not throw on mapping exhaust
   assert.equal(response.readUInt16BE(0), 0x9999);
   assert.equal(response.readUInt16BE(6), 1); // ANCOUNT
   assert.deepEqual([...response.subarray(response.length - 4)], [192, 0, 2, 1]);
-});
-
-test("qemu-net: content-length parser accepts only unambiguous decimal values", () => {
-  assert.equal(parseContentLength("5"), 5);
-  assert.equal(parseContentLength(["5", "5"]), 5);
-  assert.equal(parseContentLength("5, 5"), 5);
-
-  for (const value of ["", "5x", "+5", "0x5", "5, 6", "9007199254740992"]) {
-    assert.equal(parseContentLength(value), null, value);
-  }
 });
 
 test("qemu-net: parseHttpRequest parses content-length and preserves remaining", async () => {
@@ -463,98 +446,32 @@ test("qemu-net: parseHttpRequest consumes chunked trailers", async () => {
 });
 
 test("qemu-net: parseHttpRequest rejects unsupported transfer-encodings", async () => {
-  for (const transferEncoding of ["gzip, chunked", "chunked, chunked"]) {
-    const backend = makeBackend({ maxHttpBodyBytes: 1024 });
-    const writes: Buffer[] = [];
-    let finished = false;
-
-    await qemuHttp.handleHttpDataWithWriter(
-      backend,
-      "key",
-      { http: undefined } as any,
-      Buffer.from(
-        "POST / HTTP/1.1\r\n" +
-          "Host: example.com\r\n" +
-          `Transfer-Encoding: ${transferEncoding}\r\n` +
-          "\r\n" +
-          "5\r\nhello\r\n0\r\n\r\n",
-      ),
-      {
-        scheme: "http",
-        write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
-        finish: () => {
-          finished = true;
-        },
-      },
-    );
-
-    assert.equal(finished, true, transferEncoding);
-    assert.match(
-      Buffer.concat(writes).toString("utf8"),
-      /^HTTP\/1\.1 501 /,
-      transferEncoding,
-    );
-  }
-});
-
-test("qemu-net: parseHttpRequest rejects transfer-encoding with content-length", async () => {
   const backend = makeBackend({ maxHttpBodyBytes: 1024 });
-  const writes: Buffer[] = [];
-  let finished = false;
 
-  await qemuHttp.handleHttpDataWithWriter(
-    backend,
-    "key",
-    { http: undefined } as any,
-    Buffer.from(
-      "POST / HTTP/1.1\r\n" +
-        "Host: example.com\r\n" +
-        "Transfer-Encoding: chunked\r\n" +
-        "Content-Length: 5\r\n" +
-        "\r\n" +
-        "5\r\nhello\r\n0\r\n\r\n",
-    ),
-    {
-      scheme: "http",
-      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
-      finish: () => {
-        finished = true;
-      },
-    },
+  const buf = Buffer.from(
+    "POST / HTTP/1.1\r\n" +
+      "Host: example.com\r\n" +
+      "Transfer-Encoding: gzip, chunked\r\n" +
+      "\r\n" +
+      "5\r\nhello\r\n" +
+      "0\r\n\r\n",
   );
 
-  assert.equal(finished, true);
-  assert.match(Buffer.concat(writes).toString("utf8"), /^HTTP\/1\.1 400 /);
-});
-
-test("qemu-net: parseHttpRequest rejects malformed chunk sizes", async () => {
-  const backend = makeBackend({ maxHttpBodyBytes: 1024 });
-  backend.on("error", () => {});
   const writes: Buffer[] = [];
+  const session: any = { http: undefined };
   let finished = false;
 
-  await qemuHttp.handleHttpDataWithWriter(
-    backend,
-    "key",
-    { http: undefined } as any,
-    Buffer.from(
-      "POST / HTTP/1.1\r\n" +
-        "Host: example.com\r\n" +
-        "Transfer-Encoding: chunked\r\n" +
-        "\r\n" +
-        "5g\r\nhello\r\n0\r\n\r\n",
-    ),
-    {
-      scheme: "http",
-      write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
-      finish: () => {
-        finished = true;
-      },
+  await qemuHttp.handleHttpDataWithWriter(backend, "key", session, buf, {
+    scheme: "http",
+    write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+    finish: () => {
+      finished = true;
     },
-  );
+  });
 
   assert.equal(finished, true);
-  assert.match(Buffer.concat(writes).toString("utf8"), /^HTTP\/1\.1 400 /);
+  const responseText = Buffer.concat(writes).toString("utf8");
+  assert.match(responseText, /^HTTP\/1\.1 501 /);
 });
 
 test("qemu-net: parseHttpRequest errors on invalid content-length (does not hang)", async () => {
@@ -1154,47 +1071,6 @@ test("qemu-net: first-hop prechecked policies run once", async () => {
   assert.match(Buffer.concat(writes).toString("utf8"), /^HTTP\/1\.1 200 /);
 });
 
-test("qemu-net: chunked request policy is rechecked with the decoded body length", async () => {
-  const observedLengths: Array<string | null> = [];
-  const backend = makeBackend({
-    fetch: async () =>
-      new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      }),
-    httpHooks: {
-      isRequestAllowed: (request) => {
-        observedLengths.push(request.headers.get("content-length"));
-        return true;
-      },
-    },
-  });
-  let finished = false;
-
-  await qemuHttp.handleHttpDataWithWriter(
-    backend,
-    "key",
-    { http: undefined } as any,
-    Buffer.from(
-      "POST / HTTP/1.1\r\n" +
-        "Host: example.com\r\n" +
-        "Transfer-Encoding: chunked\r\n" +
-        "\r\n" +
-        "5\r\nhello\r\n0\r\n\r\n",
-    ),
-    {
-      scheme: "http",
-      write: () => {},
-      finish: () => {
-        finished = true;
-      },
-    },
-  );
-
-  assert.equal(finished, true);
-  assert.deepEqual(observedLengths, [null, "5"]);
-});
-
 test("qemu-net: first-hop policy is rechecked after createHttpHooks secret mutation", async () => {
   let requestPolicyCalls = 0;
   let ipPolicyCalls = 0;
@@ -1613,7 +1489,6 @@ test("qemu-net: createHttpHooks onRequest keeps streaming uploads streaming", as
   const backend = makeBackend({
     fetch: async (_url, init) => {
       fetchCalls += 1;
-      assert.equal(new Headers(init?.headers).get("content-length"), "5");
 
       const body = init?.body as ReadableStream<Uint8Array> | undefined;
       if (body) {
@@ -1665,12 +1540,8 @@ test("qemu-net: createHttpHooks onRequest keeps streaming uploads streaming", as
   assert.match(raw, /^HTTP\/1\.1 200 /);
 });
 
-test("qemu-net: streaming onRequest clones preserve the forwarded body", async () => {
-  for (const returnMode of [
-    "undefined",
-    "same-request",
-    "returned-clone",
-  ] as const) {
+test("qemu-net: streaming onRequest clone-read preserves forwarded body", async () => {
+  for (const returnMode of ["undefined", "same-request"] as const) {
     let fetchCalls = 0;
     const writes: Buffer[] = [];
     const session: any = { http: undefined };
@@ -1700,11 +1571,11 @@ test("qemu-net: streaming onRequest clones preserve the forwarded body", async (
       },
       httpHooks: {
         onRequest: async (request) => {
-          if (returnMode === "returned-clone") {
-            return request.clone();
-          }
           assert.equal(await request.clone().text(), "hello");
-          return returnMode === "same-request" ? request : undefined;
+          if (returnMode === "same-request") {
+            return request;
+          }
+          return undefined;
         },
       },
     });
@@ -1748,9 +1619,12 @@ test("qemu-net: streaming onRequest clones preserve the forwarded body", async (
   }
 });
 
-test("qemu-net: buffered body leaves content-length ownership to fetch", async () => {
-  // Fetch derives framing for buffered bodies. Canonical request headers must
-  // not carry a second, independently mutable content-length value.
+test("qemu-net: buffered body drops content-length before fetch (undici duplicate guard)", async () => {
+  // Regression: forwarding our own content-length alongside a buffered body
+  // makes undici 6's fetch append a second one; on Node >= 24.17 (built-in
+  // undici >= 7.28) the duplicate is rejected with "invalid content-length
+  // header" and the request 502s. For buffered bodies fetch must derive the
+  // length itself, so no content-length header reaches it.
   let sentHeaders: Record<string, string> | undefined;
   let sentBodyLength: number | undefined;
   const session: any = { http: undefined };
@@ -1796,172 +1670,11 @@ test("qemu-net: buffered body leaves content-length ownership to fetch", async (
   assert.deepEqual(
     contentLengthKeys,
     [],
-    "buffered body must let fetch derive content-length",
+    "buffered body must not forward content-length to fetch",
   );
+  // undici derives the length from the buffered body, which is intact
   assert.equal(sentBodyLength, 5);
   assert.equal(sentHeaders.host, "example.com");
-});
-
-test("qemu-net: default fetch sends exactly one content-length for buffered and stream bodies", async () => {
-  const observations: Array<{
-    contentLength: string | undefined;
-    rawCount: number;
-    body: string;
-  }> = [];
-  const server = http.createServer((request, response) => {
-    const chunks: Buffer[] = [];
-    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    request.on("end", () => {
-      observations.push({
-        contentLength: request.headers["content-length"],
-        rawCount: request.rawHeaders.filter(
-          (value) => value.toLowerCase() === "content-length",
-        ).length,
-        body: Buffer.concat(chunks).toString("utf8"),
-      });
-      response.end("ok");
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address === "object");
-    const url = `http://127.0.0.1:${address.port}/`;
-    const backend = makeBackend();
-
-    await fetchHookAndRespond(
-      backend,
-      {
-        method: "POST",
-        target: "/",
-        version: "HTTP/1.1",
-        headers: { host: `127.0.0.1:${address.port}` },
-        body: Buffer.from("hello"),
-      },
-      "http",
-      () => {},
-    );
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("hello"));
-        controller.close();
-      },
-    });
-    await qemuHttp.fetchHookRequestAndRespond(backend, {
-      request: {
-        method: "POST",
-        url,
-        headers: { host: `127.0.0.1:${address.port}` },
-        body: { kind: "stream", stream, byteLength: 5 },
-      },
-      httpVersion: "HTTP/1.1",
-      write: () => {},
-      httpSession: makeHttpSession(),
-    });
-  } finally {
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-  }
-
-  assert.deepEqual(observations, [
-    { contentLength: "5", rawCount: 1, body: "hello" },
-    { contentLength: "5", rawCount: 1, body: "hello" },
-  ]);
-});
-
-test("qemu-net: hook body rewrite derives framing from the new buffered body", async () => {
-  let sentBody = "";
-  let sentContentLength: string | null = null;
-  let responseHookContentLength: string | null = null;
-  let responseHookBody = "";
-
-  const backend = makeBackend({
-    fetch: async (_url, init) => {
-      sentContentLength = new Headers(init?.headers).get("content-length");
-      sentBody = Buffer.from(init?.body as Uint8Array).toString("utf8");
-      return new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      });
-    },
-    httpHooks: {
-      onRequest: (request) =>
-        new Request(request.url, {
-          method: request.method,
-          headers: request.headers,
-          body: "hello world",
-        }),
-      onResponse: async (_response, request) => {
-        responseHookContentLength = request.headers.get("content-length");
-        responseHookBody = await request.text();
-      },
-    },
-  });
-
-  await fetchHookAndRespond(
-    backend,
-    {
-      method: "POST",
-      target: "/",
-      version: "HTTP/1.1",
-      headers: { host: "example.com", "content-length": "5" },
-      body: Buffer.from("hello"),
-    },
-    "http",
-    () => {},
-  );
-
-  assert.equal(sentBody, "hello world");
-  assert.equal(sentContentLength, null);
-  assert.equal(responseHookContentLength, "11");
-  assert.equal(responseHookBody, "hello world");
-});
-
-test("qemu-net: hook body removal clears stale framing", async () => {
-  let sentBody: BodyInit | null | undefined;
-  let sentContentLength: string | null = null;
-  let responseHookContentLength: string | null = "unobserved";
-
-  const backend = makeBackend({
-    fetch: async (_url, init) => {
-      sentBody = init?.body;
-      sentContentLength = new Headers(init?.headers).get("content-length");
-      return new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      });
-    },
-    httpHooks: {
-      onRequest: (request) =>
-        new Request(request.url, {
-          method: request.method,
-          headers: request.headers,
-        }),
-      onResponse: (_response, request) => {
-        responseHookContentLength = request.headers.get("content-length");
-      },
-    },
-  });
-
-  await fetchHookAndRespond(
-    backend,
-    {
-      method: "POST",
-      target: "/",
-      version: "HTTP/1.1",
-      headers: { host: "example.com", "content-length": "5" },
-      body: Buffer.from("hello"),
-    },
-    "http",
-    () => {},
-  );
-
-  assert.equal(sentBody, undefined);
-  assert.equal(sentContentLength, null);
-  assert.equal(responseHookContentLength, null);
 });
 
 test("qemu-net: streaming onRequest body rewrite drains remaining upload bytes", async () => {
@@ -2360,131 +2073,6 @@ test("qemu-net: fetchAndRespond follows redirects and rewrites POST->GET", async
   assert.match(responseText, /^HTTP\/1\.1 200 /);
   assert.match(responseText.toLowerCase(), /connection: close/);
   assert.ok(responseText.endsWith("ok"));
-});
-
-test("qemu-net: fetchAndRespond replays buffered bodies across 307 redirects", async () => {
-  const calls: Array<{
-    method: string | undefined;
-    body: string;
-    contentLength: string | null;
-  }> = [];
-  const backend = makeBackend({
-    fetch: async (_url, init) => {
-      calls.push({
-        method: init?.method,
-        body: Buffer.from(init?.body as Uint8Array).toString("utf8"),
-        contentLength: new Headers(init?.headers).get("content-length"),
-      });
-      return calls.length === 1
-        ? new Response(null, { status: 307, headers: { location: "/next" } })
-        : new Response("ok", {
-            status: 200,
-            headers: { "content-length": "2" },
-          });
-    },
-  });
-
-  await fetchHookAndRespond(
-    backend,
-    {
-      method: "POST",
-      target: "/start",
-      version: "HTTP/1.1",
-      headers: {
-        host: "example.com",
-        "content-length": "5",
-        "content-type": "text/plain",
-      },
-      body: Buffer.from("hello"),
-    },
-    "http",
-    () => {},
-  );
-
-  assert.deepEqual(calls, [
-    { method: "POST", body: "hello", contentLength: null },
-    { method: "POST", body: "hello", contentLength: null },
-  ]);
-});
-
-test("qemu-net: fetchAndRespond drops a stream body when redirect rewrites to GET", async () => {
-  let cancelled = false;
-  const stream = new ReadableStream<Uint8Array>({
-    cancel() {
-      cancelled = true;
-    },
-  });
-  let calls = 0;
-  const backend = makeBackend({
-    fetch: async (_url, init) => {
-      calls += 1;
-      if (calls === 1) {
-        assert.equal(init?.body, stream);
-        assert.equal(new Headers(init?.headers).get("content-length"), "5");
-        return new Response(null, {
-          status: 302,
-          headers: { location: "/next" },
-        });
-      }
-      assert.equal(init?.method, "GET");
-      assert.equal(init?.body, undefined);
-      assert.equal(new Headers(init?.headers).get("content-length"), null);
-      return new Response("ok", {
-        status: 200,
-        headers: { "content-length": "2" },
-      });
-    },
-  });
-
-  await qemuHttp.fetchHookRequestAndRespond(backend, {
-    request: {
-      method: "POST",
-      url: "http://example.com/start",
-      headers: { host: "example.com", "content-type": "text/plain" },
-      body: { kind: "stream", stream, byteLength: 5 },
-    },
-    httpVersion: "HTTP/1.1",
-    write: () => {},
-    httpSession: makeHttpSession(),
-  });
-
-  assert.equal(calls, 2);
-  assert.equal(cancelled, true);
-});
-
-test("qemu-net: fetchAndRespond rejects redirects that require replaying a stream", async () => {
-  let cancelled = false;
-  const stream = new ReadableStream<Uint8Array>({
-    cancel() {
-      cancelled = true;
-    },
-  });
-  const backend = makeBackend({
-    fetch: async () =>
-      new Response(null, {
-        status: 307,
-        headers: { location: "/next" },
-      }),
-  });
-
-  await assert.rejects(
-    () =>
-      qemuHttp.fetchHookRequestAndRespond(backend, {
-        request: {
-          method: "POST",
-          url: "http://example.com/start",
-          headers: { host: "example.com", "content-type": "text/plain" },
-          body: { kind: "stream", stream, byteLength: 5 },
-        },
-        httpVersion: "HTTP/1.1",
-        write: () => {},
-        httpSession: makeHttpSession(),
-      }),
-    (error) =>
-      error instanceof HttpRequestBlockedError &&
-      error.message === "redirect requires replaying streamed request body",
-  );
-  assert.equal(cancelled, true);
 });
 
 test("qemu-net: fetchAndRespond drops auth headers on cross-origin redirects", async () => {

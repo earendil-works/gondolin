@@ -85,35 +85,16 @@ export function coalesceHeaderRecord(
   return out;
 }
 
-export function stripRequestFramingHeaders(
-  headers: Record<string, string>,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => {
-      const normalized = name.toLowerCase();
-      return (
-        normalized !== "content-length" && normalized !== "transfer-encoding"
-      );
-    }),
-  );
-}
-
 export function parseContentLength(
   raw: string | string[] | undefined,
 ): number | null {
   if (raw === undefined) return null;
-  const values = (Array.isArray(raw) ? raw : [raw])
-    .flatMap((value) => value.split(","))
-    .map((value) => value.trim());
-  if (
-    values.length === 0 ||
-    values.some((value) => !/^\d+$/.test(value)) ||
-    values.some((value) => value !== values[0])
-  ) {
+  const rawString = Array.isArray(raw) ? raw.join(",") : raw;
+  const n = Number.parseInt(rawString, 10);
+  if (!Number.isSafeInteger(n) || n < 0) {
     return null;
   }
-  const length = Number(values[0]);
-  return Number.isSafeInteger(length) ? length : null;
+  return n;
 }
 
 export const MAX_HTTP_HEADER_BYTES = 64 * 1024;
@@ -476,10 +457,10 @@ export function applyRedirectRequest(
 
   if (status === 303 && method !== "GET" && method !== "HEAD") {
     method = "GET";
-    body = { kind: "none" };
+    body = null;
   } else if ((status === 301 || status === 302) && method === "POST") {
     method = "GET";
-    body = { kind: "none" };
+    body = null;
   }
 
   const headers = { ...request.headers };
@@ -493,8 +474,10 @@ export function applyRedirectRequest(
     delete headers.cookie;
   }
 
-  if (body.kind === "none" || method === "GET" || method === "HEAD") {
+  if (!body || method === "GET" || method === "HEAD") {
+    delete headers["content-length"];
     delete headers["content-type"];
+    delete headers["transfer-encoding"];
   }
 
   return {

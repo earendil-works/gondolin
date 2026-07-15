@@ -36,7 +36,7 @@ test("http-hook-conversion: GET requests with body fail fast", () => {
         headers: {
           "content-length": "5",
         },
-        body: { kind: "buffered", bytes: Buffer.from("hello") },
+        body: Buffer.from("hello"),
       }),
     (err) => err instanceof HttpRequestBlockedError && err.status === 400,
   );
@@ -51,7 +51,7 @@ test("http-hook-conversion: HEAD requests with body fail fast", () => {
         headers: {
           "content-length": "5",
         },
-        body: { kind: "buffered", bytes: Buffer.from("hello") },
+        body: Buffer.from("hello"),
       }),
     (err) => err instanceof HttpRequestBlockedError && err.status === 400,
   );
@@ -70,13 +70,7 @@ test("http-hook-conversion: accepts undici Request values", async () => {
 
   assert.ok(converted);
   assert.equal(converted.method, "POST");
-  assert.equal(converted.body.kind, "buffered");
-  assert.equal(
-    converted.body.kind === "buffered"
-      ? converted.body.bytes.toString("utf8")
-      : null,
-    "hello",
-  );
+  assert.equal(converted.body?.toString("utf8"), "hello");
 });
 
 test("http-hook-conversion: rejects GET-like values with bodies", async () => {
@@ -185,11 +179,5 @@ test("http-hook-conversion: request body conversion succeeds within limit", asyn
   });
 
   assert.ok(converted);
-  assert.equal(converted.body.kind, "buffered");
-  assert.equal(
-    converted.body.kind === "buffered"
-      ? converted.body.bytes.toString("utf8")
-      : null,
-    "hello",
-  );
+  assert.equal(converted.body?.toString("utf8"), "hello");
 });

@@ -1,27 +1,12 @@
-export type InternalHttpRequestBody =
-  | { kind: "none" }
-  | { kind: "buffered"; bytes: Buffer }
-  | {
-      kind: "stream";
-      stream: ReadableStream<Uint8Array>;
-      /** trusted body length in `bytes` */
-      byteLength: number;
-    }
-  | {
-      kind: "metadata-only";
-      /** trusted body length in `bytes` */
-      byteLength: number;
-    };
-
 export type InternalHttpRequest = {
   /** http method */
   method: string;
   /** request url */
   url: string;
-  /** canonical request headers without body framing */
+  /** request headers */
   headers: Record<string, string>;
-  /** request body and trusted framing metadata */
-  body: InternalHttpRequestBody;
+  /** request body (null for empty) */
+  body: Buffer | null;
 };
 
 export type InternalHeaderValue = string | string[];

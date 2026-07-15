@@ -4,10 +4,7 @@ import type {
   InternalHttpResponse,
   InternalHttpResponseHeaders,
 } from "./http-types.ts";
-import {
-  HttpRequestBlockedError,
-  stripRequestFramingHeaders,
-} from "../http/utils.ts";
+import { HttpRequestBlockedError } from "../http/utils.ts";
 
 type RequestLike = Pick<Request, "url" | "method" | "headers" | "body"> & {
   arrayBuffer?: () => Promise<ArrayBuffer>;
@@ -156,7 +153,7 @@ export async function webRequestToInternalHttpRequest(
     );
   }
 
-  let body: InternalHttpRequest["body"] = { kind: "none" };
+  let body: Buffer | null = null;
   const upperMethod = value.method.toUpperCase();
   if (
     options.allowBody &&
@@ -181,7 +178,7 @@ export async function webRequestToInternalHttpRequest(
           ),
       }),
     );
-    body = bytes.length > 0 ? { kind: "buffered", bytes } : { kind: "none" };
+    body = bytes.length > 0 ? bytes : null;
   } else if (
     options.allowBody &&
     (value.body !== null || typeof value.arrayBuffer === "function")
@@ -250,28 +247,12 @@ export async function webResponseToInternalHttpResponse(
   };
 }
 
-export function requestHeadersToRecord(
-  headers: Headers,
-): Record<string, string> {
+function requestHeadersToRecord(headers: Headers): Record<string, string> {
   const record: Record<string, string> = {};
   headers.forEach((value, key) => {
     record[key.toLowerCase()] = value;
   });
-  return stripRequestFramingHeaders(record);
-}
-
-export function requestBodyByteLength(
-  request: InternalHttpRequest,
-): number | null {
-  switch (request.body.kind) {
-    case "buffered":
-      return request.body.bytes.length;
-    case "stream":
-    case "metadata-only":
-      return request.body.byteLength;
-    case "none":
-      return null;
-  }
+  return record;
 }
 
 export function responseHeadersToRecord(
@@ -295,10 +276,9 @@ export function responseHeadersToRecord(
 
 export function internalHttpRequestToWebRequest(
   request: InternalHttpRequest,
-  options: { includeBody?: boolean } = {},
 ): Request {
   const method = request.method.toUpperCase();
-  const hasBody = request.body.kind !== "none";
+  const hasBody = Boolean(request.body && request.body.length > 0);
   const canHaveBody = method !== "GET" && method !== "HEAD";
 
   if (hasBody && !canHaveBody) {
@@ -309,24 +289,11 @@ export function internalHttpRequestToWebRequest(
     );
   }
 
-  const headers = { ...request.headers };
-  const byteLength = requestBodyByteLength(request);
-  if (byteLength !== null) headers["content-length"] = String(byteLength);
-
-  const includeBody = options.includeBody ?? true;
-  const body =
-    includeBody && request.body.kind === "buffered"
-      ? new Uint8Array(request.body.bytes)
-      : includeBody && request.body.kind === "stream"
-        ? request.body.stream
-        : undefined;
-
   return new Request(request.url, {
     method: request.method,
-    headers,
-    body: body as BodyInit | undefined,
-    ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
-  } as RequestInit);
+    headers: request.headers,
+    body: hasBody ? new Uint8Array(request.body!) : undefined,
+  });
 }
 
 export function internalHttpResponseToWebResponse(
