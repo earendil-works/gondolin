@@ -1371,14 +1371,9 @@ export async function fetchHookRequestAndRespond(
     // undici (>= 7.28, Node >= 24.17) the duplicate value is rejected with
     // "invalid content-length header" and the request fails. Streamed bodies
     // keep their explicit length. Copy so redirects/hooks see the original.
-    let fetchHeaders = currentRequest.headers;
+    const fetchHeaders = { ...currentRequest.headers };
     if (bodyInit && !bodyStream) {
-      fetchHeaders = { ...currentRequest.headers };
-      for (const key of Object.keys(fetchHeaders)) {
-        if (key.toLowerCase() === "content-length") {
-          delete fetchHeaders[key];
-        }
-      }
+      delete fetchHeaders["content-length"];
     }
 
     let response: FetchResponse;
