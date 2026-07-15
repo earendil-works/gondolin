@@ -1619,6 +1619,60 @@ test("qemu-net: streaming onRequest clone-read preserves forwarded body", async 
   }
 });
 
+test("qemu-net: buffered body drops content-length before fetch (undici duplicate guard)", async () => {
+  // undici 6 duplicates an explicit Content-Length for buffered bodies; built-in
+  // undici 7.28 rejects it, so Fetch must derive the length instead.
+  let sentHeaders: Record<string, string> | undefined;
+  let sentBodyLength: number | undefined;
+  const session: any = { http: undefined };
+
+  const backend = makeBackend({
+    maxHttpBodyBytes: 1024,
+    fetch: async (_url, init) => {
+      sentHeaders = init?.headers as Record<string, string>;
+      sentBodyLength = (init?.body as Uint8Array | undefined)?.length;
+      return new Response("ok", {
+        status: 200,
+        headers: { "content-length": "2" },
+      });
+    },
+  });
+
+  let finished = false;
+  await qemuHttp.handleHttpDataWithWriter(
+    backend,
+    "key",
+    session,
+    Buffer.from(
+      "POST / HTTP/1.1\r\n" +
+        "Host: example.com\r\n" +
+        "Content-Length: 5\r\n" +
+        "\r\n" +
+        "hello",
+    ),
+    {
+      scheme: "http",
+      write: () => {},
+      finish: () => {
+        finished = true;
+      },
+    },
+  );
+
+  assert.equal(finished, true);
+  assert.ok(sentHeaders, "expected fetch to be called");
+  const contentLengthKeys = Object.keys(sentHeaders).filter(
+    (key) => key.toLowerCase() === "content-length",
+  );
+  assert.deepEqual(
+    contentLengthKeys,
+    [],
+    "buffered body must not forward content-length to fetch",
+  );
+  assert.equal(sentBodyLength, 5);
+  assert.equal(sentHeaders.host, "example.com");
+});
+
 test("qemu-net: streaming onRequest body rewrite drains remaining upload bytes", async () => {
   let releaseFetch: (() => void) | null = null;
   const fetchGate = new Promise<void>((resolve) => {

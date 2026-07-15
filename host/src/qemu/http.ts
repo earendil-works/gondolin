@@ -1365,11 +1365,18 @@ export async function fetchHookRequestAndRespond(
         ? new Uint8Array(currentRequest.body)
         : undefined;
 
+    // Avoid duplicate Content-Length when Fetch derives framing for buffered bodies.
+    // Remove it from a copy so redirects and hooks keep the measured length.
+    const fetchHeaders = { ...currentRequest.headers };
+    if (bodyInit && !bodyStream) {
+      delete fetchHeaders["content-length"];
+    }
+
     let response: FetchResponse;
     try {
       response = await fetcher(currentUrl.toString(), {
         method: currentRequest.method,
-        headers: currentRequest.headers,
+        headers: fetchHeaders,
         body: bodyInit as any,
         redirect: "manual",
         ...(bodyStream ? { duplex: "half" } : {}),
