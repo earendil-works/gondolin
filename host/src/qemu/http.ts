@@ -1365,12 +1365,8 @@ export async function fetchHookRequestAndRespond(
         ? new Uint8Array(currentRequest.body)
         : undefined;
 
-    // For a buffered body, let fetch derive content-length from the body.
-    // Passing our own content-length alongside the buffer makes undici 6's
-    // fetch append a second one; when that dispatches through Node's built-in
-    // undici (>= 7.28, Node >= 24.17) the duplicate value is rejected with
-    // "invalid content-length header" and the request fails. Streamed bodies
-    // keep their explicit length. Copy so redirects/hooks see the original.
+    // Let fetch derive Content-Length for buffered bodies.
+    // Keep the original headers intact for redirects and hooks.
     const fetchHeaders = { ...currentRequest.headers };
     if (bodyInit && !bodyStream) {
       delete fetchHeaders["content-length"];
