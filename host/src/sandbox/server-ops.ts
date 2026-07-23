@@ -269,6 +269,7 @@ export class SandboxServerOps {
       resolveDone = resolve;
       rejectDone = reject;
     });
+    void done.catch(() => {});
 
     this.fileOps.set(id, {
       kind: "write",
@@ -345,6 +346,7 @@ export class SandboxServerOps {
       resolveDone = resolve;
       rejectDone = reject;
     });
+    void done.catch(() => {});
 
     this.fileOps.set(id, {
       kind: "delete",
