@@ -724,6 +724,8 @@ export class SessionIpcServer {
 }
 
 export type IpcClientCallbacks = {
+  /** called after the external session IPC socket connects */
+  onConnect?: () => void;
   /** called with JSON server messages */
   onJson: (message: ServerMessage) => void;
   /** called with binary output frames */
@@ -747,6 +749,10 @@ export function connectToSession(
   let readBuffer = Buffer.alloc(0);
   let expectedLength: number | null = null;
   let frameType: number | null = null;
+
+  socket.on("connect", () => {
+    callbacks.onConnect?.();
+  });
 
   socket.on("data", (chunk: Buffer) => {
     readBuffer = Buffer.concat([readBuffer, chunk]);
