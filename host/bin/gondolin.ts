@@ -21,13 +21,6 @@ import {
   ensureTrufflehogBinary,
   getTrufflehogStatus,
 } from "../src/build/trufflehog.ts";
-import {
-  FrameReader,
-  buildExecRequest,
-  decodeMessage,
-  encodeFrame,
-  type IncomingMessage,
-} from "../src/sandbox/virtio-protocol.ts";
 import { attachTty } from "../src/utils/tty-attach.ts";
 import {
   getDefaultBuildConfig,
@@ -215,7 +208,7 @@ function usage() {
   console.log("Usage: gondolin <command> [options]");
   console.log("Commands:");
   console.log(
-    "  exec         Run a command via the virtio socket or in-process VM",
+    "  exec         Run a command via a session IPC socket or in-process VM",
   );
   console.log(
     "  bash         Start an interactive shell session in the VM (bash -> sh fallback)",
@@ -403,6 +396,7 @@ function execUsage() {
     "  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)",
   );
   console.log();
+  console.log("  --sock PATH uses a Gondolin session IPC socket.");
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
@@ -1443,82 +1437,104 @@ async function runExecVm(args: ExecArgs) {
   process.exit(exitCode);
 }
 
+const EXEC_OUTPUT_WINDOW_BYTES = 1024 * 1024;
+
 function runExecSocket(args: ExecArgs) {
-  const socket = net.createConnection({ path: args.sock! });
-  const reader = new FrameReader();
+  // The session socket uses the 5-byte framed JSON/binary IPC protocol, not virtio CBOR.
   let currentIndex = 0;
   let inflightId: number | null = null;
   let exitCode = 0;
   let closing = false;
 
-  const sendNext = () => {
-    const command = args.commands[currentIndex];
-    inflightId = command.id;
-    const payload = buildCommandPayload(command);
-    const message = buildExecRequest(command.id, payload);
-    socket.write(encodeFrame(message));
-  };
-
   const finish = (code?: number) => {
     if (code !== undefined && exitCode === 0) exitCode = code;
     if (closing) return;
     closing = true;
-    socket.end();
+    process.exitCode = exitCode;
+    client.close();
   };
 
-  socket.on("connect", () => {
-    console.log(`connected to ${args.sock}`);
-    sendNext();
-  });
+  const sendNext = () => {
+    if (currentIndex >= args.commands.length) {
+      finish();
+      return;
+    }
+    const command = args.commands[currentIndex]!;
+    inflightId = command.id;
+    const payload = buildCommandPayload(command);
+    client.send({
+      type: "exec",
+      id: command.id,
+      cmd: payload.cmd,
+      ...(payload.argv ? { argv: payload.argv } : {}),
+      ...(payload.env ? { env: payload.env } : {}),
+      ...(payload.cwd ? { cwd: payload.cwd } : {}),
+      stdout_window: EXEC_OUTPUT_WINDOW_BYTES,
+      stderr_window: EXEC_OUTPUT_WINDOW_BYTES,
+    });
+  };
 
-  socket.on("data", (chunk) => {
-    reader.push(chunk, (frame) => {
-      const message = decodeMessage(frame) as IncomingMessage;
-      if (message.t === "exec_output") {
-        const data = message.p.data;
-        if (message.p.stream === "stdout") {
-          process.stdout.write(data);
-        } else {
-          process.stderr.write(data);
-        }
-      } else if (message.t === "exec_response") {
-        if (inflightId !== null && message.id !== inflightId) {
-          console.error(
-            `unexpected response id ${message.id} (expected ${inflightId})`,
-          );
-          finish(1);
-          return;
-        }
-        const code = message.p.exit_code ?? 1;
-        const signal = message.p.signal;
+  const client = connectToSession(args.sock!, {
+    onConnect() {
+      console.log(`connected to ${args.sock}`);
+      sendNext();
+    },
+    onJson(message: ServerMessage) {
+      if (closing) return;
+      if (message.type === "status") return;
+      if (message.type === "exec_response") {
+        if (inflightId === null || message.id !== inflightId) return;
+        const code = message.exit_code ?? 1;
+        const signal = message.signal;
         if (signal !== undefined) {
           console.error(`process exited due to signal ${signal}`);
         }
         if (code !== 0 && exitCode === 0) exitCode = code;
         currentIndex += 1;
+        inflightId = null;
         if (currentIndex < args.commands.length) {
           sendNext();
         } else {
           finish();
         }
-      } else if (message.t === "error") {
-        console.error(`error ${message.p.code}: ${message.p.message}`);
-        finish(1);
+        return;
       }
-    });
-  });
-
-  socket.on("error", (err) => {
-    console.error(`socket error: ${err.message}`);
-    finish(1);
-  });
-
-  socket.on("end", () => {
-    if (!closing && exitCode === 0) exitCode = 1;
-  });
-
-  socket.on("close", () => {
-    process.exit(exitCode);
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== inflightId) return;
+        console.error(`error ${message.code}: ${message.message}`);
+        finish(1);
+        return;
+      }
+    },
+    onBinary(frame: Buffer) {
+      if (closing) return;
+      const decoded = decodeOutputFrame(frame);
+      if (inflightId === null || decoded.id !== inflightId) return;
+      if (decoded.stream === "stdout") {
+        process.stdout.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stdout: decoded.data.length,
+        });
+      } else {
+        process.stderr.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stderr: decoded.data.length,
+        });
+      }
+    },
+    onClose(err?: Error) {
+      if (closing) return;
+      if (err) {
+        console.error(`socket error: ${err.message}`);
+        finish(1);
+        return;
+      }
+      finish(1);
+    },
   });
 }
 
@@ -1531,7 +1547,7 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
   }
 
   if (args.sock) {
-    // Socket mode (direct virtio connection)
+    // Socket mode (session IPC)
     runExecSocket(args);
   } else {
     args.common.secrets = await resolveSecretHosts(args.common.secrets);
