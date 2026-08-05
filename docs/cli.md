@@ -64,7 +64,7 @@ options for configuring filesystem mounts and mediated network egress policy.
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
-    - Requires `resize2fs` in the guest image (`e2fsprogs` on Alpine)
+    - Requires `resize2fs` in the guest image (`e2fsprogs-extra` on Alpine)
 
 Examples:
 
