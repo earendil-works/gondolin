@@ -201,6 +201,7 @@ export function getDefaultBuildConfig(): BuildConfig {
         "ca-certificates",
         "curl",
         "e2fsprogs",
+        "e2fsprogs-extra",
         "nodejs",
         "npm",
         "uv",
