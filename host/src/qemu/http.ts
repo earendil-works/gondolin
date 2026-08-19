@@ -731,18 +731,18 @@ export async function handleHttpDataWithWriter(
         url: baseRequest.url,
         headers: {
           ...baseRequest.headers,
-          "content-length": body.length.toString(),
         },
         body: body.length > 0 ? body : null,
       };
 
-      request.headers = { ...request.headers };
-      delete request.headers["transfer-encoding"];
-      if (request.body) {
-        request.headers["content-length"] = request.body.length.toString();
-      } else {
-        delete request.headers["content-length"];
-      }
+	request.headers = { ...request.headers };
+	delete request.headers["transfer-encoding"];
+	// Let undici compute Content-Length from the buffered body. Node >= 24.17's
+	// undici rejects a manually supplied Content-Length for a buffered body
+	// ("invalid content-length header"), which surfaced as a 502 for buffered
+	// request bodies (issue #134). undici sets an accurate Content-Length
+	// automatically for buffered/string bodies.
+	delete request.headers["content-length"];
 
       httpSession.processing = true;
       let releaseHttpConcurrency: (() => void) | null = null;
@@ -1015,11 +1015,12 @@ export async function handleHttpDataWithWriter(
     // Normalize framing headers for fetch.
     request.headers = { ...request.headers };
     delete request.headers["transfer-encoding"];
-    if (request.body) {
-      request.headers["content-length"] = request.body.length.toString();
-    } else {
-      delete request.headers["content-length"];
-    }
+    // Let undici compute Content-Length from the buffered body. Node >= 24.17's
+    // undici rejects a manually supplied Content-Length for a buffered body
+    // ("invalid content-length header"), which surfaced as a 502 for buffered
+    // request bodies (issue #134). undici sets an accurate Content-Length
+    // automatically for buffered/string bodies.
+    delete request.headers["content-length"];
 
     httpSession.processing = true;
     let releaseHttpConcurrency: (() => void) | null = null;
