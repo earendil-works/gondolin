@@ -33,6 +33,8 @@ export interface AlpineBuildOptions {
   rootfsPackages: string[];
   /** packages to install in the initramfs */
   initramfsPackages: string[];
+  /** kernel image filename installed by the kernel package */
+  kernelImage: string;
   /** path to the sandboxd binary */
   sandboxdBin: string;
   /** path to the sandboxfs binary */
@@ -83,6 +85,8 @@ export interface OciResolvedSource {
 
 /** Result produced by the Alpine image build pipeline */
 export interface AlpineBuildResult {
+  /** kernel image path */
+  kernel: string;
   /** rootfs ext4 image path */
   rootfsImage: string;
   /** compressed initramfs path */

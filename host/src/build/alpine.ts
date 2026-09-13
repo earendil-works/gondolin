@@ -53,6 +53,7 @@ export async function buildAlpineImages(
     alpineBranch,
     rootfsPackages,
     initramfsPackages,
+    kernelImage,
     postBuildCopy = [],
     postBuildCommands = [],
     sandboxdBin,
@@ -68,6 +69,7 @@ export async function buildAlpineImages(
 
   const rootfsDir = path.join(workDir, "rootfs");
   const initramfsDir = path.join(workDir, "initramfs-root");
+  const kernelOut = path.join(workDir, "vmlinuz-virt");
   const rootfsImage = path.join(workDir, "rootfs.ext4");
   const initramfsOut = path.join(workDir, "initramfs.cpio.lz4");
 
@@ -206,6 +208,14 @@ export async function buildAlpineImages(
     copyRootfsToInitramfs: !opts.ociRootfs,
   });
 
+  stageInstalledKernel(
+    rootfsDir,
+    initramfsDir,
+    Boolean(opts.ociRootfs),
+    kernelImage,
+    kernelOut,
+  );
+
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
 
   log("Creating rootfs ext4 image...");
@@ -225,10 +235,28 @@ export async function buildAlpineImages(
   log(`Initramfs written to ${initramfsOut}`);
 
   return {
+    kernel: kernelOut,
     rootfsImage,
     initramfs: initramfsOut,
     ociSource,
   };
+}
+
+function stageInstalledKernel(
+  rootfsDir: string,
+  initramfsDir: string,
+  hasOciRootfs: boolean,
+  kernelImage: string,
+  outputPath: string,
+): void {
+  const packageRoot = hasOciRootfs ? initramfsDir : rootfsDir;
+  const sourcePath = path.join(packageRoot, "boot", kernelImage);
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(
+      `Kernel image '${kernelImage}' was not installed in the filesystem containing its modules: ${sourcePath}`,
+    );
+  }
+  fs.copyFileSync(sourcePath, outputPath);
 }
 
 function ensureRuntimeDirs(rootDir: string): void {
@@ -238,3 +266,6 @@ function ensureRuntimeDirs(rootDir: string): void {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 }
+
+/** @internal */
+export const __test = { stageInstalledKernel };
