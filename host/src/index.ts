@@ -188,6 +188,7 @@ export {
   listImageRefs,
   setImageRef,
   tagImage,
+  removeImage,
   type ImageArch,
   type ImageRefTargets,
   type LocalImageRef,

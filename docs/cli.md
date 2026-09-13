@@ -468,6 +468,21 @@ gondolin build --verify ./my-assets
 For a full configuration reference and build requirements, see:
 [Building Custom Images](./custom-images.md).
 
+Manage the Alpine package cache used by image builds:
+
+```bash
+gondolin build cache version
+gondolin build cache update
+gondolin build cache update --config Gondolinfile --arch aarch64
+gondolin build cache rm
+gondolin build cache rm --yes
+```
+
+`version` reports cached Alpine minirootfs and kernel package versions. `update`
+refreshes the `main` and `community` package indexes for the selected build
+configuration. `rm` prompts before deleting Alpine minirootfs, package-index,
+and APK files while preserving unrelated build cache data.
+
 ### `gondolin image`
 
 Manage the local image object store and refs:
@@ -478,7 +493,18 @@ gondolin image import ./my-assets --tag default:latest
 gondolin image inspect default:latest
 gondolin image pull alpine-base:latest
 gondolin image tag default:latest tooling:dev
+gondolin image rm tooling:dev
+gondolin image rm 3cd7a864-f023-5a35-9db1-39a1be5bdcca --force
+gondolin image rm --untagged
+gondolin image rm --all
 ```
+
+`image ls` includes objects without tags as `<untagged>`. Removing a tag deletes
+the image object when no other local tags reference it. Removing a build id
+requires `--force` when local tags still reference it; `--force` removes those
+tags as well. `--untagged` removes every untagged object, while `--all` clears
+all local refs and objects. Every removal prompts for confirmation unless
+`--yes` or `-y` is passed.
 
 Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 
