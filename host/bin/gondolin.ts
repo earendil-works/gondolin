@@ -36,13 +36,23 @@ import {
   type BuildConfig,
 } from "../src/build/config.ts";
 import { buildAssets, verifyAssets } from "../src/build/index.ts";
+import {
+  alpineBuildCacheDirectory,
+  inspectAlpineBuildCache,
+  removeAlpineBuildCache,
+  updateAlpineBuildCache,
+} from "../src/build/cache.ts";
 import { loadAssetManifest } from "../src/assets.ts";
 import {
   ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
+  listUntaggedImages,
   setImageRef,
   tagImage,
+  removeImage,
+  removeUntaggedImages,
+  removeAllImages,
   type ImageArch,
 } from "../src/images.ts";
 import {
@@ -2510,6 +2520,7 @@ async function runSnapshot(argv: string[]) {
 
 function buildUsage() {
   console.log("Usage: gondolin build [options]");
+  console.log("       gondolin build cache <version|rm|update> [options]");
   console.log();
   console.log("Build custom guest assets (kernel, initramfs, rootfs).");
   console.log();
@@ -2557,6 +2568,11 @@ function buildUsage() {
   console.log();
   console.log("Verify built assets:");
   console.log("  gondolin build --verify ./my-assets");
+  console.log();
+  console.log("Manage the Alpine build cache:");
+  console.log("  gondolin build cache version");
+  console.log("  gondolin build cache rm [--yes]");
+  console.log("  gondolin build cache update [--config FILE] [--arch ARCH]");
 }
 
 type BuildArgs = {
@@ -2645,7 +2661,143 @@ function parseBuildArgs(argv: string[]): BuildArgs {
   return args;
 }
 
+async function runBuildCache(argv: string[]) {
+  const [subcommand, ...rest] = argv;
+
+  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+    buildUsage();
+    return;
+  }
+
+  if (subcommand === "version") {
+    if (rest.length > 0) {
+      throw new Error(`unexpected argument for build cache version: ${rest[0]}`);
+    }
+    const info = inspectAlpineBuildCache();
+    console.log(`Alpine build cache: ${info.cacheDir}`);
+    console.log(`Size: ${info.sizeBytes} bytes`);
+    console.log(`Package archives: ${info.packageArchiveCount}`);
+
+    if (info.minirootfs.length === 0) {
+      console.log("Minirootfs: none");
+    } else {
+      console.log("Minirootfs:");
+      for (const entry of info.minirootfs) {
+        console.log(
+          `  Alpine ${entry.version} (${entry.arch}), cached ${entry.modifiedAt}`,
+        );
+      }
+    }
+
+    if (info.indexes.length === 0) {
+      console.log("Repository indexes: none");
+    } else {
+      console.log("Repository indexes:");
+      for (const index of info.indexes) {
+        console.log(`  ${index.file}, cached ${index.modifiedAt}`);
+        for (const pkg of index.kernelPackages) {
+          console.log(`    ${pkg.name}: ${pkg.version}`);
+        }
+      }
+    }
+    return;
+  }
+
+  if (subcommand === "rm") {
+    let assumeYes = false;
+    for (const arg of rest) {
+      if (arg === "--yes" || arg === "-y") {
+        assumeYes = true;
+        continue;
+      }
+      throw new Error(`unexpected argument for build cache rm: ${arg}`);
+    }
+
+    if (!assumeYes) {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      try {
+        const answer = await rl.question(
+          `Remove Alpine build cache at ${alpineBuildCacheDirectory()}? [y/N] `,
+        );
+        if (!/^(?:y|yes)$/i.test(answer.trim())) {
+          console.log("Aborted.");
+          return;
+        }
+      } finally {
+        rl.close();
+      }
+    }
+
+    const removed = removeAlpineBuildCache();
+    console.log(
+      `Removed ${removed.removedEntries} cache entries (${removed.removedBytes} bytes).`,
+    );
+    return;
+  }
+
+  if (subcommand === "update") {
+    let configFile: string | undefined;
+    let arch: "aarch64" | "x86_64" | undefined;
+    for (let i = 0; i < rest.length; i += 1) {
+      const arg = rest[i]!;
+      if (arg === "--config") {
+        const value = rest[++i];
+        if (!value) throw new Error("--config requires a file path");
+        configFile = value;
+        continue;
+      }
+      if (arg === "--arch") {
+        const value = rest[++i];
+        if (value !== "aarch64" && value !== "x86_64") {
+          throw new Error("--arch must be aarch64 or x86_64");
+        }
+        arch = value;
+        continue;
+      }
+      throw new Error(`unexpected argument for build cache update: ${arg}`);
+    }
+
+    let config = getDefaultBuildConfig();
+    if (configFile) {
+      const configPath = path.resolve(configFile);
+      if (!fs.existsSync(configPath)) {
+        throw new Error(`Config file not found: ${configPath}`);
+      }
+      config = parseBuildConfig(fs.readFileSync(configPath, "utf8"));
+    }
+    if (config.distro !== "alpine") {
+      throw new Error("build cache update currently supports Alpine only");
+    }
+    if (arch) config.arch = arch;
+
+    const alpine = config.alpine ?? { version: "3.23.0" };
+    console.log(
+      `Updating Alpine ${alpine.branch ?? alpine.version} package indexes for ${config.arch}...`,
+    );
+    const indexes = await updateAlpineBuildCache({
+      arch: config.arch,
+      version: alpine.version,
+      branch: alpine.branch,
+      mirror: alpine.mirror,
+    });
+    for (const index of indexes) {
+      console.log(`Updated ${index}`);
+    }
+    return;
+  }
+
+  throw new Error(`unknown build cache command: ${subcommand}`);
+}
+
 async function runBuild(argv: string[]) {
+  if (argv[0] === "cache") {
+    await runBuildCache(argv.slice(1));
+    return;
+  }
+
   const args = parseBuildArgs(argv);
 
   // Handle --init-config
@@ -2878,6 +3030,11 @@ function imageUsage() {
   console.log("  tag <SOURCE> <TARGET> [--arch aarch64|x86_64]");
   console.log("      Create or update a ref to point at an image");
   console.log();
+  console.log(
+    "  rm <BUILD_ID|REF> [--force] [--yes] | rm --untagged [--yes] | rm --all [--yes]",
+  );
+  console.log("      Remove local image tags or objects after confirmation");
+  console.log();
   console.log("  inspect <SELECTOR> [--arch aarch64|x86_64]");
   console.log(
     "      Show details for a path, build id, or ref (pulls from registry if needed)",
@@ -2916,8 +3073,9 @@ async function runImage(argv: string[]) {
         return;
       }
       const refs = listImageRefs();
-      if (refs.length === 0) {
-        console.log("No local image refs found.");
+      const untagged = listUntaggedImages();
+      if (refs.length === 0 && untagged.length === 0) {
+        console.log("No local images found.");
         return;
       }
       for (const ref of refs) {
@@ -2928,6 +3086,9 @@ async function runImage(argv: string[]) {
           .filter(Boolean)
           .join(" ");
         console.log(`${ref.reference}${targets ? `  ${targets}` : ""}`);
+      }
+      for (const image of untagged) {
+        console.log(`<untagged>  ${image.arch}=${image.buildId}`);
       }
       return;
     }
@@ -3019,6 +3180,86 @@ async function runImage(argv: string[]) {
       }
       if (updated.targets.x86_64) {
         console.log(`  x86_64: ${updated.targets.x86_64}`);
+      }
+      return;
+    }
+
+    case "rm": {
+      let selector: string | undefined;
+      let force = false;
+      let assumeYes = false;
+      let untagged = false;
+      let all = false;
+
+      for (const arg of rest) {
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--force" || arg === "-f") {
+          force = true;
+          continue;
+        }
+        if (arg === "--yes" || arg === "-y") {
+          assumeYes = true;
+          continue;
+        }
+        if (arg === "--untagged") {
+          untagged = true;
+          continue;
+        }
+        if (arg === "--all") {
+          all = true;
+          continue;
+        }
+        if (!selector) {
+          selector = arg;
+          continue;
+        }
+        throw new Error(`unexpected argument for image rm: ${arg}`);
+      }
+
+      const modes = Number(Boolean(selector)) + Number(untagged) + Number(all);
+      if (modes !== 1) {
+        throw new Error(
+          "image rm requires exactly one of <BUILD_ID|REF>, --untagged, or --all",
+        );
+      }
+      if (force && !selector) {
+        throw new Error("--force requires a build id or image ref");
+      }
+
+      if (!assumeYes) {
+        const description = all
+          ? "all local images"
+          : untagged
+            ? "all untagged local images"
+            : `local image ${selector}`;
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        try {
+          const answer = await rl.question(`Remove ${description}? [y/N] `);
+          if (!/^(?:y|yes)$/i.test(answer.trim())) {
+            console.log("Aborted.");
+            return;
+          }
+        } finally {
+          rl.close();
+        }
+      }
+
+      const removed = all
+        ? removeAllImages()
+        : untagged
+          ? { removedRefs: [], ...removeUntaggedImages() }
+          : removeImage(selector!, { force });
+      for (const ref of removed.removedRefs) {
+        console.log(`Untagged: ${ref.reference} (${ref.arch})`);
+      }
+      for (const buildId of removed.removedBuildIds) {
+        console.log(`Deleted: ${buildId}`);
       }
       return;
     }

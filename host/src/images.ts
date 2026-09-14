@@ -1468,6 +1468,214 @@ export function tagImage(
   return setImageRef(targetReference, resolved.buildId, resolvedArch);
 }
 
+function pruneEmptyRefDirectories(startDir: string): void {
+  const root = path.resolve(imageRefRootDir());
+  let current = path.resolve(startDir);
+
+  while (current !== root) {
+    const relative = path.relative(root, current);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`)) return;
+    if (!fs.existsSync(current) || fs.readdirSync(current).length > 0) return;
+    fs.rmdirSync(current);
+    current = path.dirname(current);
+  }
+}
+
+function localRefsForBuildId(buildId: string): Array<{
+  reference: string;
+  arch: ImageArch;
+  linkPath: string;
+}> {
+  const objectDir = path.resolve(getImageObjectDirectory(buildId));
+  const refs: Array<{
+    reference: string;
+    arch: ImageArch;
+    linkPath: string;
+  }> = [];
+
+  for (const entry of collectRefSymlinkEntries(imageRefRootDir())) {
+    const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
+    const target = fs.readlinkSync(linkPath);
+    if (path.resolve(path.dirname(linkPath), target) !== objectDir) continue;
+    refs.push({ ...entry, linkPath });
+  }
+
+  return refs;
+}
+
+function removeRefLink(linkPath: string): void {
+  fs.rmSync(linkPath, { force: true });
+  pruneEmptyRefDirectories(path.dirname(linkPath));
+}
+
+export function listUntaggedImages(): ResolvedImage[] {
+  const objectRoot = imageObjectRootDir();
+  if (!fs.existsSync(objectRoot)) return [];
+
+  const referenced = new Set<string>();
+  for (const entry of collectRefSymlinkEntries(imageRefRootDir())) {
+    try {
+      const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
+      referenced.add(readBuildIdFromRefSymlink(linkPath));
+    } catch {
+      // Ignore malformed refs, consistent with listImageRefs().
+    }
+  }
+
+  const images: ResolvedImage[] = [];
+  for (const entry of fs.readdirSync(objectRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !isBuildId(entry.name)) continue;
+    const buildId = normalizeImageBuildId(entry.name);
+    if (referenced.has(buildId)) continue;
+
+    try {
+      const assetDir = ensureImageObjectExists(buildId);
+      images.push({
+        source: "build-id",
+        selector: buildId,
+        assetDir,
+        buildId,
+        arch: detectImageArchFromAssetDir(assetDir),
+      });
+    } catch {
+      // Ignore malformed image objects, consistent with listImageRefs().
+    }
+  }
+
+  return images.sort((a, b) => a.selector.localeCompare(b.selector));
+}
+
+function removeUnreferencedObject(buildId: string): boolean {
+  if (localRefsForBuildId(buildId).length > 0) return false;
+
+  const objectDir = getImageObjectDirectory(buildId);
+  if (!fs.existsSync(objectDir)) return false;
+  fs.rmSync(objectDir, { recursive: true, force: true });
+  return true;
+}
+
+export function removeUntaggedImages(): {
+  removedBuildIds: string[];
+} {
+  const removedBuildIds: string[] = [];
+  for (const image of listUntaggedImages()) {
+    if (image.buildId && removeUnreferencedObject(image.buildId)) {
+      removedBuildIds.push(image.buildId);
+    }
+  }
+  return { removedBuildIds };
+}
+
+export function removeAllImages(): {
+  removedRefs: Array<{ reference: string; arch: ImageArch }>;
+  removedBuildIds: string[];
+} {
+  const removedRefs = collectRefSymlinkEntries(imageRefRootDir()).map(
+    ({ reference, arch }) => ({ reference, arch }),
+  );
+  const removedBuildIds = fs.existsSync(imageObjectRootDir())
+    ? fs
+        .readdirSync(imageObjectRootDir(), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && isBuildId(entry.name))
+        .map((entry) => normalizeImageBuildId(entry.name))
+        .sort()
+    : [];
+
+  fs.rmSync(imageRefRootDir(), { recursive: true, force: true });
+  fs.rmSync(imageObjectRootDir(), { recursive: true, force: true });
+  return { removedRefs, removedBuildIds };
+}
+
+export function removeImage(
+  selector: string,
+  options: { force?: boolean } = {},
+): {
+  selector: string;
+  removedRefs: Array<{ reference: string; arch: ImageArch }>;
+  removedBuildIds: string[];
+} {
+  const trimmed = selector.trim();
+  if (!trimmed) {
+    throw new Error("image selector must not be empty");
+  }
+
+  const removedRefs: Array<{ reference: string; arch: ImageArch }> = [];
+  const removedBuildIds: string[] = [];
+
+  if (isBuildId(trimmed)) {
+    const buildId = normalizeImageBuildId(trimmed);
+    const objectDir = getImageObjectDirectory(buildId);
+    if (!fs.existsSync(objectDir)) {
+      throw new ImageResolutionError(
+        "object_not_found",
+        `image object not found for buildId ${buildId} (expected ${objectDir})`,
+      );
+    }
+
+    const refs = localRefsForBuildId(buildId);
+    if (refs.length > 0 && !options.force) {
+      const labels = refs
+        .map((ref) => `${ref.reference} (${ref.arch})`)
+        .join(", ");
+      throw new Error(
+        `image object ${buildId} is referenced by ${labels}; remove those tags first or use --force`,
+      );
+    }
+
+    for (const ref of refs) {
+      removeRefLink(ref.linkPath);
+      removedRefs.push({ reference: ref.reference, arch: ref.arch });
+    }
+    fs.rmSync(objectDir, { recursive: true, force: true });
+    removedBuildIds.push(buildId);
+    return { selector: buildId, removedRefs, removedBuildIds };
+  }
+
+  const parsed = parseImageRef(trimmed);
+  const targetBuildIds = new Set<string>();
+  let found = false;
+
+  for (const arch of ["aarch64", "x86_64"] as const) {
+    const linkPath = symlinkTargetForRef(parsed.canonical, arch);
+    try {
+      if (!fs.lstatSync(linkPath).isSymbolicLink()) {
+        throw new Error(`invalid image ref link: ${linkPath} is not a symlink`);
+      }
+    } catch (error: any) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+
+    found = true;
+    try {
+      targetBuildIds.add(readBuildIdFromRefSymlink(linkPath));
+    } catch {
+      // Remove malformed local refs, but do not infer an object to delete.
+    }
+    removeRefLink(linkPath);
+    removedRefs.push({ reference: parsed.canonical, arch });
+  }
+
+  if (!found) {
+    throw new ImageResolutionError(
+      "ref_not_found",
+      `image ref not found: ${parsed.canonical}`,
+    );
+  }
+
+  for (const buildId of targetBuildIds) {
+    if (removeUnreferencedObject(buildId)) {
+      removedBuildIds.push(buildId);
+    }
+  }
+
+  return {
+    selector: parsed.canonical,
+    removedRefs,
+    removedBuildIds,
+  };
+}
+
 export const __test = {
   parseImageRef,
   normalizeImageArch,
