@@ -766,6 +766,16 @@ fn runExecSession(session: *ExecSession) !void {
         }
     }
 
+    // A child can exit after its output pipes have drained. Without a child
+    // exit fd, the exec loop can then sleep for the full poll timeout before
+    // waitpid observes the exit. pidfd readiness wakes that poll immediately.
+    const pidfd_raw = std.os.linux.pidfd_open(pid, 0);
+    const pidfd: ?posix.fd_t = if (std.os.linux.errno(pidfd_raw) == .SUCCESS)
+        @intCast(pidfd_raw)
+    else
+        null;
+    defer if (pidfd) |fd| posix.close(fd);
+
     if (!use_pty) {
         posix.close(stdout_pipe.?[1]);
         posix.close(stderr_pipe.?[1]);
@@ -897,7 +907,7 @@ fn runExecSession(session: *ExecSession) !void {
 
         if (status != null and !stdout_open and !stderr_open) break;
 
-        var pollfds: [3]posix.pollfd = undefined;
+        var pollfds: [4]posix.pollfd = undefined;
         var nfds: usize = 0;
         var stdout_index: ?usize = null;
         var stderr_index: ?usize = null;
@@ -984,8 +994,18 @@ fn runExecSession(session: *ExecSession) !void {
             nfds += 1;
         }
 
+        if (status == null) {
+            if (pidfd) |fd| {
+                pollfds[nfds] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+                nfds += 1;
+            }
+        }
+
         if (nfds > 0) {
-            _ = try posix.poll(pollfds[0..nfds], 100);
+            // The pidfd reports child exit, so non-PTY sessions need no timer.
+            // PTY sessions keep the timeout for their post-exit drain deadline.
+            const timeout_ms: i32 = if (pidfd != null and !use_pty) -1 else 100;
+            _ = try posix.poll(pollfds[0..nfds], timeout_ms);
         } else {
             if (status == null) {
                 const res = posix.waitpid(pid, posix.W.NOHANG);
