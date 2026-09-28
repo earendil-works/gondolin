@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Fix HTTPS egress when the host runs on Bun: select MITM certificates by pre-parsing the guest ClientHello SNI (Bun does not call `SNICallback`), and end MITM TLS sessions only after the full response reached the guest flow. #147 #73
+
 ## 0.12.0
 
 - Add `VM.getHostPid()` to allow callers to collect host-side process metrics of the VM runner. #114

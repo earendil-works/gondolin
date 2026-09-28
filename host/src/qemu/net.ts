@@ -71,6 +71,10 @@ import {
   type SyntheticDnsHostMappingMode,
 } from "./contracts.ts";
 import { QemuIcmpTracker, type IcmpTiming } from "./icmp.ts";
+import {
+  MAX_CLIENT_HELLO_PREPARSE_BYTES,
+  parseClientHelloSni,
+} from "./tls-sni.ts";
 
 const GUEST_CLOSED_ERR = createGuestClosedError();
 
@@ -155,7 +159,27 @@ type TlsSession = {
   stream: GuestTlsStream;
   socket: tls.TLSSocket;
   servername: string | null;
+  /** plaintext writes queued on `socket` whose write callback has not fired */
+  pendingPlaintextWrites: number;
+  /** ciphertext chunks handed to the guest flow and not yet acknowledged */
+  pendingGuestWrites: number;
+  /** waiters notified whenever either pending counter decreases or the session closes */
+  progressWaiters: Array<() => void>;
 };
+
+/** max plaintext writes queued on a MITM TLS socket before the HTTP writer waits */
+const TLS_MAX_PENDING_PLAINTEXT_WRITES = 16;
+/** safety re-check interval for MITM TLS drain waits in `ms` */
+const TLS_PROGRESS_RECHECK_MS = 1000;
+
+function notifyTlsProgress(tlsSession: TlsSession) {
+  const waiters = tlsSession.progressWaiters.splice(0);
+  for (const waiter of waiters) waiter();
+}
+
+function isBunRuntime(): boolean {
+  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+}
 
 class ActivityMap<K, V> extends Map<K, V> {
   private readonly onActivityChange: () => void;
@@ -210,6 +234,10 @@ export type TcpSession = {
   pendingWriteBytes: number;
   http?: HttpSession;
   tls?: TlsSession;
+  /** guest ClientHello bytes buffered for SNI pre-parsing before `tls` exists */
+  tlsHello?: Buffer;
+  /** whether the MITM secure context for `tlsHello` is being created */
+  tlsHelloPending?: boolean;
 
   /** active WebSocket upgrade/tunnel state */
   ws?: WebSocketState;
@@ -297,6 +325,12 @@ export type QemuNetworkOptions = {
   /** tls MITM context cache ttl in `ms` (<=0 disables caching) */
   tlsContextCacheTtlMs?: number;
 
+  /**
+   * @internal select MITM certificates by pre-parsing the guest ClientHello SNI
+   * instead of `SNICallback` (default: only on Bun, which does not call it)
+   */
+  tlsSniPreparse?: boolean;
+
   /** @internal udp socket factory (tests) */
   udpSocketFactory?: () => dgram.Socket;
 
@@ -374,6 +408,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private readonly tlsContextCacheMaxEntries: number;
   private readonly tlsContextCacheTtlMs: number;
+  private readonly tlsSniPreparse: boolean;
   private readonly flowResumeWaiters = new Map<
     string,
     Array<{ resolve: () => void; reject: (err: Error) => void }>
@@ -436,6 +471,7 @@ export class QemuNetworkBackend extends EventEmitter {
       DEFAULT_TLS_CONTEXT_CACHE_MAX_ENTRIES;
     this.tlsContextCacheTtlMs =
       options.tlsContextCacheTtlMs ?? DEFAULT_TLS_CONTEXT_CACHE_TTL_MS;
+    this.tlsSniPreparse = options.tlsSniPreparse ?? isBunRuntime();
 
     this.dnsMode = options.dns?.mode ?? DEFAULT_DNS_MODE;
     this.trustedDnsServers = normalizeIpv4Servers(options.dns?.trustedServers);
@@ -1165,32 +1201,51 @@ export class QemuNetworkBackend extends EventEmitter {
     });
   }
 
-  private ensureTlsSession(key: string, session: TcpSession) {
+  private ensureTlsSession(
+    key: string,
+    session: TcpSession,
+    secureContext?: tls.SecureContext,
+  ) {
     if (session.tls) return session.tls;
 
     const stream = new GuestTlsStream(async (chunk) => {
-      this.stack?.handleTcpData({ key, data: chunk });
-      this.flush();
-      await this.waitForFlowResume(key);
+      const tlsSession = session.tls;
+      if (tlsSession) tlsSession.pendingGuestWrites += 1;
+      try {
+        this.stack?.handleTcpData({ key, data: chunk });
+        this.flush();
+        await this.waitForFlowResume(key);
+      } finally {
+        if (tlsSession) {
+          tlsSession.pendingGuestWrites -= 1;
+          // Notify after the Duplex write callback has run and updated its
+          // writableLength, otherwise a drain waiter can miss the last chunk.
+          setImmediate(() => notifyTlsProgress(tlsSession));
+        }
+      }
     });
 
-    const tlsSocket = new tls.TLSSocket(stream, {
-      isServer: true,
-      ALPNProtocols: ["http/1.1"],
-      SNICallback: (servername, callback) => {
-        const sni = servername || session.dstIP;
-        this.getTlsContextAsync(sni)
-          .then((context) => {
-            if (this.options.debug) {
-              this.emitDebug(`tls sni ${sni}`);
-            }
-            callback(null, context);
-          })
-          .catch((err) => {
-            callback(err as Error);
-          });
-      },
-    });
+    // With a pre-selected context (SNI pre-parse), no SNICallback is needed.
+    const serverOptions: tls.TLSSocketOptions = secureContext
+      ? { isServer: true, ALPNProtocols: ["http/1.1"], secureContext }
+      : {
+          isServer: true,
+          ALPNProtocols: ["http/1.1"],
+          SNICallback: (servername, callback) => {
+            const sni = servername || session.dstIP;
+            this.getTlsContextAsync(sni)
+              .then((context) => {
+                if (this.options.debug) {
+                  this.emitDebug(`tls sni ${sni}`);
+                }
+                callback(null, context);
+              })
+              .catch((err) => {
+                callback(err as Error);
+              });
+          },
+        };
+    const tlsSocket = new tls.TLSSocket(stream, serverOptions);
 
     tlsSocket.on("data", (data) => {
       handleTlsHttpData(this, key, session, Buffer.from(data));
@@ -1205,12 +1260,16 @@ export class QemuNetworkBackend extends EventEmitter {
       this.stack?.handleTcpClosed({ key });
       this.settleFlowResume(key);
       this.tcpSessions.delete(key);
+      if (session.tls) notifyTlsProgress(session.tls);
     });
 
     session.tls = {
       stream,
       socket: tlsSocket,
       servername: null,
+      pendingPlaintextWrites: 0,
+      pendingGuestWrites: 0,
+      progressWaiters: [],
     };
 
     if (this.options.debug) {
@@ -1221,9 +1280,107 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private handleTlsData(key: string, session: TcpSession, data: Buffer) {
+    if (!session.tls && this.tlsSniPreparse) {
+      this.handleTlsHelloData(key, session, data);
+      return;
+    }
     const tlsSession = this.ensureTlsSession(key, session);
     if (!tlsSession) return;
     tlsSession.stream.pushEncrypted(data);
+  }
+
+  /**
+   * Buffer the guest ClientHello, select the leaf certificate from its SNI and
+   * only then create the MITM socket with that fixed context. This is the
+   * certificate `SNICallback` would select, for runtimes that do not call it.
+   */
+  private handleTlsHelloData(key: string, session: TcpSession, data: Buffer) {
+    session.tlsHello = session.tlsHello
+      ? Buffer.concat([session.tlsHello, data])
+      : Buffer.from(data);
+    if (session.tlsHelloPending) return;
+
+    const sni = parseClientHelloSni(session.tlsHello);
+    if (
+      sni === undefined &&
+      session.tlsHello.length < MAX_CLIENT_HELLO_PREPARSE_BYTES
+    ) {
+      return;
+    }
+
+    session.tlsHelloPending = true;
+    const servername = sni || session.dstIP;
+    this.getTlsContextAsync(servername)
+      .then((context) => {
+        if (this.tcpSessions.get(key) !== session) return;
+        if (this.options.debug) {
+          this.emitDebug(`tls sni ${servername} (pre-parsed)`);
+        }
+        const tlsSession = this.ensureTlsSession(key, session, context);
+        const buffered = session.tlsHello;
+        session.tlsHello = undefined;
+        session.tlsHelloPending = false;
+        if (buffered) tlsSession.stream.pushEncrypted(buffered);
+      })
+      .catch((err) => {
+        session.tlsHello = undefined;
+        this.emit("error", err);
+        this.stack?.handleTcpError({ key });
+        this.flush();
+      });
+  }
+
+  private waitForTlsProgress(tlsSession: TlsSession): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, TLS_PROGRESS_RECHECK_MS);
+      function done() {
+        clearTimeout(timer);
+        resolve();
+      }
+      tlsSession.progressWaiters.push(done);
+    });
+  }
+
+  /**
+   * @internal Backpressure for MITM TLS responses: waits for the guest flow and
+   * bounds plaintext queued on the TLS socket (not only the guest flow state).
+   */
+  async waitForTlsWritable(key: string, session: TcpSession): Promise<void> {
+    const tlsSession = session.tls;
+    if (!tlsSession) return;
+    for (;;) {
+      if (this.tcpSessions.get(key) !== session || session.tls !== tlsSession) {
+        return;
+      }
+      await this.waitForFlowResume(key);
+      if (
+        tlsSession.pendingPlaintextWrites <= TLS_MAX_PENDING_PLAINTEXT_WRITES
+      ) {
+        return;
+      }
+      await this.waitForTlsProgress(tlsSession);
+    }
+  }
+
+  /**
+   * @internal Resolves once every plaintext write has been encrypted and
+   * delivered to the guest flow, so ending the TLS session cannot truncate it.
+   */
+  async waitForTlsDrained(key: string, session: TcpSession): Promise<void> {
+    const tlsSession = session.tls;
+    if (!tlsSession) return;
+    for (;;) {
+      if (this.tcpSessions.get(key) !== session) return;
+      if (
+        tlsSession.pendingPlaintextWrites === 0 &&
+        tlsSession.pendingGuestWrites === 0 &&
+        tlsSession.stream.writableLength === 0 &&
+        tlsSession.socket.writableLength === 0
+      ) {
+        return;
+      }
+      await this.waitForTlsProgress(tlsSession);
+    }
   }
 
   private getMitmDir() {
