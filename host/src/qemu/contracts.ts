@@ -138,6 +138,10 @@ export type TcpSession = {
   http?: any;
   tls?: {
     socket: tls.TLSSocket;
+    /** plaintext writes queued on `socket` whose write callback has not fired */
+    pendingPlaintextWrites: number;
+    /** waiters notified whenever MITM TLS write progress is made */
+    progressWaiters: Array<() => void>;
   };
   ws?: any;
   ssh?: any;
@@ -170,6 +174,8 @@ export type QemuNetworkBackend<
   emit(event: string | symbol, ...args: any[]): boolean;
   flush(): void;
   waitForFlowResume(key: string): Promise<void>;
+  waitForTlsWritable(key: string, session: TSession): Promise<void>;
+  waitForTlsDrained(key: string, session: TSession): Promise<void>;
   settleFlowResume(key: string, err?: Error): void;
   abortTcpSession(key: string, session: TSession, reason: string): void;
 };

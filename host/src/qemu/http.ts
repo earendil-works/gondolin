@@ -228,15 +228,27 @@ export async function handleTlsHttpData(
   await handleHttpDataWithWriter(backend, key, session, data, {
     scheme: "https",
     write: (chunk: Buffer) => {
-      tlsSession.socket.write(chunk);
-    },
-    finish: () => {
-      tlsSession.socket.end(() => {
-        backend.stack?.handleTcpEnd({ key });
-        backend.flush();
+      tlsSession.pendingPlaintextWrites += 1;
+      tlsSession.socket.write(chunk, () => {
+        tlsSession.pendingPlaintextWrites -= 1;
+        for (const waiter of tlsSession.progressWaiters.splice(0)) waiter();
       });
     },
-    waitForWritable: () => backend.waitForFlowResume(key),
+    finish: () => {
+      // End only after every response byte reached the guest flow: some
+      // runtimes (Bun) run end() before buffered ciphertext is written to the
+      // wrapped stream, truncating the response.
+      void backend
+        .waitForTlsDrained(key, session)
+        .catch(() => {})
+        .then(() => {
+          tlsSession.socket.end(() => {
+            backend.stack?.handleTcpEnd({ key });
+            backend.flush();
+          });
+        });
+    },
+    waitForWritable: () => backend.waitForTlsWritable(key, session),
   });
 }
 
