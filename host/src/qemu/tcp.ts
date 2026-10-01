@@ -18,6 +18,11 @@ export type TcpMappedTarget = {
   connectPort: number;
 };
 
+type TcpWildcardMappedTarget = TcpMappedTarget & {
+  /** normalized suffix matched by a leading-label wildcard */
+  wildcardSuffix: string;
+};
+
 /** @internal */
 export type QemuTcpInternals = {
   /** whether mapped tcp egress is enabled */
@@ -28,6 +33,10 @@ export type QemuTcpInternals = {
   byHostPort: Map<string, TcpMappedTarget>;
   /** host-wide mapping lookup */
   byHost: Map<string, TcpMappedTarget>;
+  /** wildcard host:port mappings sorted by most-specific suffix first */
+  wildcardHostPort: TcpWildcardMappedTarget[];
+  /** wildcard host-wide mappings sorted by most-specific suffix first */
+  wildcardHost: TcpWildcardMappedTarget[];
 };
 
 type ParsedHostPort = {
@@ -117,8 +126,10 @@ function parseMappingKey(raw: string): ParsedHostPort {
     context: "tcp.hosts key",
   });
 
-  if (parsed.host.includes("*")) {
-    throw new Error(`tcp.hosts key does not support wildcard '*': ${raw}`);
+  if (parsed.host.includes("*") && !isValidWildcardHost(parsed.host)) {
+    throw new Error(
+      `tcp.hosts key wildcard must be a leading subdomain pattern like '*.example.com': ${raw}`,
+    );
   }
 
   return parsed;
@@ -137,10 +148,43 @@ function parseMappingTarget(raw: string): ParsedHostPort {
   return parsed;
 }
 
+function isValidWildcardHost(host: string): boolean {
+  if (!host.startsWith("*.")) return false;
+
+  const suffix = host.slice(2);
+  if (!suffix || suffix.includes("*")) return false;
+  if (net.isIP(suffix)) return false;
+
+  const labels = suffix.split(".");
+  return labels.length >= 2 && labels.every((label) => label.length > 0);
+}
+
+function wildcardSuffix(host: string): string | null {
+  return isValidWildcardHost(host) ? host.slice(2) : null;
+}
+
+function wildcardMatchesHost(hostname: string, suffix: string): boolean {
+  return (
+    hostname.length > suffix.length + 1 &&
+    hostname.endsWith(`.${suffix}`)
+  );
+}
+
+function sortWildcardTargets(
+  targets: TcpWildcardMappedTarget[],
+): TcpWildcardMappedTarget[] {
+  return targets.sort(
+    (a, b) => b.wildcardSuffix.length - a.wildcardSuffix.length,
+  );
+}
+
 /** @internal */
 export function createQemuTcpInternals(options?: TcpOptions): QemuTcpInternals {
   const byHostPort = new Map<string, TcpMappedTarget>();
   const byHost = new Map<string, TcpMappedTarget>();
+  const wildcardHostPort: TcpWildcardMappedTarget[] = [];
+  const wildcardHost: TcpWildcardMappedTarget[] = [];
+  const wildcardKeys = new Set<string>();
   const rules: TcpMappedTarget[] = [];
 
   const hosts = options?.hosts ?? {};
@@ -155,6 +199,27 @@ export function createQemuTcpInternals(options?: TcpOptions): QemuTcpInternals {
       connectHost: target.host,
       connectPort: target.port!,
     };
+
+    const suffix = wildcardSuffix(match.host);
+    if (suffix) {
+      const key = `${match.host}${match.port === null ? "" : `:${match.port}`}`;
+      if (wildcardKeys.has(key)) {
+        throw new Error(`duplicate tcp.hosts mapping for ${key}`);
+      }
+      wildcardKeys.add(key);
+
+      const wildcardRule: TcpWildcardMappedTarget = {
+        ...rule,
+        wildcardSuffix: suffix,
+      };
+      if (match.port !== null) {
+        wildcardHostPort.push(wildcardRule);
+      } else {
+        wildcardHost.push(wildcardRule);
+      }
+      rules.push(rule);
+      continue;
+    }
 
     if (match.port !== null) {
       const key = `${match.host}:${match.port}`;
@@ -177,6 +242,8 @@ export function createQemuTcpInternals(options?: TcpOptions): QemuTcpInternals {
     rules,
     byHostPort,
     byHost,
+    wildcardHostPort: sortWildcardTargets(wildcardHostPort),
+    wildcardHost: sortWildcardTargets(wildcardHost),
   };
 }
 
@@ -214,5 +281,19 @@ export function resolveMappedTcpTarget(
   const exact = tcp.byHostPort.get(`${normalizedHost}:${dstPort}`);
   if (exact) return exact;
 
-  return tcp.byHost.get(normalizedHost) ?? null;
+  const hostOnly = tcp.byHost.get(normalizedHost);
+  if (hostOnly) return hostOnly;
+
+  const wildcardExact = tcp.wildcardHostPort.find(
+    (target) =>
+      target.port === dstPort &&
+      wildcardMatchesHost(normalizedHost, target.wildcardSuffix),
+  );
+  if (wildcardExact) return wildcardExact;
+
+  return (
+    tcp.wildcardHost.find((target) =>
+      wildcardMatchesHost(normalizedHost, target.wildcardSuffix),
+    ) ?? null
+  );
 }
