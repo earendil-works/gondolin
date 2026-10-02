@@ -155,6 +155,24 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
 There is a [Pi + Gondolin extension](host/examples/pi-gondolin.ts) that runs
 pi tools inside a micro-VM and mounts your project at `/workspace`.
 
+## Browser Use
+
+The Chromium image can expose its Chrome DevTools endpoint through Gondolin's
+WebSocket-capable ingress gateway. The example starts Chromium in the micro-VM,
+then gives that isolated browser to a Browser Use agent running on the host:
+
+```bash
+node host/bin/gondolin.ts build \
+  --config host/examples/chromium.json \
+  --tag browser-use:latest
+
+GONDOLIN_DEFAULT_IMAGE=browser-use:latest \
+OPENAI_API_KEY=... \
+node host/examples/browser-use.ts
+```
+
+The browser stays inside Gondolin; only its localhost CDP endpoint is exposed.
+
 ## AI Use Disclaimer
 
 This codebase has been built with the support of coding agents.
