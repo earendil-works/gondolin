@@ -19,6 +19,39 @@ function makeTcpNatKey(
   return `TCP:${srcIP}:${srcPort}:${dstIP}:${dstPort}`;
 }
 
+// TCP sequence and acknowledgement numbers are 32 bits wide and wrap at 2^32.
+// Stored counters (mySeq/myAck/vmSeq/vmAck) are kept in [0, 2^32) and compared
+// with RFC 1982 serial-number arithmetic, like the kernel's before()/after().
+
+/** Fold a value into the 32-bit TCP sequence space [0, 2^32). */
+function wrapSeq(value: number): number {
+  return value >>> 0;
+}
+
+/**
+ * Signed RFC 1982 distance between two sequence numbers: > 0 when `a` is "after"
+ * `b`, < 0 when "before", 0 when equal. ToInt32 (`| 0`) folds the difference into
+ * the [-2^31, 2^31) serial window so comparisons stay correct across wrap.
+ */
+function seqDistance(a: number, b: number): number {
+  return (a - b) | 0;
+}
+
+/** `a` is strictly after `b` in serial-number order. */
+function seqGt(a: number, b: number): boolean {
+  return seqDistance(a, b) > 0;
+}
+
+/** `a` is strictly before `b` in serial-number order. */
+function seqLt(a: number, b: number): boolean {
+  return seqDistance(a, b) < 0;
+}
+
+/** `a` is at or before `b` in serial-number order. */
+function seqLe(a: number, b: number): boolean {
+  return seqDistance(a, b) <= 0;
+}
+
 const HTTP_METHODS = [
   "GET",
   "POST",
@@ -753,7 +786,7 @@ export class NetworkStack extends EventEmitter {
         vmSeq: seq,
         vmAck: ack,
         mySeq: Math.floor(Math.random() * 0x0fffffff),
-        myAck: seq + 1,
+        myAck: wrapSeq(seq + 1),
         peerWindow: window,
         pendingOutbound: Buffer.alloc(0),
         endPending: false,
@@ -785,7 +818,7 @@ export class NetworkStack extends EventEmitter {
           dstIP,
           dstPort,
           0,
-          seq + (payload.length || 1),
+          wrapSeq(seq + (payload.length || 1)),
           0x04,
         );
       }
@@ -796,7 +829,7 @@ export class NetworkStack extends EventEmitter {
     session.peerWindow = window;
 
     let shouldDrainOutbound = false;
-    if (ack > session.vmAck && ack <= session.mySeq) {
+    if (seqGt(ack, session.vmAck) && seqLe(ack, session.mySeq)) {
       session.vmAck = ack;
       shouldDrainOutbound = true;
     }
@@ -817,7 +850,7 @@ export class NetworkStack extends EventEmitter {
       // protocol and trigger errors like "Bad packet length".
       const expectedSeq = session.myAck;
 
-      if (seq > expectedSeq) {
+      if (seqGt(seq, expectedSeq)) {
         // Out-of-order: re-ACK what we've already seen.
         this.sendTCP(
           session.srcIP,
@@ -831,7 +864,7 @@ export class NetworkStack extends EventEmitter {
         return;
       }
 
-      const skip = Math.max(0, expectedSeq - seq);
+      const skip = Math.max(0, seqDistance(expectedSeq, seq));
       if (skip >= payload.length) {
         // Pure retransmit (or segment contains only already-acked bytes)
         this.sendTCP(
@@ -850,7 +883,7 @@ export class NetworkStack extends EventEmitter {
 
       const newPayload = payload.subarray(skip);
       let sendBuffer: Buffer | null = null;
-      const nextAck = expectedSeq + newPayload.length;
+      const nextAck = wrapSeq(expectedSeq + newPayload.length);
 
       if (!session.flowProtocol) {
         session.pendingData = Buffer.concat([session.pendingData, newPayload]);
@@ -930,8 +963,8 @@ export class NetworkStack extends EventEmitter {
     if (FIN) {
       // FIN consumes one sequence number, so only accept it once the sequence
       // space up to the FIN is fully received.
-      const finSeq = seq + payload.length;
-      if (finSeq > session.myAck) {
+      const finSeq = wrapSeq(seq + payload.length);
+      if (seqGt(finSeq, session.myAck)) {
         // Out-of-order FIN: keep ACKing the last in-order byte.
         this.sendTCP(
           session.srcIP,
@@ -945,7 +978,7 @@ export class NetworkStack extends EventEmitter {
         return;
       }
 
-      if (finSeq < session.myAck) {
+      if (seqLt(finSeq, session.myAck)) {
         // Duplicate FIN (already acked)
         this.sendTCP(
           session.srcIP,
@@ -961,7 +994,7 @@ export class NetworkStack extends EventEmitter {
 
       // finSeq === session.myAck
       this.callbacks.onTcpClose({ key, destroy: false });
-      session.myAck++;
+      session.myAck = wrapSeq(session.myAck + 1);
 
       this.sendTCP(
         session.srcIP,
@@ -997,8 +1030,9 @@ export class NetworkStack extends EventEmitter {
     const header = Buffer.alloc(20);
     header.writeUInt16BE(srcPort, 0);
     header.writeUInt16BE(dstPort, 2);
-    header.writeUInt32BE(seq, 4);
-    header.writeUInt32BE(ack, 8);
+    // Defensive: never let an out-of-range counter throw on serialization
+    header.writeUInt32BE(wrapSeq(seq), 4);
+    header.writeUInt32BE(wrapSeq(ack), 8);
     header[12] = 0x50;
     header[13] = flags;
     header.writeUInt16BE(65535, 14);
@@ -1325,7 +1359,7 @@ export class NetworkStack extends EventEmitter {
       return;
     }
 
-    const inFlight = Math.max(0, session.mySeq - session.vmAck);
+    const inFlight = Math.max(0, seqDistance(session.mySeq, session.vmAck));
     const maxInFlight = Math.max(
       0,
       Math.min(session.peerWindow, this.TCP_MAX_IN_FLIGHT_BYTES),
@@ -1351,7 +1385,7 @@ export class NetworkStack extends EventEmitter {
 
     const MSS = 1460;
     let bytesBurstThisTick = 0;
-    let inFlight = Math.max(0, session.mySeq - session.vmAck);
+    let inFlight = Math.max(0, seqDistance(session.mySeq, session.vmAck));
     const maxInFlight = Math.max(
       0,
       Math.min(session.peerWindow, this.TCP_MAX_IN_FLIGHT_BYTES),
@@ -1391,7 +1425,7 @@ export class NetworkStack extends EventEmitter {
         return;
       }
 
-      session.mySeq += chunk.length;
+      session.mySeq = wrapSeq(session.mySeq + chunk.length);
       inFlight += chunk.length;
       bytesBurstThisTick += chunk.length;
     }
@@ -1432,7 +1466,7 @@ export class NetworkStack extends EventEmitter {
           return;
         }
 
-        session.mySeq++;
+        session.mySeq = wrapSeq(session.mySeq + 1);
         session.state = "FIN_WAIT";
         session.endPending = false;
         inFlight += 1;
@@ -1464,7 +1498,7 @@ export class NetworkStack extends EventEmitter {
       session.myAck,
       0x12,
     );
-    session.mySeq++;
+    session.mySeq = wrapSeq(session.mySeq + 1);
   }
 
   handleTcpData(message: { key: string; data: Buffer }) {
