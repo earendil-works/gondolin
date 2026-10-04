@@ -1,5 +1,5 @@
 import { getInfoFromSshExecRequest } from "../../src/ssh/exec.ts";
-import { XorShift32 } from "../rng.ts";
+import type { XorShift32 } from "../rng.ts";
 import type { FuzzTarget } from "./types.ts";
 
 function bytesToWeirdAscii(buf: Buffer): string {

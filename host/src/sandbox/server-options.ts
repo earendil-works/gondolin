@@ -1,11 +1,11 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
-import { execFileSync } from "child_process";
-import { createRequire } from "module";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 
-import { getHostNodeArchCached } from "../host/arch.ts";
+import { getHostNodeArchCached, normalizeArchitecture } from "../host/arch.ts";
 import {
   debugFlagsToArray,
   parseDebugEnv,
@@ -15,6 +15,7 @@ import {
 } from "../debug.ts";
 import {
   ensureGuestAssets,
+  findCommonAssetDir,
   loadAssetManifest,
   loadGuestAssets,
   resolveGuestAssetsSync,
@@ -31,6 +32,7 @@ import {
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
+import { isPathWithin } from "../utils/path.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -331,10 +333,9 @@ function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
 function normalizeArch(
   value: string | null | undefined,
 ): "arm64" | "x64" | null {
-  if (!value) return null;
-  const lower = value.toLowerCase();
-  if (lower === "arm64" || lower === "aarch64") return "arm64";
-  if (lower === "x64" || lower === "x86_64" || lower === "amd64") return "x64";
+  const arch = normalizeArchitecture(value);
+  if (arch === "aarch64") return "arm64";
+  if (arch === "x86_64") return "x64";
   return null;
 }
 
@@ -541,7 +542,7 @@ type ResolveDefaultKrunRunnerPathDeps = {
 function resolveDefaultKrunRunnerPath(
   deps: ResolveDefaultKrunRunnerPathDeps = {},
 ): string {
-  const envValue = Object.prototype.hasOwnProperty.call(deps, "envPath")
+  const envValue = Object.hasOwn(deps, "envPath")
     ? deps.envPath
     : process.env.GONDOLIN_KRUN_RUNNER;
   const envPath = envValue?.trim();
@@ -599,12 +600,7 @@ function resolveManifestAssetPath(
   }
 
   const resolved = path.resolve(imageDir, relPath);
-  const relative = path.relative(imageDir, resolved);
-  if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
-  ) {
+  if (!isPathWithin(imageDir, resolved)) {
     throw new Error(`${fieldName} must stay within image dir, got ${relPath}`);
   }
 
@@ -663,26 +659,6 @@ function resolveKrunKernelOverride(
   };
 }
 
-function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
-  const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
-  const initrdDir = assets.initrdPath ? path.dirname(assets.initrdPath) : null;
-  const rootfsDir = assets.rootfsPath ? path.dirname(assets.rootfsPath) : null;
-
-  if (!kernelDir || !initrdDir || !rootfsDir) return null;
-  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) return null;
-  return kernelDir;
-}
-
-function isPathWithinOrEqual(base: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(base), path.resolve(candidate));
-  return (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== ".." &&
-      !path.isAbsolute(relative))
-  );
-}
-
 function findSharedAssetAncestor(assets: Partial<GuestAssets>): string | null {
   const assetPaths = [assets.kernelPath, assets.initrdPath, assets.rootfsPath];
   if (assetPaths.some((value) => !value)) {
@@ -694,7 +670,7 @@ function findSharedAssetAncestor(assets: Partial<GuestAssets>): string | null {
   for (const rawPath of assetPaths.slice(1)) {
     const current = path.dirname(path.resolve(rawPath!));
 
-    while (!isPathWithinOrEqual(candidate, current)) {
+    while (!isPathWithin(candidate, current)) {
       const parent = path.dirname(candidate);
       if (parent === candidate) {
         break;

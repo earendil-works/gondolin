@@ -1,5 +1,5 @@
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   createTempQcow2Overlay,
@@ -10,6 +10,7 @@ import {
 } from "./qemu/img.ts";
 
 import {
+  findCommonAssetDir,
   loadAssetManifest,
   loadGuestAssets,
   type GuestAssets,
@@ -135,7 +136,7 @@ function writeCheckpointTrailer(
   diskPath: string,
   data: VmCheckpointData,
 ): void {
-  const json = Buffer.from(JSON.stringify(data, null, 2) + "\n", "utf8");
+  const json = Buffer.from(`${JSON.stringify(data, null, 2)}\n`, "utf8");
   const footer = Buffer.alloc(TRAILER_SIZE);
   TRAILER_MAGIC.copy(footer, 0);
   footer.writeBigUInt64BE(BigInt(json.length), 8);
@@ -192,14 +193,6 @@ function validateGuestAssetsExist(assets: GuestAssets): boolean {
     fs.existsSync(assets.initrdPath) &&
     fs.existsSync(assets.rootfsPath)
   );
-}
-
-function findCommonAssetDir(assets: GuestAssets): string | null {
-  const kernelDir = path.dirname(assets.kernelPath);
-  const initrdDir = path.dirname(assets.initrdPath);
-  const rootfsDir = path.dirname(assets.rootfsPath);
-  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) return null;
-  return kernelDir;
 }
 
 function devGuestOutDirs(): string[] {

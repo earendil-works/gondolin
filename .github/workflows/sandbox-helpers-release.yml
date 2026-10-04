@@ -68,7 +68,7 @@ jobs:
           output.end();
           NODE
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.meta.outputs.source_ref }}
           fetch-depth: 0
@@ -90,17 +90,17 @@ jobs:
           - arch: x86_64
             zig_target: x86_64-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_ref }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Verify package version matches helper release
         run: |
@@ -127,7 +127,7 @@ jobs:
             --output-dir "$PWD"
 
       - name: Upload helper archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sandbox-helpers-${{ matrix.arch }}
           path: |
@@ -143,7 +143,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: helper-artifacts
 
@@ -152,7 +152,7 @@ jobs:
           find helper-artifacts -mindepth 2 -type f -name 'gondolin-sandbox-helpers-*' -exec mv -f {} helper-artifacts/ \;
 
       - name: Create sandbox helper release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
           target_commitish: ${{ needs.prepare.outputs.source_sha }}
@@ -180,16 +180,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: helper-artifacts
 

@@ -1,6 +1,6 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -169,7 +169,7 @@ if [ "$cmd" = "image" ]; then
   sub="\${2:-}"
   if [ "$sub" = "inspect" ]; then
     if [ -n "\${FAKE_REPO_DIGEST:-}" ]; then
-      printf "[\\\"%s\\\"]\\n" "$FAKE_REPO_DIGEST"
+      printf "[\\"%s\\"]\\n" "$FAKE_REPO_DIGEST"
     else
       printf "[]\\n"
     fi
@@ -205,7 +205,9 @@ test("oci rootfs: buildOciCreateArgs includes dummy command", () => {
 });
 
 test("oci rootfs: tar ownership parser preserves uid/gid metadata", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-tar-owners-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-tar-owners-"),
+  );
   const tarPath = path.join(tmp, "rootfs.tar");
 
   try {

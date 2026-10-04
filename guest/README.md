@@ -32,7 +32,7 @@ The build resolves prebuilt sandbox helper binaries by default, so Zig is not
 required for ordinary image builds. Make sure host Node dependencies are
 installed (e.g., `pnpm install` at the repo root or `pnpm -C host install`).
 
-For contributor helper builds and guest tests, install Zig 0.16.0. To force the
+For contributor helper builds and guest tests, install Zig 0.17.0. To force the
 image build pipeline to build helpers from local Zig sources, set
 `GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1`; if invoking from outside the
 checkout, also set `GONDOLIN_GUEST_SRC` to this `guest/` directory.
@@ -45,7 +45,7 @@ Mandatory build command (builds kernel, initramfs, rootfs, and krun boot assets 
 make build
 ```
 
-Build sandbox helper binaries from source (requires Zig 0.16.0):
+Build sandbox helper binaries from source (requires Zig 0.17.0):
 
 ```sh
 make build-bins

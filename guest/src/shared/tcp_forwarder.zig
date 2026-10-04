@@ -8,6 +8,7 @@
 const std = @import("std");
 const posix = @import("posix_compat.zig");
 const protocol = @import("protocol.zig");
+const virtio_port = @import("virtio_port.zig");
 
 const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
 const MAX_BUFFERED_TCP: usize = 256 * 1024;
@@ -35,7 +36,7 @@ pub fn run(virtio_port_name: []const u8, log: anytype) !void {
 
     log.info("starting", .{});
 
-    const virtio_fd = try openVirtioPort(virtio_port_name, log);
+    const virtio_fd = try virtio_port.open(virtio_port_name, log);
     defer posix.close(virtio_fd);
 
     // Non-blocking virtio makes the event loop easier.
@@ -312,7 +313,7 @@ test "forwardBackendPayload closes connection when encoding fails after read" {
         .backend_shutdown = false,
     });
 
-    const payload = [_]u8{0xaa} ** 8192;
+    const payload: [8192]u8 = @splat(0xaa);
     const result = try forwardBackendPayload(
         allocator,
         &conns,
@@ -360,7 +361,7 @@ test "forwardBackendPayload propagates close failure when tcp_close cannot be en
 
     failing_allocator_state.fail_index = failing_allocator_state.alloc_index;
 
-    const payload = [_]u8{0xbb} ** 8192;
+    const payload: [8192]u8 = @splat(0xbb);
     try std.testing.expectError(error.OutOfMemory, forwardBackendPayload(
         allocator,
         &conns,
@@ -417,67 +418,4 @@ fn sendOpened(
     defer allocator.free(payload);
     try writer.enqueue(payload);
     try writer.flush(virtio_fd);
-}
-
-fn tryOpenVirtioPath(path: []const u8) !?posix.fd_t {
-    const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
-        error.FileNotFound, error.NoDevice => return null,
-        else => return err,
-    };
-
-    // switch to blocking
-    const original_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
-    _ = try posix.fcntl(fd, posix.F.SETFL, original_flags & ~nonblock_flag);
-
-    return fd;
-}
-
-fn scanVirtioPorts(virtio_port_name: []const u8) !?posix.fd_t {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close(io);
-
-    var it = dev_dir.iterate();
-    var path_buf: [64]u8 = undefined;
-    while (try it.next(io)) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
-        if (!virtioPortMatches(entry.name, virtio_port_name)) continue;
-        const path = try std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name});
-        if (try tryOpenVirtioPath(path)) |fd| return fd;
-    }
-
-    return null;
-}
-
-fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
-    var path_buf: [128]u8 = undefined;
-    const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
-    defer posix.close(fd);
-
-    var name_buf: [64]u8 = undefined;
-    const size = posix.read(fd, &name_buf) catch return false;
-    const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
-    return std.mem.eql(u8, trimmed, expected);
-}
-
-fn openVirtioPort(virtio_port_name: []const u8, log: anytype) !posix.fd_t {
-    var path_buf: [128]u8 = undefined;
-    const direct_path = try std.fmt.bufPrint(&path_buf, "/dev/virtio-ports/{s}", .{virtio_port_name});
-
-    var warned = false;
-
-    while (true) {
-        if (try tryOpenVirtioPath(direct_path)) |file| return file;
-        if (try scanVirtioPorts(virtio_port_name)) |file| return file;
-
-        if (!warned) {
-            log.info("waiting for {s} port", .{virtio_port_name});
-            warned = true;
-        }
-
-        posix.nanosleep(0, 100 * std.time.ns_per_ms);
-    }
 }

@@ -19,4 +19,5 @@ test("cli: gondolin image --help renders usage", () => {
 
   assert.equal(result.status, 0);
   assert.match(result.stdout ?? "", /Usage: gondolin image/);
+  assert.match(result.stdout ?? "", /rm <BUILD_ID\|REF> \[--force\]/);
 });

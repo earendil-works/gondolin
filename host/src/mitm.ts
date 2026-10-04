@@ -42,7 +42,9 @@ export async function loadOrCreateMitmCa(mitmDir: string): Promise<MitmCa> {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
     }
     if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
-      throw new Error("persisted mitm ca cert is missing required key identifiers");
+      throw new Error(
+        "persisted mitm ca cert is missing required key identifiers",
+      );
     }
     return {
       key,
@@ -75,7 +77,9 @@ export function loadOrCreateMitmCaSync(mitmDir: string): MitmCa {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
     }
     if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
-      throw new Error("persisted mitm ca cert is missing required key identifiers");
+      throw new Error(
+        "persisted mitm ca cert is missing required key identifiers",
+      );
     }
     return {
       key,
@@ -172,7 +176,8 @@ export function mitmLeafHasRequiredKeyIdentifiers(
   caCert: forge.pki.Certificate,
   leafCert: forge.pki.Certificate,
 ): boolean {
-  const caSubjectKeyIdentifier = getCertificateSubjectKeyIdentifierBytes(caCert);
+  const caSubjectKeyIdentifier =
+    getCertificateSubjectKeyIdentifierBytes(caCert);
   if (caSubjectKeyIdentifier === undefined) {
     return false;
   }

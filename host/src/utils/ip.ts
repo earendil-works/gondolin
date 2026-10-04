@@ -52,7 +52,7 @@ export function parseIPv6Hextets(ip: string): number[] | null {
 
   const parts = normalized.split(":");
   const expanded = expandIpv6Parts(parts);
-  if (!expanded || expanded.length !== 8) return null;
+  if (expanded?.length !== 8) return null;
   return expanded;
 }
 
@@ -102,4 +102,48 @@ export function extractIPv4Mapped(hextets: number[]): string | null {
   const c = hextets[7]! >> 8;
   const d = hextets[7]! & 0xff;
   return `${a}.${b}.${c}.${d}`;
+}
+
+/** Whether an ip address is in a loopback, private, link-local or otherwise internal range */
+export function isInternalIpAddress(ip: string): boolean {
+  const family = net.isIP(ip);
+  if (family === 4) return isInternalIPv4(ip);
+  if (family === 6) return isInternalIPv6(ip);
+  return false;
+}
+
+function isInternalIPv4(ip: string): boolean {
+  const octets = ip.split(".").map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part))) {
+    return false;
+  }
+
+  const [a, b] = octets;
+  if (a === 0) return true;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 255) return true;
+  return false;
+}
+
+function isInternalIPv6(ip: string): boolean {
+  const hextets = parseIPv6Hextets(ip);
+  if (!hextets) return false;
+
+  const isAllZero = hextets.every((value) => value === 0);
+  const isLoopback =
+    hextets.slice(0, 7).every((value) => value === 0) && hextets[7] === 1;
+  if (isAllZero || isLoopback) return true;
+
+  if ((hextets[0]! & 0xfe00) === 0xfc00) return true;
+  if ((hextets[0]! & 0xffc0) === 0xfe80) return true;
+
+  const mapped = extractIPv4Mapped(hextets);
+  if (mapped && isInternalIPv4(mapped)) return true;
+
+  return false;
 }

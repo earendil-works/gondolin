@@ -1,15 +1,7 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("stdint.h");
-    @cInclude("stdbool.h");
-    @cInclude("string.h");
-    @cInclude("sys/socket.h");
-    @cInclude("sys/un.h");
-    @cInclude("unistd.h");
-    @cInclude("libkrun.h");
-});
+const krun = @import("libkrun.zig");
+const c = std.c;
 
 const Config = struct {
     kernelPath: []const u8,
@@ -91,27 +83,27 @@ fn parseArgs(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u
 }
 
 fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
-    _ = c.krun_init_log(c.KRUN_LOG_TARGET_DEFAULT, c.KRUN_LOG_LEVEL_WARN, c.KRUN_LOG_STYLE_NEVER, 0);
+    _ = krun.krun_init_log(krun.LOG_TARGET_DEFAULT, krun.LOG_LEVEL_WARN, krun.LOG_STYLE_NEVER, 0);
 
     var c_string_arena = std.heap.ArenaAllocator.init(allocator);
     defer c_string_arena.deinit();
     const c_allocator = c_string_arena.allocator();
 
-    const ctx_raw = c.krun_create_ctx();
+    const ctx_raw = krun.krun_create_ctx();
     if (ctx_raw < 0) return krunError("krun_create_ctx", ctx_raw);
     const ctx: u32 = @intCast(ctx_raw);
-    errdefer _ = c.krun_free_ctx(ctx);
+    errdefer _ = krun.krun_free_ctx(ctx);
 
-    const vm_cfg = c.krun_set_vm_config(ctx, cfg.cpus, cfg.memoryMiB);
+    const vm_cfg = krun.krun_set_vm_config(ctx, cfg.cpus, cfg.memoryMiB);
     if (vm_cfg < 0) return krunError("krun_set_vm_config", vm_cfg);
 
-    const kernel_path_z = try c_allocator.dupeZ(u8, cfg.kernelPath);
-    const initrd_path_z = try c_allocator.dupeZ(u8, cfg.initrdPath);
-    const append_z = try c_allocator.dupeZ(u8, cfg.append);
+    const kernel_path_z = try c_allocator.dupeSentinel(u8, cfg.kernelPath, 0);
+    const initrd_path_z = try c_allocator.dupeSentinel(u8, cfg.initrdPath, 0);
+    const append_z = try c_allocator.dupeSentinel(u8, cfg.append, 0);
 
     const kernel_format: u32 = try detectKernelFormat(cfg.kernelPath);
 
-    const kernel_rc = c.krun_set_kernel(
+    const kernel_rc = krun.krun_set_kernel(
         ctx,
         kernel_path_z.ptr,
         kernel_format,
@@ -124,18 +116,18 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
         .none => "/dev/null",
         .stdio => "/dev/stdout",
     };
-    const console_output_z = try c_allocator.dupeZ(u8, console_output_path);
-    const console_rc = c.krun_set_console_output(ctx, console_output_z.ptr);
+    const console_output_z = try c_allocator.dupeSentinel(u8, console_output_path, 0);
+    const console_rc = krun.krun_set_console_output(ctx, console_output_z.ptr);
     if (console_rc < 0) return krunError("krun_set_console_output", console_rc);
 
     if (cfg.rootDiskPath) |root_disk_path| {
-        const root_disk_path_z = try c_allocator.dupeZ(u8, root_disk_path);
+        const root_disk_path_z = try c_allocator.dupeSentinel(u8, root_disk_path, 0);
         const disk_format: u32 = switch (cfg.rootDiskFormat orelse .raw) {
-            .raw => c.KRUN_DISK_FORMAT_RAW,
-            .qcow2 => c.KRUN_DISK_FORMAT_QCOW2,
+            .raw => krun.DISK_FORMAT_RAW,
+            .qcow2 => krun.DISK_FORMAT_QCOW2,
         };
-        const block_id = try c_allocator.dupeZ(u8, "root");
-        const disk_rc = c.krun_add_disk2(
+        const block_id = try c_allocator.dupeSentinel(u8, "root", 0);
+        const disk_rc = krun.krun_add_disk2(
             ctx,
             block_id.ptr,
             root_disk_path_z.ptr,
@@ -146,20 +138,20 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     }
 
     if (cfg.netSocketPath) |net_socket_path| {
-        const net_path_z = try c_allocator.dupeZ(u8, net_socket_path);
+        const net_path_z = try c_allocator.dupeSentinel(u8, net_socket_path, 0);
         var mac = try parseMac(cfg.netMac orelse "02:00:00:00:00:01");
-        const net_rc = c.krun_add_net_unixstream(
+        const net_rc = krun.krun_add_net_unixstream(
             ctx,
             net_path_z.ptr,
             -1,
-            @ptrCast(&mac[0]),
-            c.COMPAT_NET_FEATURES,
+            &mac,
+            krun.COMPAT_NET_FEATURES,
             0,
         );
         if (net_rc < 0) return krunError("krun_add_net_unixstream", net_rc);
     }
 
-    const console_id_raw = c.krun_add_virtio_console_multiport(ctx);
+    const console_id_raw = krun.krun_add_virtio_console_multiport(ctx);
     if (console_id_raw < 0) return krunError("krun_add_virtio_console_multiport", console_id_raw);
     const console_id: u32 = @intCast(console_id_raw);
 
@@ -168,7 +160,7 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     try addConsolePort(c_allocator, ctx, console_id, "virtio-ssh", cfg.virtioSshSocketPath);
     try addConsolePort(c_allocator, ctx, console_id, "virtio-ingress", cfg.virtioIngressSocketPath);
 
-    const start_rc = c.krun_start_enter(ctx);
+    const start_rc = krun.krun_start_enter(ctx);
     if (start_rc < 0) return krunError("krun_start_enter", start_rc);
     std.process.exit(@intCast(@mod(start_rc, 256)));
 }
@@ -187,8 +179,8 @@ fn addConsolePort(
         return error.DupFailed;
     }
 
-    const port_name_z = try allocator.dupeZ(u8, port_name);
-    const rc = c.krun_add_console_port_inout(
+    const port_name_z = try allocator.dupeSentinel(u8, port_name, 0);
+    const rc = krun.krun_add_console_port_inout(
         ctx,
         console_id,
         port_name_z.ptr,
@@ -203,22 +195,21 @@ fn addConsolePort(
 }
 
 fn connectUnixStream(socket_path: []const u8) !c_int {
-    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+    const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
     errdefer _ = c.close(fd);
 
-    var addr = std.mem.zeroes(c.struct_sockaddr_un);
-    addr.sun_family = c.AF_UNIX;
+    var addr: c.sockaddr.un = .{ .path = @splat(0) };
 
-    if (socket_path.len + 1 > addr.sun_path.len) {
+    if (socket_path.len + 1 > addr.path.len) {
         return error.SocketPathTooLong;
     }
 
-    std.mem.copyForwards(u8, addr.sun_path[0..socket_path.len], socket_path);
-    addr.sun_path[socket_path.len] = 0;
+    std.mem.copyForwards(u8, addr.path[0..socket_path.len], socket_path);
+    addr.path[socket_path.len] = 0;
 
-    const sockaddr_ptr: *const c.struct_sockaddr = @ptrCast(&addr);
-    const addr_len: c.socklen_t = @intCast(@sizeOf(c.sa_family_t) + socket_path.len + 1);
+    const sockaddr_ptr: *const c.sockaddr = @ptrCast(&addr);
+    const addr_len: c.socklen_t = @intCast(@offsetOf(c.sockaddr.un, "path") + socket_path.len + 1);
 
     if (c.connect(fd, sockaddr_ptr, addr_len) != 0) {
         return error.SocketConnectFailed;
@@ -237,26 +228,26 @@ fn detectKernelFormat(kernel_path: []const u8) !u32 {
     const n = try file.readPositionalAll(io, &header, 0);
 
     if (n >= 2 and header[0] == 'M' and header[1] == 'Z') {
-        return c.KRUN_KERNEL_FORMAT_PE_GZ;
+        return krun.KERNEL_FORMAT_PE_GZ;
     }
 
     if (n >= 4 and header[0] == 0x7f and header[1] == 'E' and header[2] == 'L' and header[3] == 'F') {
-        return c.KRUN_KERNEL_FORMAT_ELF;
+        return krun.KERNEL_FORMAT_ELF;
     }
 
     if (n >= 2 and header[0] == 0x1f and header[1] == 0x8b) {
-        return c.KRUN_KERNEL_FORMAT_IMAGE_GZ;
+        return krun.KERNEL_FORMAT_IMAGE_GZ;
     }
 
     if (n >= 3 and header[0] == 'B' and header[1] == 'Z' and header[2] == 'h') {
-        return c.KRUN_KERNEL_FORMAT_IMAGE_BZ2;
+        return krun.KERNEL_FORMAT_IMAGE_BZ2;
     }
 
     if (n >= 4 and header[0] == 0x28 and header[1] == 0xb5 and header[2] == 0x2f and header[3] == 0xfd) {
-        return c.KRUN_KERNEL_FORMAT_IMAGE_ZSTD;
+        return krun.KERNEL_FORMAT_IMAGE_ZSTD;
     }
 
-    return c.KRUN_KERNEL_FORMAT_RAW;
+    return krun.KERNEL_FORMAT_RAW;
 }
 
 fn parseMac(value: []const u8) ![6]u8 {

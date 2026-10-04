@@ -69,8 +69,9 @@ test("checkpoint: load rejects legacy checkpoint.json format", () => {
 });
 
 test("checkpoint: legacy trailers default to qemu compatibility", () => {
-  const compatible =
-    checkpointTest.resolveCheckpointCompatibleVmm(makeCheckpointData());
+  const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
+    makeCheckpointData(),
+  );
   assert.deepEqual(compatible, ["qemu"]);
 });
 

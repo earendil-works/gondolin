@@ -260,7 +260,7 @@ test("RealFSProvider blocks dangling escaping symlink on write", (t) => {
   const provider = new RealFSProvider(root);
   const outsideTarget = path.join(
     os.tmpdir(),
-    "gondolin-dangling-" + Date.now(),
+    `gondolin-dangling-${Date.now()}`,
   );
   t.after(() => {
     fs.rmSync(outsideTarget, { force: true });
@@ -328,7 +328,7 @@ test("RealFSProvider blocks chained dangling symlink escape", (t) => {
 
   const root = makeTempDir(t);
   const provider = new RealFSProvider(root);
-  const outsideTarget = path.join(os.tmpdir(), "gondolin-chain-" + Date.now());
+  const outsideTarget = path.join(os.tmpdir(), `gondolin-chain-${Date.now()}`);
   t.after(() => {
     fs.rmSync(outsideTarget, { force: true });
   });

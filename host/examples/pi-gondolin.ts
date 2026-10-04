@@ -45,7 +45,7 @@ const GUEST_WORKSPACE = "/workspace";
 
 function shQuote(value: string): string {
   // POSIX shell quoting: wraps in single quotes and escapes internal quotes
-  return "'" + value.replace(/'/g, "'\\''") + "'";
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function toGuestPath(localCwd: string, localPath: string): string {
@@ -310,7 +310,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Run user `!` commands inside the VM too
-  pi.on("user_bash", (_event, ctx) => {
+  pi.on("user_bash", (_event, _ctx) => {
     if (!vm) return;
     return { operations: createGondolinBashOps(vm, localCwd) };
   });

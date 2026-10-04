@@ -1,4 +1,4 @@
-import { Readable } from "stream";
+import { Readable } from "node:stream";
 
 import { attachTty } from "./utils/tty-attach.ts";
 
@@ -448,6 +448,7 @@ export class ExecProcess
     return this.session.id;
   }
 
+  // biome-ignore lint/suspicious/noThenProperty: ExecProcess is intentionally awaitable
   then<TResult1 = ExecResult, TResult2 = never>(
     onfulfilled?:
       | ((value: ExecResult) => TResult1 | PromiseLike<TResult1>)
@@ -666,12 +667,11 @@ export function createExecSession(
     windowBytes?: number;
   },
 ): ExecSession {
-  let resolve!: (result: ExecResult) => void;
-  let reject!: (error: Error) => void;
-  const resultPromise = new Promise<ExecResult>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
+  const {
+    promise: resultPromise,
+    resolve,
+    reject,
+  } = Promise.withResolvers<ExecResult>();
 
   const windowBytes = resolveWindowBytes(options.windowBytes);
 

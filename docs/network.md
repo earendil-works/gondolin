@@ -264,6 +264,12 @@ By default, Gondolin blocks connections to internal / local ranges (e.g.
 loopback, RFC1918, link-local, metadata-style targets).  This prevents the guest
 from reaching sensitive services on the host's LAN or cloud metadata endpoints.
 
+This applies even when no `httpHooks` are configured: if `httpHooks.isIpAllowed`
+is not provided, the network backend installs a default policy that rejects
+internal addresses.  To reach internal services, use `allowedInternalHosts` /
+`blockInternalRanges: false` with `createHttpHooks()`, or supply your own
+`isIpAllowed` callback (which fully replaces the default).
+
 ### DNS Rebinding Protection
 
 Policy is checked using host-side DNS resolution and is typically validated more than once:

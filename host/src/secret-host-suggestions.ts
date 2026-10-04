@@ -1,14 +1,16 @@
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 
 import {
   ensureTrufflehogBinary,
   ensureTrufflehogSourceDir,
 } from "./build/trufflehog.ts";
+import { errorMessage } from "./utils/error.ts";
 
 const URL_RE = /https?:\/\/[^\s"'`<>]+/gi;
-const DETECTOR_SOURCE_SKIP_FILE_RE = /(?:^|\/)(?:[^/]+_test|[^/]+_integration_test)\.go$/;
+const DETECTOR_SOURCE_SKIP_FILE_RE =
+  /(?:^|\/)(?:[^/]+_test|[^/]+_integration_test)\.go$/;
 
 type TrufflehogScanResult = {
   stdout: string;
@@ -63,7 +65,7 @@ function parseTrufflehogJsonLines(stdout: string): TrufflehogFinding[] {
       findings.push(JSON.parse(trimmed) as TrufflehogFinding);
     } catch (error) {
       throw new Error(
-        `failed to parse trufflehog json line: ${error instanceof Error ? error.message : String(error)}`,
+        `failed to parse trufflehog json line: ${errorMessage(error)}`,
       );
     }
   }
@@ -75,51 +77,55 @@ async function runTrufflehogSecretDetection(
   secretValue: string,
 ): Promise<TrufflehogFinding[]> {
   const binaryPath = await ensureTrufflehogBinary();
-  const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "gondolin-secret-detect-"));
+  const tmpRoot = fs.mkdtempSync(
+    path.join(process.env.TMPDIR ?? "/tmp", "gondolin-secret-detect-"),
+  );
   const filePath = path.join(tmpRoot, "secret.txt");
 
   try {
     fs.writeFileSync(filePath, `${secretValue}\n`, { mode: 0o600 });
-    const result = await new Promise<TrufflehogScanResult>((resolve, reject) => {
-      const child = spawn(
-        binaryPath,
-        [
-          "filesystem",
-          filePath,
-          "--json",
-          "--no-update",
-          "--no-verification",
-          "--results=verified,unknown,unverified",
-        ],
-        {
-          cwd: tmpRoot,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-
-      let stdout = "";
-      let stderr = "";
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0 || code === 183) {
-          resolve({ stdout, stderr });
-          return;
-        }
-        reject(
-          new Error(
-            `trufflehog secret detection failed with exit code ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`,
-          ),
+    const result = await new Promise<TrufflehogScanResult>(
+      (resolve, reject) => {
+        const child = spawn(
+          binaryPath,
+          [
+            "filesystem",
+            filePath,
+            "--json",
+            "--no-update",
+            "--no-verification",
+            "--results=verified,unknown,unverified",
+          ],
+          {
+            cwd: tmpRoot,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
         );
-      });
-    });
+
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0 || code === 183) {
+            resolve({ stdout, stderr });
+            return;
+          }
+          reject(
+            new Error(
+              `trufflehog secret detection failed with exit code ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`,
+            ),
+          );
+        });
+      },
+    );
 
     return parseTrufflehogJsonLines(result.stdout);
   } finally {
@@ -244,10 +250,17 @@ export async function suggestHostsForSecret(
     : null;
 
   for (const finding of findings) {
-    if (finding.DetectorName && sourceRoot && !detectorNames.has(finding.DetectorName)) {
+    if (
+      finding.DetectorName &&
+      sourceRoot &&
+      !detectorNames.has(finding.DetectorName)
+    ) {
       detectorNames.add(finding.DetectorName);
       detectorSuggestions.push(
-        ...collectSuggestionsFromDetectorSource(sourceRoot, finding.DetectorName),
+        ...collectSuggestionsFromDetectorSource(
+          sourceRoot,
+          finding.DetectorName,
+        ),
       );
     }
     if (!finding.DetectorName) continue;

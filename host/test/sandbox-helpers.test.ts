@@ -69,7 +69,10 @@ function createHelperBundle(
   };
 }
 
-function createHelperArchive(bundleDir: string, tmpDir: string): {
+function createHelperArchive(
+  bundleDir: string,
+  tmpDir: string,
+): {
   archivePath: string;
   data: Buffer;
   sha256: string;
@@ -85,7 +88,8 @@ function createHelperArchive(bundleDir: string, tmpDir: string): {
 }
 
 function restoreFetch(prevFetch: typeof globalThis.fetch): void {
-  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = prevFetch;
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch =
+    prevFetch;
 }
 
 function setEnv(name: string, value: string | undefined): void {
@@ -101,7 +105,7 @@ function hostPackageVersion(): string {
   const parsed = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
     version?: unknown;
   };
-  assert.equal(typeof parsed.version, "string");
+  assert.ok(typeof parsed.version === "string");
   return parsed.version;
 }
 
@@ -166,6 +170,10 @@ test("sandbox helpers: ensureSandboxHelperBinaries downloads and caches helpers"
       "gondolin:9.8.7": {
         x86_64: buildId,
       },
+      // later release with unchanged helper binaries shares the build id
+      "gondolin:9.9.0": {
+        x86_64: buildId,
+      },
     },
     builds: {
       [buildId]: {
@@ -228,6 +236,19 @@ test("sandbox helpers: ensureSandboxHelperBinaries downloads and caches helpers"
     assert.equal(second.buildId, buildId);
     assert.equal(archiveFetches, 1);
     assert.equal(registryFetches, 2);
+
+    // Upgrading gondolin must reuse the cached object even though its
+    // manifest records the release that first downloaded it.
+    const upgraded = await ensureSandboxHelperBinaries({
+      arch: "x86_64",
+      gondolinVersion: "9.9.0",
+      registryUrl,
+      storeDir,
+    });
+    assert.equal(upgraded.source, "cache");
+    assert.equal(upgraded.buildId, buildId);
+    assert.equal(upgraded.manifest?.gondolinVersion, "9.8.7");
+    assert.equal(archiveFetches, 1);
   } finally {
     restoreFetch(prevFetch);
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -242,10 +263,11 @@ test("sandbox helpers: explicit helper directory bypasses registry fetch", async
 
   const prevFetch = globalThis.fetch;
   let fetchCalls = 0;
-  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () => {
-    fetchCalls += 1;
-    return new Response("not found", { status: 404 });
-  };
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch =
+    async () => {
+      fetchCalls += 1;
+      return new Response("not found", { status: 404 });
+    };
 
   try {
     const resolved = await ensureSandboxHelperBinaries({
@@ -255,7 +277,10 @@ test("sandbox helpers: explicit helper directory bypasses registry fetch", async
     });
     assert.equal(resolved.source, "directory");
     assert.equal(resolved.buildId, buildId);
-    assert.equal(resolved.paths.sandboxingressPath, path.join(bundleDir, "bin", "sandboxingress"));
+    assert.equal(
+      resolved.paths.sandboxingressPath,
+      path.join(bundleDir, "bin", "sandboxingress"),
+    );
     assert.equal(fetchCalls, 0);
   } finally {
     restoreFetch(prevFetch);
@@ -362,7 +387,8 @@ test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", 
   const prevRegistryUrl = process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL;
   const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
   const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
-  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+  const prevSourceBuild =
+    process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
   let archiveFetches = 0;
 
   (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async (
@@ -448,10 +474,11 @@ test("resolveSandboxBinaryPaths: all custom helper paths bypass registry", async
 
   const prevFetch = globalThis.fetch;
   let fetchCalls = 0;
-  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () => {
-    fetchCalls += 1;
-    return new Response("not found", { status: 404 });
-  };
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch =
+    async () => {
+      fetchCalls += 1;
+      return new Response("not found", { status: 404 });
+    };
 
   try {
     const paths = await resolveSandboxBinaryPaths(
@@ -495,10 +522,12 @@ test("resolveSandboxBinaryPaths: registry failures do not source-build by defaul
   const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
   const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
   const prevGuestSrc = process.env.GONDOLIN_GUEST_SRC;
-  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+  const prevSourceBuild =
+    process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
 
-  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () =>
-    new Response("not found", { status: 404, statusText: "Not Found" });
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch =
+    async () =>
+      new Response("not found", { status: 404, statusText: "Not Found" });
 
   try {
     process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
@@ -563,13 +592,18 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
   const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
   const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
   const prevGuestSrc = process.env.GONDOLIN_GUEST_SRC;
-  const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
+  const prevSourceBuild =
+    process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
   let fetchCalls = 0;
 
-  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch = async () => {
-    fetchCalls += 1;
-    return new Response("not found", { status: 404, statusText: "Not Found" });
-  };
+  (globalThis as unknown as { fetch: typeof globalThis.fetch }).fetch =
+    async () => {
+      fetchCalls += 1;
+      return new Response("not found", {
+        status: 404,
+        statusText: "Not Found",
+      });
+    };
 
   try {
     process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
@@ -585,7 +619,8 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
       () => {},
     );
 
-    assert.equal(fetchCalls, 1);
+    // The env flag forces a source build without consulting the registry.
+    assert.equal(fetchCalls, 0);
     assert.equal(
       fs.readFileSync(paths.sandboxsshPath, "utf8"),
       "#!/bin/sh\necho source-sandboxssh\n",
