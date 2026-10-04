@@ -20,6 +20,7 @@ All notable changes to Gondolin are documented here.
 - Add a Browser Use example that drives Chromium running inside a micro-VM through the ingress gateway.  #145
 - Add `gondolin image rm` (by ref, build id, `--untagged` or `--all`) and `gondolin build cache info|update|rm` for managing local images and the Alpine build cache.  `image ls` now lists untagged images.  #146
 - Automatically refresh cached Alpine `APKINDEX` files during `gondolin build` when a package download returns 404 because the cached index is stale.
+- Fix stale trailing bytes when guest processes shrink or `ftruncate()` files on `MemoryProvider` mounts: open `MemoryFileHandle`s now follow truncates done through the path or other handles.  sandboxfs also advertises `FUSE_ATOMIC_O_TRUNC` so `O_TRUNC` is applied on open.  #149
 
 ## 0.12.0
 

@@ -359,12 +359,9 @@ const SandboxFs = struct {
 
     fn handleInit(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
         const init_in = try parseFuseInit(payload);
-        // Advertise FUSE_ATOMIC_O_TRUNC so the guest kernel sends O_TRUNC atomically
-        // in the OPEN request, which the host VFS RPC layer truncates correctly.
-        // Without it the kernel strips O_TRUNC and performs truncation via a
-        // separate SETATTR path that does not reach the host, so guest writes that
-        // shrink an existing file keep stale tails and truncate(2) silently does
-        // nothing.
+        // FUSE_BIG_WRITES and FUSE_ATOMIC_O_TRUNC.  With atomic O_TRUNC the
+        // kernel forwards O_TRUNC in OPEN and the host truncates through the
+        // opened handle, instead of following up with a separate SETATTR.
         const supported_flags: u32 = (1 << 5) | (1 << 3);
         const enabled_flags = init_in.flags & supported_flags;
 

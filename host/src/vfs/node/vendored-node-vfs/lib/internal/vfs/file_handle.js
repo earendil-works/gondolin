@@ -292,6 +292,19 @@ class MemoryFileHandle extends VirtualFileHandle {
     }
   }
 
+  // XXX(patch): GONDOLIN_VENDORED_NODE_VFS_PATCH
+  // The entry is the source of truth for static content.  Re-read it before
+  // every operation so a handle observes truncates and resizes done through
+  // the path or through other handles instead of resurrecting stale bytes
+  // from its own snapshot on the next write.
+  #syncFromEntry() {
+    const entry = this.#entry;
+    if (!entry || (entry.isDynamic && entry.isDynamic())) return;
+    if (entry.content !== null && entry.content !== undefined) {
+      this.#content = entry.content;
+    }
+  }
+
   /**
    * Gets the current content synchronously.
    * For dynamic content providers, this gets fresh content from the entry.
@@ -302,6 +315,7 @@ class MemoryFileHandle extends VirtualFileHandle {
     if (this.#entry?.isDynamic && this.#entry.isDynamic()) {
       return this.#entry.getContentSync();
     }
+    this.#syncFromEntry();
     return this.#content;
   }
 
@@ -315,6 +329,7 @@ class MemoryFileHandle extends VirtualFileHandle {
     if (this.#entry?.getContentAsync) {
       return this.#entry.getContentAsync();
     }
+    this.#syncFromEntry();
     return this.#content;
   }
 
@@ -380,6 +395,7 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   writeSync(buffer, offset, length, position) {
     this._checkClosed();
+    this.#syncFromEntry();
 
     const writePos = position !== null && position !== undefined ? position : this.position;
     const data = buffer.subarray(offset, offset + length);
@@ -467,6 +483,7 @@ class MemoryFileHandle extends VirtualFileHandle {
     const buffer = typeof data === 'string' ? Buffer.from(data, options?.encoding) : data;
 
     // In append mode, append to existing content
+    this.#syncFromEntry();
     if (this.flags === 'a' || this.flags === 'a+') {
       const newContent = Buffer.alloc(this.#content.length + buffer.length);
       this.#content.copy(newContent, 0);
@@ -502,6 +519,7 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   statSync(options) {
     this._checkClosed();
+    this.#syncFromEntry();
     if (this.#getStats) {
       return this.#getStats(this.#content.length);
     }
@@ -523,6 +541,7 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   truncateSync(len = 0) {
     this._checkClosed();
+    this.#syncFromEntry();
 
     if (len < this.#content.length) {
       this.#content = this.#content.subarray(0, len);
