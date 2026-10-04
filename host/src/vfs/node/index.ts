@@ -1,5 +1,3 @@
-"use strict";
-
 import type { Dirent, Stats } from "node:fs";
 import { createRequire } from "node:module";
 
@@ -149,13 +147,36 @@ export type VirtualProvider = {
   unwatchFile?(path: string, listener?: (...args: unknown[]) => void): void;
 };
 
-export type MemoryProvider = VirtualProvider & {
-  setReadOnly(): void;
-};
+/** Optional provider methods implemented by the bundled memory and real fs providers */
+type LinkCapableProviderMethods = Required<
+  Pick<
+    VirtualProvider,
+    | "link"
+    | "linkSync"
+    | "realpath"
+    | "realpathSync"
+    | "readlink"
+    | "readlinkSync"
+    | "symlink"
+    | "symlinkSync"
+  >
+>;
 
-export type RealFSProvider = VirtualProvider & {
-  readonly rootPath: string;
-};
+export type MemoryProvider = VirtualProvider &
+  LinkCapableProviderMethods & {
+    setReadOnly(): void;
+  };
+
+export type RealFSProvider = VirtualProvider &
+  LinkCapableProviderMethods &
+  Required<
+    Pick<
+      VirtualProvider,
+      "access" | "accessSync" | "copyFile" | "copyFileSync" | "statfs"
+    >
+  > & {
+    readonly rootPath: string;
+  };
 
 export type VirtualFileSystemOptions = {
   /** enable require/import module hooks */

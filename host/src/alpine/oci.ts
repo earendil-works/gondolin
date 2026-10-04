@@ -1,12 +1,21 @@
-import fs from "fs";
-import path from "path";
-import { execFileSync } from "child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import type {
   Architecture,
   ContainerRuntime,
   OciPullPolicy,
 } from "../build/config.ts";
+import {
+  TAR_TYPE_GNU_LONGLINK,
+  TAR_TYPE_GNU_LONGNAME,
+  TAR_TYPE_PAX_GLOBAL,
+  TAR_TYPE_PAX_LOCAL,
+  parsePaxHeaders,
+  readLongTarString,
+  readTarString,
+} from "./tar.ts";
 import type {
   OciResolvedSource,
   OciRootfsOptions,
@@ -433,10 +442,6 @@ function commandOutputToString(value: unknown): string {
 }
 
 const TAR_BLOCK_SIZE = 512;
-const TAR_TYPE_PAX_LOCAL = 0x78;
-const TAR_TYPE_PAX_GLOBAL = 0x67;
-const TAR_TYPE_GNU_LONGNAME = 0x4c;
-const TAR_TYPE_GNU_LONGLINK = 0x4b;
 
 function readTarOwnershipEntries(tarPath: string): RootfsOwnershipEntry[] {
   const entries = new Map<string, RootfsOwnershipEntry>();
@@ -568,67 +573,6 @@ function readExact(fd: number, offset: number, size: number): Buffer {
   return buf;
 }
 
-function readTarString(buf: Buffer, start: number, length: number): string {
-  const slice = buf.subarray(start, start + length);
-  const nul = slice.indexOf(0);
-  const end = nul === -1 ? slice.length : nul;
-  return slice.subarray(0, end).toString("utf8");
-}
-
-function readLongTarString(content: Buffer | null): string {
-  if (!content || content.length === 0) {
-    return "";
-  }
-
-  let end = content.length;
-  while (end > 0 && (content[end - 1] === 0 || content[end - 1] === 0x0a)) {
-    end -= 1;
-  }
-  return content.subarray(0, end).toString("utf8");
-}
-
-function parsePaxHeaders(content: Buffer | null): Record<string, string> {
-  if (!content || content.length === 0) {
-    return {};
-  }
-
-  const out: Record<string, string> = {};
-  let offset = 0;
-
-  while (offset < content.length) {
-    const spaceIdx = content.indexOf(0x20, offset);
-    if (spaceIdx === -1) {
-      break;
-    }
-
-    const lenStr = content.subarray(offset, spaceIdx).toString("utf8").trim();
-    const recordLen = Number.parseInt(lenStr, 10);
-    if (!Number.isFinite(recordLen) || recordLen <= 0) {
-      break;
-    }
-
-    const recordEnd = offset + recordLen;
-    if (recordEnd > content.length) {
-      break;
-    }
-
-    const record = content.subarray(spaceIdx + 1, recordEnd).toString("utf8");
-    const normalized = record.endsWith("\n") ? record.slice(0, -1) : record;
-    const eqIdx = normalized.indexOf("=");
-    if (eqIdx !== -1) {
-      const key = normalized.slice(0, eqIdx);
-      const value = normalized.slice(eqIdx + 1);
-      if (key) {
-        out[key] = value;
-      }
-    }
-
-    offset = recordEnd;
-  }
-
-  return out;
-}
-
 function parsePaxNumericHeader(value: string | undefined): number | null {
   if (!value) {
     return null;
@@ -653,15 +597,14 @@ function parseTarNumber(field: Buffer): number {
       value = (value << 8n) | BigInt(field[idx]!);
     }
     if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new Error("tar numeric field exceeds JavaScript safe integer range");
+      throw new Error(
+        "tar numeric field exceeds JavaScript safe integer range",
+      );
     }
     return Number(value);
   }
 
-  const text = field
-    .toString("utf8")
-    .replace(/\0.*$/, "")
-    .trim();
+  const text = field.toString("utf8").replace(/\0.*$/, "").trim();
   if (!text) {
     return 0;
   }

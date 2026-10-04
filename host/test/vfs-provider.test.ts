@@ -12,8 +12,12 @@ test("SandboxVfsProvider hooks wrap handle operations", async () => {
   const events: string[] = [];
 
   const vfs = new SandboxVfsProvider(provider, {
-    before: (ctx) => events.push(`before:${ctx.op}`),
-    after: (ctx) => events.push(`after:${ctx.op}`),
+    before: (ctx) => {
+      events.push(`before:${ctx.op}`);
+    },
+    after: (ctx) => {
+      events.push(`after:${ctx.op}`);
+    },
   });
 
   const handle = await vfs.open("/file.txt", "w+");
@@ -41,8 +45,12 @@ test("SandboxVfsProvider link delegates and emits hooks", async () => {
   });
 
   const vfs = new SandboxVfsProvider(provider, {
-    before: (ctx) => events.push(`before:${ctx.op}`),
-    after: (ctx) => events.push(`after:${ctx.op}`),
+    before: (ctx) => {
+      events.push(`before:${ctx.op}`);
+    },
+    after: (ctx) => {
+      events.push(`after:${ctx.op}`);
+    },
   });
 
   await vfs.link("/a", "/b");

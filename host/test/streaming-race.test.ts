@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import * as qemuHttp from "../src/qemu/http.ts";
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
@@ -92,7 +93,7 @@ async function waitForCondition(
     if (Date.now() - start > timeoutMs) {
       throw new Error(message);
     }
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await delay(5);
   }
 }
 
@@ -107,7 +108,7 @@ async function runStreamingUpload(options: {
   let fetchBodyLen = 0;
   let dnsLookupCalls = 0;
 
-  let releaseDns: (() => void) | null = null;
+  let releaseDns = null as (() => void) | null;
   const dnsGate =
     options.gateDnsPrecheck === true
       ? new Promise<void>((resolve) => {

@@ -24,6 +24,7 @@ function makeResolvedOptions(
     virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
     virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
     virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
+    virtioIngressSocketPath: "/tmp/gondolin-test-virtioingress.sock",
     netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
@@ -70,7 +71,7 @@ function makeClient(): { client: any; captured: Captured } {
 
 function execMessage(id: number) {
   return {
-    type: "exec",
+    type: "exec" as const,
     id,
     cmd: "/bin/sh",
     argv: ["-lc", "echo hi"],
@@ -141,12 +142,15 @@ test("SandboxServer: boot start failure closes client and rejects later messages
   const captured: any[] = [];
   let closed = 0;
 
-  const connection = server.connect((data, isBinary) => {
-    if (isBinary) return;
-    captured.push(JSON.parse(String(data)));
-  }, () => {
-    closed += 1;
-  });
+  const connection = server.connect(
+    (data, isBinary) => {
+      if (isBinary) return;
+      captured.push(JSON.parse(String(data)));
+    },
+    () => {
+      closed += 1;
+    },
+  );
 
   const controller = (server as any).controller;
   controller.start = async () => {
@@ -193,7 +197,7 @@ test("SandboxServer: krun hint skips low-value Zig stack frames", async () => {
   );
   controller.emit(
     "log",
-    "    if (start_rc < 0) return krunError(\"krun_start_enter\", start_rc);\n",
+    '    if (start_rc < 0) return krunError("krun_start_enter", start_rc);\n',
     "stderr",
   );
   controller.emit("log", "                       ^\n", "stderr");

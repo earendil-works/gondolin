@@ -1,0 +1,86 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "host/src/**/*.ts",
+      "host/bin/**/*.ts",
+      "host/test/**/*.ts",
+      "host/fuzz/**/*.ts",
+      "host/examples/**/*.ts",
+      "host/scripts/**/*.ts",
+      "scripts/**/*.mjs",
+      "!host/src/vfs/node/vendored-node-vfs"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 80
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "trailingCommas": "all"
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "noNonNullAssertion": "off",
+        "useNodejsImportProtocol": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "off",
+        "noControlCharactersInRegex": "off",
+        "noConfusingVoidType": "off",
+        "noTemplateCurlyInString": "off",
+        "noAssignInExpressions": "off",
+        "noFallthroughSwitchClause": "off"
+      },
+      "correctness": {
+        "useImportExtensions": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "host/src/sandbox/server.ts"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedPrivateClassMembers": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "host/test/**"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnsafeOptionalChaining": "off"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -192,10 +192,10 @@ async function runNestedCommand(
 
   console.log("[outer] exitCode:", result.exitCode);
   if (result.stdout.trim()) {
-    console.log("[outer] stdout:\n" + result.stdout);
+    console.log(`[outer] stdout:\n${result.stdout}`);
   }
   if (result.stderr.trim()) {
-    console.log("[outer] stderr:\n" + result.stderr);
+    console.log(`[outer] stderr:\n${result.stderr}`);
   }
 
   if (!result.ok) {

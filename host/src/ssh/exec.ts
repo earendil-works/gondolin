@@ -115,7 +115,7 @@ export function getInfoFromSshExecRequest(
   req: SshExecRequest,
 ): GitSshExecInfo | null {
   const argv = splitSshExecCommand(req.command);
-  if (!argv || argv.length !== 2) return null;
+  if (argv?.length !== 2) return null;
 
   const serviceArg = argv[0]!.trim();
   // Reject anything that could trigger shell expansion in the executable path.

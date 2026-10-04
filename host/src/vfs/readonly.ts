@@ -153,9 +153,10 @@ export class ReadonlyProvider
 
   accessSync(path: string, mode?: number): void {
     if (this.backend.accessSync) {
-      return this.backend.accessSync(path, mode);
+      this.backend.accessSync(path, mode);
+      return;
     }
-    return super.accessSync(path, mode);
+    super.accessSync(path, mode);
   }
 
   async statfs(path: string): Promise<VfsStatfs> {

@@ -1,7 +1,7 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { execFileSync } from "child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { parseEnvEntry } from "../utils/env.ts";
 import { assertSafeWritePath } from "./rootfs.ts";
@@ -74,12 +74,10 @@ export function injectBeforeSandboxdExec(
   const marker = "\nexec /usr/bin/sandboxd\n";
   const idx = script.lastIndexOf(marker);
   if (idx !== -1) {
-    return (
-      script.slice(0, idx) + "\n" + snippet.trimEnd() + "\n" + script.slice(idx)
-    );
+    return `${script.slice(0, idx)}\n${snippet.trimEnd()}\n${script.slice(idx)}`;
   }
 
-  return script.trimEnd() + "\n" + snippet.trimEnd() + "\n";
+  return `${script.trimEnd()}\n${snippet.trimEnd()}\n`;
 }
 
 export function generateImageEnvScript(

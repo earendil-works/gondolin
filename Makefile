@@ -101,7 +101,7 @@ clean:
 
 hooks:
 	@git config core.hooksPath .husky
-	@chmod +x .husky/pre-commit .husky/_/pre-commit .husky/_/h
+	@chmod +x .husky/pre-commit
 	@echo "Installed hooks (core.hooksPath=.husky)"
 
 libkrun:
@@ -131,6 +131,7 @@ libkrun:
 
 krun-runner: libkrun
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required to build host/krun-runner" && exit 1)
+	@v="$$(zig version)"; case "$$v" in 0.17.*) ;; *) echo "Zig 0.17.x is required to build host/krun-runner (found $$v); install it with scripts/install-zig.sh 0.17.0" >&2; exit 1;; esac
 	@echo "Building host krun runner"
 	@cd host/krun-runner && \
 		if [ "$(UNAME_S)" = "Darwin" ]; then \

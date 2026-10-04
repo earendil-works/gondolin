@@ -1,11 +1,11 @@
-import { EventEmitter } from "events";
+import { EventEmitter } from "node:events";
 import http, {
   type IncomingHttpHeaders,
   type IncomingMessage,
   type ServerResponse,
-} from "http";
-import net from "net";
-import type { Duplex, Writable } from "stream";
+} from "node:http";
+import type net from "node:net";
+import type { Duplex, Writable } from "node:stream";
 
 import type { VirtualProvider } from "./vfs/node/index.ts";
 import type { SandboxServer } from "./sandbox/server.ts";
@@ -134,25 +134,25 @@ export function serializeListenersFile(data: ParsedListenersFile): string {
     lines.push([route.prefix, `:${route.port}`, ...opts].join("\t"));
   }
 
-  return lines.join("\n") + "\n";
+  return `${lines.join("\n")}\n`;
 }
 
 function normalizePrefix(prefix: string): string {
   let p = prefix;
-  if (!p.startsWith("/")) p = "/" + p;
+  if (!p.startsWith("/")) p = `/${p}`;
   if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
   return p;
 }
 
 function pathMatchesPrefix(pathname: string, prefix: string): boolean {
   if (prefix === "/") return true;
-  return pathname === prefix || pathname.startsWith(prefix + "/");
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
 function stripPrefix(pathname: string, prefix: string): string {
   if (prefix === "/") return pathname;
   if (pathname === prefix) return "/";
-  if (pathname.startsWith(prefix + "/")) {
+  if (pathname.startsWith(`${prefix}/`)) {
     const rest = pathname.slice(prefix.length);
     return rest.length === 0 ? "/" : rest;
   }
@@ -195,11 +195,11 @@ function parseConnectionTokens(raw: string | string[] | undefined): string[] {
 }
 
 function hasUpgradeIntentHeaders(headers: IncomingHttpHeaders): boolean {
-  if (joinHeaderValue(headers["upgrade"]).trim().length > 0) {
+  if (joinHeaderValue(headers.upgrade).trim().length > 0) {
     return true;
   }
 
-  if (parseConnectionTokens(headers["connection"]).includes("upgrade")) {
+  if (parseConnectionTokens(headers.connection).includes("upgrade")) {
     return true;
   }
 
@@ -1037,7 +1037,7 @@ export class IngressGateway {
       : stripHopByHopHeaders;
 
     // Build initial upstream request config (can be patched by onRequest)
-    let hookRequest: IngressHookRequest = {
+    const hookRequest: IngressHookRequest = {
       clientIp,
       method: clientMethod,
       path,
@@ -1051,10 +1051,10 @@ export class IngressGateway {
     // Remove body framing headers; we choose framing ourselves.
     delete hookRequest.headers["content-length"];
     delete hookRequest.headers["transfer-encoding"];
-    delete hookRequest.headers["expect"];
+    delete hookRequest.headers.expect;
 
-    hookRequest.headers["host"] = hostHeader;
-    if (!forUpgrade) hookRequest.headers["connection"] = "close";
+    hookRequest.headers.host = hostHeader;
+    if (!forUpgrade) hookRequest.headers.connection = "close";
 
     // Forwarded headers
     if (clientIp) {
@@ -1138,8 +1138,8 @@ export class IngressGateway {
     // Remove body framing headers; we choose framing ourselves.
     delete hookRequest.headers["content-length"];
     delete hookRequest.headers["transfer-encoding"];
-    delete hookRequest.headers["expect"];
-    if (!forUpgrade) hookRequest.headers["connection"] = "close";
+    delete hookRequest.headers.expect;
+    if (!forUpgrade) hookRequest.headers.connection = "close";
 
     return {
       hookRequest,
@@ -1178,7 +1178,7 @@ export class IngressGateway {
         headerLines.push(`${k}: ${v}`);
       }
     }
-    const headerBlob = headerLines.join("\r\n") + "\r\n\r\n";
+    const headerBlob = `${headerLines.join("\r\n")}\r\n\r\n`;
 
     await writeStream(upstream, headerBlob);
 
@@ -1285,7 +1285,7 @@ export class IngressGateway {
       const incoming = normalizeIncomingHeaders(req.headers);
 
       const hostHeader =
-        typeof incoming["host"] === "string" ? incoming["host"] : "localhost";
+        typeof incoming.host === "string" ? incoming.host : "localhost";
 
       const { hookRequest, bufferResponseBody, maxBufferedResponseBodyBytes } =
         await this.buildUpstreamHookRequest(
@@ -1348,7 +1348,7 @@ export class IngressGateway {
             if (b.length === 0) continue;
             await writeStream(
               upstream,
-              Buffer.from(b.length.toString(16) + "\r\n", "ascii"),
+              Buffer.from(`${b.length.toString(16)}\r\n`, "ascii"),
             );
             await writeStream(upstream, b);
             await writeStream(upstream, "\r\n");
@@ -1374,7 +1374,7 @@ export class IngressGateway {
         },
         "upstream response header timeout",
       );
-      let respHeaders = normalizeHeaderRecord(
+      const respHeaders = normalizeHeaderRecord(
         stripHopByHopHeaders(head.headers),
       );
       delete respHeaders["content-length"]; // let node decide unless we keep fixed-length
@@ -1588,7 +1588,7 @@ export class IngressGateway {
         );
       }
 
-      const hostHeader = joinHeaderValue(incoming["host"]) || "localhost";
+      const hostHeader = joinHeaderValue(incoming.host) || "localhost";
       const { hookRequest } = await this.buildUpstreamHookRequest(
         url,
         route,
@@ -1628,7 +1628,7 @@ export class IngressGateway {
       );
       const upstreamStatusCode = respHead.statusCode;
 
-      let responseForHook: IngressHookResponse = {
+      const responseForHook: IngressHookResponse = {
         statusCode: respHead.statusCode,
         statusMessage: respHead.statusMessage,
         headers: normalizeHeaderRecord(respHead.headers),
