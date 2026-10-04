@@ -45,7 +45,7 @@ The package release workflow is tag-driven (`.github/workflows/release.yml`) and
 ## Key Conventions
 
 - **TypeScript:** The host package uses Node's strip-only TypeScript support for running `.ts` files directly; see `host/tsconfig.json` (`erasableSyntaxOnly`). Tests use Node's built-in test runner (`node:test`).
-- **Zig version:** 0.16.0 (see `guest/build.zig.zon`).
+- **Zig version:** 0.17.0 (see `guest/build.zig.zon`).
 - **Package manager:** pnpm (workspace root + `host/` package).
 
 ### Field comments (TS interfaces/types + Zig structs)

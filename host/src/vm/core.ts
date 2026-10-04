@@ -1,10 +1,11 @@
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
-import { execFileSync } from "child_process";
-import { Duplex, Readable } from "stream";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import type { Duplex, Readable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { AsyncSingleflight } from "../utils/async.ts";
 
@@ -76,7 +77,7 @@ import {
 } from "../ingress.ts";
 import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
 import {
-  SandboxVfsProvider,
+  type SandboxVfsProvider,
   type VfsHooks,
   composeVfsHooks,
   wrapProvider,
@@ -101,6 +102,7 @@ import {
   normalizeCommand,
   toAsyncIterable,
 } from "../exec.ts";
+import { errorMessage } from "../utils/error.ts";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
@@ -237,6 +239,8 @@ export class VM {
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
   private rootDisk: RootDiskState | null = null;
   private checkpointed = false;
+  /** whether `close()` was called; a closed vm must not be restarted */
+  private closed = false;
   private readonly baseOptionsForClone: VMOptions;
   private readonly defaultEnv: EnvInput | undefined;
   private connection: SandboxConnection | null = null;
@@ -592,6 +596,7 @@ export class VM {
    * Close the VM and release associated resources.
    */
   async close() {
+    this.closed = true;
     return this.closeSingleflight.run(() => this.closeInternal());
   }
 
@@ -721,13 +726,13 @@ export class VM {
         // ignore
       }
       throw new Error(
-        `failed to run ssh-keygen (needed for vm.enableSsh): ${err instanceof Error ? err.message : String(err)}`,
+        `failed to run ssh-keygen (needed for vm.enableSsh): ${errorMessage(err)}`,
       );
     }
 
-    const pubKey = fs.readFileSync(keyPath + ".pub", "utf8").trim();
+    const pubKey = fs.readFileSync(`${keyPath}.pub`, "utf8").trim();
 
-    const shQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    const shQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
     const sshUser = shQuote(user);
 
     // Install authorized_keys + start sandboxssh + start sshd
@@ -905,15 +910,14 @@ fi
         break;
       } catch (err) {
         lastErr = err;
-        await new Promise((r) => setTimeout(r, 150));
+        await delay(150);
       } finally {
         probe?.destroy();
       }
     }
 
     if (lastErr) {
-      const detail =
-        lastErr instanceof Error ? lastErr.message : String(lastErr);
+      const detail = errorMessage(lastErr);
       throw new Error(`ssh port-forward is not available: ${detail}`);
     }
 
@@ -1118,7 +1122,7 @@ fi
         id,
         cmd,
         argv: argv.length ? argv : undefined,
-        env: mergedEnv && mergedEnv.length ? mergedEnv : undefined,
+        env: mergedEnv?.length ? mergedEnv : undefined,
         cwd: options.cwd,
         stdin: session.stdinEnabled ? true : undefined,
         pty: options.pty ? true : undefined,
@@ -1186,6 +1190,9 @@ fi
   }
 
   private async startInternal() {
+    if (this.closed) {
+      throw new Error("vm is closed and cannot be restarted");
+    }
     if (this.checkpointed) {
       throw new Error(
         "vm was checkpointed and cannot be restarted; resume the checkpoint instead",
@@ -1234,9 +1241,12 @@ fi
           if (this.startupGeneration !== cleanupGeneration) {
             return;
           }
-          void this.close().catch(() => {
-            // ignore close errors after startup timeout
-          });
+          // Tear down without marking the vm closed so start() can be retried.
+          void this.closeSingleflight
+            .run(() => this.closeInternal())
+            .catch(() => {
+              // ignore close errors after startup timeout
+            });
         }, 0);
       },
     );
@@ -1782,9 +1792,10 @@ fi
 
     let message: StatusMessage | ExecResponseMessage | ErrorMessage;
     try {
-      message = JSON.parse(
-        typeof data === "string" ? data : data.toString(),
-      ) as StatusMessage | ExecResponseMessage | ErrorMessage;
+      message = JSON.parse(typeof data === "string" ? data : data.toString()) as
+        | StatusMessage
+        | ExecResponseMessage
+        | ErrorMessage;
     } catch {
       return;
     }

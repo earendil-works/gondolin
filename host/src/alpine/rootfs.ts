@@ -1,5 +1,7 @@
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
+
+import { isPathWithin } from "../utils/path.ts";
 
 /** Check if any intermediate component of `target` (below `root`) is a symlink */
 export function hasSymlinkComponent(target: string, root: string): boolean {
@@ -33,17 +35,11 @@ export function pathEntryExists(targetPath: string): boolean {
   }
 }
 
-function isPathInsideRoot(target: string, root: string): boolean {
-  const absTarget = path.resolve(target);
-  const absRoot = path.resolve(root);
-  return absTarget === absRoot || absTarget.startsWith(absRoot + path.sep);
-}
-
 export function resolveWritePath(target: string, root: string): string {
   const absTarget = path.resolve(target);
   const absRoot = path.resolve(root);
 
-  if (!isPathInsideRoot(absTarget, absRoot)) {
+  if (!isPathWithin(absRoot, absTarget)) {
     throw new Error(`Refusing to write outside rootfs: ${absTarget}`);
   }
 
@@ -66,7 +62,7 @@ export function resolveWritePath(target: string, root: string): string {
 
       const linkTarget = fs.readlinkSync(next);
       const resolved = path.resolve(path.dirname(next), linkTarget);
-      if (!isPathInsideRoot(resolved, absRoot)) {
+      if (!isPathWithin(absRoot, resolved)) {
         throw new Error(
           `Refusing to write through symlinked path: ${absTarget}`,
         );
@@ -87,7 +83,7 @@ export function assertSafeWritePath(target: string, root: string): void {
   const absTarget = path.resolve(target);
   const absRoot = path.resolve(root);
 
-  if (!isPathInsideRoot(absTarget, absRoot)) {
+  if (!isPathWithin(absRoot, absTarget)) {
     throw new Error(`Refusing to write outside rootfs: ${absTarget}`);
   }
 
@@ -137,7 +133,7 @@ function hardenExtractedRootfsSymlink(
     rootfsDir,
   );
 
-  if (!isPathInsideRoot(resolvedTarget, rootfsDir)) {
+  if (!isPathWithin(rootfsDir, resolvedTarget)) {
     throw new Error(
       `OCI rootfs contains symlink escaping the rootfs: ${linkPath} -> ${rawTarget}`,
     );

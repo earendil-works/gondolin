@@ -1,7 +1,7 @@
-import net from "net";
-import dns from "dns";
+import net from "node:net";
+import dns from "node:dns";
 import { fetch as undiciFetch } from "undici";
-import type { ReadableStream as WebReadableStream } from "stream/web";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import {
   ON_REQUEST_EARLY_POLICY_SAFE,
@@ -34,6 +34,7 @@ import {
   applyRedirectRequest,
   evictSharedDispatcher,
   getCheckedDispatcher,
+  getIpPolicy,
   getRedirectUrl,
   normalizeLookupEntries,
   sendHttpResponse,
@@ -49,6 +50,7 @@ import {
   internalHttpResponseToWebResponse,
   responseHeadersToRecord,
 } from "../internal/http-conversion.ts";
+import { errorMessage } from "../utils/error.ts";
 
 const MAX_HTTP_REDIRECTS = 10;
 export { MAX_HTTP_HEADER_BYTES };
@@ -241,7 +243,7 @@ export async function handleTlsHttpData(
 }
 
 function has100ContinueExpectation(headers: Record<string, string>): boolean {
-  const expect = headers["expect"]?.toLowerCase();
+  const expect = headers.expect?.toLowerCase();
   if (!expect) return false;
 
   return expect
@@ -439,11 +441,6 @@ export async function handleHttpDataWithWriter(
       const head = parseHttpHead(headBuf);
       if (!head) return;
 
-      const bufferedBodyBytes = Math.max(
-        0,
-        httpSession.buffer.length - head.bodyOffset,
-      );
-
       const rawHeaders = head.headers;
       const headers = coalesceHeaderRecord(rawHeaders);
 
@@ -519,9 +516,9 @@ export async function handleHttpDataWithWriter(
       };
 
       const hasUpgrade = (() => {
-        const connection = headers["connection"]?.toLowerCase() ?? "";
+        const connection = headers.connection?.toLowerCase() ?? "";
         return (
-          Boolean(headers["upgrade"]) ||
+          Boolean(headers.upgrade) ||
           connection
             .split(",")
             .map((t: string) => t.trim())
@@ -785,7 +782,7 @@ export async function handleHttpDataWithWriter(
     if (contentLength > 0 && bufferedBodyBytes < contentLength) {
       // If the client uses Expect: 100-continue and no body bytes have arrived yet,
       // send the interim response first and wait for more data.
-      const expect = state.headers["expect"]?.toLowerCase() ?? "";
+      const expect = state.headers.expect?.toLowerCase() ?? "";
       if (expect.includes("100-continue") && bufferedBodyBytes === 0) {
         maybeSend100ContinueFromHead(
           httpSession,
@@ -876,7 +873,7 @@ export async function handleHttpDataWithWriter(
         },
         {
           highWaterMark: HTTP_STREAMING_REQUEST_BODY_HIGH_WATER_BYTES,
-          size: (chunk: Uint8Array) => chunk.byteLength,
+          size: (chunk?: Uint8Array) => chunk?.byteLength ?? 0,
         },
       );
 
@@ -942,6 +939,7 @@ export async function handleHttpDataWithWriter(
               error.status,
               error.statusText,
               httpVersion,
+              error.message,
             );
           } else {
             backend.emit("error", error);
@@ -1049,6 +1047,7 @@ export async function handleHttpDataWithWriter(
           error.status,
           error.statusText,
           httpVersion,
+          error.message,
         );
       } else {
         backend.emit("error", error);
@@ -1078,7 +1077,13 @@ export async function handleHttpDataWithWriter(
       if (backend.options.debug) {
         backend.emitDebug(`http blocked ${error.message}`);
       }
-      respondWithError(options.write, error.status, error.statusText, version);
+      respondWithError(
+        options.write,
+        error.status,
+        error.statusText,
+        version,
+        error.message,
+      );
     } else {
       backend.emit("error", error);
       respondWithError(options.write, 400, "Bad Request", version);
@@ -1130,7 +1135,7 @@ function parseHttpHead(buffer: Buffer): {
   }
 
   const [method, target, version] = lines[0].split(" ");
-  if (!method || !target || !version || !version.startsWith("HTTP/")) {
+  if (!method || !target || !version?.startsWith("HTTP/")) {
     throw new Error("invalid request line");
   }
 
@@ -1152,7 +1157,7 @@ function validateExpectHeader(
   // RFC 9110: unknown expectations MUST be rejected with 417.
   if (version !== "HTTP/1.1") return;
 
-  const expect = headers["expect"]?.toLowerCase();
+  const expect = headers.expect?.toLowerCase();
   if (!expect) return;
 
   const tokens = expect
@@ -1387,7 +1392,7 @@ export async function fetchHookRequestAndRespond(
         evictSharedDispatcher(backend, originKey);
       }
       if (backend.options.debug) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         backend.emitDebug(
           `http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`,
         );
@@ -1456,7 +1461,7 @@ export async function fetchHookRequestAndRespond(
       );
     }
 
-    let responseHeaders = stripHopByHopHeaders(
+    const responseHeaders = stripHopByHopHeaders(
       responseHeadersToRecord(response.headers),
     );
     const contentEncodingValue = responseHeaders["content-encoding"];
@@ -1479,7 +1484,7 @@ export async function fetchHookRequestAndRespond(
       delete responseHeaders["content-encoding"];
       delete responseHeaders["content-length"];
     }
-    responseHeaders["connection"] = "close";
+    responseHeaders.connection = "close";
 
     const responseBodyStream =
       response.body as WebReadableStream<Uint8Array> | null;
@@ -1916,8 +1921,13 @@ function respondWithError(
   status: number,
   statusText: string,
   httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1",
+  detail?: string,
 ) {
-  const body = Buffer.from(`${status} ${statusText}\n`);
+  const body = Buffer.from(
+    detail
+      ? `${status} ${statusText}: ${detail}\n`
+      : `${status} ${statusText}\n`,
+  );
   sendHttpResponse(
     write,
     {
@@ -1953,7 +1963,7 @@ function buildFetchUrl(
     }
     return request.target;
   }
-  const host = request.headers["host"];
+  const host = request.headers.host;
   if (!host) return null;
   return `${defaultScheme}://${host}${request.target}`;
 }
@@ -1965,37 +1975,43 @@ export async function resolveHostname(
 ): Promise<{ address: string; family: 4 | 6 }> {
   const ipFamily = net.isIP(hostname);
 
-  const entries: LookupEntry[] =
-    ipFamily === 4 || ipFamily === 6
-      ? [{ address: hostname, family: ipFamily }]
-      : normalizeLookupEntries(
-          // Use all addresses so policy checks can pick the first allowed entry.
-          await new Promise<dns.LookupAddress[]>((resolve, reject) => {
-            const lookup = backend.options.dnsLookup ?? dns.lookup.bind(dns);
-            lookup(
-              hostname,
-              { all: true, verbatim: true },
-              (
-                err: NodeJS.ErrnoException | null,
-                addresses: dns.LookupAddress[],
-              ) => {
-                if (err) reject(err);
-                else resolve(addresses);
-              },
-            );
-          }),
-        );
-
-  if (entries.length === 0) {
-    throw new Error("DNS lookup returned no addresses");
+  let entries: LookupEntry[];
+  if (ipFamily === 4 || ipFamily === 6) {
+    entries = [{ address: hostname, family: ipFamily }];
+  } else {
+    try {
+      entries = normalizeLookupEntries(
+        // Use all addresses so policy checks can pick the first allowed entry.
+        await new Promise<dns.LookupAddress[]>((resolve, reject) => {
+          const lookup = backend.options.dnsLookup ?? dns.lookup.bind(dns);
+          lookup(
+            hostname,
+            { all: true, verbatim: true },
+            (
+              err: NodeJS.ErrnoException | null,
+              addresses: dns.LookupAddress[],
+            ) => {
+              if (err) reject(err);
+              else resolve(addresses);
+            },
+          );
+        }),
+      );
+    } catch (err) {
+      throw dnsLookupFailedError(backend, hostname, err);
+    }
   }
 
-  const isIpAllowed = backend.options.httpHooks?.isIpAllowed;
-  if (!policy || !isIpAllowed) {
+  if (entries.length === 0) {
+    throw dnsLookupFailedError(backend, hostname, null);
+  }
+
+  if (!policy) {
     const first = entries[0]!;
     return { address: first.address, family: first.family };
   }
 
+  const { isIpAllowed, isDefault } = getIpPolicy(backend);
   for (const entry of entries) {
     const allowed = await isIpAllowed({
       hostname,
@@ -2009,7 +2025,41 @@ export async function resolveHostname(
     }
   }
 
-  throw new HttpRequestBlockedError(`blocked by policy: ${hostname}`);
+  if (backend.options.debug) {
+    backend.emitDebug(
+      `http ip policy blocked ${hostname} (${entries.map((entry) => entry.address).join(", ")})${isDefault ? " by default internal-range policy" : ""}`,
+    );
+  }
+
+  // Never echo resolved addresses to the guest: that would leak host-side
+  // (eg: split-horizon) DNS results.
+  throw new HttpRequestBlockedError(
+    isDefault
+      ? `blocked by policy: ${hostname} (internal address; provide httpHooks.isIpAllowed to allow)`
+      : `blocked by policy: ${hostname}`,
+  );
+}
+
+function dnsLookupFailedError(
+  backend: QemuNetworkBackend,
+  hostname: string,
+  err: unknown,
+): HttpRequestBlockedError {
+  const code =
+    err && typeof err === "object" && "code" in err && err.code
+      ? String(err.code)
+      : err
+        ? "lookup error"
+        : "no addresses";
+  if (backend.options.debug) {
+    const detail = err instanceof Error ? err.message : code;
+    backend.emitDebug(`http dns lookup failed ${hostname} (${detail})`);
+  }
+  return new HttpRequestBlockedError(
+    `host dns lookup failed for ${hostname} (${code})`,
+    502,
+    "Bad Gateway",
+  );
 }
 
 function hasPolicyRelevantRequestHeadChange(
@@ -2097,8 +2147,6 @@ async function ensureIpAllowed(
   protocol: "http" | "https",
   port: number,
 ) {
-  if (!backend.options.httpHooks?.isIpAllowed) return;
-
   // Resolve all A/AAAA records and ensure at least one address is permitted.
   // When using the default fetch, the guarded undici lookup will additionally
   // pin the actual connect to an allowed IP.
@@ -2392,7 +2440,7 @@ function normalizeHookResponseForGuest(
     isHead || status === 204 || status === 205 || status === 304;
 
   const headers: InternalHttpResponseHeaders = { ...response.headers };
-  headers["connection"] = "close";
+  headers.connection = "close";
   delete headers["transfer-encoding"];
 
   const body = suppressBody ? Buffer.alloc(0) : response.body;

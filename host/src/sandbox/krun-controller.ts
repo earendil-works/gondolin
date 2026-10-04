@@ -1,43 +1,17 @@
-import { EventEmitter } from "events";
-import child_process from "child_process";
-import type { ChildProcess } from "child_process";
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
+import { EventEmitter } from "node:events";
+import child_process from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
-import type { SandboxLogStream, SandboxState } from "./controller.ts";
-
-const activeChildren = new Set<ChildProcess>();
-let exitHookRegistered = false;
-
-function killActiveChildren() {
-  for (const child of activeChildren) {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function registerExitHook() {
-  if (exitHookRegistered) return;
-  exitHookRegistered = true;
-  process.once("exit", () => {
-    killActiveChildren();
-  });
-}
-
-function trackChild(child: ChildProcess) {
-  registerExitHook();
-  activeChildren.add(child);
-  const cleanup = () => {
-    activeChildren.delete(child);
-  };
-  child.once("exit", cleanup);
-  child.once("error", cleanup);
-}
+import {
+  forwardChildLogs,
+  terminateChild,
+  trackChild,
+} from "./child-process.ts";
+import type { SandboxState } from "./controller.ts";
 
 function resolveExecutableForInspection(executable: string): string {
   if (path.isAbsolute(executable) || executable.includes(path.sep)) {
@@ -189,14 +163,7 @@ export class KrunController extends EventEmitter {
       );
 
       trackChild(this.child);
-
-      this.child.stdout?.on("data", (chunk) => {
-        this.emit("log", chunk.toString(), "stdout" satisfies SandboxLogStream);
-      });
-
-      this.child.stderr?.on("data", (chunk) => {
-        this.emit("log", chunk.toString(), "stderr" satisfies SandboxLogStream);
-      });
+      forwardChildLogs(this, this.child);
 
       this.child.on("spawn", () => {
         this.setState("running");
@@ -244,96 +211,7 @@ export class KrunController extends EventEmitter {
       this.restartTimer = null;
     }
 
-    const closeTimeoutMs = 10_000;
-
-    let exited = false;
-    let exitHandler: (() => void) | null = null;
-    let errorHandler: ((err: Error) => void) | null = null;
-
-    const waitForExit = new Promise<void>((resolve) => {
-      const exitCode = (child as any).exitCode as number | null | undefined;
-      if (typeof exitCode === "number") {
-        exited = true;
-        resolve();
-        return;
-      }
-
-      exitHandler = () => {
-        exited = true;
-        resolve();
-      };
-
-      errorHandler = () => {
-        exited = true;
-        resolve();
-      };
-
-      child.once("exit", exitHandler);
-      child.once("error", errorHandler);
-    });
-
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
-
-    const sigkillTimer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }, 3000);
-
-    let closeTimeoutTimer: NodeJS.Timeout | null = null;
-    try {
-      await Promise.race([
-        waitForExit,
-        new Promise<void>((resolve) => {
-          closeTimeoutTimer = setTimeout(resolve, closeTimeoutMs);
-        }),
-      ]);
-    } finally {
-      if (closeTimeoutTimer) {
-        clearTimeout(closeTimeoutTimer);
-      }
-      clearTimeout(sigkillTimer);
-    }
-
-    if (!exited) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-
-      try {
-        (child.stdin as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        (child.stdout as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        (child.stderr as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        child.unref();
-      } catch {
-        // ignore
-      }
-
-      killActiveChildren();
-
-      if (exitHandler) child.off("exit", exitHandler);
-      if (errorHandler) child.off("error", errorHandler);
-    }
+    await terminateChild(child);
 
     this.cleanupActiveConfig();
     this.setState("stopped");

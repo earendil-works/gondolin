@@ -11,7 +11,7 @@ public key, checked against a pinned SHA256, and added to GITHUB_PATH when
 running under GitHub Actions.
 
 Environment:
-  ZIG_VERSION        Zig version when no positional version is supplied (default: 0.16.0)
+  ZIG_VERSION        Zig version when no positional version is supplied (default: 0.17.0)
   ZIG_INSTALL_ROOT   Toolchain install root (default: ~/.cache/gondolin/zig)
   ZIG_MIRRORS        Newline-separated mirror list override
 USAGE
@@ -22,7 +22,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-VERSION="${1:-${ZIG_VERSION:-0.16.0}}"
+VERSION="${1:-${ZIG_VERSION:-0.17.0}}"
 SOURCE_QUERY="source=github-earendil-works-gondolin"
 ZSF_MINISIGN_PUBKEY="RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U"
 
@@ -80,6 +80,22 @@ case "${VERSION}/${PLATFORM}" in
   0.16.0/aarch64-macos)
     FILENAME="zig-aarch64-macos-0.16.0.tar.xz"
     SHA256="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+    ;;
+  0.17.0/x86_64-linux)
+    FILENAME="zig-x86_64-linux-0.17.0.tar.xz"
+    SHA256="1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
+    ;;
+  0.17.0/aarch64-linux)
+    FILENAME="zig-aarch64-linux-0.17.0.tar.xz"
+    SHA256="9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8"
+    ;;
+  0.17.0/x86_64-macos)
+    FILENAME="zig-x86_64-macos-0.17.0.tar.xz"
+    SHA256="4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6"
+    ;;
+  0.17.0/aarch64-macos)
+    FILENAME="zig-aarch64-macos-0.17.0.tar.xz"
+    SHA256="b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a"
     ;;
   *)
     echo "unsupported Zig toolchain: version=${VERSION} platform=${PLATFORM}" >&2

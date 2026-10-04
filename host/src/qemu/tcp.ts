@@ -1,4 +1,4 @@
-import net from "net";
+import net from "node:net";
 
 import type { DnsMode, SyntheticDnsHostMappingMode } from "./contracts.ts";
 

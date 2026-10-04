@@ -8,7 +8,9 @@ function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
 ): ResolvedSandboxServerOptions {
   return {
+    vmm: "qemu",
     qemuPath: "/bin/false",
+    krunRunnerPath: "/bin/false",
     kernelPath: "/tmp/vmlinuz",
     initrdPath: "/tmp/initramfs.cpio",
     rootfsPath: "/tmp/rootfs.ext4",
@@ -22,6 +24,7 @@ function makeResolvedOptions(
     virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
     virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
     virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
+    virtioIngressSocketPath: "/tmp/gondolin-test-virtioingress.sock",
     netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
@@ -98,13 +101,7 @@ function stdinMessage(id: number, data: Buffer, eof = false) {
 }
 
 function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (err: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers<T>();
 }
 
 function tcpSession(extra: Record<string, unknown> = {}) {

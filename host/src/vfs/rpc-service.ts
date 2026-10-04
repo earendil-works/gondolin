@@ -1,5 +1,5 @@
-import os from "os";
-import path from "path";
+import os from "node:os";
+import path from "node:path";
 import type { Dirent, Stats } from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
@@ -884,7 +884,7 @@ export class FsRpcService {
   private removeMapping(entryPath: string) {
     const normalized = normalizePath(entryPath);
     for (const [pathKey, ino] of this.pathToIno.entries()) {
-      if (pathKey === normalized || pathKey.startsWith(normalized + "/")) {
+      if (pathKey === normalized || pathKey.startsWith(`${normalized}/`)) {
         this.pathToIno.delete(pathKey);
         const paths = this.inoToPaths.get(ino);
         if (paths) {
@@ -906,7 +906,7 @@ export class FsRpcService {
     for (const [pathKey, ino] of this.pathToIno.entries()) {
       if (
         pathKey === normalizedOld ||
-        pathKey.startsWith(normalizedOld + "/")
+        pathKey.startsWith(`${normalizedOld}/`)
       ) {
         const suffix = pathKey.slice(normalizedOld.length);
         updates.push({
@@ -919,9 +919,9 @@ export class FsRpcService {
 
     for (const [pathKey, ino] of this.pathToIno.entries()) {
       const overlapsDestination =
-        pathKey === normalizedNew || pathKey.startsWith(normalizedNew + "/");
+        pathKey === normalizedNew || pathKey.startsWith(`${normalizedNew}/`);
       const isMovedSource =
-        pathKey === normalizedOld || pathKey.startsWith(normalizedOld + "/");
+        pathKey === normalizedOld || pathKey.startsWith(`${normalizedOld}/`);
       if (!overlapsDestination || isMovedSource) {
         continue;
       }
@@ -952,7 +952,7 @@ export class FsRpcService {
     for (const handleEntry of this.handles.values()) {
       if (
         handleEntry.path === normalizedOld ||
-        handleEntry.path.startsWith(normalizedOld + "/")
+        handleEntry.path.startsWith(`${normalizedOld}/`)
       ) {
         const suffix = handleEntry.path.slice(normalizedOld.length);
         handleEntry.path = normalizedNew + suffix;
@@ -964,7 +964,7 @@ export class FsRpcService {
 function normalizePath(entryPath: string) {
   let normalized = path.posix.normalize(entryPath);
   if (!normalized.startsWith("/")) {
-    normalized = "/" + normalized;
+    normalized = `/${normalized}`;
   }
   if (normalized.length > 1 && normalized.endsWith("/")) {
     normalized = normalized.slice(0, -1);
@@ -981,7 +981,7 @@ function matchesAnyTarget(
     if (cachePath === target) {
       return true;
     }
-    if (includeDescendants && cachePath.startsWith(target + "/")) {
+    if (includeDescendants && cachePath.startsWith(`${target}/`)) {
       return true;
     }
   }
@@ -1085,13 +1085,13 @@ type DirentLike = {
 function isDirentLike(entry: unknown): entry is DirentLike {
   return Boolean(
     entry &&
-    typeof entry === "object" &&
-    "isDirectory" in entry &&
-    typeof (entry as { isDirectory: () => boolean }).isDirectory ===
-      "function" &&
-    "isSymbolicLink" in entry &&
-    typeof (entry as { isSymbolicLink: () => boolean }).isSymbolicLink ===
-      "function",
+      typeof entry === "object" &&
+      "isDirectory" in entry &&
+      typeof (entry as { isDirectory: () => boolean }).isDirectory ===
+        "function" &&
+      "isSymbolicLink" in entry &&
+      typeof (entry as { isSymbolicLink: () => boolean }).isSymbolicLink ===
+        "function",
   );
 }
 
@@ -1189,8 +1189,8 @@ function normalizeError(error: unknown): ErrnoResult {
 function isErrnoError(error: unknown): error is NodeJS.ErrnoException {
   return Boolean(
     error &&
-    typeof error === "object" &&
-    "errno" in error &&
-    "message" in error,
+      typeof error === "object" &&
+      "errno" in error &&
+      "message" in error,
   );
 }

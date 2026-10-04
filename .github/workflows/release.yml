@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
@@ -42,7 +42,7 @@ jobs:
           echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Release ${{ steps.version.outputs.version }}
@@ -97,18 +97,18 @@ jobs:
             package_dir: packages/gondolin-krun-runner-darwin-arm64
             package_name: '@earendil-works/gondolin-krun-runner-darwin-arm64'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -174,16 +174,16 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"

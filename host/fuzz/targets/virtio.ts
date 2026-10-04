@@ -1,11 +1,10 @@
 import {
   FrameReader,
-  MAX_FRAME,
   decodeMessage,
   encodeFrame,
   buildExecRequest,
 } from "../../src/sandbox/virtio-protocol.ts";
-import { XorShift32 } from "../rng.ts";
+import type { XorShift32 } from "../rng.ts";
 import type { FuzzTarget } from "./types.ts";
 
 function randChunking(input: Buffer, rng: XorShift32): Buffer[] {

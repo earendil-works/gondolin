@@ -3,6 +3,7 @@ const sandboxd = @import("sandboxd");
 const cbor = sandboxd.cbor;
 const fs_rpc = sandboxd.fs_rpc;
 const posix = sandboxd.posix;
+const writeAll = sandboxd.protocol.writeAll;
 const log = std.log.scoped(.sandboxfs);
 
 const FUSE_ROOT_ID: u64 = 1;
@@ -278,7 +279,7 @@ const SandboxFs = struct {
             .allocator = allocator,
             .fuse_fd = fuse_fd,
             .rpc = rpc,
-            .unsupported_opcode_logged = [_]bool{false} ** 256,
+            .unsupported_opcode_logged = @splat(false),
         };
     }
 
@@ -351,7 +352,7 @@ const SandboxFs = struct {
         const opcode = header.opcode;
         if (opcode < self.unsupported_opcode_logged.len and !self.unsupported_opcode_logged[opcode]) {
             self.unsupported_opcode_logged[opcode] = true;
-            log.warn("unsupported fuse opcode {} -> errno {}", .{ opcode, @intFromEnum(err) });
+            log.warn("unsupported fuse opcode {} -> errno {}", .{ opcode, @backingInt(err) });
         }
         try sendError(self.fuse_fd, header.unique, err);
     }
@@ -373,7 +374,7 @@ const SandboxFs = struct {
             .max_pages = 0,
             .map_alignment = 0,
             .flags2 = 0,
-            .unused = .{0} ** 7,
+            .unused = @splat(0),
         };
 
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
@@ -1090,7 +1091,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn mountFuse(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, mount_point: []const u8) !void {
-    const data = try std.fmt.allocPrint(allocator, "fd={d},rootmode=40000,user_id=0,group_id=0,default_permissions", .{fuse_fd});
+    const data = try allocator.print("fd={d},rootmode=40000,user_id=0,group_id=0,default_permissions", .{fuse_fd});
     defer allocator.free(data);
     const data_z = try makeZ(allocator, data);
     defer allocator.free(data_z);
@@ -1123,41 +1124,11 @@ fn openRpcPort(path: []const u8) ?posix.fd_t {
         if (posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
             return fd;
         } else |_| {
-            if (openVirtioPortByName(expected)) |fd| return fd;
+            if (sandboxd.virtio_port.scan(expected) catch null) |fd| return fd;
         }
         posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
     return null;
-}
-
-fn openVirtioPortByName(expected: []const u8) ?posix.fd_t {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close(io);
-
-    var it = dev_dir.iterate();
-    var path_buf: [64]u8 = undefined;
-    while (it.next(io) catch null) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
-        if (!virtioPortMatches(entry.name, expected)) continue;
-        const path = std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name}) catch continue;
-        return posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch continue;
-    }
-
-    return null;
-}
-
-fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
-    var path_buf: [128]u8 = undefined;
-    const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
-    defer posix.close(fd);
-
-    var name_buf: [64]u8 = undefined;
-    const size = posix.read(fd, &name_buf) catch return false;
-    const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
-    return std.mem.eql(u8, trimmed, expected);
 }
 
 fn readFuseRequest(fd: posix.fd_t, buffer: []u8) ![]u8 {
@@ -1390,13 +1361,13 @@ fn alignDirent(len: usize) usize {
 
 fn errnoFromResponse(err: i32) std.os.linux.E {
     const code: i32 = if (err < 0) -err else err;
-    return @enumFromInt(@as(u16, @intCast(code)));
+    return @fromBackingInt(@as(u16, @intCast(code)));
 }
 
 fn sendError(fd: posix.fd_t, unique: u64, err: std.os.linux.E) !void {
     var out = FuseOutHeader{
         .len = @sizeOf(FuseOutHeader),
-        .@"error" = -@as(i32, @intCast(@intFromEnum(err))),
+        .@"error" = -@as(i32, @intCast(@backingInt(err))),
         .unique = unique,
     };
     try writeAll(fd, std.mem.asBytes(&out));
@@ -1419,15 +1390,6 @@ fn sendResponse(fd: posix.fd_t, unique: u64, err: i32, payload: []const u8) !voi
         .{ .base = payload.ptr, .len = payload.len },
     };
     try writevAll(fd, &iovecs);
-}
-
-fn writeAll(fd: posix.fd_t, data: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const n = try posix.write(fd, data[offset..]);
-        if (n == 0) return error.EndOfStream;
-        offset += n;
-    }
 }
 
 fn writevAll(fd: posix.fd_t, iovecs: []const posix.iovec_const) !void {
@@ -1641,7 +1603,7 @@ fn defaultStatfs() FuseStatfsOut {
         .namelen = 255,
         .frsize = 4096,
         .padding = 0,
-        .spare = .{0} ** 6,
+        .spare = @splat(0),
     } };
 }
 
