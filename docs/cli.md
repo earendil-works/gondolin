@@ -28,7 +28,7 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 23.6.0
+- Node.js >= 22.19.0
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
 first use from local overrides/store first, then via `builtin-image-registry.json`,

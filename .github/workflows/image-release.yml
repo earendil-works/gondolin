@@ -41,7 +41,7 @@ jobs:
           fi
           echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.source.outputs.source_ref }}
           fetch-depth: 0
@@ -144,22 +144,22 @@ jobs:
             zig_target: x86_64-linux-musl
             archive_arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_ref }}
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: pnpm
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install dependencies
         run: |
@@ -224,7 +224,7 @@ jobs:
           JSON
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-${{ matrix.archive_arch }}
           path: |
@@ -240,7 +240,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: .
 
@@ -251,7 +251,7 @@ jobs:
           find . -type f -name '*.tar.gz.meta.json' -exec mv {} . \;
 
       - name: Create image release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
           name: Image ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
@@ -278,12 +278,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: .
 

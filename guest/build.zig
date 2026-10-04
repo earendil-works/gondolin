@@ -1,9 +1,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Zig does not enforce `minimum_zig_version`, and older compilers fail with
+// confusing errors, so reject them up front.
+comptime {
+    const required = std.SemanticVersion{ .major = 0, .minor = 17, .patch = 0 };
+    if (builtin.zig_version.order(required) == .lt) {
+        @compileError("Zig 0.17.0 or newer is required (found " ++ builtin.zig_version_string ++ "); install it with scripts/install-zig.sh 0.17.0");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{
-        .default_target = .{ .cpu_arch = builtin.cpu.arch, .os_tag = .linux, .abi = .musl },
+        .default_target = .{ .cpu_arch = builtin.target.cpu.arch, .os_tag = .linux, .abi = .musl },
     });
     const optimize = b.standardOptimizeOption(.{});
 

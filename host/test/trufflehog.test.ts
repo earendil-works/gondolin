@@ -5,9 +5,15 @@ import test from "node:test";
 import { __test } from "../src/build/trufflehog.ts";
 
 test("resolveSupportedPlatform supports gondolin host platforms", () => {
-  assert.equal(__test.resolveSupportedPlatform("darwin", "arm64"), "darwin-arm64");
+  assert.equal(
+    __test.resolveSupportedPlatform("darwin", "arm64"),
+    "darwin-arm64",
+  );
   assert.equal(__test.resolveSupportedPlatform("darwin", "x64"), "darwin-x64");
-  assert.equal(__test.resolveSupportedPlatform("linux", "arm64"), "linux-arm64");
+  assert.equal(
+    __test.resolveSupportedPlatform("linux", "arm64"),
+    "linux-arm64",
+  );
   assert.equal(__test.resolveSupportedPlatform("linux", "x64"), "linux-x64");
 });
 

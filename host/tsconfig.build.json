@@ -8,5 +8,13 @@
     "sourceMap": true,
     "allowImportingTsExtensions": false,
     "rewriteRelativeImportExtensions": true
-  }
+  },
+  "include": [
+    "src/**/*.ts",
+    "bin/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }
