@@ -91,3 +91,39 @@ test("SandboxVfsProvider sync operations reject async hooks", () => {
     /async hook used in sync operation/,
   );
 });
+
+test("MemoryProvider handles observe truncates made through other paths", async () => {
+  const provider = new MemoryProvider();
+  const seed = await provider.open("/file.txt", "w+");
+  await seed.writeFile("x".repeat(618));
+  await seed.close();
+
+  // Mirrors FUSE without atomic O_TRUNC: open, truncate by path, then write
+  const handle = await provider.open("/file.txt", "r+");
+  const truncater = await provider.open("/file.txt", "r+");
+  await truncater.truncate(0);
+  await truncater.close();
+  const data = Buffer.from("short\n");
+  await handle.write(data, 0, data.length, 0);
+  assert.equal((await handle.stat()).size, data.length);
+  await handle.close();
+  assert.equal(await readMemoryFile(provider, "/file.txt"), "short\n");
+
+  // ftruncate through one handle while another handle keeps writing
+  const a = await provider.open("/file.txt", "r+");
+  const b = await provider.open("/file.txt", "r+");
+  await a.truncate(0);
+  await b.write(Buffer.from("ab"), 0, 2, 0);
+  await a.close();
+  await b.close();
+  assert.equal(await readMemoryFile(provider, "/file.txt"), "ab");
+});
+
+async function readMemoryFile(provider: MemoryProvider, path: string) {
+  const handle = await provider.open(path, "r");
+  try {
+    return (await handle.readFile("utf8")).toString();
+  } finally {
+    await handle.close();
+  }
+}

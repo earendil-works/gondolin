@@ -359,7 +359,10 @@ const SandboxFs = struct {
 
     fn handleInit(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
         const init_in = try parseFuseInit(payload);
-        const supported_flags: u32 = (1 << 5);
+        // FUSE_BIG_WRITES and FUSE_ATOMIC_O_TRUNC.  With atomic O_TRUNC the
+        // kernel forwards O_TRUNC in OPEN and the host truncates through the
+        // opened handle, instead of following up with a separate SETATTR.
+        const supported_flags: u32 = (1 << 5) | (1 << 3);
         const enabled_flags = init_in.flags & supported_flags;
 
         const out = FuseInitOut{
