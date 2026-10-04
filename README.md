@@ -157,21 +157,15 @@ pi tools inside a micro-VM and mounts your project at `/workspace`.
 
 ## Browser Use
 
-The Chromium image can expose its Chrome DevTools endpoint through Gondolin's
-WebSocket-capable ingress gateway. The example starts Chromium in the micro-VM,
-then gives that isolated browser to a Browser Use agent running on the host:
+There is a [Browser Use example](host/examples/browser-use.ts) that runs
+Chromium inside a micro-VM and drives it from a [Browser
+Use](https://github.com/browser-use/browser-use) agent on the host through the
+ingress gateway.  Only the guest-local Chrome DevTools endpoint is exposed:
 
 ```bash
-node host/bin/gondolin.ts build \
-  --config host/examples/chromium.json \
-  --tag browser-use:latest
-
-GONDOLIN_DEFAULT_IMAGE=browser-use:latest \
-OPENAI_API_KEY=... \
-node host/examples/browser-use.ts
+node host/bin/gondolin.ts build --config host/examples/chromium.json --tag browser-use:latest
+OPENAI_API_KEY=... node host/examples/browser-use.ts
 ```
-
-The browser stays inside Gondolin; only its localhost CDP endpoint is exposed.
 
 ## AI Use Disclaimer
 

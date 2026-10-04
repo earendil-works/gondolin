@@ -6,10 +6,11 @@
  *     --config host/examples/chromium.json \
  *     --tag browser-use:latest
  *
- * Then run:
- *   GONDOLIN_DEFAULT_IMAGE=browser-use:latest \
- *   OPENAI_API_KEY=... \
- *   node host/examples/browser-use.ts
+ * Then run (requires `uv` on the host):
+ *   OPENAI_API_KEY=... node host/examples/browser-use.ts
+ *
+ * Set `BROWSER_USE_IMAGE` to use a different image and `OPENAI_MODEL` to pick
+ * a different model.
  */
 
 import { once } from "node:events";
@@ -19,6 +20,7 @@ import { VM } from "../src/vm/core.ts";
 
 const CDP_PORT = 9222;
 const CDP_TIMEOUT_MS = 15_000;
+const IMAGE = process.env.BROWSER_USE_IMAGE ?? "browser-use:latest";
 
 const browserUseAgent = String.raw`
 import asyncio
@@ -37,7 +39,7 @@ async def main() -> None:
     )
     agent = Agent(
         task="Open https://example.com and return its heading.",
-        llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"), reasoning_effort="xhigh"),
+        llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna")),
         browser_session=browser,
     )
     history = await agent.run(max_steps=4)
@@ -69,7 +71,7 @@ async function main(): Promise<void> {
     throw new Error("OPENAI_API_KEY is required");
   }
 
-  const vm = await VM.create();
+  const vm = await VM.create({ sandbox: { imagePath: IMAGE } });
   let ingress: Awaited<ReturnType<typeof vm.enableIngress>> | undefined;
   let closing = false;
   let chromiumError: unknown;
@@ -87,7 +89,8 @@ async function main(): Promise<void> {
         "--headless",
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--remote-debugging-address=0.0.0.0",
+        // Ingress only reaches guest loopback services.
+        "--remote-debugging-address=127.0.0.1",
         `--remote-debugging-port=${CDP_PORT}`,
         "--user-data-dir=/tmp/browser-use-profile",
         "about:blank",

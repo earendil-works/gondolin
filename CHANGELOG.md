@@ -17,6 +17,7 @@ All notable changes to Gondolin are documented here.
 - Add `e2fsprogs-extra` to the default `alpine-base` build config so `rootfs.size` / `--rootfs-size` can find `resize2fs` in the guest.  #140
 - Take the guest kernel image from the kernel package installed during `gondolin build` instead of downloading it separately, so the kernel and its modules can no longer drift apart when build caches are stale.  #144
 - Fix `gondolin exec --sock`, which still spoke the raw virtio protocol, to use the session IPC protocol with output flow control.  `--sock` now also accepts a session id.  #139
+- Add a Browser Use example that drives Chromium running inside a micro-VM through the ingress gateway.  #145
 
 ## 0.12.0
 
