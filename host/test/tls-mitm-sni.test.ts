@@ -220,39 +220,35 @@ for (const tlsSniPreparse of [false, true]) {
   const skip =
     isBun && !tlsSniPreparse ? "Bun does not call SNICallback" : false;
 
-  test(
-    `tls-mitm (${mode}): complete responses under guest backpressure`,
-    { skip },
-    async () => {
-      const body = crypto.randomBytes(3 * 1024 * 1024 + 17);
-      const digest = crypto.createHash("sha256").update(body).digest("hex");
-      const results = await mitmRoundTrip(tlsSniPreparse, {
-        body,
-        parallel: 6,
-        pauseGuestFlow: true,
-      });
-      for (const result of results) {
-        assert.match(result.head, /^HTTP\/1\.1 200 /);
-        assert.equal(result.subjectaltname, "DNS:example.com");
-        assert.equal(result.body.length, body.length);
-        assert.equal(
-          crypto.createHash("sha256").update(result.body).digest("hex"),
-          digest,
-        );
-      }
-    },
-  );
+  test(`tls-mitm (${mode}): complete responses under guest backpressure`, {
+    skip,
+  }, async () => {
+    const body = crypto.randomBytes(3 * 1024 * 1024 + 17);
+    const digest = crypto.createHash("sha256").update(body).digest("hex");
+    const results = await mitmRoundTrip(tlsSniPreparse, {
+      body,
+      parallel: 6,
+      pauseGuestFlow: true,
+    });
+    for (const result of results) {
+      assert.match(result.head, /^HTTP\/1\.1 200 /);
+      assert.equal(result.subjectaltname, "DNS:example.com");
+      assert.equal(result.body.length, body.length);
+      assert.equal(
+        crypto.createHash("sha256").update(result.body).digest("hex"),
+        digest,
+      );
+    }
+  });
 
-  test(
-    `tls-mitm (${mode}): small responses end cleanly`,
-    { skip },
-    async () => {
-      const results = await mitmRoundTrip(tlsSniPreparse, {
-        body: Buffer.from("ok"),
-        parallel: 12,
-        pauseGuestFlow: false,
-      });
-      for (const result of results) assert.equal(result.body.toString(), "ok");
-    },
-  );
+  test(`tls-mitm (${mode}): small responses end cleanly`, {
+    skip,
+  }, async () => {
+    const results = await mitmRoundTrip(tlsSniPreparse, {
+      body: Buffer.from("ok"),
+      parallel: 12,
+      pauseGuestFlow: false,
+    });
+    for (const result of results) assert.equal(result.body.toString(), "ok");
+  });
 }
