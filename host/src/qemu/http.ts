@@ -1374,7 +1374,12 @@ export async function fetchHookRequestAndRespond(
     // Remove it from a copy so redirects and hooks keep the measured length.
     const fetchHeaders = { ...currentRequest.headers };
     if (bodyInit && !bodyStream) {
-      delete fetchHeaders["content-length"];
+      // Hooks may return headers with arbitrary casing.
+      for (const name of Object.keys(fetchHeaders)) {
+        if (name.toLowerCase() === "content-length") {
+          delete fetchHeaders[name];
+        }
+      }
     }
 
     let response: FetchResponse;
