@@ -1,9 +1,9 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { MANIFEST_FILENAME, loadAssetManifest } from "../assets.ts";
-import type { BuildConfig } from "./config.ts";
+import { type BuildConfig, hasPostBuildCommands } from "./config.ts";
 import {
   detectContainerRuntime,
   runCommand,
@@ -14,6 +14,7 @@ import {
   type BuildOptions,
   type BuildResult,
 } from "./shared.ts";
+import { errorMessage } from "../utils/error.ts";
 
 /** Build assets inside a container */
 export async function buildInContainer(
@@ -234,7 +235,7 @@ node /work/run-build.mjs
   try {
     fs.rmSync(workDir, { recursive: true, force: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log(
       `Warning: could not remove temporary container build dir ${workDir}: ${message}`,
     );
@@ -247,8 +248,4 @@ node /work/run-build.mjs
     manifestPath,
     manifest,
   };
-}
-
-function hasPostBuildCommands(config: BuildConfig): boolean {
-  return (config.postBuild?.commands?.length ?? 0) > 0;
 }

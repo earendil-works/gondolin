@@ -1,21 +1,21 @@
-import { createHash } from "crypto";
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import type {
   BuildConfig,
   ContainerRuntime,
   OciPullPolicy,
   RootfsMode,
 } from "./build/config.ts";
-import { gondolinCacheDir } from "./cache.ts";
+import { normalizeArchitecture } from "./host/arch.ts";
+import {
+  getImageStoreDirectory,
+  isImageBuildId,
+  tryParseImageRef,
+} from "./image-ref.ts";
+import { isPathWithin } from "./utils/path.ts";
+import { uuidv5 } from "./utils/uuid.ts";
 
 let cachedAssetVersion: string | null = null;
-
-const BUILD_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-const IMAGE_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function resolveAssetVersion(): string {
   if (cachedAssetVersion) return cachedAssetVersion;
@@ -41,10 +41,6 @@ function resolveAssetVersion(): string {
 
   cachedAssetVersion = "v0.0.0";
   return cachedAssetVersion;
-}
-
-function getImageStoreDirectory(): string {
-  return process.env.GONDOLIN_IMAGE_STORE ?? gondolinCacheDir("images");
 }
 
 function defaultGuestImageSelector(): string {
@@ -80,95 +76,33 @@ function tryFindRepoGuestAssetsDir(): string | null {
   return tryFindFrom(process.cwd()) ?? tryFindFrom(import.meta.dirname);
 }
 
-function normalizeImageArch(
-  value: string | undefined | null,
-): "aarch64" | "x86_64" | null {
-  if (!value) return null;
-  const lower = value.toLowerCase();
-  if (lower === "aarch64" || lower === "arm64") return "aarch64";
-  if (lower === "x86_64" || lower === "amd64" || lower === "x64") {
-    return "x86_64";
-  }
-  return null;
-}
-
-function hostDefaultImageArch(): "aarch64" | "x86_64" {
-  return normalizeImageArch(process.arch) ?? "x86_64";
-}
-
-function ensurePathWithinRoot(root: string, candidate: string): string | null {
-  const resolvedRoot = path.resolve(root);
-  const resolvedCandidate = path.resolve(candidate);
-  const relative = path.relative(resolvedRoot, resolvedCandidate);
-  if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
-  ) {
-    return null;
-  }
-  return resolvedCandidate;
-}
-
-function hasValidImageNameSegments(name: string): boolean {
-  const segments = name.split("/");
-  if (segments.length === 0) return false;
-
-  for (const segment of segments) {
-    if (segment.length === 0 || segment === "." || segment === "..") {
-      return false;
-    }
-    if (!IMAGE_NAME_SEGMENT_PATTERN.test(segment)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function parseImageRef(selector: string): { name: string; tag: string } | null {
-  const trimmed = selector.trim();
-  if (!trimmed) return null;
-
-  const colon = trimmed.lastIndexOf(":");
-  const hasExplicitTag = colon > 0 && colon < trimmed.length - 1;
-  const name = hasExplicitTag ? trimmed.slice(0, colon) : trimmed;
-  const tag = hasExplicitTag ? trimmed.slice(colon + 1) : "latest";
-
-  if (!IMAGE_NAME_PATTERN.test(name)) return null;
-  if (!hasValidImageNameSegments(name)) return null;
-  if (!IMAGE_TAG_PATTERN.test(tag)) return null;
-
-  return { name, tag };
-}
-
 function resolveDefaultImageAssetDirFromStore(): string | null {
   const selector = defaultGuestImageSelector().trim();
   if (!selector) return null;
 
   const storeDir = getImageStoreDirectory();
 
-  if (BUILD_ID_PATTERN.test(selector)) {
+  if (isImageBuildId(selector)) {
     const objectDir = path.join(storeDir, "objects", selector);
     return assetsExist(objectDir) ? objectDir : null;
   }
 
-  const parsedRef = parseImageRef(selector);
+  const parsedRef = tryParseImageRef(selector);
   if (!parsedRef) return null;
 
+  const hostArch = normalizeArchitecture(process.arch) ?? "x86_64";
   const archOrder: Array<"aarch64" | "x86_64"> = [
-    hostDefaultImageArch(),
-    hostDefaultImageArch() === "aarch64" ? "x86_64" : "aarch64",
+    hostArch,
+    hostArch === "aarch64" ? "x86_64" : "aarch64",
   ];
 
   const refsRoot = path.join(storeDir, "refs");
 
   for (const arch of archOrder) {
-    const linkPath = ensurePathWithinRoot(
-      refsRoot,
-      path.join(refsRoot, parsedRef.name, parsedRef.tag, arch),
-    );
-    if (!linkPath || !fs.existsSync(linkPath)) continue;
+    const linkPath = path.join(refsRoot, parsedRef.name, parsedRef.tag, arch);
+    if (!isPathWithin(refsRoot, linkPath) || !fs.existsSync(linkPath)) {
+      continue;
+    }
 
     try {
       const target = fs.readlinkSync(linkPath);
@@ -213,43 +147,6 @@ export const MANIFEST_FILENAME = "manifest.json";
 // This must never change, otherwise the same asset checksums would produce
 // different IDs across versions.
 const GUEST_ASSET_BUILD_ID_NAMESPACE = "7b6ed0c0-7e7f-4c2a-8b2d-0bf3d5be9d52";
-
-function uuidToBytes(uuid: string): Buffer {
-  const hex = uuid.replace(/-/g, "");
-  if (hex.length !== 32) throw new Error(`invalid uuid: ${uuid}`);
-  return Buffer.from(hex, "hex");
-}
-
-function bytesToUuid(bytes: Uint8Array): string {
-  const hex = Buffer.from(bytes).toString("hex");
-  return (
-    hex.slice(0, 8) +
-    "-" +
-    hex.slice(8, 12) +
-    "-" +
-    hex.slice(12, 16) +
-    "-" +
-    hex.slice(16, 20) +
-    "-" +
-    hex.slice(20)
-  );
-}
-
-function uuidv5(name: string, namespace: string): string {
-  const ns = uuidToBytes(namespace);
-  const hash = createHash("sha1");
-  hash.update(ns);
-  hash.update(Buffer.from(name, "utf8"));
-  const digest = hash.digest();
-  const bytes = Buffer.from(digest.subarray(0, 16));
-
-  // Set version to 5 (0101)
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
-  // Set variant to RFC 4122 (10xx)
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return bytesToUuid(bytes);
-}
 
 export type AssetBuildIdInput = {
   /** sha256 checksums (hex) */
@@ -368,6 +265,24 @@ export interface GuestAssets {
   initrdPath: string;
   /** rootfs image path */
   rootfsPath: string;
+}
+
+/**
+ * Return the directory containing all guest assets, or `null` if they are
+ * missing or split across directories.
+ *
+ * @internal
+ */
+export function findCommonAssetDir(
+  assets: Partial<GuestAssets>,
+): string | null {
+  const kernelDir = assets.kernelPath ? path.dirname(assets.kernelPath) : null;
+  const initrdDir = assets.initrdPath ? path.dirname(assets.initrdPath) : null;
+  const rootfsDir = assets.rootfsPath ? path.dirname(assets.rootfsPath) : null;
+
+  if (!kernelDir || !initrdDir || !rootfsDir) return null;
+  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) return null;
+  return kernelDir;
 }
 
 /**

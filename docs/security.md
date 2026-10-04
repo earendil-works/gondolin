@@ -174,6 +174,7 @@ Key enforcement points:
             - IPv4: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0/8, broadcast
             - IPv6: loopback, link-local, ULA, and IPv4-mapped variants
         - It can also require that the request hostname matches a configured allowlist (with `*` wildcards).
+        - If `httpHooks.isIpAllowed` is not provided at all (including when no `httpHooks` are configured), the network backend falls back to a default policy that blocks the same internal ranges.
 
 5. **DNS rebinding protection**
     Gondolin checks policy in *two* places:

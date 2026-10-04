@@ -3,7 +3,7 @@ import { once } from "node:events";
 import test from "node:test";
 
 import {
-  GondolinListeners,
+  type GondolinListeners,
   createGondolinEtcHooks,
   createGondolinEtcMount,
 } from "../src/ingress.ts";

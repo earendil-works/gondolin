@@ -12,22 +12,30 @@ concurrency:
 
 jobs:
   check:
-    name: Lint & Typecheck
+    name: Lint & Typecheck (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported Node (package.json engines) and current CI default
+        node-version: ['22.19.0', '24']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
           cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Lint host
+        run: make -C host lint
 
       - name: Typecheck host
         run: pnpm --filter @earendil-works/gondolin exec tsc --noEmit
@@ -54,19 +62,19 @@ jobs:
             artifact: gondolin-guest-arm64
             zig-target: aarch64-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install dependencies
         run: |
@@ -97,7 +105,7 @@ jobs:
             krun-kernel krun-empty-initrd
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
@@ -108,19 +116,19 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install dependencies
         run: pnpm install
@@ -179,14 +187,14 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -209,14 +217,14 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -253,19 +261,19 @@ jobs:
     needs: [check, build-guest, krun-linux-build, krun-runner-package-smoke]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Download guest assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gondolin-guest-x64
           path: .
@@ -277,7 +285,7 @@ jobs:
           touch guest/image/out/*
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -322,19 +330,19 @@ jobs:
     needs: [check, build-guest]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/setup@v3
         with:
-          version: 8
+          install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
 
       - name: Download guest assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gondolin-guest-x64
           path: .
@@ -348,7 +356,7 @@ jobs:
           touch guest/image/out/*
 
       - name: Install Zig
-        run: scripts/install-zig.sh 0.16.0
+        run: scripts/install-zig.sh 0.17.0
 
       - name: Install system dependencies
         run: |
@@ -391,13 +399,13 @@ jobs:
   #     contents: read
   #     id-token: write
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #
-  #     - uses: pnpm/action-setup@v2
+  #     - uses: pnpm/setup@v3
   #       with:
-  #         version: 8
+  #         install: false
   #
-  #     - uses: actions/setup-node@v4
+  #     - uses: actions/setup-node@v7
   #       with:
   #         node-version: '24'
   #         registry-url: 'https://registry.npmjs.org'
@@ -422,7 +430,7 @@ jobs:
   #         npm publish --access public --provenance --tag pr-${{ github.event.pull_request.number }}
   #
   #     - name: Comment on PR
-  #       uses: actions/github-script@v7
+  #       uses: actions/github-script@v9
   #       with:
   #         script: |
   #           const version = `0.0.0-pr.${{ github.event.pull_request.number }}.${context.sha.substring(0, 7)}`;

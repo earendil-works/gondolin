@@ -1,4 +1,4 @@
-import { XorShift32 } from "../rng.ts";
+import type { XorShift32 } from "../rng.ts";
 
 export type FuzzTarget = {
   name: string;

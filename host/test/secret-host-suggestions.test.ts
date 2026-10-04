@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { __test as suggestionTest } from "../src/secret-host-suggestions.ts";
@@ -24,10 +24,10 @@ test("parseTrufflehogJsonLines parses newline-delimited json", () => {
   const findings = parseTrufflehogJsonLines(
     '{"DetectorName":"OpenAI"}\n{"DetectorName":"Github"}\n',
   );
-  assert.deepEqual(findings.map((finding: any) => finding.DetectorName), [
-    "OpenAI",
-    "Github",
-  ]);
+  assert.deepEqual(
+    findings.map((finding: any) => finding.DetectorName),
+    ["OpenAI", "Github"],
+  );
 });
 
 test("collectSuggestionsFromDetectorSource finds hosts in detector source", () => {
@@ -37,9 +37,9 @@ test("collectSuggestionsFromDetectorSource finds hosts in detector source", () =
   fs.writeFileSync(
     path.join(detectorDir, "openai.go"),
     [
-      'package openai',
+      "package openai",
       'import "github.com/wasilibs/go-re2"',
-      'func x() { _ = detectorspb.DetectorType_OpenAI }',
+      "func x() { _ = detectorspb.DetectorType_OpenAI }",
       'const endpoint = "https://api.openai.com/v1/me"',
     ].join("\n"),
   );

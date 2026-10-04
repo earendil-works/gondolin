@@ -1,8 +1,8 @@
-import { execFileSync } from "child_process";
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 type Qcow2CreateOptions = {
   /** overlay file path */

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-import { randomUUID } from "crypto";
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline/promises";
-import { PassThrough } from "stream";
-import { fileURLToPath } from "url";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
@@ -16,18 +17,12 @@ import type { VirtualProvider } from "../src/vfs/node/index.ts";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
+import type { HttpHooks } from "../src/qemu/contracts.ts";
 import { suggestHostsForSecret } from "../src/secret-host-suggestions.ts";
 import {
   ensureTrufflehogBinary,
   getTrufflehogStatus,
 } from "../src/build/trufflehog.ts";
-import {
-  FrameReader,
-  buildExecRequest,
-  decodeMessage,
-  encodeFrame,
-  type IncomingMessage,
-} from "../src/sandbox/virtio-protocol.ts";
 import { attachTty } from "../src/utils/tty-attach.ts";
 import {
   getDefaultBuildConfig,
@@ -66,6 +61,7 @@ import {
   type ServerMessage,
   type SnapshotResponseMessage,
 } from "../src/sandbox/control-protocol.ts";
+import { errorMessage } from "../src/utils/error.ts";
 
 type Command = {
   cmd: string;
@@ -90,10 +86,7 @@ function getDefaultInteractiveShellCommand(): string[] {
 }
 
 function checkpointBaseDir(): string {
-  return (
-    process.env.GONDOLIN_CHECKPOINT_DIR ??
-    gondolinCacheDir("checkpoints")
-  );
+  return process.env.GONDOLIN_CHECKPOINT_DIR ?? gondolinCacheDir("checkpoints");
 }
 
 function sanitizeCheckpointName(name: string): string {
@@ -130,7 +123,7 @@ async function waitForCheckpointReady(
       // keep polling
     }
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await delay(50);
   }
 
   try {
@@ -217,7 +210,7 @@ function renderCliError(err: unknown) {
     }
   }
 
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   console.error(message);
 }
 
@@ -225,7 +218,7 @@ function usage() {
   console.log("Usage: gondolin <command> [options]");
   console.log("Commands:");
   console.log(
-    "  exec         Run a command via the virtio socket or in-process VM",
+    "  exec         Run a command via a session IPC socket or in-process VM",
   );
   console.log(
     "  bash         Start an interactive shell session in the VM (bash -> sh fallback)",
@@ -405,14 +398,17 @@ function snapshotUsage() {
 
 function execUsage() {
   console.log("Usage:");
-  console.log("  gondolin exec --sock PATH -- CMD [ARGS...]");
+  console.log("  gondolin exec --sock PATH|ID -- CMD [ARGS...]");
   console.log(
-    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
+    "  gondolin exec --sock PATH|ID --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
   );
   console.log(
     "  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)",
   );
   console.log();
+  console.log(
+    "  --sock PATH|ID uses a Gondolin session IPC socket path or session id.",
+  );
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
@@ -605,10 +601,7 @@ function parseHostSecret(spec: string): SecretSpec {
       throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
     }
 
-    const value =
-      eqIndex === -1
-        ? process.env[name]
-        : spec.slice(eqIndex + 1);
+    const value = eqIndex === -1 ? process.env[name] : spec.slice(eqIndex + 1);
     if (value === undefined) {
       throw new Error(`Environment variable ${name} not set for host-secret`);
     }
@@ -715,7 +708,9 @@ async function promptForSuggestedSecretHosts(
   }
 }
 
-async function resolveSecretHosts(secrets: SecretSpec[]): Promise<SecretSpec[]> {
+async function resolveSecretHosts(
+  secrets: SecretSpec[],
+): Promise<SecretSpec[]> {
   const resolved: SecretSpec[] = [];
 
   for (const secret of secrets) {
@@ -892,7 +887,7 @@ function parseRootfsSizeOption(
   try {
     parseDiskSizeToBytes(value);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     fail(`invalid --rootfs-size: ${message}`);
   }
   return value;
@@ -970,7 +965,7 @@ function buildVmOptions(common: CommonOptions) {
   }
 
   // Build HTTP hooks if we have network options
-  let httpHooks;
+  let httpHooks: HttpHooks | undefined;
   let env: Record<string, string> | undefined;
 
   if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
@@ -1245,7 +1240,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
           const mapping = parseTcpMapSpec(spec);
           args.common.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1277,7 +1272,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
         try {
           args.common.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1453,83 +1448,118 @@ async function runExecVm(args: ExecArgs) {
   process.exit(exitCode);
 }
 
-function runExecSocket(args: ExecArgs) {
-  const socket = net.createConnection({ path: args.sock! });
-  const reader = new FrameReader();
+const EXEC_OUTPUT_WINDOW_BYTES = 1024 * 1024;
+
+function runExecSocket(args: ExecArgs, sockPath: string) {
+  // The session socket uses the 5-byte framed JSON/binary IPC protocol, not virtio CBOR.
   let currentIndex = 0;
   let inflightId: number | null = null;
   let exitCode = 0;
   let closing = false;
 
-  const sendNext = () => {
-    const command = args.commands[currentIndex];
-    inflightId = command.id;
-    const payload = buildCommandPayload(command);
-    const message = buildExecRequest(command.id, payload);
-    socket.write(encodeFrame(message));
-  };
-
   const finish = (code?: number) => {
     if (code !== undefined && exitCode === 0) exitCode = code;
     if (closing) return;
     closing = true;
-    socket.end();
+    process.exitCode = exitCode;
+    client.close();
   };
 
-  socket.on("connect", () => {
-    console.log(`connected to ${args.sock}`);
-    sendNext();
-  });
+  const sendNext = () => {
+    if (currentIndex >= args.commands.length) {
+      finish();
+      return;
+    }
+    const command = args.commands[currentIndex]!;
+    inflightId = command.id;
+    const payload = buildCommandPayload(command);
+    client.send({
+      type: "exec",
+      id: command.id,
+      cmd: payload.cmd,
+      ...(payload.argv ? { argv: payload.argv } : {}),
+      ...(payload.env ? { env: payload.env } : {}),
+      ...(payload.cwd ? { cwd: payload.cwd } : {}),
+      stdout_window: EXEC_OUTPUT_WINDOW_BYTES,
+      stderr_window: EXEC_OUTPUT_WINDOW_BYTES,
+    });
+  };
 
-  socket.on("data", (chunk) => {
-    reader.push(chunk, (frame) => {
-      const message = decodeMessage(frame) as IncomingMessage;
-      if (message.t === "exec_output") {
-        const data = message.p.data;
-        if (message.p.stream === "stdout") {
-          process.stdout.write(data);
-        } else {
-          process.stderr.write(data);
-        }
-      } else if (message.t === "exec_response") {
-        if (inflightId !== null && message.id !== inflightId) {
-          console.error(
-            `unexpected response id ${message.id} (expected ${inflightId})`,
-          );
-          finish(1);
-          return;
-        }
-        const code = message.p.exit_code ?? 1;
-        const signal = message.p.signal;
+  const client = connectToSession(sockPath, {
+    onConnect() {
+      sendNext();
+    },
+    onJson(message: ServerMessage) {
+      if (closing) return;
+      if (message.type === "status") return;
+      if (message.type === "exec_response") {
+        if (inflightId === null || message.id !== inflightId) return;
+        const code = message.exit_code ?? 1;
+        const signal = message.signal;
         if (signal !== undefined) {
           console.error(`process exited due to signal ${signal}`);
         }
         if (code !== 0 && exitCode === 0) exitCode = code;
         currentIndex += 1;
+        inflightId = null;
         if (currentIndex < args.commands.length) {
           sendNext();
         } else {
           finish();
         }
-      } else if (message.t === "error") {
-        console.error(`error ${message.p.code}: ${message.p.message}`);
-        finish(1);
+        return;
       }
-    });
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== inflightId) return;
+        console.error(`error ${message.code}: ${message.message}`);
+        finish(1);
+        return;
+      }
+    },
+    onBinary(frame: Buffer) {
+      if (closing) return;
+      const decoded = decodeOutputFrame(frame);
+      if (inflightId === null || decoded.id !== inflightId) return;
+      if (decoded.stream === "stdout") {
+        process.stdout.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stdout: decoded.data.length,
+        });
+      } else {
+        process.stderr.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stderr: decoded.data.length,
+        });
+      }
+    },
+    onClose(err?: Error) {
+      if (closing) return;
+      if (err) {
+        console.error(`socket error: ${err.message}`);
+        finish(1);
+        return;
+      }
+      console.error("session connection closed before the command finished");
+      finish(1);
+    },
   });
+}
 
-  socket.on("error", (err) => {
-    console.error(`socket error: ${err.message}`);
-    finish(1);
+/** Resolve `--sock` as a socket path, falling back to a session id (or prefix) */
+async function resolveExecSocketPath(value: string): Promise<string> {
+  if (value.includes("/") || fs.existsSync(value)) return value;
+  await gcSessions().catch(() => {
+    // ignore
   });
-
-  socket.on("end", () => {
-    if (!closing && exitCode === 0) exitCode = 1;
-  });
-
-  socket.on("close", () => {
-    process.exit(exitCode);
-  });
+  const session = await findSession(value);
+  if (!session?.alive) {
+    throw new Error(`session not found or not running: ${value}`);
+  }
+  return session.socketPath;
 }
 
 async function runExec(argv: string[] = process.argv.slice(2)) {
@@ -1541,8 +1571,8 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
   }
 
   if (args.sock) {
-    // Socket mode (direct virtio connection)
-    runExecSocket(args);
+    // Socket mode (session IPC)
+    runExecSocket(args, await resolveExecSocketPath(args.sock));
   } else {
     args.common.secrets = await resolveSecretHosts(args.common.secrets);
 
@@ -1599,7 +1629,7 @@ function parseBashArgs(argv: string[]): BashArgs {
       try {
         args.vmm = parseVmmOption(raw);
       } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
+        console.error(errorMessage(err));
         process.exit(1);
       }
       continue;
@@ -1658,7 +1688,7 @@ function parseBashArgs(argv: string[]): BashArgs {
         try {
           args.vmm = parseVmmOption(value);
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1728,7 +1758,7 @@ function parseBashArgs(argv: string[]): BashArgs {
           const mapping = parseTcpMapSpec(spec);
           args.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1770,7 +1800,7 @@ function parseBashArgs(argv: string[]): BashArgs {
         try {
           args.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1927,10 +1957,8 @@ async function runBash(argv: string[]) {
 
     const ESCAPE_BYTE = 0x1d; // Ctrl-]
 
-    let resolveEscape!: () => void;
-    const escapePromise = new Promise<void>((resolve) => {
-      resolveEscape = resolve;
-    });
+    const { promise: escapePromise, resolve: resolveEscape } =
+      Promise.withResolvers<void>();
 
     // This intentionally shares logic with ExecProcess.attach() via attachTty()
     // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
@@ -2185,7 +2213,7 @@ async function runAttach(argv: string[]) {
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2427,7 +2455,7 @@ async function runSnapshot(argv: string[]) {
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2848,7 +2876,7 @@ async function runBuild(argv: string[]) {
     try {
       config = parseBuildConfig(configContent);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       console.error(`Failed to parse config: ${message}`);
       process.exit(1);
     }
@@ -2911,7 +2939,7 @@ async function runBuild(argv: string[]) {
       }
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new Error(`Build failed: ${message}`);
   } finally {
     if (cleanupOutputDir) {
