@@ -1,6 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Zig does not enforce `minimum_zig_version`, and older compilers fail with
+// confusing errors, so reject them up front.
+comptime {
+    const required = std.SemanticVersion{ .major = 0, .minor = 17, .patch = 0 };
+    if (builtin.zig_version.order(required) == .lt) {
+        @compileError("Zig 0.17.0 or newer is required (found " ++ builtin.zig_version_string ++ "); install it with scripts/install-zig.sh 0.17.0");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -37,27 +46,25 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.linkSystemLibrary("krun", .{});
 
-    const install_exe = b.addInstallArtifact(exe, .{});
-    if (target.result.os.tag == .macos and builtin.os.tag == .macos) {
+    if (target.result.os.tag == .macos and builtin.target.os.tag == .macos) {
+        // The install path is not known at configure time, so sign a copy of
+        // the binary as a cached build output and install the signed copy.
         const codesign = b.addSystemCommand(&.{
+            "/bin/sh",
+            "-c",
+            "cp \"$1\" \"$3\" && codesign --force --sign - --entitlements \"$2\" \"$3\"",
             "codesign",
-            "--force",
-            "--sign",
-            "-",
-            "--entitlements",
-            b.pathFromRoot("gondolin-krun-runner.entitlements"),
-            b.getInstallPath(.bin, "gondolin-krun-runner"),
         });
-        codesign.step.dependOn(&install_exe.step);
-        b.getInstallStep().dependOn(&codesign.step);
+        codesign.addArtifactArg2(exe, .{});
+        codesign.addFileArg2(b.path("gondolin-krun-runner.entitlements"), .{});
+        const signed_exe = codesign.addOutputFileArg2("gondolin-krun-runner", .{});
+        b.getInstallStep().dependOn(&b.addInstallBinFile(signed_exe, "gondolin-krun-runner").step);
     } else {
-        b.getInstallStep().dependOn(&install_exe.step);
+        b.installArtifact(exe);
     }
 
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the krun runner");
     run_step.dependOn(&run_cmd.step);

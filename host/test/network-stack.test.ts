@@ -1149,7 +1149,7 @@ test("network-stack: TCP sniff-limit exceeded rejects incomplete HTTP request li
   drainAllQemuTx(stack);
 
   // Create a payload that looks like it starts with an HTTP method, but never completes a request line.
-  const payload = Buffer.from("GET /" + "a".repeat(8192), "ascii");
+  const payload = Buffer.from(`GET /${"a".repeat(8192)}`, "ascii");
   stack.handleTCP(
     buildTcpSegment({
       srcPort: 40004,

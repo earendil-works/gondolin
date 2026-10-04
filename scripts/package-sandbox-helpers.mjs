@@ -1,73 +1,28 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  computeSandboxHelperBuildId,
+  SANDBOX_HELPER_BINARY_NAMES,
+} from "../host/src/build/sandbox-helpers.ts";
+import { computeFileHash } from "../host/src/build/helpers.ts";
+import { normalizeVersion, parseArgs, requireArg } from "./lib/cli.mjs";
+
 const HELPER_KIND = "gondolin-sandbox-helpers";
 const RELEASE_ARTIFACT_KIND = "gondolin-sandbox-helpers-release-artifact";
-const BINARY_NAMES = [
-  "sandboxd",
-  "sandboxfs",
-  "sandboxssh",
-  "sandboxingress",
-];
 const ZIG_TARGETS = {
   aarch64: "aarch64-linux-musl",
   x86_64: "x86_64-linux-musl",
 };
-const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 
 function usage() {
   return `Usage: node scripts/package-sandbox-helpers.mjs --version <version> --arch <aarch64|x86_64> [options]\n\nOptions:\n  --guest-dir <path>     Guest source directory (default: ./guest)\n  --output-dir <path>    Directory for archive + metadata (default: cwd)\n  --source-ref <ref>     Git ref recorded in manifest metadata\n  --target <triple>      Zig target triple (default: inferred from arch)\n  --zig-version <ver>    Zig version (default: \`zig version\`)\n`;
-}
-
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i];
-    if (token === "--help" || token === "-h") {
-      args.help = true;
-      continue;
-    }
-    if (!token.startsWith("--")) {
-      throw new Error(`unexpected argument: ${token}`);
-    }
-
-    const eq = token.indexOf("=");
-    if (eq >= 0) {
-      args[token.slice(2, eq)] = token.slice(eq + 1);
-      continue;
-    }
-
-    const key = token.slice(2);
-    const value = argv[++i];
-    if (value === undefined) {
-      throw new Error(`missing value for --${key}`);
-    }
-    args[key] = value;
-  }
-  return args;
-}
-
-function requireArg(args, name) {
-  const value = args[name];
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`missing required --${name}`);
-  }
-  return value.trim();
-}
-
-function normalizeVersion(value) {
-  const version = value.trim().replace(/^v/, "");
-  if (!VERSION_PATTERN.test(version)) {
-    throw new Error(`invalid version: ${value}`);
-  }
-  return version;
 }
 
 function normalizeArch(value) {
@@ -76,47 +31,6 @@ function normalizeArch(value) {
     throw new Error(`invalid arch: ${value}`);
   }
   return arch;
-}
-
-function sha256File(filePath) {
-  const hash = createHash("sha256");
-  const fd = fs.openSync(filePath, "r");
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-
-  try {
-    let bytesRead = 0;
-    while ((bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
-      hash.update(buffer.subarray(0, bytesRead));
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-
-  return hash.digest("hex");
-}
-
-function bytesToUuid(bytes) {
-  const hex = bytes.toString("hex");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join("-");
-}
-
-function computeBuildId({ arch, checksums }) {
-  const parts = ["gondolin-sandbox-helper-build", `arch=${arch}`];
-  for (const name of BINARY_NAMES) {
-    parts.push(`${name}=${checksums[name]}`);
-  }
-
-  const digest = createHash("sha256").update(parts.join("\n")).digest();
-  const bytes = Buffer.from(digest.subarray(0, 16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  return bytesToUuid(bytes);
 }
 
 function commandFailure(command, args, result) {
@@ -146,14 +60,7 @@ function hasGnuTar() {
 }
 
 function createPortableTarGz(stageDir, archivePath) {
-  const tarArgs = [
-    "-czf",
-    archivePath,
-    "-C",
-    stageDir,
-    "manifest.json",
-    "bin",
-  ];
+  const tarArgs = ["-czf", archivePath, "-C", stageDir, "manifest.json", "bin"];
   const tar = spawnSync("tar", tarArgs, {
     maxBuffer: MAX_ARCHIVE_BYTES,
   });
@@ -204,7 +111,7 @@ function copyHelperBinaries(binSourceDir, binDestDir) {
   fs.mkdirSync(binDestDir, { recursive: true });
   const checksums = {};
 
-  for (const name of BINARY_NAMES) {
+  for (const name of SANDBOX_HELPER_BINARY_NAMES) {
     const source = path.join(binSourceDir, name);
     const stat = fs.statSync(source, { throwIfNoEntry: false });
     if (!stat?.isFile()) {
@@ -214,7 +121,7 @@ function copyHelperBinaries(binSourceDir, binDestDir) {
     const dest = path.join(binDestDir, name);
     fs.copyFileSync(source, dest);
     fs.chmodSync(dest, 0o755);
-    checksums[name] = sha256File(dest);
+    checksums[name] = computeFileHash(dest);
   }
 
   return checksums;
@@ -236,9 +143,12 @@ function main() {
 
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
   const repoRoot = path.resolve(scriptDir, "..");
-  const guestDir = path.resolve(args["guest-dir"] || path.join(repoRoot, "guest"));
+  const guestDir = path.resolve(
+    args["guest-dir"] || path.join(repoRoot, "guest"),
+  );
   const outputDir = path.resolve(args["output-dir"] || process.cwd());
-  const sourceRef = typeof args["source-ref"] === "string" ? args["source-ref"].trim() : "";
+  const sourceRef =
+    typeof args["source-ref"] === "string" ? args["source-ref"].trim() : "";
   const zigVersion =
     typeof args["zig-version"] === "string" && args["zig-version"].trim()
       ? args["zig-version"].trim()
@@ -261,7 +171,7 @@ function main() {
       path.join(guestDir, "zig-out", "bin"),
       binDir,
     );
-    const buildId = computeBuildId({ arch, checksums });
+    const buildId = computeSandboxHelperBuildId({ arch, checksums });
     const manifest = {
       schema: 1,
       kind: HELPER_KIND,
@@ -282,7 +192,7 @@ function main() {
     const archivePath = path.join(outputDir, archive);
     createDeterministicTarGz(stageDir, archivePath);
 
-    const archiveSha256 = sha256File(archivePath);
+    const archiveSha256 = computeFileHash(archivePath);
     fs.writeFileSync(
       path.join(outputDir, `${archive}.sha256`),
       `${archiveSha256}  ${archive}\n`,
@@ -324,6 +234,8 @@ function main() {
 try {
   main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(
+    `${error instanceof Error ? error.message : String(error)}\n`,
+  );
   process.exit(1);
 }

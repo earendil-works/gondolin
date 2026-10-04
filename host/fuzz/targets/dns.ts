@@ -5,7 +5,7 @@ import {
   DNS_TYPE_AAAA,
   DNS_CLASS_IN,
 } from "../../src/qemu/dns.ts";
-import { XorShift32 } from "../rng.ts";
+import type { XorShift32 } from "../rng.ts";
 import type { FuzzTarget } from "./types.ts";
 
 function seedQuery(name: string, type: number): Buffer {

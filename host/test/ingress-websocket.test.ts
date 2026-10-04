@@ -3,6 +3,7 @@ import net from "node:net";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { Duplex } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { IngressGateway } from "../src/ingress.ts";
 
@@ -151,12 +152,12 @@ test("ingress: websocket upgrades are tunneled", async () => {
   });
 
   // Wait for the handshake response + initial tunnel bytes.
-  await new Promise((r) => setTimeout(r, 100));
+  await delay(100);
 
   // Send a post-upgrade payload.
   client.write(Buffer.from("ping"));
 
-  await new Promise((r) => setTimeout(r, 100));
+  await delay(100);
 
   const out = received.toString("utf8");
   assert.match(out, /^HTTP\/1\.1 101 /);

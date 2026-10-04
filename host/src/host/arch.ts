@@ -20,6 +20,22 @@ function nodeArchToArchitecture(arch: NodeJS.Architecture): Architecture {
 }
 
 /**
+ * Normalize an architecture alias (`arm64`, `amd64`, `x64`, ...) to the
+ * canonical guest architecture name, or `null` if it is not recognized.
+ */
+export function normalizeArchitecture(
+  value: string | undefined | null,
+): Architecture | null {
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower === "aarch64" || lower === "arm64") return "aarch64";
+  if (lower === "x86_64" || lower === "amd64" || lower === "x64") {
+    return "x86_64";
+  }
+  return null;
+}
+
+/**
  * Synchronously detect the host node architecture.
  *
  * On macOS x64 under Rosetta, this runs a sysctl probe and may return "arm64".

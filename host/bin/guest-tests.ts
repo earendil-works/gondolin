@@ -1,8 +1,9 @@
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 
 import { VM } from "../src/vm/core.ts";
+import { errorMessage } from "../src/utils/error.ts";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 
@@ -57,7 +58,7 @@ async function dumpGuestLogs(vm: VM, label: string) {
       process.stderr.write(out);
       process.stderr.write("\n----- end -----\n");
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       process.stderr.write(
         `\n----- ${title} (failed) -----\n${detail}\n----- end -----\n`,
       );
@@ -197,7 +198,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   process.stderr.write(`${message}\n`);
   process.exit(1);
 });

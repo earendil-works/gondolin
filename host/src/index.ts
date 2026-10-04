@@ -29,7 +29,7 @@ export {
   type VmFsDeleteOptions,
 } from "./vm/core.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
-export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec.ts";
+export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
 
 // Server for running the sandbox
 export { SandboxServer } from "./sandbox/server.ts";
@@ -92,6 +92,7 @@ export {
   type SecretDefinition,
   type SecretManager,
   type SecretManagerEntry,
+  type SecretPlaceholderMode,
   type UpdateSecretOptions,
 } from "./http/hooks.ts";
 
@@ -113,16 +114,21 @@ export type {
   SshExecPolicy,
 } from "./qemu/ssh.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
+export {
+  suggestHostsForSecret,
+  type SecretHostSuggestion,
+  type SuggestSecretHostsOptions,
+} from "./secret-host-suggestions.ts";
 
 // SSH helpers
 export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";
 
 // Debug helpers
-export {
-  type DebugFlag,
-  type DebugConfig,
-  type DebugComponent,
-  type DebugLogFn,
+export type {
+  DebugFlag,
+  DebugConfig,
+  DebugComponent,
+  DebugLogFn,
 } from "./debug.ts";
 
 // Ingress gateway
@@ -182,6 +188,7 @@ export {
   listImageRefs,
   setImageRef,
   tagImage,
+  removeImage,
   type ImageArch,
   type ImageRefTargets,
   type LocalImageRef,

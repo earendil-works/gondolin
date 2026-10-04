@@ -1,7 +1,7 @@
-import fs from "fs";
-import net from "net";
-import path from "path";
-import { Duplex } from "stream";
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import { Duplex } from "node:stream";
 
 import {
   FrameReader,
@@ -109,7 +109,7 @@ export class VirtioBridge {
       return this.writeFrame(frame);
     }
     const queued = this.queueFrame(frame);
-    if (queued && this.socket && this.socket.writable && !this.waitingDrain) {
+    if (queued && this.socket?.writable && !this.waitingDrain) {
       this.flushPending();
     }
     return queued;
@@ -122,7 +122,7 @@ export class VirtioBridge {
   onWritable?: () => void;
 
   private writeFrame(frame: Buffer): boolean {
-    if (!this.socket || !this.socket.writable) {
+    if (!this.socket?.writable) {
       return this.queueFrame(frame);
     }
     const ok = this.socket.write(frame);

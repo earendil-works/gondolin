@@ -133,7 +133,7 @@ The base rootfs image is not modified when using the default `cow` mode. When
 combined with `rootfs.mode="memory"`, Gondolin uses a temporary qcow2 overlay so
 the guest-side filesystem resize survives for the lifetime of that VM.
 
-The guest image must include `resize2fs` (Alpine package: `e2fsprogs`). Newer
+The guest image must include `resize2fs` (Alpine package: `e2fsprogs-extra`). Newer
 `alpine-base` images include it; custom images should add it to
 `alpine.rootfsPackages` when using `rootfs.size`.
 

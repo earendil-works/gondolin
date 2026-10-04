@@ -28,7 +28,7 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 23.6.0
+- Node.js >= 22.19.0
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
 first use from local overrides/store first, then via `builtin-image-registry.json`,
@@ -64,7 +64,7 @@ options for configuring filesystem mounts and mediated network egress policy.
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
-    - Requires `resize2fs` in the guest image (`e2fsprogs` on Alpine)
+    - Requires `resize2fs` in the guest image (`e2fsprogs-extra` on Alpine)
 
 Examples:
 
@@ -87,6 +87,12 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
     - Allow outbound HTTP/HTTPS requests to this host
     - May be repeated
     - `HOST_PATTERN` supports `*` wildcards (for example `*.github.com`)
+
+- `--host-secret NAME[=VALUE]`
+    - Make a secret available inside the VM as an environment variable named `NAME`
+    - Gondolin resolves a managed `trufflehog` helper on first use, then scans for suggested hostnames and asks you to confirm them
+    - If no suggestions are found, the command fails and asks you to re-run with explicit hosts
+    - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
 - `--host-secret NAME@HOST[,HOST...][=VALUE]`
     - Make a secret available inside the VM as an environment variable named `NAME`
@@ -408,16 +414,18 @@ Per-command flags apply to the most recent `--cmd`:
 
 ### Socket Mode (Advanced)
 
-If you already have a running sandbox server and a virtio control socket path,
-you can send exec requests without creating a VM:
+To run non-interactive commands in an already running Gondolin session (for
+example one started with `gondolin bash`), pass its session id (or a unique
+prefix, as shown by `gondolin list`) or the path to its session IPC socket:
 
 ```bash
-gondolin exec --sock /path/to/virtio.sock -- COMMAND [ARGS...]
+gondolin exec --sock SESSION_ID -- COMMAND [ARGS...]
+gondolin exec --sock /path/to/session.sock -- COMMAND [ARGS...]
 ```
 
-This is primarily useful when you manage the VM lifecycle yourself (for example
-via the programmatic `SandboxServer`/`VM` APIs) and want a separate process to
-issue exec requests.
+No VM is created; command output is written to stdout/stderr and the process
+exits with the command's exit code.  Use `gondolin attach` for interactive
+shells.
 
 ### `gondolin build`
 
@@ -462,6 +470,23 @@ gondolin build --verify ./my-assets
 For a full configuration reference and build requirements, see:
 [Building Custom Images](./custom-images.md).
 
+Manage the Alpine package cache used by image builds:
+
+```bash
+gondolin build cache info
+gondolin build cache update
+gondolin build cache update --config Gondolinfile --arch aarch64
+gondolin build cache rm
+gondolin build cache rm --yes
+```
+
+`info` reports the cache size and the cached Alpine minirootfs and kernel
+package versions. `update` refreshes the `main` and `community` package indexes
+for the selected build configuration (builds also refresh them automatically
+when a cached index references packages that are no longer on the mirror). `rm`
+prompts before deleting Alpine minirootfs, package-index, and APK files while
+preserving unrelated build cache data.
+
 ### `gondolin image`
 
 Manage the local image object store and refs:
@@ -472,7 +497,18 @@ gondolin image import ./my-assets --tag default:latest
 gondolin image inspect default:latest
 gondolin image pull alpine-base:latest
 gondolin image tag default:latest tooling:dev
+gondolin image rm tooling:dev
+gondolin image rm 3cd7a864-f023-5a35-9db1-39a1be5bdcca --force
+gondolin image rm --untagged
+gondolin image rm --all
 ```
+
+`image ls` includes objects without tags as `<untagged>`. Removing a tag deletes
+the image object when no other local tags reference it. Removing a build id
+requires `--force` when local tags still reference it; `--force` removes those
+tags as well. `--untagged` removes every untagged object, while `--all` clears
+all local refs and objects. Every removal prompts for confirmation unless
+`--yes` or `-y` is passed.
 
 Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 
@@ -508,6 +544,14 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 - `GONDOLIN_CHECKPOINT_DIR`
     - Override checkpoint directory used by `gondolin snapshot` / `gondolin bash --resume`
     - Default: `~/.cache/gondolin/checkpoints`
+
+You can inspect the managed `trufflehog` helper with:
+
+```bash
+gondolin tools trufflehog
+gondolin tools trufflehog --install
+gondolin tools trufflehog --json
+```
 
 - `GONDOLIN_SESSIONS_DIR`
     - Override session registry directory used by `gondolin list` / `gondolin attach`

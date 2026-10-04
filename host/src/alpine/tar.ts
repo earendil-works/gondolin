@@ -1,8 +1,8 @@
-import fs from "fs";
-import path from "path";
-import { createGunzip } from "zlib";
-import { Writable } from "stream";
-import { pipeline } from "stream/promises";
+import fs from "node:fs";
+import path from "node:path";
+import { createGunzip } from "node:zlib";
+import { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import type { TarEntry } from "./types.ts";
 import { hasSymlinkComponent } from "./rootfs.ts";
@@ -11,10 +11,10 @@ const TAR_TYPE_FILE = 0x30;
 const TAR_TYPE_DIRECTORY = 0x35;
 const TAR_TYPE_SYMLINK = 0x32;
 const TAR_TYPE_HARDLINK = 0x31;
-const TAR_TYPE_PAX_LOCAL = 0x78;
-const TAR_TYPE_PAX_GLOBAL = 0x67;
-const TAR_TYPE_GNU_LONGNAME = 0x4c;
-const TAR_TYPE_GNU_LONGLINK = 0x4b;
+export const TAR_TYPE_PAX_LOCAL = 0x78;
+export const TAR_TYPE_PAX_GLOBAL = 0x67;
+export const TAR_TYPE_GNU_LONGNAME = 0x4c;
+export const TAR_TYPE_GNU_LONGLINK = 0x4b;
 
 /** Parse a raw tar archive buffer into entries */
 export function parseTar(buf: Buffer): TarEntry[] {
@@ -124,7 +124,10 @@ export function parseTar(buf: Buffer): TarEntry[] {
   return entries;
 }
 
-function parsePaxHeaders(content: Buffer | null): Record<string, string> {
+/** Parse PAX extended header records into a key/value map */
+export function parsePaxHeaders(
+  content: Buffer | null,
+): Record<string, string> {
   if (!content || content.length === 0) {
     return {};
   }
@@ -166,7 +169,8 @@ function parsePaxHeaders(content: Buffer | null): Record<string, string> {
   return out;
 }
 
-function readLongTarString(content: Buffer | null): string {
+/** Read a GNU long name/link payload, stripping trailing NULs/newlines */
+export function readLongTarString(content: Buffer | null): string {
   if (!content || content.length === 0) {
     return "";
   }
@@ -178,7 +182,12 @@ function readLongTarString(content: Buffer | null): string {
   return content.subarray(0, end).toString("utf8");
 }
 
-function readTarString(buf: Buffer, offset: number, length: number): string {
+/** Read a NUL-terminated string field from a tar header */
+export function readTarString(
+  buf: Buffer,
+  offset: number,
+  length: number,
+): string {
   const slice = buf.subarray(offset, offset + length);
   const nullIdx = slice.indexOf(0);
   const end = nullIdx === -1 ? length : nullIdx;

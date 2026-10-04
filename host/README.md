@@ -38,10 +38,10 @@ sudo apt install \
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-# install Zig 0.16.0 for your Linux architecture
+# install Zig 0.17.0 for your Linux architecture
 ```
 
-- Node.js >= 23.6
+- Node.js >= 22.19
 
 > **Note:** Runtime validation is currently strongest on ARM64 (Apple Silicon, Linux aarch64).
 > Linux x86_64 is currently smoke-tested for `make krun-runner` in CI.
@@ -124,6 +124,10 @@ await vm.close();
 ```
 
 The guest never sees the real secret values. It only gets placeholders.
+By default (`secretPlaceholderMode: "shared"`) those placeholders look like
+`<random-marker>.<normalized_secret_name>`, where all generated secrets share
+one random marker. `secretPlaceholderMode: "unique"` instead gives each secret
+its own fully random placeholder like `GONDOLIN_SECRET_<random>`.
 Placeholders are substituted by the host in outbound HTTP headers, including
 `Authorization: Basic …` (the base64 token is decoded and placeholders in
 `username:password` are replaced).

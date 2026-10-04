@@ -1,4 +1,4 @@
-import { Duplex, PassThrough, Readable } from "stream";
+import { type Duplex, PassThrough, type Readable } from "node:stream";
 
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import {
@@ -11,19 +11,19 @@ import {
   buildPtyResize,
   buildStdinData,
 } from "./virtio-protocol.ts";
-import {
-  type BootCommandMessage,
-  type ClientMessage,
-  type ExecCommandMessage,
-  type ExecWindowCommandMessage,
-  type PtyResizeCommandMessage,
-  type StdinCommandMessage,
+import type {
+  BootCommandMessage,
+  ClientMessage,
+  ExecCommandMessage,
+  ExecWindowCommandMessage,
+  PtyResizeCommandMessage,
+  StdinCommandMessage,
 } from "./control-protocol.ts";
 import type { SandboxState } from "./controller.ts";
-import {
-  type GuestFileDeleteOptions,
-  type GuestFileReadOptions,
-  type GuestFileWriteOptions,
+import type {
+  GuestFileDeleteOptions,
+  GuestFileReadOptions,
+  GuestFileWriteOptions,
 } from "./server-options.ts";
 import {
   MAX_REQUEST_ID,
@@ -45,24 +45,12 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { stripTrailingNewline } from "../debug.ts";
+import { errorMessage } from "../utils/error.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;
   reject: (err: Error) => void;
   cleanup?: () => void;
-};
-
-type FileReadOperation = {
-  kind: "read";
-  stream: PassThrough;
-  resolve: () => void;
-  reject: (err: Error) => void;
-};
-
-type FileDoneOperation = {
-  kind: "write" | "delete";
-  resolve: () => void;
-  reject: (err: Error) => void;
 };
 
 export class SandboxServerOps {
@@ -151,12 +139,11 @@ export class SandboxServerOps {
         ? Math.trunc(options.highWaterMark)
         : undefined;
 
-    let resolveDone!: () => void;
-    let rejectDone!: (err: Error) => void;
-    const done = new Promise<void>((resolve, reject) => {
-      resolveDone = resolve;
-      rejectDone = reject;
-    });
+    const {
+      promise: done,
+      resolve: resolveDone,
+      reject: rejectDone,
+    } = Promise.withResolvers<void>();
     void done.catch(() => {});
 
     const stream = new PassThrough(
@@ -263,12 +250,12 @@ export class SandboxServerOps {
 
     const id = this.allocateFileOpId();
 
-    let resolveDone!: () => void;
-    let rejectDone!: (err: Error) => void;
-    const done = new Promise<void>((resolve, reject) => {
-      resolveDone = resolve;
-      rejectDone = reject;
-    });
+    const {
+      promise: done,
+      resolve: resolveDone,
+      reject: rejectDone,
+    } = Promise.withResolvers<void>();
+    void done.catch(() => {});
 
     this.fileOps.set(id, {
       kind: "write",
@@ -339,12 +326,12 @@ export class SandboxServerOps {
 
     const id = this.allocateFileOpId();
 
-    let resolveDone!: () => void;
-    let rejectDone!: (err: Error) => void;
-    const done = new Promise<void>((resolve, reject) => {
-      resolveDone = resolve;
-      rejectDone = reject;
-    });
+    const {
+      promise: done,
+      resolve: resolveDone,
+      reject: rejectDone,
+    } = Promise.withResolvers<void>();
+    void done.catch(() => {});
 
     this.fileOps.set(id, {
       kind: "delete",
@@ -925,7 +912,7 @@ export class SandboxServerOps {
     try {
       config = normalizeSandboxFsConfig(message);
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      const error = errorMessage(err);
       sendError(client, {
         type: "error",
         code: "invalid_request",

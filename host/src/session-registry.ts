@@ -1,8 +1,8 @@
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
 
+import { gondolinCacheDir } from "./cache.ts";
 import type { SandboxConnection } from "./sandbox/client.ts";
 import {
   decodeOutputFrame,
@@ -18,13 +18,10 @@ import {
   type SnapshotResponseMessage,
   type StdinCommandMessage,
 } from "./sandbox/control-protocol.ts";
-
-const CACHE_BASE =
-  process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+import { errorMessage } from "./utils/error.ts";
 
 const SESSIONS_DIR =
-  process.env.GONDOLIN_SESSIONS_DIR ??
-  path.join(CACHE_BASE, "gondolin", "sessions");
+  process.env.GONDOLIN_SESSIONS_DIR ?? gondolinCacheDir("sessions");
 
 const MAX_REQUEST_ID = 0xffffffff;
 const INTERNAL_ID_FLOOR = 0x80000000;
@@ -115,7 +112,7 @@ export function registerSession(options: { id: string; label?: string }): {
     label: options.label,
   };
 
-  fs.writeFileSync(metaPath, JSON.stringify(info, null, 2) + "\n");
+  fs.writeFileSync(metaPath, `${JSON.stringify(info, null, 2)}\n`);
   return { socketPath: sockPath, metadataPath: metaPath };
 }
 
@@ -502,7 +499,7 @@ export class SessionIpcServer {
           },
         );
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         sendError(socket, "ipc_unavailable", detail);
         socket.destroy();
         return null;
@@ -534,7 +531,7 @@ export class SessionIpcServer {
       try {
         internalId = this.allocateInternalId();
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         sendError(socket, "queue_full", detail, message.id);
         return;
       }
@@ -556,7 +553,7 @@ export class SessionIpcServer {
         externalToInternal.delete(message.id);
         internalToExternal.delete(internalId);
         this.releaseInternalId(internalId);
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         sendError(socket, "ipc_error", detail, message.id);
       }
     };
@@ -579,7 +576,7 @@ export class SessionIpcServer {
       try {
         conn.send({ ...message, id: internalId } as ClientMessage);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         sendError(socket, "ipc_error", detail, message.id);
       }
     };
@@ -636,7 +633,7 @@ export class SessionIpcServer {
           }
         })
         .catch((err) => {
-          const detail = err instanceof Error ? err.message : String(err);
+          const detail = errorMessage(err);
           sendError(socket, "snapshot_failed", detail, message.id);
         });
     };
@@ -728,6 +725,8 @@ export class SessionIpcServer {
 }
 
 export type IpcClientCallbacks = {
+  /** called after the external session IPC socket connects */
+  onConnect?: () => void;
   /** called with JSON server messages */
   onJson: (message: ServerMessage) => void;
   /** called with binary output frames */
@@ -751,6 +750,10 @@ export function connectToSession(
   let readBuffer = Buffer.alloc(0);
   let expectedLength: number | null = null;
   let frameType: number | null = null;
+
+  socket.on("connect", () => {
+    callbacks.onConnect?.();
+  });
 
   socket.on("data", (chunk: Buffer) => {
     readBuffer = Buffer.concat([readBuffer, chunk]);

@@ -1,10 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 
 import forge from "node-forge";
+import { gondolinCacheDir } from "./cache.ts";
 
 export type MitmCa = {
   /** ca private key */
@@ -18,9 +18,7 @@ export type MitmCa = {
 };
 
 export function getDefaultMitmCertDir() {
-  const cacheBase =
-    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-  return path.join(cacheBase, "gondolin", "ssl");
+  return gondolinCacheDir("ssl");
 }
 
 export function resolveMitmCertDir(mitmCertDir?: string) {
@@ -44,7 +42,9 @@ export async function loadOrCreateMitmCa(mitmDir: string): Promise<MitmCa> {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
     }
     if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
-      throw new Error("persisted mitm ca cert is missing required key identifiers");
+      throw new Error(
+        "persisted mitm ca cert is missing required key identifiers",
+      );
     }
     return {
       key,
@@ -77,7 +77,9 @@ export function loadOrCreateMitmCaSync(mitmDir: string): MitmCa {
       throw new Error("persisted mitm ca cert has an unsafe serial number");
     }
     if (!mitmCaHasRequiredKeyIdentifiers(cert)) {
-      throw new Error("persisted mitm ca cert is missing required key identifiers");
+      throw new Error(
+        "persisted mitm ca cert is missing required key identifiers",
+      );
     }
     return {
       key,
@@ -174,7 +176,8 @@ export function mitmLeafHasRequiredKeyIdentifiers(
   caCert: forge.pki.Certificate,
   leafCert: forge.pki.Certificate,
 ): boolean {
-  const caSubjectKeyIdentifier = getCertificateSubjectKeyIdentifierBytes(caCert);
+  const caSubjectKeyIdentifier =
+    getCertificateSubjectKeyIdentifierBytes(caCert);
   if (caSubjectKeyIdentifier === undefined) {
     return false;
   }
