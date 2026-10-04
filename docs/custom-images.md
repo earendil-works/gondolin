@@ -114,6 +114,7 @@ The file has the following structure:
       "ca-certificates",
       "curl",
       "e2fsprogs",
+      "e2fsprogs-extra",
       "nodejs",
       "npm",
       "uv",

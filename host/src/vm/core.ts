@@ -1621,7 +1621,7 @@ fi
       "-c",
       [
         "if ! command -v resize2fs >/dev/null 2>&1; then",
-        "  echo 'rootfs.size requires resize2fs in the guest image (install e2fsprogs)' >&2;",
+        "  echo 'rootfs.size requires resize2fs in the guest image (Alpine: install e2fsprogs-extra)' >&2;",
         "  exit 127;",
         "fi;",
         "resize2fs /dev/vda",

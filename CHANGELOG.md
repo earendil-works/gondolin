@@ -14,6 +14,7 @@ All notable changes to Gondolin are documented here.
 - `GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` now always builds helpers from local Zig sources as documented, instead of only acting as a fallback when published helpers cannot be resolved.
 - Fix unhandled promise rejections when `writeGuestFile()` or `deleteGuestFile()` fail before completion, for example when aborted.  #136
 - Fix HTTP 502 responses for guest requests with buffered bodies (e.g. `POST`, `git clone` over HTTP) on Node.js >= 24.17 caused by a duplicated `Content-Length` header.  #135
+- Add `e2fsprogs-extra` to the default `alpine-base` build config so `rootfs.size` / `--rootfs-size` can find `resize2fs` in the guest.  #140
 
 ## 0.12.0
 
