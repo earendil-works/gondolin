@@ -473,17 +473,19 @@ For a full configuration reference and build requirements, see:
 Manage the Alpine package cache used by image builds:
 
 ```bash
-gondolin build cache version
+gondolin build cache info
 gondolin build cache update
 gondolin build cache update --config Gondolinfile --arch aarch64
 gondolin build cache rm
 gondolin build cache rm --yes
 ```
 
-`version` reports cached Alpine minirootfs and kernel package versions. `update`
-refreshes the `main` and `community` package indexes for the selected build
-configuration. `rm` prompts before deleting Alpine minirootfs, package-index,
-and APK files while preserving unrelated build cache data.
+`info` reports the cache size and the cached Alpine minirootfs and kernel
+package versions. `update` refreshes the `main` and `community` package indexes
+for the selected build configuration (builds also refresh them automatically
+when a cached index references packages that are no longer on the mirror). `rm`
+prompts before deleting Alpine minirootfs, package-index, and APK files while
+preserving unrelated build cache data.
 
 ### `gondolin image`
 

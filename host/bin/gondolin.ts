@@ -2548,7 +2548,7 @@ async function runSnapshot(argv: string[]) {
 
 function buildUsage() {
   console.log("Usage: gondolin build [options]");
-  console.log("       gondolin build cache <version|rm|update> [options]");
+  console.log("       gondolin build cache <info|rm|update> [options]");
   console.log();
   console.log("Build custom guest assets (kernel, initramfs, rootfs).");
   console.log();
@@ -2598,7 +2598,7 @@ function buildUsage() {
   console.log("  gondolin build --verify ./my-assets");
   console.log();
   console.log("Manage the Alpine build cache:");
-  console.log("  gondolin build cache version");
+  console.log("  gondolin build cache info");
   console.log("  gondolin build cache rm [--yes]");
   console.log("  gondolin build cache update [--config FILE] [--arch ARCH]");
 }
@@ -2689,6 +2689,37 @@ function parseBuildArgs(argv: string[]): BuildArgs {
   return args;
 }
 
+/** Ask for a yes/no confirmation on the terminal (defaults to no) */
+async function confirmDestructive(
+  question: string,
+  assumeYes: boolean,
+): Promise<boolean> {
+  if (assumeYes) return true;
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await rl.question(`${question} [y/N] `);
+    if (/^(?:y|yes)$/i.test(answer.trim())) return true;
+    console.log("Aborted.");
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+function formatByteSize(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
 async function runBuildCache(argv: string[]) {
   const [subcommand, ...rest] = argv;
 
@@ -2697,13 +2728,13 @@ async function runBuildCache(argv: string[]) {
     return;
   }
 
-  if (subcommand === "version") {
+  if (subcommand === "info") {
     if (rest.length > 0) {
-      throw new Error(`unexpected argument for build cache version: ${rest[0]}`);
+      throw new Error(`unexpected argument for build cache info: ${rest[0]}`);
     }
     const info = inspectAlpineBuildCache();
     console.log(`Alpine build cache: ${info.cacheDir}`);
-    console.log(`Size: ${info.sizeBytes} bytes`);
+    console.log(`Size: ${formatByteSize(info.sizeBytes)}`);
     console.log(`Package archives: ${info.packageArchiveCount}`);
 
     if (info.minirootfs.length === 0) {
@@ -2741,27 +2772,18 @@ async function runBuildCache(argv: string[]) {
       throw new Error(`unexpected argument for build cache rm: ${arg}`);
     }
 
-    if (!assumeYes) {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-      try {
-        const answer = await rl.question(
-          `Remove Alpine build cache at ${alpineBuildCacheDirectory()}? [y/N] `,
-        );
-        if (!/^(?:y|yes)$/i.test(answer.trim())) {
-          console.log("Aborted.");
-          return;
-        }
-      } finally {
-        rl.close();
-      }
+    if (
+      !(await confirmDestructive(
+        `Remove Alpine build cache at ${alpineBuildCacheDirectory()}?`,
+        assumeYes,
+      ))
+    ) {
+      return;
     }
 
     const removed = removeAlpineBuildCache();
     console.log(
-      `Removed ${removed.removedEntries} cache entries (${removed.removedBytes} bytes).`,
+      `Removed ${removed.removedEntries} cache entries (${formatByteSize(removed.removedBytes)}).`,
     );
     return;
   }
@@ -3257,25 +3279,13 @@ async function runImage(argv: string[]) {
         throw new Error("--force requires a build id or image ref");
       }
 
-      if (!assumeYes) {
-        const description = all
-          ? "all local images"
-          : untagged
-            ? "all untagged local images"
-            : `local image ${selector}`;
-        const rl = readline.createInterface({
-          input: process.stdin,
-          output: process.stdout,
-        });
-        try {
-          const answer = await rl.question(`Remove ${description}? [y/N] `);
-          if (!/^(?:y|yes)$/i.test(answer.trim())) {
-            console.log("Aborted.");
-            return;
-          }
-        } finally {
-          rl.close();
-        }
+      const description = all
+        ? "all local images"
+        : untagged
+          ? "all untagged local images"
+          : `local image ${selector}`;
+      if (!(await confirmDestructive(`Remove ${description}?`, assumeYes))) {
+        return;
       }
 
       const removed = all

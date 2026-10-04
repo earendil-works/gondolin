@@ -18,6 +18,8 @@ All notable changes to Gondolin are documented here.
 - Take the guest kernel image from the kernel package installed during `gondolin build` instead of downloading it separately, so the kernel and its modules can no longer drift apart when build caches are stale.  #144
 - Fix `gondolin exec --sock`, which still spoke the raw virtio protocol, to use the session IPC protocol with output flow control.  `--sock` now also accepts a session id.  #139
 - Add a Browser Use example that drives Chromium running inside a micro-VM through the ingress gateway.  #145
+- Add `gondolin image rm` (by ref, build id, `--untagged` or `--all`) and `gondolin build cache info|update|rm` for managing local images and the Alpine build cache.  `image ls` now lists untagged images.  #146
+- Automatically refresh cached Alpine `APKINDEX` files during `gondolin build` when a package download returns 404 because the cached index is stale.
 
 ## 0.12.0
 

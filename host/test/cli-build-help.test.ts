@@ -23,5 +23,5 @@ test("cli: gondolin build --help documents --tag and optional --output", () => {
     result.stdout ?? "",
     /--output DIR\s+Output directory.*optional/,
   );
-  assert.match(result.stdout ?? "", /build cache <version\|rm\|update>/);
+  assert.match(result.stdout ?? "", /build cache <info\|rm\|update>/);
 });

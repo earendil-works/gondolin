@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import type { Architecture } from "../build/config.ts";
-import { downloadFile } from "./utils.ts";
+import { DownloadFileError, downloadFile } from "./utils.ts";
 import { decompressTarGz, extractEntries, parseTar } from "./tar.ts";
 import { pathEntryExists } from "./rootfs.ts";
 import type { ApkMeta } from "./types.ts";
@@ -54,6 +54,47 @@ export async function installPackages(
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"));
 
+  let downloads: string[];
+  try {
+    downloads = await resolveAndDownload(
+      repos,
+      packages,
+      arch,
+      cacheDir,
+      log,
+      false,
+    );
+  } catch (err) {
+    // A cached APKINDEX goes stale once Alpine publishes package updates and
+    // drops the old versions from the mirror; refresh the indexes once.
+    if (!(err instanceof DownloadFileError) || err.status !== 404) throw err;
+    log("Package download returned 404; refreshing cached APKINDEX files...");
+    downloads = await resolveAndDownload(
+      repos,
+      packages,
+      arch,
+      cacheDir,
+      log,
+      true,
+    );
+  }
+
+  for (const apkPath of downloads) {
+    const raw = await decompressTarGz(apkPath);
+    const entries = parseTar(raw);
+    extractEntries(entries, targetDir);
+  }
+}
+
+/** Resolve packages and their dependencies and download them into the cache */
+async function resolveAndDownload(
+  repos: string[],
+  packages: string[],
+  arch: Architecture,
+  cacheDir: string,
+  log: (msg: string) => void,
+  refreshIndexes: boolean,
+): Promise<string[]> {
   const pkgMeta = new Map<string, ApkMeta>();
   const pkgRepo = new Map<string, string>();
   const provides = new Map<string, string>();
@@ -61,7 +102,7 @@ export async function installPackages(
   for (const repo of repos) {
     const { indexPath } = packageIndexCachePaths(repo, arch, cacheDir);
 
-    if (!fs.existsSync(indexPath)) {
+    if (refreshIndexes || !fs.existsSync(indexPath)) {
       await refreshPackageIndex(repo, arch, cacheDir);
     }
 
@@ -115,6 +156,7 @@ export async function installPackages(
     }
   }
 
+  const downloads: string[] = [];
   for (const pkgName of needed) {
     const meta = pkgMeta.get(pkgName)!;
     const repo = pkgRepo.get(pkgName)!;
@@ -125,11 +167,9 @@ export async function installPackages(
       const url = `${repo}/${arch}/${apkFilename}`;
       await downloadFile(url, apkPath);
     }
-
-    const raw = await decompressTarGz(apkPath);
-    const entries = parseTar(raw);
-    extractEntries(entries, targetDir);
+    downloads.push(apkPath);
   }
+  return downloads;
 }
 
 function packageIndexCachePaths(

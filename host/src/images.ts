@@ -1167,7 +1167,13 @@ function localRefsForBuildId(buildId: string): Array<{
 
   for (const entry of collectRefSymlinkEntries(imageRefRootDir())) {
     const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
-    const target = fs.readlinkSync(linkPath);
+    let target: string;
+    try {
+      target = fs.readlinkSync(linkPath);
+    } catch {
+      // Ignore malformed refs, consistent with listImageRefs().
+      continue;
+    }
     if (path.resolve(path.dirname(linkPath), target) !== objectDir) continue;
     refs.push({ ...entry, linkPath });
   }

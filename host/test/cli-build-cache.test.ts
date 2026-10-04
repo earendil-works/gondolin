@@ -22,13 +22,13 @@ function runCacheCommand(storeDir: string, args: string[], input?: string) {
   );
 }
 
-test("cli: build cache version reports an empty cache", () => {
+test("cli: build cache info reports an empty cache", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-cli-cache-"),
   );
 
   try {
-    const result = runCacheCommand(storeDir, ["version"]);
+    const result = runCacheCommand(storeDir, ["info"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Alpine build cache:/);
     assert.match(result.stdout, /Minirootfs: none/);
