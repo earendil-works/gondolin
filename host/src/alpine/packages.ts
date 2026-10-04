@@ -1,9 +1,9 @@
-import fs from "fs";
-import path from "path";
-import { execFileSync } from "child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import type { Architecture } from "../build/config.ts";
-import { downloadFile } from "./utils.ts";
+import { DownloadFileError, downloadFile } from "./utils.ts";
 import { decompressTarGz, extractEntries, parseTar } from "./tar.ts";
 import { pathEntryExists } from "./rootfs.ts";
 import type { ApkMeta } from "./types.ts";
@@ -54,28 +54,56 @@ export async function installPackages(
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"));
 
+  let downloads: string[];
+  try {
+    downloads = await resolveAndDownload(
+      repos,
+      packages,
+      arch,
+      cacheDir,
+      log,
+      false,
+    );
+  } catch (err) {
+    // A cached APKINDEX goes stale once Alpine publishes package updates and
+    // drops the old versions from the mirror; refresh the indexes once.
+    if (!(err instanceof DownloadFileError) || err.status !== 404) throw err;
+    log("Package download returned 404; refreshing cached APKINDEX files...");
+    downloads = await resolveAndDownload(
+      repos,
+      packages,
+      arch,
+      cacheDir,
+      log,
+      true,
+    );
+  }
+
+  for (const apkPath of downloads) {
+    const raw = await decompressTarGz(apkPath);
+    const entries = parseTar(raw);
+    extractEntries(entries, targetDir);
+  }
+}
+
+/** Resolve packages and their dependencies and download them into the cache */
+async function resolveAndDownload(
+  repos: string[],
+  packages: string[],
+  arch: Architecture,
+  cacheDir: string,
+  log: (msg: string) => void,
+  refreshIndexes: boolean,
+): Promise<string[]> {
   const pkgMeta = new Map<string, ApkMeta>();
   const pkgRepo = new Map<string, string>();
   const provides = new Map<string, string>();
 
   for (const repo of repos) {
-    const safeName = repo.replace(/[^A-Za-z0-9]+/g, "_");
-    const indexPath = path.join(cacheDir, `APKINDEX-${safeName}-${arch}`);
+    const { indexPath } = packageIndexCachePaths(repo, arch, cacheDir);
 
-    if (!fs.existsSync(indexPath)) {
-      const tarPath = `${indexPath}.tar.gz`;
-      const url = `${repo}/${arch}/APKINDEX.tar.gz`;
-      await downloadFile(url, tarPath);
-
-      const raw = await decompressTarGz(tarPath);
-      const entries = parseTar(raw);
-      const indexEntry = entries.find(
-        (e) => e.name === "APKINDEX" && e.content,
-      );
-      if (!indexEntry?.content) {
-        throw new Error(`APKINDEX not found in ${url}`);
-      }
-      fs.writeFileSync(indexPath, indexEntry.content);
+    if (refreshIndexes || !fs.existsSync(indexPath)) {
+      await refreshPackageIndex(repo, arch, cacheDir);
     }
 
     const content = fs.readFileSync(indexPath, "utf8");
@@ -128,6 +156,7 @@ export async function installPackages(
     }
   }
 
+  const downloads: string[] = [];
   for (const pkgName of needed) {
     const meta = pkgMeta.get(pkgName)!;
     const repo = pkgRepo.get(pkgName)!;
@@ -138,11 +167,64 @@ export async function installPackages(
       const url = `${repo}/${arch}/${apkFilename}`;
       await downloadFile(url, apkPath);
     }
-
-    const raw = await decompressTarGz(apkPath);
-    const entries = parseTar(raw);
-    extractEntries(entries, targetDir);
+    downloads.push(apkPath);
   }
+  return downloads;
+}
+
+function packageIndexCachePaths(
+  repo: string,
+  arch: Architecture,
+  cacheDir: string,
+): { indexPath: string; tarPath: string } {
+  const safeName = repo.replace(/[^A-Za-z0-9]+/g, "_");
+  const indexPath = path.join(cacheDir, `APKINDEX-${safeName}-${arch}`);
+  return { indexPath, tarPath: `${indexPath}.tar.gz` };
+}
+
+async function refreshPackageIndex(
+  repo: string,
+  arch: Architecture,
+  cacheDir: string,
+): Promise<string> {
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const { indexPath, tarPath } = packageIndexCachePaths(repo, arch, cacheDir);
+  const nonce = `${process.pid}-${Date.now()}`;
+  const temporaryTarPath = `${tarPath}.tmp-${nonce}`;
+  const temporaryIndexPath = `${indexPath}.tmp-${nonce}`;
+  const url = `${repo}/${arch}/APKINDEX.tar.gz`;
+
+  try {
+    await downloadFile(url, temporaryTarPath);
+    const raw = await decompressTarGz(temporaryTarPath);
+    const entries = parseTar(raw);
+    const indexEntry = entries.find(
+      (entry) => entry.name === "APKINDEX" && entry.content,
+    );
+    if (!indexEntry?.content) {
+      throw new Error(`APKINDEX not found in ${url}`);
+    }
+
+    fs.writeFileSync(temporaryIndexPath, indexEntry.content);
+    fs.renameSync(temporaryTarPath, tarPath);
+    fs.renameSync(temporaryIndexPath, indexPath);
+    return indexPath;
+  } finally {
+    fs.rmSync(temporaryTarPath, { force: true });
+    fs.rmSync(temporaryIndexPath, { force: true });
+  }
+}
+
+export async function refreshPackageIndexes(
+  repos: string[],
+  arch: Architecture,
+  cacheDir: string,
+): Promise<string[]> {
+  const refreshed: string[] = [];
+  for (const repo of repos) {
+    refreshed.push(await refreshPackageIndex(repo, arch, cacheDir));
+  }
+  return refreshed;
 }
 
 export function runPostBuildCommands(

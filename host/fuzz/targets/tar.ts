@@ -1,10 +1,10 @@
-import { parseTar } from "../../src/build/alpine.ts";
-import { XorShift32 } from "../rng.ts";
+import { parseTar } from "../../src/alpine/tar.ts";
+import type { XorShift32 } from "../rng.ts";
 import type { FuzzTarget } from "./types.ts";
 
 export const tarTarget: FuzzTarget = {
   name: "tar",
-  description: "build-alpine: tar parser",
+  description: "alpine: tar parser",
   defaultMaxLen: 256 * 1024,
   seeds: [
     // End-of-archive marker: one zero block

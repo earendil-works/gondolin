@@ -10,9 +10,13 @@ import {
   ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
+  listUntaggedImages,
   resolveImageSelector,
   setImageRef,
   tagImage,
+  removeImage,
+  removeUntaggedImages,
+  removeAllImages,
 } from "../src/images.ts";
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
@@ -216,6 +220,208 @@ test("images: tagImage can tag from asset directory selectors", () => {
 
     const resolved = resolveImageSelector("tooling:dev", "x86_64");
     assert.equal(resolved.buildId, imported.buildId);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: listUntaggedImages excludes objects referenced by tags", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const images = listUntaggedImages();
+    assert.deepEqual(
+      images.map((image) => ({ buildId: image.buildId, arch: image.arch })),
+      [{ buildId: untagged.buildId, arch: "x86_64" }],
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeUntaggedImages preserves tagged objects", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const removed = removeUntaggedImages();
+    assert.deepEqual(removed.removedBuildIds, [untagged.buildId]);
+    assert.equal(fs.existsSync(tagged.assetDir), true);
+    assert.equal(fs.existsSync(untagged.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeAllImages clears refs and objects", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const removed = removeAllImages();
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:tagged", arch: "aarch64" },
+    ]);
+    assert.deepEqual(
+      new Set(removed.removedBuildIds),
+      new Set([tagged.buildId, untagged.buildId]),
+    );
+    assert.equal(listImageRefs().length, 0);
+    assert.equal(listUntaggedImages().length, 0);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage deletes an object after removing its last tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:dev", imported.buildId, imported.arch);
+
+    const removed = removeImage("tooling:dev");
+
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:dev", arch: "x86_64" },
+    ]);
+    assert.deepEqual(removed.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+    assert.equal(listImageRefs().length, 0);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage keeps objects referenced by another tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:first", imported.buildId, imported.arch);
+    setImageRef("tooling:second", imported.buildId, imported.arch);
+
+    const first = removeImage("tooling:first");
+    assert.deepEqual(first.removedBuildIds, []);
+    assert.equal(fs.existsSync(imported.assetDir), true);
+    assert.equal(
+      resolveImageSelector("tooling:second", "aarch64").buildId,
+      imported.buildId,
+    );
+
+    const second = removeImage("tooling:second");
+    assert.deepEqual(second.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage removes every architecture associated with a tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const armAssets = createFakeAssets("aarch64");
+  const x64Assets = createFakeAssets("x86_64");
+
+  try {
+    const armImage = importImageFromDirectory(armAssets.dir);
+    const x64Image = importImageFromDirectory(x64Assets.dir);
+    setImageRef("tooling:multi", armImage.buildId, armImage.arch);
+    setImageRef("tooling:multi", x64Image.buildId, x64Image.arch);
+
+    const removed = removeImage("tooling:multi");
+
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:multi", arch: "aarch64" },
+      { reference: "tooling:multi", arch: "x86_64" },
+    ]);
+    assert.deepEqual(
+      new Set(removed.removedBuildIds),
+      new Set([armImage.buildId, x64Image.buildId]),
+    );
+    assert.equal(fs.existsSync(armImage.assetDir), false);
+    assert.equal(fs.existsSync(x64Image.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(armAssets.dir, { recursive: true, force: true });
+    fs.rmSync(x64Assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage requires force to delete a tagged build id", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:dev", imported.buildId, imported.arch);
+
+    assert.throws(
+      () => removeImage(imported.buildId),
+      /remove those tags first or use --force/,
+    );
+
+    const removed = removeImage(imported.buildId, { force: true });
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:dev", arch: "x86_64" },
+    ]);
+    assert.deepEqual(removed.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+    assert.equal(listImageRefs().length, 0);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
