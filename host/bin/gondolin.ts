@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-import { randomUUID } from "crypto";
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline/promises";
-import { PassThrough } from "stream";
-import { fileURLToPath } from "url";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
@@ -16,6 +17,7 @@ import type { VirtualProvider } from "../src/vfs/node/index.ts";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
+import type { HttpHooks } from "../src/qemu/contracts.ts";
 import { suggestHostsForSecret } from "../src/secret-host-suggestions.ts";
 import {
   ensureTrufflehogBinary,
@@ -56,6 +58,7 @@ import {
   type ServerMessage,
   type SnapshotResponseMessage,
 } from "../src/sandbox/control-protocol.ts";
+import { errorMessage } from "../src/utils/error.ts";
 
 type Command = {
   cmd: string;
@@ -80,10 +83,7 @@ function getDefaultInteractiveShellCommand(): string[] {
 }
 
 function checkpointBaseDir(): string {
-  return (
-    process.env.GONDOLIN_CHECKPOINT_DIR ??
-    gondolinCacheDir("checkpoints")
-  );
+  return process.env.GONDOLIN_CHECKPOINT_DIR ?? gondolinCacheDir("checkpoints");
 }
 
 function sanitizeCheckpointName(name: string): string {
@@ -120,7 +120,7 @@ async function waitForCheckpointReady(
       // keep polling
     }
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await delay(50);
   }
 
   try {
@@ -207,7 +207,7 @@ function renderCliError(err: unknown) {
     }
   }
 
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   console.error(message);
 }
 
@@ -595,10 +595,7 @@ function parseHostSecret(spec: string): SecretSpec {
       throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
     }
 
-    const value =
-      eqIndex === -1
-        ? process.env[name]
-        : spec.slice(eqIndex + 1);
+    const value = eqIndex === -1 ? process.env[name] : spec.slice(eqIndex + 1);
     if (value === undefined) {
       throw new Error(`Environment variable ${name} not set for host-secret`);
     }
@@ -705,7 +702,9 @@ async function promptForSuggestedSecretHosts(
   }
 }
 
-async function resolveSecretHosts(secrets: SecretSpec[]): Promise<SecretSpec[]> {
+async function resolveSecretHosts(
+  secrets: SecretSpec[],
+): Promise<SecretSpec[]> {
   const resolved: SecretSpec[] = [];
 
   for (const secret of secrets) {
@@ -882,7 +881,7 @@ function parseRootfsSizeOption(
   try {
     parseDiskSizeToBytes(value);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     fail(`invalid --rootfs-size: ${message}`);
   }
   return value;
@@ -960,7 +959,7 @@ function buildVmOptions(common: CommonOptions) {
   }
 
   // Build HTTP hooks if we have network options
-  let httpHooks;
+  let httpHooks: HttpHooks | undefined;
   let env: Record<string, string> | undefined;
 
   if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
@@ -1235,7 +1234,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
           const mapping = parseTcpMapSpec(spec);
           args.common.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1267,7 +1266,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
         try {
           args.common.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1589,7 +1588,7 @@ function parseBashArgs(argv: string[]): BashArgs {
       try {
         args.vmm = parseVmmOption(raw);
       } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
+        console.error(errorMessage(err));
         process.exit(1);
       }
       continue;
@@ -1648,7 +1647,7 @@ function parseBashArgs(argv: string[]): BashArgs {
         try {
           args.vmm = parseVmmOption(value);
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1718,7 +1717,7 @@ function parseBashArgs(argv: string[]): BashArgs {
           const mapping = parseTcpMapSpec(spec);
           args.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1760,7 +1759,7 @@ function parseBashArgs(argv: string[]): BashArgs {
         try {
           args.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1917,10 +1916,8 @@ async function runBash(argv: string[]) {
 
     const ESCAPE_BYTE = 0x1d; // Ctrl-]
 
-    let resolveEscape!: () => void;
-    const escapePromise = new Promise<void>((resolve) => {
-      resolveEscape = resolve;
-    });
+    const { promise: escapePromise, resolve: resolveEscape } =
+      Promise.withResolvers<void>();
 
     // This intentionally shares logic with ExecProcess.attach() via attachTty()
     // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
@@ -2175,7 +2172,7 @@ async function runAttach(argv: string[]) {
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2417,7 +2414,7 @@ async function runSnapshot(argv: string[]) {
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2696,7 +2693,7 @@ async function runBuild(argv: string[]) {
     try {
       config = parseBuildConfig(configContent);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       console.error(`Failed to parse config: ${message}`);
       process.exit(1);
     }
@@ -2759,7 +2756,7 @@ async function runBuild(argv: string[]) {
       }
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new Error(`Build failed: ${message}`);
   } finally {
     if (cleanupOutputDir) {

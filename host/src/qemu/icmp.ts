@@ -1,4 +1,4 @@
-import type { monitorEventLoopDelay } from "perf_hooks";
+import type { monitorEventLoopDelay } from "node:perf_hooks";
 
 export type IcmpTiming = {
   srcIP: string;

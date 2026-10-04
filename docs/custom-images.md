@@ -64,7 +64,7 @@ Building custom images normally requires the following host tools:
 | **e2fsprogs** | Creating/extending ext4 rootfs images (mke2fs, debugfs) |
 | **Docker or Podman** *(optional)* | Pull/export OCI rootfs images (`oci.image`) |
 
-Gondolin downloads prebuilt sandbox helper binaries automatically. Zig 0.16.0 is
+Gondolin downloads prebuilt sandbox helper binaries automatically. Zig 0.17.0 is
 only required for contributors or custom forks that explicitly build sandbox
 helpers from source.
 
@@ -114,6 +114,7 @@ The file has the following structure:
       "ca-certificates",
       "curl",
       "e2fsprogs",
+      "e2fsprogs-extra",
       "nodejs",
       "npm",
       "uv",
@@ -171,7 +172,7 @@ override this in two ways:
   avoid mixing helper versions.
 
 Contributor source builds are opt-in. To build sandbox helpers from a local
-checkout instead of using published helpers, install Zig 0.16.0 and set
+checkout instead of using published helpers, install Zig 0.17.0 and set
 `GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1`. If running outside the checkout,
 set `GONDOLIN_GUEST_SRC` to the local `guest/` directory.
 
@@ -414,7 +415,7 @@ binaries, or provide all four custom helper paths in the build config.
 ### `Cannot build sandbox helpers from source`
 
 This contributor path only runs when
-`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` is set. Install Zig 0.16.0 and run
+`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` is set. Install Zig 0.17.0 and run
 from a Gondolin checkout, or set `GONDOLIN_GUEST_SRC` to a local `guest/`
 directory. Unset the environment variable to use published helpers instead.
 

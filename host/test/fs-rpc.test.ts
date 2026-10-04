@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
@@ -332,7 +333,7 @@ test("fs rpc readdir deduplicates concurrent cache misses", async () => {
       if (prop === "readdir") {
         return async (entryPath: string, options?: object) => {
           readdirCalls += 1;
-          await new Promise((resolve) => setTimeout(resolve, 25));
+          await delay(25);
           return (target as any).readdir(entryPath, options);
         };
       }

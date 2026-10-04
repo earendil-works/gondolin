@@ -2,8 +2,8 @@
  * Alpine Linux image builder orchestration.
  */
 
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   copyExecutable,
@@ -216,7 +216,9 @@ export async function buildAlpineImages(
     kernelOut,
   );
 
+  // The kernel is shipped as a separate asset; drop /boot from both images.
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
+  fs.rmSync(path.join(initramfsDir, "boot"), { recursive: true, force: true });
 
   log("Creating rootfs ext4 image...");
   createRootfsImage(

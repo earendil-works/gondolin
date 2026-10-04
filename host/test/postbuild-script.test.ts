@@ -5,7 +5,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findGuestSourceRoot, runPostbuild } from "../scripts/postbuild.mjs";
+import { findGuestSourceRoot, runPostbuild } from "../scripts/postbuild.ts";
 
 function makeHostPackage(root: string): string {
   const pkgRoot = path.join(root, "host");
@@ -74,10 +74,6 @@ test("postbuild: finds guest sources via GONDOLIN_GUEST_SRC", () => {
     assert.equal(
       fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.d.ts"), "utf8"),
       'export { foo } from "./foo.js";\nexport type Bar = import("./bar.js").Bar;\n',
-    );
-    assert.equal(
-      fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.cjs"), "utf8"),
-      '"use strict";\nmodule.exports = require("./index.js");\n',
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

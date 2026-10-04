@@ -77,7 +77,8 @@ function assertLooksLikeMitmCa(ca: {
   assert.ok(days > 3600 && days < 3700);
 
   // Public/private key match (compare modulus n)
-  assert.equal(cert.publicKey.n.toString(16), key.n.toString(16));
+  const publicKey = cert.publicKey as forge.pki.rsa.PublicKey;
+  assert.equal(publicKey.n.toString(16), key.n.toString(16));
 }
 
 test("mitm getDefaultMitmCertDir respects XDG_CACHE_HOME", (t) => {

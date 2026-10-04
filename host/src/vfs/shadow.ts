@@ -7,6 +7,7 @@ import type {
   VirtualProvider,
   VfsStatfs,
 } from "./node/index.ts";
+import { getEntryName, isNoEntryError } from "./mounts.ts";
 import { delegateStatfsOrEnosys } from "./statfs.ts";
 import {
   ERRNO,
@@ -85,24 +86,10 @@ export function createShadowPathPredicate(
     const p = normalizeVfsPath(path);
     for (const shadow of normalized) {
       if (p === shadow) return true;
-      if (p.startsWith(shadow + "/")) return true;
+      if (p.startsWith(`${shadow}/`)) return true;
     }
     return false;
   };
-}
-
-function isNoEntryError(err: unknown) {
-  if (!err || typeof err !== "object") return false;
-  const error = err as NodeJS.ErrnoException;
-  return (
-    error.code === "ENOENT" ||
-    error.code === "ERRNO_2" ||
-    error.errno === ERRNO.ENOENT
-  );
-}
-
-function getEntryName(entry: string | Dirent) {
-  return typeof entry === "string" ? entry : entry.name;
 }
 
 /**

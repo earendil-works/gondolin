@@ -1,17 +1,20 @@
-import { createHash, randomUUID } from "crypto";
-import fs from "fs";
-import os from "os";
-import path from "path";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { extractTarGz } from "../alpine/tar.ts";
-import type { Architecture } from "./config.ts";
+import { normalizeArchitecture } from "../host/arch.ts";
 import {
-  cacheBaseDir,
-  computeFileHash,
-  downloadToBuffer,
   fetchCachedJsonRegistry,
   normalizeSha256,
-} from "./helpers.ts";
+  parseKeyedRegistry,
+  parseRegistryUrl,
+  resolveKeyedRegistryRef,
+} from "../registry.ts";
+import { digestToUuidV5 } from "../utils/uuid.ts";
+import type { Architecture } from "./config.ts";
+import { cacheBaseDir, computeFileHash, downloadToBuffer } from "./helpers.ts";
 
 const SANDBOX_HELPER_REGISTRY_SCHEMA = 1 as const;
 const SANDBOX_HELPER_MANIFEST_SCHEMA = 1 as const;
@@ -157,17 +160,10 @@ function helperObjectRootDir(storeDir: string): string {
 }
 
 function helperObjectDir(storeDir: string, buildId: string): string {
-  return path.join(helperObjectRootDir(storeDir), normalizeHelperBuildId(buildId));
-}
-
-function normalizeArchitecture(value: string | undefined | null): Architecture | null {
-  if (!value) return null;
-  const lower = value.toLowerCase();
-  if (lower === "aarch64" || lower === "arm64") return "aarch64";
-  if (lower === "x86_64" || lower === "amd64" || lower === "x64") {
-    return "x86_64";
-  }
-  return null;
+  return path.join(
+    helperObjectRootDir(storeDir),
+    normalizeHelperBuildId(buildId),
+  );
 }
 
 function normalizeHelperBuildId(value: string): string {
@@ -178,17 +174,6 @@ function normalizeHelperBuildId(value: string): string {
   return lower;
 }
 
-function bytesToUuid(bytes: Buffer): string {
-  const hex = bytes.toString("hex");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join("-");
-}
-
 export function computeSandboxHelperBuildId(
   input: SandboxHelperBuildIdInput,
 ): string {
@@ -197,11 +182,7 @@ export function computeSandboxHelperBuildId(
     parts.push(`${name}=${normalizeSha256(input.checksums[name], name)}`);
   }
 
-  const digest = createHash("sha256").update(parts.join("\n")).digest();
-  const bytes = Buffer.from(digest.subarray(0, 16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  return bytesToUuid(bytes);
+  return digestToUuidV5(createHash("sha256").update(parts.join("\n")).digest());
 }
 
 function hasValidRefNameSegments(name: string): boolean {
@@ -281,18 +262,9 @@ function parseRegistrySource(
   }
 
   const rec = raw as Record<string, unknown>;
-  if (typeof rec.url !== "string" || rec.url.trim().length === 0) {
-    throw new Error(`invalid ${where}.url: expected string`);
-  }
-
-  let url: string;
-  try {
-    url = new URL(rec.url, baseUrl).toString();
-  } catch {
-    throw new Error(`invalid ${where}.url: ${rec.url}`);
-  }
-
-  const source: RegistrySandboxHelperSource = { url };
+  const source: RegistrySandboxHelperSource = {
+    url: parseRegistryUrl(rec.url, `${where}.url`, baseUrl),
+  };
 
   if (rec.sha256 !== undefined) {
     source.sha256 = normalizeSha256(rec.sha256, `${where}.sha256`);
@@ -333,94 +305,17 @@ function parseBuiltinSandboxHelperRegistry(
   raw: unknown,
   sourceUrl: string,
 ): BuiltinSandboxHelperRegistry {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("invalid builtin sandbox helper registry: expected object");
-  }
-
-  const rec = raw as Record<string, unknown>;
-  if (rec.schema !== SANDBOX_HELPER_REGISTRY_SCHEMA) {
-    throw new Error(
-      `invalid builtin sandbox helper registry schema: expected ${SANDBOX_HELPER_REGISTRY_SCHEMA}`,
-    );
-  }
-
-  const baseUrl = new URL(sourceUrl);
-
-  if (
-    !rec.builds ||
-    typeof rec.builds !== "object" ||
-    Array.isArray(rec.builds)
-  ) {
-    throw new Error("invalid builtin sandbox helper registry: builds must be an object");
-  }
-
-  const builds: Record<string, RegistrySandboxHelperSource> = {};
-  for (const [buildId, value] of Object.entries(
-    rec.builds as Record<string, unknown>,
-  )) {
-    const canonical = normalizeHelperBuildId(buildId);
-    builds[canonical] = parseRegistrySource(
-      value,
-      `builds['${buildId}']`,
-      baseUrl,
-    );
-  }
-
-  if (!rec.refs || typeof rec.refs !== "object" || Array.isArray(rec.refs)) {
-    throw new Error("invalid builtin sandbox helper registry: refs must be an object");
-  }
-
-  const refs: Record<string, Partial<Record<Architecture, string>>> = {};
-  for (const [reference, archMap] of Object.entries(
-    rec.refs as Record<string, unknown>,
-  )) {
-    const parsedRef = parseSandboxHelperRef(reference);
-    if (parsedRef.canonical !== reference) {
-      throw new Error(`invalid builtin sandbox helper registry ref key: ${reference}`);
-    }
-
-    if (!archMap || typeof archMap !== "object" || Array.isArray(archMap)) {
-      throw new Error(`invalid registry ref '${reference}': expected object`);
-    }
-
-    const mapped: Partial<Record<Architecture, string>> = {};
-    for (const [archKey, value] of Object.entries(
-      archMap as Record<string, unknown>,
-    )) {
-      const arch = normalizeArchitecture(archKey);
-      if (!arch) {
-        throw new Error(`invalid registry ref '${reference}' arch key: ${archKey}`);
-      }
-      if (typeof value !== "string") {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: expected build id string`,
-        );
-      }
-
-      const buildId = normalizeHelperBuildId(value);
-      const source = builds[buildId];
-      if (!source) {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: unknown build id ${buildId}`,
-        );
-      }
-      if (source.arch && source.arch !== arch) {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: arch ${arch} does not match build arch ${source.arch}`,
-        );
-      }
-
-      mapped[arch] = buildId;
-    }
-
-    refs[parsedRef.canonical] = mapped;
-  }
-
-  return {
+  const { refs, builds } = parseKeyedRegistry(raw, sourceUrl, {
+    label: "builtin sandbox helper registry",
     schema: SANDBOX_HELPER_REGISTRY_SCHEMA,
-    refs,
-    builds,
-  };
+    keyName: "arch",
+    normalizeKey: normalizeArchitecture,
+    normalizeBuildId: normalizeHelperBuildId,
+    canonicalRef: (reference) => parseSandboxHelperRef(reference).canonical,
+    parseBuild: parseRegistrySource,
+    buildKey: (source) => source.arch,
+  });
+  return { schema: SANDBOX_HELPER_REGISTRY_SCHEMA, refs, builds };
 }
 
 async function fetchBuiltinSandboxHelperRegistry(
@@ -438,37 +333,6 @@ async function fetchBuiltinSandboxHelperRegistry(
   });
 }
 
-function resolveRegistrySourceForRef(
-  registry: BuiltinSandboxHelperRegistry,
-  reference: string,
-  arch: Architecture,
-): { buildId: string; source: RegistrySandboxHelperSource } {
-  const parsedRef = parseSandboxHelperRef(reference);
-  const entries = registry.refs[parsedRef.canonical];
-  if (!entries) {
-    throw new Error(
-      `sandbox helper ref not found in builtin registry: ${parsedRef.canonical}`,
-    );
-  }
-
-  const buildId = entries[arch];
-  if (!buildId) {
-    const availableArchs = Object.keys(entries).join(", ") || "none";
-    throw new Error(
-      `sandbox helper ref '${parsedRef.canonical}' has no registry source for ${arch} (available: ${availableArchs})`,
-    );
-  }
-
-  const source = registry.builds[buildId];
-  if (!source) {
-    throw new Error(
-      `sandbox helper ref '${parsedRef.canonical}' points to unknown registry build id: ${buildId}`,
-    );
-  }
-
-  return { buildId, source };
-}
-
 function parseSandboxHelperManifest(raw: unknown): SandboxHelperManifest {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("invalid sandbox helper manifest: expected object");
@@ -481,7 +345,9 @@ function parseSandboxHelperManifest(raw: unknown): SandboxHelperManifest {
     );
   }
   if (rec.kind !== SANDBOX_HELPER_KIND) {
-    throw new Error(`invalid sandbox helper manifest kind: ${String(rec.kind)}`);
+    throw new Error(
+      `invalid sandbox helper manifest kind: ${String(rec.kind)}`,
+    );
   }
   if (typeof rec.gondolinVersion !== "string" || !rec.gondolinVersion) {
     throw new Error("invalid sandbox helper manifest gondolinVersion");
@@ -493,7 +359,11 @@ function parseSandboxHelperManifest(raw: unknown): SandboxHelperManifest {
   if (!arch) {
     throw new Error(`invalid sandbox helper manifest arch: ${rec.arch}`);
   }
-  if (!rec.checksums || typeof rec.checksums !== "object" || Array.isArray(rec.checksums)) {
+  if (
+    !rec.checksums ||
+    typeof rec.checksums !== "object" ||
+    Array.isArray(rec.checksums)
+  ) {
     throw new Error("invalid sandbox helper manifest checksums");
   }
 
@@ -589,12 +459,16 @@ function assertExecutableFiles(paths: SandboxHelperBinaryPaths): void {
       throw new Error(`sandbox helper binary not found: ${filePath}`);
     }
     if (!stat.isFile()) {
-      throw new Error(`sandbox helper binary is not a regular file: ${filePath}`);
+      throw new Error(
+        `sandbox helper binary is not a regular file: ${filePath}`,
+      );
     }
   }
 }
 
-function computeHelperChecksums(paths: SandboxHelperBinaryPaths): SandboxHelperChecksums {
+function computeHelperChecksums(
+  paths: SandboxHelperBinaryPaths,
+): SandboxHelperChecksums {
   const checksums = {} as SandboxHelperChecksums;
   for (const name of SANDBOX_HELPER_BINARY_NAMES) {
     checksums[name] = computeFileHash(pathForHelperName(paths, name));
@@ -622,6 +496,8 @@ function resolveSandboxHelperDirectory(
   options: {
     expectedArch?: Architecture;
     expectedGondolinVersion?: string;
+    /** content-derived build id the helpers must match */
+    expectedBuildId?: string;
     source: "directory" | "cache";
   },
 ): ResolvedSandboxHelpers {
@@ -651,6 +527,11 @@ function resolveSandboxHelperDirectory(
     ) {
       throw new Error(
         `sandbox helper gondolinVersion mismatch\n  expected: ${options.expectedGondolinVersion}\n  got:      ${manifest.gondolinVersion}`,
+      );
+    }
+    if (options.expectedBuildId && buildId !== options.expectedBuildId) {
+      throw new Error(
+        `sandbox helper buildId mismatch\n  expected: ${options.expectedBuildId}\n  got:      ${buildId}\n  dir:      ${resolvedDir}`,
       );
     }
   } else if (!arch) {
@@ -701,7 +582,9 @@ async function importSandboxHelpersFromSource(
       source: "cache",
     });
     if (!extracted.manifest) {
-      throw new Error("downloaded sandbox helper archive is missing manifest.json");
+      throw new Error(
+        "downloaded sandbox helper archive is missing manifest.json",
+      );
     }
     if (extracted.buildId !== expectedBuildId) {
       throw new Error(
@@ -727,7 +610,7 @@ async function importSandboxHelpersFromSource(
           return {
             ...resolveSandboxHelperDirectory(objectDir, {
               expectedArch: source.arch,
-              expectedGondolinVersion: source.gondolinVersion,
+              expectedBuildId,
               source: "cache",
             }),
             source: "download",
@@ -739,7 +622,7 @@ async function importSandboxHelpersFromSource(
 
     const resolved = resolveSandboxHelperDirectory(objectDir, {
       expectedArch: source.arch,
-      expectedGondolinVersion: source.gondolinVersion,
+      expectedBuildId,
       source: "cache",
     });
     return { ...resolved, source: "download" };
@@ -751,7 +634,8 @@ async function importSandboxHelpersFromSource(
 export async function ensureSandboxHelperBinaries(
   options: ResolveSandboxHelperOptions,
 ): Promise<ResolvedSandboxHelpers> {
-  const gondolinVersion = options.gondolinVersion ?? resolveHostPackageVersion();
+  const gondolinVersion =
+    options.gondolinVersion ?? resolveHostPackageVersion();
   const explicitHelpersDir =
     options.helpersDir ?? process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
 
@@ -766,17 +650,22 @@ export async function ensureSandboxHelperBinaries(
   const storeDir = options.storeDir ?? getSandboxHelperStoreDirectory();
   const registry = await fetchBuiltinSandboxHelperRegistry(options);
   const ref = options.ref ?? sandboxHelperRefForVersion(gondolinVersion);
-  const { buildId, source } = resolveRegistrySourceForRef(
+  const { buildId, build: source } = resolveKeyedRegistryRef(
     registry,
-    ref,
+    parseSandboxHelperRef(ref).canonical,
     options.arch,
+    { label: "sandbox helper" },
   );
 
   const objectDir = helperObjectDir(storeDir, buildId);
   if (fs.existsSync(objectDir)) {
+    // Build ids are content-addressed and the registry maps several releases
+    // to the same build when helper binaries are unchanged.  The cached
+    // manifest records whichever release was downloaded first, so verify the
+    // content instead of the release version.
     return resolveSandboxHelperDirectory(objectDir, {
       expectedArch: options.arch,
-      expectedGondolinVersion: gondolinVersion,
+      expectedBuildId: buildId,
       source: "cache",
     });
   }

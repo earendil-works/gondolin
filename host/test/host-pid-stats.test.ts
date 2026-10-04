@@ -24,29 +24,31 @@ test.after(() => {
   scheduleForceExit();
 });
 
-test(
-  "VM.getHostPid exposes a pid that can be sampled with ps",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async () => {
-    const vm = await VM.create({
-      startTimeoutMs,
-      sandbox: { console: "none" },
-    });
+test("VM.getHostPid exposes a pid that can be sampled with ps", {
+  skip: skipVmTests,
+  timeout: timeoutMs,
+}, async () => {
+  const vm = await VM.create({
+    startTimeoutMs,
+    sandbox: { console: "none" },
+  });
 
-    try {
-      await vm.start();
+  try {
+    await vm.start();
 
-      const pid = vm.getHostPid();
-      assert.equal(typeof pid, "number");
-      assert.ok(pid > 0, "expected a positive host pid");
+    const pid = vm.getHostPid();
+    assert.equal(typeof pid, "number");
+    assert.ok(pid !== null && pid > 0, "expected a positive host pid");
 
-      const stats = readPsStats(pid);
-      console.log(`ps stats for VM host pid ${pid}:\n${stats}`);
+    const stats = readPsStats(pid);
+    console.log(`ps stats for VM host pid ${pid}:\n${stats}`);
 
-      assert.match(stats, /^\s*PID\s+PPID\s+RSS\s+VSZ\s+%CPU\s+%MEM\s+ELAPSED\s+COMMAND/m);
-      assert.match(stats, new RegExp(`\\b${pid}\\b`));
-    } finally {
-      await vm.close();
-    }
-  },
-);
+    assert.match(
+      stats,
+      /^\s*PID\s+PPID\s+RSS\s+VSZ\s+%CPU\s+%MEM\s+ELAPSED\s+COMMAND/m,
+    );
+    assert.match(stats, new RegExp(`\\b${pid}\\b`));
+  } finally {
+    await vm.close();
+  }
+});
