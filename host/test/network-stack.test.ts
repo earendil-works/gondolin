@@ -1760,31 +1760,23 @@ test("network-stack: dropped outbound TCP payload tears down session", () => {
   );
 });
 
-test("network-stack: TCP ack past 2^32 must wrap on the wire, not throw", () => {
-  // Regression: a 32-bit seq/ack overflow crashed a downstream process on 0.12.0.
-  //   RangeError [ERR_OUT_OF_RANGE] ... Received 4_294_967_340
-  //     at NetworkStack.sendTCP          (network-stack.ts:1001) writeUInt32BE(ack,8), unmasked
-  //     at NetworkStack.drainOutboundTcp (network-stack.ts:1422)
-  //     at NetworkStack.handleTcpEnd     (network-stack.ts:1497)
-  // session.myAck is seeded from the guest's 32-bit SYN ISN (myAck = seq + 1, :756)
-  // and only grows (:910 data, :964 FIN), never reduced mod 2^32 -- so a high guest
-  // ISN overflows the unmasked write at :1001. Deterministic: the ISN is an input.
+test("network-stack: TCP ack past 2^32 wraps on the wire instead of throwing", () => {
+  // myAck is seeded from the guest's random 32-bit ISN, so a high ISN used to
+  // push it past 2^32 and crash `writeUInt32BE` on the next ACK or FIN.
   const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
   const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 
   let key = "";
+  const sends: Buffer[] = [];
   const stack = new NetworkStack({
     gatewayMac,
     vmMac,
     dnsServers: ["8.8.8.8"],
-    allowTcpFlow: () => true, // raw-tcp bypass: deliver bytes as-is, no deny/teardown
+    allowTcpFlow: () => true,
     callbacks: {
       onUdpSend: () => {},
-      onTcpConnect: (m) => {
-        key = m.key;
-        return { allowRawTcp: true } as any;
-      },
-      onTcpSend: () => {},
+      onTcpConnect: (m) => (key = m.key),
+      onTcpSend: (m) => sends.push(m.data),
       onTcpClose: () => {},
       onTcpPause: () => {},
       onTcpResume: () => {},
@@ -1796,50 +1788,55 @@ test("network-stack: TCP ack past 2^32 must wrap on the wire, not throw", () => 
   const srcPort = 40123;
   const dstPort = 80;
 
-  // ISN+1 (SYN) +60 (data) = 4_294_967_340 = 2^32 + 44; wrapped, the ack must be 44.
   const ISN = 0xffffffff - 16;
-  const WRAPPED_ACK = (ISN + 1 + 60) % 0x1_0000_0000;
+  const request = Buffer.from(
+    "GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: wrap-test\r\n\r\n",
+  );
+  const WRAPPED_ACK = (ISN + 1 + request.length) % 0x1_0000_0000;
 
   stack.handleTCP(
     buildTcpSegment({ srcPort, dstPort, seq: ISN, ack: 0, flags: 0x02 }),
     srcIP,
     dstIP,
-  ); // SYN
-  stack.handleTcpConnected({ key }); // SYN/ACK; myAck = 2^32 - 16 (still a valid uint32)
+  );
+  stack.handleTcpConnected({ key });
   drainAllQemuTx(stack);
-  // mySeq is random; read it back so the guest can ACK the SYN/ACK (opens the window
-  // so teardown actually sends a FIN). Trigger stays the crafted ISN, not mySeq.
   const hostSeq = (stack as any).natTable.get(key).mySeq as number;
 
-  // 60 bytes pushes myAck to 2^32 + 44. The data ACK at :918 overflows first, but in
-  // production receive()'s try/catch (:471/:486) swallows it -- we swallow it here too
-  // so the test reaches the *unwrapped* teardown path that actually crashes uncaught.
-  try {
-    stack.handleTCP(
-      buildTcpSegment({
-        srcPort,
-        dstPort,
-        seq: ISN + 1,
-        ack: hostSeq,
-        flags: 0x18,
-        payload: Buffer.alloc(60, 0x61),
-      }),
-      srcIP,
-      dstIP,
-    );
-  } catch (err) {
-    // expected only on 0.12.0: the data-ACK overflow that receive() swallows in
-    // production. Anything else is a real setup failure and must surface here.
-    assert.equal((err as NodeJS.ErrnoException).code, "ERR_OUT_OF_RANGE");
-  }
-
-  // Upstream close -> drainOutboundTcp FIN with myAck (2^32 + 44). handleTcpEnd has no
-  // try/catch, so on 0.12.0 this throws uncaught. Correct: wrap to uint32, don't throw.
-  assert.doesNotThrow(
-    () => stack.handleTcpEnd({ key }),
-    "teardown must wrap seq/ack, not throw",
+  // Payload crosses the 2^32 boundary
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: ISN + 1,
+      ack: hostSeq,
+      flags: 0x18,
+      payload: request,
+    }),
+    srcIP,
+    dstIP,
   );
+  drainAllQemuTx(stack);
+  assert.equal(Buffer.concat(sends).toString(), request.toString());
 
+  // A retransmit of the same bytes after the wrap must not be re-delivered
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: ISN + 1,
+      ack: hostSeq,
+      flags: 0x18,
+      payload: request,
+    }),
+    srcIP,
+    dstIP,
+  );
+  drainAllQemuTx(stack);
+  assert.equal(Buffer.concat(sends).length, request.length);
+
+  // Upstream close sends a FIN carrying the wrapped ack
+  stack.handleTcpEnd({ key });
   const fin = decodeFramesFromQemuData(drainAllQemuTx(stack))
     .map(parseEthernet)
     .filter((eth) => eth.etherType === 0x0800)
@@ -1848,5 +1845,75 @@ test("network-stack: TCP ack past 2^32 must wrap on the wire, not throw", () => 
     .map((ipOut) => ipOut.payload)
     .find((tcp) => (tcp[13] & 0x01) !== 0);
   assert.ok(fin, "expected an outbound FIN segment during teardown");
-  assert.equal(fin!.readUInt32BE(8), WRAPPED_ACK, "ack must wrap mod 2^32");
+  assert.equal(fin.readUInt32BE(8), WRAPPED_ACK, "ack must wrap mod 2^32");
+});
+
+test("network-stack: outbound TCP keeps flowing when mySeq wraps past 2^32", () => {
+  // Long-lived downloads (> ~4 GiB on one connection) wrap the host sequence
+  // number; ACKs from the guest then carry small wrapped values.
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  let key = "";
+
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    dnsServers: ["8.8.8.8"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => (key = m.key),
+      onTcpSend: () => {},
+      onTcpClose: () => {},
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([93, 184, 216, 34]);
+  const srcPort = 50002;
+  const dstPort = 80;
+
+  stack.handleTCP(
+    buildTcpSegment({ srcPort, dstPort, seq: 1, ack: 0, flags: 0x02 }),
+    srcIP,
+    dstIP,
+  );
+  const session = (stack as any).natTable.get(key);
+  // Pretend the connection already transferred almost 4 GiB
+  session.mySeq = 0xffffffff - 1000;
+  stack.handleTcpConnected({ key });
+  drainAllQemuTx(stack);
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+
+  stack.handleTcpData({ key, data: Buffer.alloc(8 * 1024, 0x42) });
+  assert.equal(countTcpPayloadBytes(drainAllQemuTx(stack)), 8 * 1024);
+  assert.ok(session.mySeq >= 0 && session.mySeq < 0x1_0000_0000);
+
+  // Guest ACKs everything with the wrapped sequence number
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: 2,
+      ack: session.mySeq,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+  assert.equal(session.vmAck, session.mySeq);
+
+  stack.handleTcpData({ key, data: Buffer.alloc(4 * 1024, 0x43) });
+  assert.equal(countTcpPayloadBytes(drainAllQemuTx(stack)), 4 * 1024);
 });

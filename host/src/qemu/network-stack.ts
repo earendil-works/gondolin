@@ -20,10 +20,8 @@ function makeTcpNatKey(
 }
 
 // TCP sequence and acknowledgement numbers are 32 bits wide and wrap at 2^32.
-// We keep every stored counter (mySeq/myAck/vmSeq/vmAck) masked into [0, 2^32)
-// and compare them with RFC 1982 serial-number arithmetic instead of raw </>,
-// which break across the wrap boundary. Skipping either half re-introduces the
-// `writeUInt32BE` overflow crash or silent reassembly desync near 0xFFFFFFFF.
+// Stored counters (mySeq/myAck/vmSeq/vmAck) are kept in [0, 2^32) and compared
+// with RFC 1982 serial-number arithmetic, like the kernel's before()/after().
 
 /** Fold a value into the 32-bit TCP sequence space [0, 2^32). */
 function wrapSeq(value: number): number {
@@ -1032,8 +1030,7 @@ export class NetworkStack extends EventEmitter {
     const header = Buffer.alloc(20);
     header.writeUInt16BE(srcPort, 0);
     header.writeUInt16BE(dstPort, 2);
-    // Counters are kept wrapped at their mutation sites; mask again here so the
-    // serialization boundary can never emit an out-of-range uint32 (the crash).
+    // Defensive: never let an out-of-range counter throw on serialization
     header.writeUInt32BE(wrapSeq(seq), 4);
     header.writeUInt32BE(wrapSeq(ack), 8);
     header[12] = 0x50;
