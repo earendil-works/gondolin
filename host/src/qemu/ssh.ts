@@ -1,4 +1,4 @@
-import { Duplex } from "stream";
+import { Duplex } from "node:stream";
 import ssh2 from "ssh2";
 import type {
   AuthContext as SshAuthContext,
@@ -9,6 +9,7 @@ import type {
   ServerChannel as SshServerChannel,
   Session as SshServerSession,
 } from "ssh2";
+import { errorMessage } from "../utils/error.ts";
 
 const { Client: SshClientCtor, Server: SshServerCtor } = ssh2;
 
@@ -337,11 +338,6 @@ export function assertSshDnsConfig(options: {
   }
 }
 
-function formatError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
 function resolveSshCredential(
   ssh: QemuSshInternals,
   hostname: string,
@@ -496,7 +492,7 @@ function ensureSshProxySession(
     backend.abortTcpSession(
       key,
       session,
-      `ssh-proxy-error (${formatError(err)})`,
+      `ssh-proxy-error (${errorMessage(err)})`,
     );
   };
 
@@ -588,7 +584,7 @@ function attachSshSessionHandlers(options: {
       try {
         guestChannel.stderr.write(
           Buffer.from(
-            `gondolin ssh proxy error: ${formatError(err)}\n`,
+            `gondolin ssh proxy error: ${errorMessage(err)}\n`,
             "utf8",
           ),
         );
@@ -832,7 +828,7 @@ export async function bridgeSshExecChannel(options: {
     backend.abortTcpSession(
       key,
       session,
-      `ssh-upstream-channel-error (${formatError(err)})`,
+      `ssh-upstream-channel-error (${errorMessage(err)})`,
     );
   });
 
@@ -840,7 +836,7 @@ export async function bridgeSshExecChannel(options: {
     backend.abortTcpSession(
       key,
       session,
-      `ssh-upstream-error (${formatError(err)})`,
+      `ssh-upstream-error (${errorMessage(err)})`,
     );
   });
 }
@@ -859,7 +855,7 @@ export function handleSshProxyData(
     backend.abortTcpSession(
       key,
       session,
-      `ssh-proxy-init-error (${formatError(err)})`,
+      `ssh-proxy-init-error (${errorMessage(err)})`,
     );
   }
 }

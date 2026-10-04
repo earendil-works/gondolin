@@ -1,26 +1,10 @@
-import { EventEmitter } from "events";
-import { Duplex, PassThrough, Readable } from "stream";
+import { EventEmitter } from "node:events";
+import type { PassThrough } from "node:stream";
 
 import { getHostNodeArchCached } from "../host/arch.ts";
 import { AsyncSingleflight } from "../utils/async.ts";
-import { toBufferIterable } from "../utils/buffer-iter.ts";
 import {
-  buildExecRequest,
-  buildPtyResize,
-  buildStdinData,
-  buildExecWindow,
-  buildFileDeleteRequest,
-  buildFileReadRequest,
-  buildFileWriteData,
-  buildFileWriteRequest,
-} from "./virtio-protocol.ts";
-import {
-  type BootCommandMessage,
-  type ClientMessage,
   type ExecCommandMessage,
-  type ExecWindowCommandMessage,
-  type PtyResizeCommandMessage,
-  type StdinCommandMessage,
   encodeOutputFrame,
 } from "./control-protocol.ts";
 import {
@@ -40,37 +24,29 @@ import {
   type DebugFlag,
 } from "../debug.ts";
 import {
-  type GuestFileDeleteOptions,
-  type GuestFileReadOptions,
-  type GuestFileWriteOptions,
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "./server-options.ts";
 import {
-  MAX_REQUEST_ID,
-  TcpForwardStream,
+  type TcpForwardStream,
   VirtioBridge,
-  estimateBase64Bytes,
   isValidRequestId,
   parseMac,
 } from "./server-transport.ts";
 import {
   type SandboxClient,
-  type SandboxConnection,
-  LocalSandboxClient,
   sendBinary,
   sendError,
   sendJson,
 } from "./client.ts";
+import type { SandboxFsConfig } from "./server-boot-config.ts";
 import {
-  buildSandboxfsAppend,
-  isSameSandboxFsConfig,
-  normalizeSandboxFsConfig,
-  type SandboxFsConfig,
-} from "./server-boot-config.ts";
-import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
+  type SandboxServerOps,
+  installSandboxServerOps,
+} from "./server-ops.ts";
+import { errorMessage } from "../utils/error.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 
@@ -135,6 +111,7 @@ type SandboxServerInternalOptions = {
   qemuRootDiskVolatileMode?: "snapshot";
 };
 
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: methods are installed by installSandboxServerOps
 export class SandboxServer extends EventEmitter {
   private emitDebug(component: DebugComponent, message: string) {
     const normalized = stripTrailingNewline(message);
@@ -142,7 +119,7 @@ export class SandboxServer extends EventEmitter {
     // Legacy string log event
     this.emit(
       "log",
-      `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""),
+      `[${component}] ${normalized}${message.endsWith("\n") ? "\n" : ""}`,
     );
   }
 
@@ -210,7 +187,7 @@ export class SandboxServer extends EventEmitter {
   private formatQemuLogHint(): string {
     const hint = this.selectQemuHintLine();
     if (!hint) return "";
-    const truncated = hint.length > 300 ? hint.slice(0, 300) + "…" : hint;
+    const truncated = hint.length > 300 ? `${hint.slice(0, 300)}…` : hint;
     const label = this.options.vmm === "krun" ? "krun" : "qemu";
     return ` (${label}: ${truncated})`;
   }
@@ -350,7 +327,7 @@ export class SandboxServer extends EventEmitter {
       );
     }
     this.on("error", (err) => {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       this.emitDebug("error", message);
     });
     // Detect if we received pre-resolved options (from static create())
@@ -741,7 +718,7 @@ export class SandboxServer extends EventEmitter {
         }
       } else if (message.t === "file_read_data") {
         const op = this.fileOps.get(message.id);
-        if (!op || op.kind !== "read") return;
+        if (op?.kind !== "read") return;
 
         const data = message.p.data;
         if (!Buffer.isBuffer(data)) {
@@ -1047,7 +1024,7 @@ export class SandboxServer extends EventEmitter {
       this.emit("error", new Error(`[virtio] bridge error: ${message}`));
       this.failInflight(
         "protocol_error",
-        `virtio bridge error: ${message}` + this.formatQemuLogHint(),
+        `virtio bridge error: ${message}${this.formatQemuLogHint()}`,
       );
     };
 

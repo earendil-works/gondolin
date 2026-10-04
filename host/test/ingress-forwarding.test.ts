@@ -68,7 +68,7 @@ test("IngressGateway: ignores client Content-Length when transfer-encoding is pr
   const listeners = new GondolinListeners(new MemoryProvider());
   listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
 
-  let upstream: CaptureDuplex | null = null;
+  let upstream = null as CaptureDuplex | null;
 
   const sandbox = {
     openIngressStream: async () => {
@@ -117,7 +117,7 @@ test("IngressGateway: ignores client Content-Length when transfer-encoding is pr
   assert.equal(Buffer.concat(res.bodyChunks).toString("utf8"), "ok");
 
   // Hop-by-hop removal honors Connection: bar
-  assert.equal(res.headers["bar"], undefined);
+  assert.equal(res.headers.bar, undefined);
 
   assert.ok(upstream);
   const upstreamBytes = Buffer.concat(upstream.written).toString("utf8");
@@ -177,7 +177,7 @@ test("IngressGateway: returns 502 on upstream response header timeout", async ()
   const listeners = new GondolinListeners(new MemoryProvider());
   listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
 
-  let upstream: CaptureDuplex | null = null;
+  let upstream = null as CaptureDuplex | null;
   const sandbox = {
     openIngressStream: async () => {
       upstream = new CaptureDuplex();
@@ -251,7 +251,7 @@ test("IngressGateway: does not half-close upstream before response arrives", asy
   const listeners = new GondolinListeners(new MemoryProvider());
   listeners.setRoutes([{ prefix: "/", port: 1234, stripPrefix: true }]);
 
-  let upstream: CaptureDuplex | null = null;
+  let upstream = null as CaptureDuplex | null;
   let upstreamEndCalls = 0;
 
   const sandbox = {

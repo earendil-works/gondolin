@@ -1,4 +1,4 @@
-import path from "path";
+import path from "node:path";
 
 /**
  * Build configuration schema for custom Linux kernel and rootfs builds.
@@ -184,6 +184,16 @@ export interface BuildConfig {
 /**
  * Get the default build configuration for the current system.
  */
+/** Whether the build uses an OCI image as rootfs source */
+export function hasOciRootfs(config: BuildConfig): boolean {
+  return config.oci !== undefined;
+}
+
+/** Whether the build config declares post-build commands */
+export function hasPostBuildCommands(config: BuildConfig): boolean {
+  return (config.postBuild?.commands?.length ?? 0) > 0;
+}
+
 export function getDefaultBuildConfig(): BuildConfig {
   const arch = getDefaultArch();
 

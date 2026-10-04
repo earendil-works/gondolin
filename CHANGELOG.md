@@ -4,6 +4,17 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Block guest HTTP/TLS egress to loopback, private, link-local and other internal address ranges by default, even when no `httpHooks` (or no `httpHooks.isIpAllowed`) are configured.  Previously VMs created without hooks could reach host-local services and cloud metadata endpoints.  Provide a custom `isIpAllowed` to opt out.
+- Close idle upstream UDP sockets in `trusted` and `open` DNS modes and cap the number of concurrently open ones, fixing a host file descriptor leak in long-running VMs.
+- Lower the minimum supported Node.js version to 22.19.0 (previously 23.6.0).
+- Drop the generated `dist/src/index.cjs` shim; CommonJS consumers now load the ESM entrypoint directly through Node's `require(esm)` support.
+- Upgrade guest and krun runner builds to Zig 0.17.0.  The krun runner now uses hand-written libkrun bindings instead of `@cImport`.
+- Fix cached sandbox helpers being rejected with a `gondolinVersion mismatch` after upgrading Gondolin when the new release reuses the same helper build.
+- `VM.close()` is now terminal: `start()`, `exec()` and friends on a closed VM reject with `vm is closed` instead of silently restarting the sandbox server and leaking its sockets.
+- `GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` now always builds helpers from local Zig sources as documented, instead of only acting as a fallback when published helpers cannot be resolved.
+- Fix unhandled promise rejections when `writeGuestFile()` or `deleteGuestFile()` fail before completion, for example when aborted.  #136
+- Fix HTTP 502 responses for guest requests with buffered bodies (e.g. `POST`, `git clone` over HTTP) on Node.js >= 24.17 caused by a duplicated `Content-Length` header.  #135
+
 ## 0.12.0
 
 - Add `VM.getHostPid()` to allow callers to collect host-side process metrics of the VM runner. #114
