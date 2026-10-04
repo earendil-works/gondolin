@@ -88,13 +88,25 @@ test("cli exec help describes a session IPC socket", async () => {
   assert.doesNotMatch(result.stdout, /via the virtio socket/i);
 });
 
-test("cli exec --sock does not report connected when connect fails", async () => {
+test("cli exec --sock rejects unknown session ids", async () => {
+  const result = await runCli([
+    "exec",
+    "--sock",
+    "does-not-exist-session-id",
+    "--",
+    "true",
+  ]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /session not found or not running/);
+});
+
+test("cli exec --sock reports connect failures", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-cli-exec-"));
   const socketPath = path.join(dir, "missing.sock");
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 1);
-    assert.doesNotMatch(result.stdout, /connected to/);
+    assert.equal(result.stdout, "");
     assert.match(result.stderr, /socket error: connect ENOENT/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -114,6 +126,7 @@ test("cli exec --sock fails when the session closes during an exec", async () =>
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 1);
+    assert.match(result.stderr, /session connection closed/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     fs.rmSync(dir, { recursive: true, force: true });
@@ -248,7 +261,7 @@ test("cli exec --sock replenishes credits for large stdout and stderr", async ()
     assert.equal(result.status, 0);
     assert.equal(
       result.stdout,
-      `connected to ${socketPath}\n${stdoutOutput.toString()}`,
+      stdoutOutput.toString(),
     );
     assert.equal(result.stderr, stderrOutput.toString());
   } finally {
@@ -289,7 +302,7 @@ test("cli exec --sock ignores buffered output after its response", async () => {
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 0);
-    assert.equal(result.stdout, `connected to ${socketPath}\n`);
+    assert.equal(result.stdout, "");
     assert.equal(result.stderr, "");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -401,7 +414,7 @@ test("cli exec --sock ignores stale frames from a previous command", async () =>
       "second",
     ]);
     assert.equal(result.status, 0);
-    assert.equal(result.stdout, `connected to ${socketPath}\ncurrent`);
+    assert.equal(result.stdout, "current");
     assert.equal(result.stderr, "");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

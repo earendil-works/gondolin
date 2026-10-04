@@ -414,15 +414,18 @@ Per-command flags apply to the most recent `--cmd`:
 
 ### Socket Mode (Advanced)
 
-For a running Gondolin session, use the session IPC socket path recorded for
-that session to send exec requests without creating a VM:
+To run non-interactive commands in an already running Gondolin session (for
+example one started with `gondolin bash`), pass its session id (or a unique
+prefix, as shown by `gondolin list`) or the path to its session IPC socket:
 
 ```bash
+gondolin exec --sock SESSION_ID -- COMMAND [ARGS...]
 gondolin exec --sock /path/to/session.sock -- COMMAND [ARGS...]
 ```
 
-This is primarily useful when a separate process needs to issue exec requests
-against an existing Gondolin session.
+No VM is created; command output is written to stdout/stderr and the process
+exits with the command's exit code.  Use `gondolin attach` for interactive
+shells.
 
 ### `gondolin build`
 

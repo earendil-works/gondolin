@@ -388,15 +388,17 @@ function snapshotUsage() {
 
 function execUsage() {
   console.log("Usage:");
-  console.log("  gondolin exec --sock PATH -- CMD [ARGS...]");
+  console.log("  gondolin exec --sock PATH|ID -- CMD [ARGS...]");
   console.log(
-    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
+    "  gondolin exec --sock PATH|ID --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
   );
   console.log(
     "  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)",
   );
   console.log();
-  console.log("  --sock PATH uses a Gondolin session IPC socket.");
+  console.log(
+    "  --sock PATH|ID uses a Gondolin session IPC socket path or session id.",
+  );
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
@@ -1438,7 +1440,7 @@ async function runExecVm(args: ExecArgs) {
 
 const EXEC_OUTPUT_WINDOW_BYTES = 1024 * 1024;
 
-function runExecSocket(args: ExecArgs) {
+function runExecSocket(args: ExecArgs, sockPath: string) {
   // The session socket uses the 5-byte framed JSON/binary IPC protocol, not virtio CBOR.
   let currentIndex = 0;
   let inflightId: number | null = null;
@@ -1473,9 +1475,8 @@ function runExecSocket(args: ExecArgs) {
     });
   };
 
-  const client = connectToSession(args.sock!, {
+  const client = connectToSession(sockPath, {
     onConnect() {
-      console.log(`connected to ${args.sock}`);
       sendNext();
     },
     onJson(message: ServerMessage) {
@@ -1532,9 +1533,23 @@ function runExecSocket(args: ExecArgs) {
         finish(1);
         return;
       }
+      console.error("session connection closed before the command finished");
       finish(1);
     },
   });
+}
+
+/** Resolve `--sock` as a socket path, falling back to a session id (or prefix) */
+async function resolveExecSocketPath(value: string): Promise<string> {
+  if (value.includes("/") || fs.existsSync(value)) return value;
+  await gcSessions().catch(() => {
+    // ignore
+  });
+  const session = await findSession(value);
+  if (!session?.alive) {
+    throw new Error(`session not found or not running: ${value}`);
+  }
+  return session.socketPath;
 }
 
 async function runExec(argv: string[] = process.argv.slice(2)) {
@@ -1547,7 +1562,7 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
 
   if (args.sock) {
     // Socket mode (session IPC)
-    runExecSocket(args);
+    runExecSocket(args, await resolveExecSocketPath(args.sock));
   } else {
     args.common.secrets = await resolveSecretHosts(args.common.secrets);
 
