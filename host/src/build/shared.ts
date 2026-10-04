@@ -1,6 +1,6 @@
-import fs from "fs";
-import path from "path";
-import { execFileSync, spawn, type SpawnOptions } from "child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
 
 import {
   MANIFEST_FILENAME,
@@ -10,6 +10,7 @@ import {
 import type { BuildConfig, Architecture } from "./config.ts";
 import { computeFileHash } from "./helpers.ts";
 import { ensureSandboxHelperBinaries } from "./sandbox-helpers.ts";
+import { errorMessage } from "../utils/error.ts";
 export { computeFileHash } from "./helpers.ts";
 
 /** Fixed output filenames for assets */
@@ -226,7 +227,7 @@ export function ensureHostDistBuilt(
   }
 
   const tsconfigPath = path.join(hostPkgRoot, "tsconfig.build.json");
-  const postbuildPath = path.join(hostPkgRoot, "scripts", "postbuild.mjs");
+  const postbuildPath = path.join(hostPkgRoot, "scripts", "postbuild.ts");
   const tscPath = path.join(
     hostPkgRoot,
     "node_modules",
@@ -307,10 +308,6 @@ function envFlagEnabled(name: string): boolean {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function assertSandboxBinaryPathsExist(paths: SandboxBinaryPaths): void {
   for (const [name, filePath] of Object.entries(paths)) {
     if (!fs.existsSync(filePath)) {
@@ -355,7 +352,7 @@ async function buildSandboxBinaryPathsFromSource(
       `Cannot build sandbox helpers from source because ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1 was set, ` +
         "but guest sources were not found. Use a Gondolin checkout or set " +
         "GONDOLIN_GUEST_SRC. " +
-        "This contributor path requires Zig 0.16.0.",
+        "This contributor path requires Zig 0.17.0.",
     );
   }
 
@@ -366,7 +363,7 @@ async function buildSandboxBinaryPathsFromSource(
   } catch (error) {
     throw new Error(
       "Failed to build sandbox helpers from Zig sources. " +
-        "Install Zig 0.16.0 or unset " +
+        "Install Zig 0.17.0 or unset " +
         `${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV} to use published helpers.\n` +
         `Cause: ${errorMessage(error)}`,
     );
@@ -445,6 +442,17 @@ export async function resolveSandboxBinaryPaths(
     return paths;
   }
 
+  // Contributor override: always build from local Zig sources so changes to
+  // the guest helpers end up in the image, even when published helpers exist.
+  if (envFlagEnabled(BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV)) {
+    log(
+      `Building sandbox helpers from Zig sources because ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1`,
+    );
+    const paths = await buildSandboxBinaryPathsFromSource(config.arch, log);
+    assertSandboxBinaryPathsExist(paths);
+    return paths;
+  }
+
   try {
     const resolved = await ensureSandboxHelperBinaries({
       arch: config.arch,
@@ -453,27 +461,16 @@ export async function resolveSandboxBinaryPaths(
     assertSandboxBinaryPathsExist(resolved.paths);
     return resolved.paths;
   } catch (error) {
-    if (!envFlagEnabled(BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV)) {
-      throw new Error(
-        `Could not resolve published sandbox helper binaries for ${config.arch}.\n` +
-          "Set GONDOLIN_SANDBOX_HELPERS_DIR to a directory containing " +
-          "bin/sandboxd, bin/sandboxfs, bin/sandboxssh, and " +
-          "bin/sandboxingress, or provide all four sandbox helper paths " +
-          "in the build config.\n" +
-          `Contributors can set ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1 to build helpers from Zig sources instead.\n` +
-          `Cause: ${errorMessage(error)}`,
-      );
-    }
-
-    log(`Could not resolve published sandbox helpers: ${errorMessage(error)}`);
-    log(
-      `Falling back to Zig source build because ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1`,
+    throw new Error(
+      `Could not resolve published sandbox helper binaries for ${config.arch}.\n` +
+        "Set GONDOLIN_SANDBOX_HELPERS_DIR to a directory containing " +
+        "bin/sandboxd, bin/sandboxfs, bin/sandboxssh, and " +
+        "bin/sandboxingress, or provide all four sandbox helper paths " +
+        "in the build config.\n" +
+        `Contributors can set ${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV}=1 to build helpers from Zig sources instead.\n` +
+        `Cause: ${errorMessage(error)}`,
     );
   }
-
-  const paths = await buildSandboxBinaryPathsFromSource(config.arch, log);
-  assertSandboxBinaryPathsExist(paths);
-  return paths;
 }
 
 async function buildGuestBinaries(

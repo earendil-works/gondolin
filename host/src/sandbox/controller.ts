@@ -1,41 +1,19 @@
-import { EventEmitter } from "events";
-import child_process from "child_process";
-import type { ChildProcess } from "child_process";
-import fs from "fs";
-import net from "net";
-import path from "path";
-import { randomUUID } from "crypto";
+import { EventEmitter } from "node:events";
+import child_process from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
-const activeChildren = new Set<ChildProcess>();
-let exitHookRegistered = false;
-
-function killActiveChildren() {
-  for (const child of activeChildren) {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function registerExitHook() {
-  if (exitHookRegistered) return;
-  exitHookRegistered = true;
-  process.once("exit", () => {
-    killActiveChildren();
-  });
-}
-
-function trackChild(child: ChildProcess) {
-  registerExitHook();
-  activeChildren.add(child);
-  const cleanup = () => {
-    activeChildren.delete(child);
-  };
-  child.once("exit", cleanup);
-  child.once("error", cleanup);
-}
+import {
+  forwardChildLogs,
+  getActiveChildrenCount,
+  killActiveChildren,
+  terminateChild,
+  trackChild,
+} from "./child-process.ts";
+import { errorMessage } from "../utils/error.ts";
 
 const QMP_COMMAND_TIMEOUT_MS = 2000;
 
@@ -196,7 +174,7 @@ function executeQmpCommand(
     });
 
     socket.on("error", (err) => {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       finish(
         new QmpCommandError(command, "socket_error", message, commandSent),
       );
@@ -351,14 +329,7 @@ export class SandboxController extends EventEmitter {
       stdio: ["ignore", "pipe", "pipe"],
     });
     trackChild(this.child);
-
-    this.child.stdout?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stdout" satisfies SandboxLogStream);
-    });
-
-    this.child.stderr?.on("data", (chunk) => {
-      this.emit("log", chunk.toString(), "stderr" satisfies SandboxLogStream);
-    });
+    forwardChildLogs(this, this.child);
 
     this.child.on("spawn", () => {
       this.setState("running");
@@ -410,112 +381,7 @@ export class SandboxController extends EventEmitter {
       this.restartTimer = null;
     }
 
-    // Best-effort shutdown sequence:
-    // - SIGTERM first
-    // - SIGKILL after a short grace period
-    // - never hang forever waiting on an "exit" event
-    //
-    // CI runners (notably Linux/KVM) have occasionally exhibited situations where
-    // QEMU does not terminate promptly and keeps Node alive via its stdio pipes.
-    // In that case we fall back to destroying the pipes + unref'ing the child so
-    // the process can still exit.
-    const closeTimeoutMs = 10_000;
-
-    let exited = false;
-    let exitHandler: (() => void) | null = null;
-    let errorHandler: ((err: Error) => void) | null = null;
-
-    const waitForExit = new Promise<void>((resolve) => {
-      // If the process is already gone, don't wait.
-      // (ChildProcess.exitCode is `number | null`; treat `undefined` as "unknown" and keep waiting.)
-      const exitCode = (child as any).exitCode as number | null | undefined;
-      if (typeof exitCode === "number") {
-        exited = true;
-        resolve();
-        return;
-      }
-
-      exitHandler = () => {
-        exited = true;
-        resolve();
-      };
-
-      errorHandler = () => {
-        exited = true;
-        resolve();
-      };
-
-      child.once("exit", exitHandler);
-      child.once("error", errorHandler);
-    });
-
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
-
-    const sigkillTimer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }, 3000);
-
-    // Hard cap on waiting for the child to exit.
-    let closeTimeoutTimer: NodeJS.Timeout | null = null;
-    try {
-      await Promise.race([
-        waitForExit,
-        new Promise<void>((resolve) => {
-          closeTimeoutTimer = setTimeout(resolve, closeTimeoutMs);
-        }),
-      ]);
-    } finally {
-      if (closeTimeoutTimer) {
-        clearTimeout(closeTimeoutTimer);
-      }
-      clearTimeout(sigkillTimer);
-    }
-
-    // If the child is still around, do not keep the event loop alive waiting for it.
-    if (!exited) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-
-      // Last resort: detach the child so it cannot keep Node alive.
-      try {
-        (child.stdin as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        (child.stdout as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        (child.stderr as any)?.destroy?.();
-      } catch {
-        // ignore
-      }
-      try {
-        child.unref();
-      } catch {
-        // ignore
-      }
-
-      // Also SIGKILL any other tracked children (best-effort)
-      killActiveChildren();
-
-      // Remove our listeners to avoid leaks if the child exits later.
-      if (exitHandler) child.off("exit", exitHandler);
-      if (errorHandler) child.off("error", errorHandler);
-    }
+    await terminateChild(child);
 
     this.cleanupQmpSocket();
     this.paused = false;
@@ -611,7 +477,7 @@ export class SandboxController extends EventEmitter {
         }
       }
 
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       this.emit(
         "log",
         `qmp idle pause disabled: ${message}\n`,
@@ -903,5 +769,5 @@ export const __test = {
   selectAccel,
   selectCpu,
   killActiveChildren,
-  getActiveChildrenCount: () => activeChildren.size,
+  getActiveChildrenCount,
 };

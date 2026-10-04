@@ -1,6 +1,6 @@
-import type dns from "dns";
-import type net from "net";
-import type tls from "tls";
+import type dns from "node:dns";
+import type net from "node:net";
+import type tls from "node:tls";
 import type { Agent, fetch as undiciFetch } from "undici";
 
 export type HttpFetch = typeof undiciFetch;

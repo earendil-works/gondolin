@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import type fs from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
 import type { VirtualFileHandle, VirtualProvider } from "./node/index.ts";

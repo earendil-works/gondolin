@@ -9,7 +9,7 @@ function makeRequest(init: {
   method: string;
   url: string;
   headers?: Record<string, string>;
-  body?: BodyInit | null;
+  body?: RequestInit["body"];
 }): Request {
   return new Request(init.url, {
     method: init.method,
@@ -726,7 +726,7 @@ test("http hooks update secret host allowlists after creation", async () => {
   assert.deepEqual(allowedHosts, ["*"]);
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -781,7 +781,7 @@ test("http hooks delete secrets by substituting empty strings", async () => {
   assert.match(request.headers.get("authorization") ?? "", /^Bearer ?$/);
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -857,7 +857,7 @@ test("http hooks reject revoked secret values after rotation on allowed hosts", 
   secretManager.updateSecret("API_KEY", { value: "rotated-value" });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -884,7 +884,7 @@ test("http hooks reject revoked secret values embedded in custom headers", async
   secretManager.updateSecret("API_KEY", { value: "newsecret" });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -911,7 +911,7 @@ test("http hooks reject revoked secret values embedded in authorization headers"
   secretManager.updateSecret("API_KEY", { value: "newsecret" });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -938,7 +938,7 @@ test("http hooks reject revoked secret values in malformed basic auth headers", 
   secretManager.updateSecret("API_KEY", { value: "newsecret" });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -965,7 +965,7 @@ test("http hooks reject deleted secret values in malformed basic auth headers", 
   secretManager.deleteSecret("API_KEY");
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1072,7 +1072,7 @@ test("http hooks reject revoked secret values embedded in query values", async (
   secretManager.updateSecret("API_KEY", { value: "newsecret" });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1097,7 +1097,7 @@ test("http hooks reject deleted secret values embedded in headers and query valu
   secretManager.deleteSecret("API_KEY");
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1168,7 +1168,7 @@ test("http hooks reject URL parameter secrets on disallowed hosts when enabled",
   });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1236,7 +1236,7 @@ test("http hooks reject basic auth secrets on disallowed hosts", async () => {
   ).toString("base64");
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1261,7 +1261,7 @@ test("http hooks reject secrets on disallowed hosts", async () => {
   });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1286,7 +1286,7 @@ test("http hooks reject already-substituted secrets on disallowed hosts", async 
   });
 
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1317,7 +1317,7 @@ test("http hooks reject secrets if onRequest rewrites the destination", async ()
 
   // Secret substitution must use the *final* destination, and block here.
   await assert.rejects(
-    () =>
+    async () =>
       httpHooks.onRequest!(
         makeRequest({
           method: "GET",
@@ -1403,7 +1403,7 @@ test("http hooks reject invalid hook return values", async () => {
   const { httpHooks: headHooks } = createHttpHooks({
     onRequest: () => ({}) as any,
   });
-  await assert.rejects(() =>
+  await assert.rejects(async () =>
     headHooks.onRequest!(
       makeRequest({ method: "GET", url: "https://example.com/data" }),
     ),
@@ -1412,7 +1412,7 @@ test("http hooks reject invalid hook return values", async () => {
   const { httpHooks: bodyHooks } = createHttpHooks({
     onRequest: () => ({}) as any,
   });
-  await assert.rejects(() =>
+  await assert.rejects(async () =>
     bodyHooks.onRequest!(
       makeRequest({
         method: "POST",

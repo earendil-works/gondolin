@@ -1,7 +1,7 @@
-import fs from "fs";
+import fs from "node:fs";
 import type { Stats } from "node:fs";
-import path from "path";
-import { Readable } from "stream";
+import path from "node:path";
+import { Readable } from "node:stream";
 
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import type { ExecResult } from "../exec.ts";
@@ -13,6 +13,7 @@ import {
 } from "../vfs/mounts.ts";
 import type { SandboxVfsProvider } from "../vfs/provider.ts";
 import { normalizeVfsPath } from "../vfs/utils.ts";
+import { errorMessage } from "../utils/error.ts";
 
 const DEFAULT_VFS_FILE_CHUNK_SIZE = 64 * 1024;
 
@@ -215,7 +216,7 @@ export class VmFsController implements VmFs {
         await vfs.access(vfsPath, mode);
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to access guest file '${filePath}': ${detail}`);
       }
     }
@@ -282,7 +283,7 @@ export class VmFsController implements VmFs {
         await vfs.mkdir(vfsPath, mkdirOptions);
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(
           `failed to create guest directory '${dirPath}': ${detail}`,
         );
@@ -348,7 +349,7 @@ export class VmFsController implements VmFs {
           typeof entry === "string" ? entry : entry.name,
         );
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(
           `failed to list guest directory '${dirPath}': ${detail}`,
         );
@@ -398,7 +399,7 @@ export class VmFsController implements VmFs {
         assertNotAborted(options.signal, "file stat aborted");
         return await vfs.stat(vfsPath);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to stat guest file '${filePath}': ${detail}`);
       }
     }
@@ -426,7 +427,7 @@ export class VmFsController implements VmFs {
     try {
       return parseGuestStatOutput(result.stdout);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       throw new Error(`failed to stat guest file '${filePath}': ${detail}`);
     }
   }
@@ -456,7 +457,7 @@ export class VmFsController implements VmFs {
         await vfs.rename(oldVfsPath, newVfsPath);
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(
           `failed to rename guest path '${oldPath}' to '${newPath}': ${detail}`,
         );
@@ -498,7 +499,7 @@ export class VmFsController implements VmFs {
       try {
         return this.readFileStreamFromVfs(vfsPath, options);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to stream guest file '${filePath}': ${detail}`);
       }
     }
@@ -518,7 +519,7 @@ export class VmFsController implements VmFs {
         signal: options.signal,
       });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       throw new Error(`failed to stream guest file '${filePath}': ${detail}`);
     }
   }
@@ -545,7 +546,7 @@ export class VmFsController implements VmFs {
           signal: options.signal,
         });
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to read guest file '${filePath}': ${detail}`);
       }
     } else {
@@ -563,7 +564,7 @@ export class VmFsController implements VmFs {
           signal: options.signal,
         });
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to read guest file '${filePath}': ${detail}`);
       }
     }
@@ -595,7 +596,7 @@ export class VmFsController implements VmFs {
         await this.writeFileToVfs(vfsPath, payload, options.signal);
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to write guest file '${filePath}': ${detail}`);
       }
     }
@@ -613,7 +614,7 @@ export class VmFsController implements VmFs {
         signal: options.signal,
       });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       throw new Error(`failed to write guest file '${filePath}': ${detail}`);
     }
   }
@@ -636,7 +637,7 @@ export class VmFsController implements VmFs {
         });
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         throw new Error(`failed to delete guest file '${filePath}': ${detail}`);
       }
     }
@@ -656,7 +657,7 @@ export class VmFsController implements VmFs {
         signal: options.signal,
       });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       throw new Error(`failed to delete guest file '${filePath}': ${detail}`);
     }
   }
@@ -869,7 +870,7 @@ function resolveAbsoluteGuestPath(
   if (filePath.startsWith("/")) {
     return normalizeVfsPath(filePath);
   }
-  if (!cwd || !cwd.startsWith("/")) {
+  if (!cwd?.startsWith("/")) {
     return null;
   }
   return normalizeVfsPath(path.posix.join(cwd, filePath));

@@ -1,5 +1,5 @@
 import { NetworkStack } from "../../src/qemu/network-stack.ts";
-import { XorShift32 } from "../rng.ts";
+import type { XorShift32 } from "../rng.ts";
 import type { FuzzTarget } from "./types.ts";
 
 function sanitizeQemuFramedStream(buf: Buffer, maxFrame: number) {

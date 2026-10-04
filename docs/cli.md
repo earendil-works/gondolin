@@ -28,7 +28,7 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 23.6.0
+- Node.js >= 22.19.0
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
 first use from local overrides/store first, then via `builtin-image-registry.json`,
@@ -64,7 +64,7 @@ options for configuring filesystem mounts and mediated network egress policy.
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
-    - Requires `resize2fs` in the guest image (`e2fsprogs` on Alpine)
+    - Requires `resize2fs` in the guest image (`e2fsprogs-extra` on Alpine)
 
 Examples:
 

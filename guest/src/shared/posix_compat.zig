@@ -232,9 +232,9 @@ pub fn execvpeZ(
 
     while (it.next()) |component| {
         const candidate = if (component.len == 0)
-            std.fmt.bufPrintZ(&candidate_buf, "{s}", .{file_slice}) catch continue
+            std.mem.printSentinel(&candidate_buf, "{s}", .{file_slice}, 0) catch continue
         else
-            std.fmt.bufPrintZ(&candidate_buf, "{s}/{s}", .{ component, file_slice }) catch continue;
+            std.mem.printSentinel(&candidate_buf, "{s}/{s}", .{ component, file_slice }, 0) catch continue;
 
         execveZ(candidate.ptr, argv, envp) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => continue,
