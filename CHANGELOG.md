@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Fix a host-process crash on Bun when a guest closes an intercepted TLS flow while the host still has ciphertext to write, for example after rejecting the MITM certificate (custom CA bundles, certifi, pinning). The wrapped guest stream now has an error listener that tears down only that flow.
+
 - Fix `chmod` from the guest being silently ignored on VFS mounts (`MemoryProvider`, `RealFSProvider`, `ShadowProvider`, ...): sandboxfs now forwards mode changes to the host and providers gain an optional `chmod()` method.  `RealFSProvider` never applies setuid/setgid bits to host files.  Requires a guest image built with this version.  #115
 - Fix a TOCTOU race in VFS path validation: fs-rpc requests are now processed strictly in order, so a guest pipelining requests can no longer swap a directory between `RealFSProvider`'s path check and the host syscall to reach files outside the mount root.  #143
 

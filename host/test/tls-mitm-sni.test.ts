@@ -7,6 +7,8 @@ import { Duplex } from "node:stream";
 import test from "node:test";
 import tls from "node:tls";
 
+import forge from "node-forge";
+
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
 import {
   MAX_CLIENT_HELLO_PREPARSE_BYTES,
@@ -250,5 +252,106 @@ for (const tlsSniPreparse of [false, true]) {
       pauseGuestFlow: false,
     });
     for (const result of results) assert.equal(result.body.toString(), "ok");
+  });
+}
+
+/**
+ * A guest that rejects the MITM certificate (custom CA bundle, certifi, pinning) aborts the
+ * handshake and closes its flow while the host still has handshake ciphertext pending.
+ * The pending guest write then fails with "guest closed"; that must stay a per-flow event
+ * and never become an uncaught stream error in the host process.
+ */
+async function guestRejectsCertificate(tlsSniPreparse: boolean) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-tls-abort-"));
+  const backend = new QemuNetworkBackend({
+    socketPath: path.join(
+      os.tmpdir(),
+      `gondolin-tls-abort-${crypto.randomUUID()}.sock`,
+    ),
+    mitmCertDir: dir,
+    tlsSniPreparse,
+  });
+  const internals = backend as any;
+  await internals.ensureCaAsync();
+  const key = "TCP:192.168.127.3:41000:203.0.113.10:443";
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 41000,
+    dstIP: "203.0.113.10",
+    dstPort: 443,
+    connectIP: "203.0.113.10",
+    syntheticHostname: null,
+    flowControlPaused: false,
+    protocol: "tls",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+  const wire = new CaptureDuplex();
+  internals.stack = {
+    handleTcpData: ({ data }: { data: Buffer }) => {
+      wire.push(Buffer.from(data));
+      // A slow guest: every host->guest chunk waits for a flow resume.
+      session.flowControlPaused = true;
+    },
+    handleTcpEnd: () => {},
+    handleTcpClosed: () => {},
+    handleTcpError: () => {},
+  };
+  internals.flush = () => {};
+  internals.tcpSessions.set(key, session);
+  wire.onWrite = (chunk) => internals.handleTlsData(key, session, chunk);
+
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown) => uncaught.push(error);
+  process.on("uncaughtException", onUncaught);
+  try {
+    // Trust an unrelated CA: the client rejects the MITM leaf and aborts.
+    const unrelated = forge.pki.rsa.generateKeyPair(1024);
+    const caCert = forge.pki.createCertificate();
+    caCert.publicKey = unrelated.publicKey;
+    caCert.serialNumber = "01";
+    caCert.validity.notBefore = new Date(Date.now() - 60_000);
+    caCert.validity.notAfter = new Date(Date.now() + 3_600_000);
+    caCert.setSubject([{ name: "commonName", value: "unrelated" }]);
+    caCert.setIssuer([{ name: "commonName", value: "unrelated" }]);
+    caCert.sign(unrelated.privateKey, forge.md.sha256.create());
+    const client = tls.connect({
+      socket: wire,
+      servername: "example.com",
+      ca: forge.pki.certificateToPem(caCert),
+    });
+    const failure = await new Promise<Error>((resolve) => {
+      client.on("error", resolve);
+      client.on("secureConnect", () =>
+        resolve(new Error("unexpected handshake success")),
+      );
+    });
+    assert.notEqual(failure.message, "unexpected handshake success");
+    // The guest closes its flow (FIN), as the network stack reports for a real VM: the host
+    // then ends its TLS socket, whose final write targets the closed flow.
+    internals.handleTcpClose({ key, destroy: false });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(
+      uncaught,
+      [],
+      "guest TLS abort must not raise in the host process",
+    );
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    await backend.close().catch(() => {});
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+for (const tlsSniPreparse of [false, true]) {
+  const mode = tlsSniPreparse ? "SNI pre-parse" : "SNICallback";
+  const skip =
+    isBun && !tlsSniPreparse ? "Bun does not call SNICallback" : false;
+  test(`tls-mitm (${mode}): guest certificate rejection stays a per-flow event`, {
+    skip,
+  }, async () => {
+    await guestRejectsCertificate(tlsSniPreparse);
   });
 }
