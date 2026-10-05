@@ -64,6 +64,7 @@ import {
 import type { WebSocketState } from "./ws.ts";
 import {
   createGuestClosedError,
+  isGuestClosedError,
   type DnsMode,
   type DnsOptions,
   type HttpFetch,
@@ -1322,6 +1323,17 @@ export class QemuNetworkBackend extends EventEmitter {
           },
         };
     const tlsSocket = new tls.TLSSocket(stream, serverOptions);
+
+    // A guest can close its flow while the host still has ciphertext to write (e.g. after
+    // rejecting the MITM certificate). The pending guest write then fails with "guest
+    // closed" and the wrapped stream emits `error`. Node forwards that to the TLS socket;
+    // Bun does not, so without a listener it is an uncaught error that crashes the host.
+    stream.on("error", (err) => {
+      if (!isGuestClosedError(err) && this.options.debug) {
+        this.emitDebug(`tls guest stream error ${(err as Error).message}`);
+      }
+      tlsSocket.destroy();
+    });
 
     tlsSocket.on("data", (data) => {
       handleTlsHttpData(this, key, session, Buffer.from(data));
