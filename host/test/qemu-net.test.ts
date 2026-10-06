@@ -4961,3 +4961,107 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
   releaseBlockedFetches();
   await Promise.all(runs);
 });
+
+function recordGuestTcp(backend: QemuNetworkBackend) {
+  (backend as any).resetStack();
+  const stack = (backend as any).stack;
+
+  const sent: { seq: number; ack: number; flags: number }[] = [];
+  const sendTCP = stack.sendTCP.bind(stack);
+  stack.sendTCP = (...args: any[]) => {
+    sent.push({ seq: args[4], ack: args[5], flags: args[6] });
+    sendTCP(...args);
+  };
+
+  const segment = (
+    dst: { ip: number[]; port: number },
+    srcPort: number,
+    seq: number,
+    ack: number,
+    flags: number,
+  ) => {
+    const header = Buffer.alloc(20);
+    header.writeUInt16BE(srcPort, 0);
+    header.writeUInt16BE(dst.port, 2);
+    header.writeUInt32BE(seq, 4);
+    header.writeUInt32BE(ack, 8);
+    header[12] = 0x50;
+    header[13] = flags;
+    header.writeUInt16BE(65535, 14);
+    stack.handleTCP(
+      header,
+      Buffer.from([192, 168, 127, 3]),
+      Buffer.from(dst.ip),
+    );
+  };
+
+  return { stack, sent, segment };
+}
+
+test("qemu-net: guest FIN before any payload is answered with a FIN, a guest RST is not, and both sessions are dropped", () => {
+  const backend = makeBackend();
+  const { stack, sent, segment } = recordGuestTcp(backend);
+  const dst = { ip: [203, 0, 113, 10], port: 80 };
+
+  segment(dst, 40030, 100, 0, 0x02);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].flags, 0x12);
+  const hostSeq = sent[0].seq + 1;
+
+  sent.length = 0;
+  segment(dst, 40030, 101, hostSeq, 0x11);
+
+  const fins = sent.filter((s) => (s.flags & 0x01) !== 0);
+  assert.equal(fins.length, 1, "expected one FIN to the guest");
+  assert.equal(fins[0].seq, hostSeq);
+  assert.equal(fins[0].ack, 102, "FIN must acknowledge the guest's FIN");
+
+  sent.length = 0;
+  segment(dst, 40031, 200, 0, 0x02);
+  segment(dst, 40031, 201, sent[0].seq + 1, 0x10);
+  sent.length = 0;
+  segment(dst, 40031, 201, 0, 0x04);
+  assert.deepEqual(sent, []);
+
+  assert.equal(stack.natTable.size, 0);
+  assert.equal(backend.tcpSessions.size, 0);
+});
+
+test("qemu-net: mapped tcp answers a guest FIN before any payload with a FIN and drops the session", () => {
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: { hosts: { "foo.internal": "127.0.0.1:9" } },
+  });
+  const { stack, sent, segment } = recordGuestTcp(backend);
+
+  const responses: any[] = [];
+  stack.handleUdpResponse = (msg: any) => responses.push(msg);
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-early-fin",
+    srcIP: "192.168.127.3",
+    srcPort: 41127,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("foo.internal", 0x4014),
+  });
+  const response = responses[0].data as Buffer;
+  const dst = { ip: [...response.subarray(response.length - 4)], port: 7000 };
+
+  segment(dst, 40032, 100, 0, 0x02);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].flags, 0x12);
+  const hostSeq = sent[0].seq + 1;
+  const [session] = [...backend.tcpSessions.values()];
+  assert.ok(session.mappedTcp);
+
+  sent.length = 0;
+  segment(dst, 40032, 101, hostSeq, 0x11);
+
+  const fins = sent.filter((s) => (s.flags & 0x01) !== 0);
+  assert.equal(fins.length, 1, "expected one FIN to the guest");
+  assert.equal(fins[0].seq, hostSeq);
+  assert.equal(fins[0].ack, 102, "FIN must acknowledge the guest's FIN");
+  assert.equal(session.socket, null);
+  assert.equal(stack.natTable.size, 0);
+  assert.equal(backend.tcpSessions.size, 0);
+});

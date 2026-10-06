@@ -1184,6 +1184,10 @@ export class QemuNetworkBackend extends EventEmitter {
         }
       } else {
         this.tcpSessions.delete(message.key);
+        if (!message.destroy && session.protocol === null) {
+          // No upstream will ever send "end", so close our side right away
+          this.stack?.handleTcpEnd({ key: message.key });
+        }
       }
     }
   }
