@@ -825,6 +825,21 @@ export class NetworkStack extends EventEmitter {
       return;
     }
 
+    if (SYN) {
+      // RFC 9293 §3.10.7.4 challenge ACK: a guest reusing the 4-tuple answers
+      // it with RST, clearing this session for its next SYN retransmit.
+      this.sendTCP(
+        session.srcIP,
+        session.srcPort,
+        session.dstIP,
+        session.dstPort,
+        session.mySeq,
+        session.myAck,
+        0x10,
+      );
+      return;
+    }
+
     const prevPeerWindow = session.peerWindow;
     session.peerWindow = window;
 
