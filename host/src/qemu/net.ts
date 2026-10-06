@@ -1162,6 +1162,13 @@ export class QemuNetworkBackend extends EventEmitter {
       // above before clearing this pointer.
       session.http = undefined;
       session.ws = undefined;
+      if (!message.destroy && session.socket) {
+        // The guest already got ACKs for these. A connecting net.Socket buffers
+        // writes and sends end()'s FIN only after them.
+        for (const pending of session.pendingWrites) {
+          session.socket.write(pending);
+        }
+      }
       session.pendingWrites = [];
       session.pendingWriteBytes = 0;
       session.flowControlPaused = false;
