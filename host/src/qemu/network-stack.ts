@@ -52,6 +52,9 @@ function seqLe(a: number, b: number): boolean {
   return seqDistance(a, b) <= 0;
 }
 
+/** Receive window advertised on every segment in `bytes` (no window scaling) */
+const TCP_RECEIVE_WINDOW = 65535;
+
 const HTTP_METHODS = [
   "GET",
   "POST",
@@ -840,6 +843,23 @@ export class NetworkStack extends EventEmitter {
       this.drainOutboundTcp(key, session);
     }
 
+    if (payload.length === 0 && !SYN && !FIN) {
+      // Keepalive probes (seq = RCV.NXT - 1) need an ACK (RFC 9293 §3.10.7.4).
+      const offset = seqDistance(seq, session.myAck);
+      if (offset < 0 || offset >= TCP_RECEIVE_WINDOW) {
+        this.sendTCP(
+          session.srcIP,
+          session.srcPort,
+          session.dstIP,
+          session.dstPort,
+          session.mySeq,
+          session.myAck,
+          0x10,
+        );
+        return;
+      }
+    }
+
     if (payload.length > 0) {
       // Basic TCP reassembly / retransmit handling:
       // - only accept in-order bytes starting at `session.myAck`
@@ -1035,7 +1055,7 @@ export class NetworkStack extends EventEmitter {
     header.writeUInt32BE(wrapSeq(ack), 8);
     header[12] = 0x50;
     header[13] = flags;
-    header.writeUInt16BE(65535, 14);
+    header.writeUInt16BE(TCP_RECEIVE_WINDOW, 14);
     header.writeUInt16BE(0, 16);
     header.writeUInt16BE(0, 18);
 
