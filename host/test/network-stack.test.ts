@@ -1917,3 +1917,178 @@ test("network-stack: outbound TCP keeps flowing when mySeq wraps past 2^32", () 
   stack.handleTcpData({ key, data: Buffer.alloc(4 * 1024, 0x43) });
   assert.equal(countTcpPayloadBytes(drainAllQemuTx(stack)), 4 * 1024);
 });
+
+for (const remoteClosed of [false, true]) {
+  test(`network-stack: session is removed once the guest ACKs our FIN after closing first${remoteClosed ? " (host socket closed)" : ""}`, () => {
+    // A leaked session makes a later SYN on the same 4-tuple be ignored.
+    const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+    const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+    let key = "";
+    const stack = new NetworkStack({
+      gatewayMac,
+      vmMac,
+      dnsServers: ["8.8.8.8"],
+      callbacks: {
+        onUdpSend: () => {},
+        onTcpConnect: (m) => {
+          key = m.key;
+          return { allowRawTcp: true };
+        },
+        onTcpSend: () => {},
+        onTcpClose: () => {},
+        onTcpPause: () => {},
+        onTcpResume: () => {},
+      },
+    });
+
+    const srcIP = ip([192, 168, 127, 3]);
+    const dstIP = ip([198, 19, 0, 10]);
+    const srcPort = 40030;
+    const dstPort = 7000;
+
+    stack.handleTCP(
+      buildTcpSegment({ srcPort, dstPort, seq: 100, ack: 0, flags: 0x02 }),
+      srcIP,
+      dstIP,
+    );
+    stack.handleTcpConnected({ key });
+    const hostSeq = (stack as any).natTable.get(key).mySeq as number;
+
+    stack.handleTCP(
+      buildTcpSegment({
+        srcPort,
+        dstPort,
+        seq: 101,
+        ack: hostSeq,
+        flags: 0x11,
+      }),
+      srcIP,
+      dstIP,
+    );
+    // Upstream still replies after the guest's half-close
+    stack.handleTcpData({ key, data: Buffer.from("bye") });
+    stack.handleTCP(
+      buildTcpSegment({
+        srcPort,
+        dstPort,
+        seq: 102,
+        ack: hostSeq + 3,
+        flags: 0x10,
+      }),
+      srcIP,
+      dstIP,
+    );
+    assert.ok((stack as any).natTable.has(key));
+
+    stack.handleTcpData({ key, data: Buffer.from("!") });
+    stack.handleTcpEnd({ key });
+    if (remoteClosed) {
+      stack.handleTcpClosed({ key });
+    }
+    const fin = decodeFramesFromQemuData(drainAllQemuTx(stack))
+      .map(parseEthernet)
+      .filter((eth) => eth.etherType === 0x0800)
+      .map((eth) => parseIPv4(eth.payload))
+      .filter((ipOut) => ipOut.protocol === 6)
+      .map((ipOut) => ipOut.payload)
+      .find((tcp) => (tcp[13] & 0x01) !== 0);
+    assert.ok(fin, "expected an outbound FIN segment");
+    assert.equal(fin.readUInt32BE(4), hostSeq + 4);
+
+    // Data is acknowledged, our FIN is not yet
+    stack.handleTCP(
+      buildTcpSegment({
+        srcPort,
+        dstPort,
+        seq: 102,
+        ack: hostSeq + 4,
+        flags: 0x10,
+      }),
+      srcIP,
+      dstIP,
+    );
+    assert.ok((stack as any).natTable.has(key));
+
+    stack.handleTCP(
+      buildTcpSegment({
+        srcPort,
+        dstPort,
+        seq: 102,
+        ack: hostSeq + 5,
+        flags: 0x10,
+      }),
+      srcIP,
+      dstIP,
+    );
+    assert.equal((stack as any).natTable.has(key), false);
+  });
+}
+
+test("network-stack: session closed by upstream first stays until the guest's FIN", () => {
+  const gatewayMac = mac([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd]);
+  const vmMac = mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+  let key = "";
+  const stack = new NetworkStack({
+    gatewayMac,
+    vmMac,
+    dnsServers: ["8.8.8.8"],
+    callbacks: {
+      onUdpSend: () => {},
+      onTcpConnect: (m) => {
+        key = m.key;
+        return { allowRawTcp: true };
+      },
+      onTcpSend: () => {},
+      onTcpClose: () => {},
+      onTcpPause: () => {},
+      onTcpResume: () => {},
+    },
+  });
+
+  const srcIP = ip([192, 168, 127, 3]);
+  const dstIP = ip([198, 19, 0, 10]);
+  const srcPort = 40031;
+  const dstPort = 7000;
+
+  stack.handleTCP(
+    buildTcpSegment({ srcPort, dstPort, seq: 100, ack: 0, flags: 0x02 }),
+    srcIP,
+    dstIP,
+  );
+  stack.handleTcpConnected({ key });
+  const hostSeq = (stack as any).natTable.get(key).mySeq as number;
+  stack.handleTCP(
+    buildTcpSegment({ srcPort, dstPort, seq: 101, ack: hostSeq, flags: 0x10 }),
+    srcIP,
+    dstIP,
+  );
+
+  stack.handleTcpEnd({ key });
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: 101,
+      ack: hostSeq + 1,
+      flags: 0x10,
+    }),
+    srcIP,
+    dstIP,
+  );
+  assert.ok((stack as any).natTable.has(key));
+
+  stack.handleTCP(
+    buildTcpSegment({
+      srcPort,
+      dstPort,
+      seq: 101,
+      ack: hostSeq + 1,
+      flags: 0x11,
+    }),
+    srcIP,
+    dstIP,
+  );
+  assert.equal((stack as any).natTable.has(key), false);
+});
