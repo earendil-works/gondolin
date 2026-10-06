@@ -4961,3 +4961,71 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
   releaseBlockedFetches();
   await Promise.all(runs);
 });
+
+test("qemu-net: mapped tcp delivers guest data queued before connect when the guest closes", async () => {
+  const server = net.createServer();
+  // Resolves on the guest's FIN, so the bytes seen by then arrived before it.
+  const received = new Promise<Buffer>((resolve, reject) => {
+    server.once("connection", (sock) => {
+      const chunks: Buffer[] = [];
+      sock.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      sock.on("end", () => {
+        resolve(Buffer.concat(chunks));
+        sock.end();
+      });
+      sock.on("error", reject);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    tcp: { hosts: { "foo.internal": `127.0.0.1:${addr.port}` } },
+  });
+
+  const responses: any[] = [];
+  (backend as any).stack = {
+    handleUdpResponse: (msg: any) => responses.push(msg),
+    handleTcpConnected: () => {},
+    handleTcpData: () => {},
+    handleTcpEnd: () => {},
+    handleTcpClosed: () => {},
+    handleTcpError: () => {},
+  };
+
+  (backend as any).handleUdpSend({
+    key: "udp-tcp-map-fin",
+    srcIP: "192.168.127.3",
+    srcPort: 41126,
+    dstIP: "192.168.127.1",
+    dstPort: 53,
+    payload: buildQueryA("foo.internal", 0x4013),
+  });
+  const response = responses[0].data as Buffer;
+  const fooIp = [...response.subarray(response.length - 4)].join(".");
+
+  const key = "tcp-map-fin";
+  const connect = (backend as any).handleTcpConnect({
+    key,
+    srcIP: "192.168.127.3",
+    srcPort: 50030,
+    dstIP: fooIp,
+    dstPort: 7000,
+  });
+  assert.equal(connect.allowRawTcp, true);
+
+  // Both run synchronously, so the upstream connect() cannot have completed.
+  (backend as any).handleTcpSend({ key, data: Buffer.from("hello") });
+  assert.equal((backend as any).tcpSessions.get(key).connected, false);
+  (backend as any).handleTcpClose({ key, destroy: false });
+
+  try {
+    const data = await received;
+    assert.equal(data.toString("utf8"), "hello");
+  } finally {
+    await backend.close().catch(() => {});
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
