@@ -194,6 +194,10 @@ type TcpSession = {
   pendingOutbound: Buffer;
   /** FIN pending until outbound payload is drained */
   endPending: boolean;
+  /** whether the guest's FIN has been accepted */
+  guestFinReceived: boolean;
+  /** whether our FIN has been sent (it is the last sequence number) */
+  finSent: boolean;
   flowProtocol: TcpFlowProtocol | null;
   /** whether this flow can bypass protocol sniffing and run as raw tcp */
   allowRawTcp: boolean;
@@ -790,6 +794,8 @@ export class NetworkStack extends EventEmitter {
         peerWindow: window,
         pendingOutbound: Buffer.alloc(0),
         endPending: false,
+        guestFinReceived: false,
+        finSent: false,
         flowProtocol: null,
         allowRawTcp: false,
         pendingData: Buffer.alloc(0),
@@ -832,6 +838,16 @@ export class NetworkStack extends EventEmitter {
     if (seqGt(ack, session.vmAck) && seqLe(ack, session.mySeq)) {
       session.vmAck = ack;
       shouldDrainOutbound = true;
+      // LAST-ACK: tracked apart from `state`, which handleTcpClosed overwrites
+      if (
+        session.guestFinReceived &&
+        session.finSent &&
+        session.vmAck === session.mySeq
+      ) {
+        this.clearPauseState(key);
+        this.natTable.delete(key);
+        return;
+      }
     }
     if (session.pendingOutbound.length > 0 && window > prevPeerWindow) {
       shouldDrainOutbound = true;
@@ -995,6 +1011,7 @@ export class NetworkStack extends EventEmitter {
       // finSeq === session.myAck
       this.callbacks.onTcpClose({ key, destroy: false });
       session.myAck = wrapSeq(session.myAck + 1);
+      session.guestFinReceived = true;
 
       this.sendTCP(
         session.srcIP,
@@ -1468,6 +1485,7 @@ export class NetworkStack extends EventEmitter {
 
         session.mySeq = wrapSeq(session.mySeq + 1);
         session.state = "FIN_WAIT";
+        session.finSent = true;
         session.endPending = false;
         inFlight += 1;
       }
