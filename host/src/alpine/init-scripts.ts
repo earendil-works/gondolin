@@ -269,6 +269,25 @@ if modprobe fuse > /dev/null 2>&1; then
   log "[init] loaded fuse"
 fi
 
+sandboxfs_mount="/data"
+sandboxfs_binds=""
+sandboxfs_map_created_ownership=""
+
+if [ -r /proc/cmdline ]; then
+  for arg in $(cat /proc/cmdline); do
+    case "\${arg}" in
+      sandboxfs.mount=*)
+        sandboxfs_mount="\${arg#sandboxfs.mount=}"
+        ;;
+      sandboxfs.bind=*)
+        sandboxfs_binds="\${arg#sandboxfs.bind=}"
+        ;;
+      sandboxfs.map-created-ownership=*)
+        sandboxfs_map_created_ownership="\${arg#sandboxfs.map-created-ownership=}"
+        ;;
+    esac
+  done
+fi
 wait_for_sandboxfs() {
   for i in $(seq 1 300); do
     if grep -q " \${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
@@ -296,7 +315,11 @@ if [ -x /usr/bin/sandboxfs ]; then
   log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
   sandboxfs_binds_file="/run/sandboxfs.binds"
   rm -f "\${sandboxfs_binds_file}"
-  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" --binds-file "\${sandboxfs_binds_file}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  sandboxfs_ownership_arg=""
+  if [ "\${sandboxfs_map_created_ownership}" = "1" ]; then
+    sandboxfs_ownership_arg="--map-created-ownership"
+  fi
+  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" --binds-file "\${sandboxfs_binds_file}" \${sandboxfs_ownership_arg} > "\${SANDBOXFS_LOG}" 2>&1 &
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1

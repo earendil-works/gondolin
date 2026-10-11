@@ -276,6 +276,9 @@ function bashUsage() {
   console.log(
     "  --mount-memfs PATH              Create memory-backed mount at path",
   );
+  console.log(
+    "  --map-created-ownership         Report guest UID/GID for newly created entries",
+  );
   console.log();
   console.log("Network Options:");
   console.log(
@@ -341,6 +344,9 @@ function bashUsage() {
   console.log();
   console.log("Examples:");
   console.log("  gondolin bash --mount-hostfs /home/user/project:/workspace");
+  console.log(
+    "  gondolin bash --mount-hostfs $PWD:/workspace --map-created-ownership",
+  );
   console.log(
     "  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp",
   );
@@ -420,6 +426,9 @@ function execUsage() {
     "  --mount-memfs PATH              Create memory-backed mount at path",
   );
   console.log(
+    "  --map-created-ownership         Report guest UID/GID for newly created entries",
+  );
+  console.log(
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
@@ -493,6 +502,7 @@ type SshCredentialSpec = {
 type CommonOptions = {
   mounts: MountSpec[];
   memoryMounts: string[];
+  mapCreatedOwnership?: boolean;
   allowedHosts: string[];
   secrets: SecretSpec[];
 
@@ -1074,7 +1084,15 @@ function buildVmOptions(common: CommonOptions) {
       : undefined;
 
   const vmOptions: any = {
-    vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
+    vfs:
+      Object.keys(mounts).length > 0 || common.mapCreatedOwnership
+        ? {
+            ...(Object.keys(mounts).length > 0 ? { mounts } : {}),
+            ...(common.mapCreatedOwnership
+              ? { mapCreatedOwnership: true }
+              : {}),
+          }
+        : undefined,
     httpHooks,
     dns,
     ssh:
@@ -1179,6 +1197,10 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const path = optionArgs[++i];
         if (!path) fail("--mount-memfs requires a path argument");
         args.common.memoryMounts.push(path);
+        return i;
+      }
+      case "--map-created-ownership": {
+        args.common.mapCreatedOwnership = true;
         return i;
       }
       case "--image": {
@@ -1668,6 +1690,10 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.memoryMounts.push(path);
+        break;
+      }
+      case "--map-created-ownership": {
+        args.mapCreatedOwnership = true;
         break;
       }
       case "--image": {

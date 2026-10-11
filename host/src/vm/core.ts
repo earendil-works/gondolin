@@ -262,6 +262,7 @@ export class VM {
   private vfs: SandboxVfsProvider | null;
   private readonly fuseMount: string;
   private readonly fuseBinds: string[];
+  private readonly mapCreatedOwnership: boolean;
   private readonly shortcutBindMounts: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
@@ -413,6 +414,7 @@ export class VM {
     let fuseConfig = resolveFuseConfig(options.vfs, fuseMounts);
     this.fuseMount = fuseConfig.fuseMount;
     this.fuseBinds = fuseConfig.fuseBinds;
+    this.mapCreatedOwnership = options.vfs?.mapCreatedOwnership ?? false;
 
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
     if (sandboxOptions.vfsProvider && options.vfs) {
@@ -1602,6 +1604,7 @@ fi
       type: "boot",
       fuseMount: this.fuseMount,
       fuseBinds: this.fuseBinds,
+      mapCreatedOwnership: this.mapCreatedOwnership,
     });
   }
 
