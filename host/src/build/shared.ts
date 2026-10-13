@@ -436,6 +436,12 @@ export async function resolveSandboxBinaryPaths(
     }
   }
 
+  if (envFlagEnabled(BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV)) {
+    const paths = await buildSandboxBinaryPathsFromSource(config.arch, log);
+    assertSandboxBinaryPathsExist(paths);
+    return paths;
+  }
+
   if (options.skipBinaries) {
     const paths = resolveExistingGuestZigOutBinaryPaths();
     assertSandboxBinaryPathsExist(paths);

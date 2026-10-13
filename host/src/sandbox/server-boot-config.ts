@@ -5,6 +5,7 @@ import type { BootCommandMessage } from "./control-protocol.ts";
 export type SandboxFsConfig = {
   fuseMount: string;
   fuseBinds: string[];
+  mapCreatedOwnership: boolean;
 };
 
 export function normalizeSandboxFsConfig(
@@ -15,9 +16,14 @@ export function normalizeSandboxFsConfig(
     "fuseMount",
   );
   const fuseBinds = normalizeBindList(message.fuseBinds ?? []);
+  const mapCreatedOwnership = message.mapCreatedOwnership ?? false;
+  if (typeof mapCreatedOwnership !== "boolean") {
+    throw new Error("mapCreatedOwnership must be a boolean");
+  }
   return {
     fuseMount,
     fuseBinds,
+    mapCreatedOwnership,
   };
 }
 
@@ -66,7 +72,7 @@ export function isSameSandboxFsConfig(
   for (let i = 0; i < left.fuseBinds.length; i += 1) {
     if (left.fuseBinds[i] !== right.fuseBinds[i]) return false;
   }
-  return true;
+  return left.mapCreatedOwnership === right.mapCreatedOwnership;
 }
 
 /**
@@ -111,11 +117,16 @@ export function buildSandboxfsAppend(
     binds.push(bind);
     length += extra;
   }
-
-  if (binds.length === 0) return base;
-  // parents have to be bound before their children
-  binds.sort();
-  return `${base}${prefix}${binds.join(",")}`;
+  const pieces = [base];
+  if (binds.length > 0) {
+    // parents have to be bound before their children
+    binds.sort();
+    pieces.push(`${prefix}${binds.join(",")}`);
+  }
+  if (config.mapCreatedOwnership) {
+    pieces.push("sandboxfs.map-created-ownership=1");
+  }
+  return joinCmdline(pieces);
 }
 
 /** Build the result of the sandboxfs `mounts` rpc op */

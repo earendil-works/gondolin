@@ -11,7 +11,7 @@
  * - pty_resize { type: "pty_resize", id, rows, cols }
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
  * - snapshot { type: "snapshot", id, path }
- * - boot { type: "boot", fuseMount?, fuseBinds? }
+ * - boot { type: "boot", fuseMount?, fuseBinds?, mapCreatedOwnership? }
  *
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
@@ -88,6 +88,8 @@ export type BootCommandMessage = {
   fuseMount?: string;
   /** guest paths to bind into the fuse mount */
   fuseBinds?: string[];
+  /** ownership view for entries created by guest processes */
+  mapCreatedOwnership?: boolean;
 };
 
 export type ExecWindowCommandMessage = {

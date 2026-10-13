@@ -269,23 +269,60 @@ const DefaultTtls = struct {
     pub const entry_ms: u64 = 1000;
 };
 
+const CreatedOwnership = struct {
+    ino: u64,
+    uid: u32,
+    gid: u32,
+};
+
 const SandboxFs = struct {
     allocator: std.mem.Allocator,
     fuse_fd: posix.fd_t,
     rpc: ?fs_rpc.FsRpcClient,
+    map_created_ownership: bool,
+    created_ownership: std.ArrayList(CreatedOwnership) = .empty,
     unsupported_opcode_logged: [256]bool,
 
-    pub fn init(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
+    pub fn init(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, rpc: ?fs_rpc.FsRpcClient, map_created_ownership: bool) SandboxFs {
         return .{
             .allocator = allocator,
             .fuse_fd = fuse_fd,
             .rpc = rpc,
+            .map_created_ownership = map_created_ownership,
             .unsupported_opcode_logged = @splat(false),
         };
     }
 
     pub fn deinit(self: *SandboxFs) void {
-        _ = self;
+        self.created_ownership.deinit(self.allocator);
+    }
+
+    fn rememberCreatedOwnership(self: *SandboxFs, ino: u64, uid: u32, gid: u32) !void {
+        if (!self.map_created_ownership) return;
+        for (self.created_ownership.items) |*mapping| {
+            if (mapping.ino == ino) {
+                mapping.uid = uid;
+                mapping.gid = gid;
+                return;
+            }
+        }
+        try self.created_ownership.append(self.allocator, .{ .ino = ino, .uid = uid, .gid = gid });
+    }
+
+    fn applyCreatedOwnership(self: *SandboxFs, attr: *FuseAttr) void {
+        if (!self.map_created_ownership) return;
+        for (self.created_ownership.items) |mapping| {
+            if (mapping.ino == attr.ino) {
+                attr.uid = mapping.uid;
+                attr.gid = mapping.gid;
+                return;
+            }
+        }
+    }
+
+    fn applyCreatedOwnershipToEntry(self: *SandboxFs, entry: *ParsedEntry) void {
+        self.applyCreatedOwnership(&entry.attr);
+        entry.out.attr = entry.attr;
     }
 
     pub fn run(self: *SandboxFs) !void {
@@ -402,7 +439,8 @@ const SandboxFs = struct {
             const res_map = response.res orelse return error.InvalidResponse;
             const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
             const entry_map = try expectMap(entry_val);
-            const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+            var entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+            self.applyCreatedOwnershipToEntry(&entry);
 
             try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
             return;
@@ -432,7 +470,8 @@ const SandboxFs = struct {
             const res_map = response.res orelse return error.InvalidResponse;
             const attr_val = cbor.getMapValue(res_map, "attr") orelse return error.InvalidResponse;
             const attr_map = try expectMap(attr_val);
-            const attr = try parseAttr(attr_map, header.nodeid);
+            var attr = try parseAttr(attr_map, header.nodeid);
+            self.applyCreatedOwnership(&attr);
             const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
 
             const out = buildAttrOut(attr, attr_ttl_ms);
@@ -515,7 +554,8 @@ const SandboxFs = struct {
         const res_map = attr_response.res orelse return error.InvalidResponse;
         const attr_val = cbor.getMapValue(res_map, "attr") orelse return error.InvalidResponse;
         const attr_map = try expectMap(attr_val);
-        const attr = try parseAttr(attr_map, header.nodeid);
+        var attr = try parseAttr(attr_map, header.nodeid);
+        self.applyCreatedOwnership(&attr);
         const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
 
         const out = buildAttrOut(attr, attr_ttl_ms);
@@ -548,7 +588,8 @@ const SandboxFs = struct {
         const res_map = response.res orelse return error.InvalidResponse;
         const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
         const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        var entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        self.applyCreatedOwnershipToEntry(&entry);
 
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
@@ -578,7 +619,9 @@ const SandboxFs = struct {
         const res_map = response.res orelse return error.InvalidResponse;
         const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
         const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        var entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        try self.rememberCreatedOwnership(entry.attr.ino, header.uid, header.gid);
+        self.applyCreatedOwnershipToEntry(&entry);
 
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
@@ -699,7 +742,8 @@ const SandboxFs = struct {
         const res_map = response.res orelse return error.InvalidResponse;
         const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
         const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        var entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        self.applyCreatedOwnershipToEntry(&entry);
 
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
@@ -914,7 +958,9 @@ const SandboxFs = struct {
         const res_map = response.res orelse return error.InvalidResponse;
         const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
         const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        var entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+        try self.rememberCreatedOwnership(entry.attr.ino, header.uid, header.gid);
+        self.applyCreatedOwnershipToEntry(&entry);
         const fh = getMapU64(res_map, "fh") orelse return error.InvalidResponse;
         const open_flags = getMapU32(res_map, "open_flags") orelse 0;
         var buf = std.ArrayList(u8).empty;
@@ -1072,6 +1118,7 @@ pub fn main(init: std.process.Init) !void {
     var mount_point: []const u8 = "/data";
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
     var binds_file: ?[]const u8 = null;
+    var map_created_ownership = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -1088,6 +1135,10 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, args[i], "--binds-file") and i + 1 < args.len) {
             binds_file = args[i + 1];
             i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--map-created-ownership")) {
+            map_created_ownership = true;
             continue;
         }
     }
@@ -1117,7 +1168,7 @@ pub fn main(init: std.process.Init) !void {
     try mountFuse(allocator, fuse_fd, mount_point);
     log.info("mounted sandboxfs at {s}", .{mount_point});
 
-    var sandboxfs = SandboxFs.init(allocator, fuse_fd, rpc_client);
+    var sandboxfs = SandboxFs.init(allocator, fuse_fd, rpc_client, map_created_ownership);
     defer sandboxfs.deinit();
 
     sandboxfs.run() catch |err| {
