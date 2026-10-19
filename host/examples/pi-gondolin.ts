@@ -18,6 +18,9 @@
  * Notes:
  *   - The VM is started on `session_start` (and lazily if a tool is used before that)
  *   - User `!` commands are also executed inside the VM
+ *   - Set `GONDOLIN_DISABLED=1` to keep the extension loaded but skip VM routing,
+ *     so pi falls back to its normal host tools (useful as an escape hatch to
+ *     run with real system access without removing the extension)
  *   - Module resolution happens relative to this file, so keeping it inside the
  *     gondolin repo (or installing `@earendil-works/gondolin` next to it) is easiest
  */
@@ -162,6 +165,7 @@ function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
 }
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.GONDOLIN_DISABLED === "1") return;
   const localCwd = process.cwd();
 
   const localRead = createReadTool(localCwd);
