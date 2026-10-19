@@ -69,7 +69,11 @@ function copyAllKernelModules(srcDir: string, dstDir: string): void {
 
   fs.rmSync(dstDir, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(dstDir), { recursive: true });
-  fs.cpSync(srcDir, dstDir, { recursive: true, dereference: false });
+  fs.cpSync(srcDir, dstDir, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: true,
+  });
 }
 
 function copyInitramfsModules(srcDir: string, dstDir: string): void {

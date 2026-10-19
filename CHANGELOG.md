@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Fix image builds copying kernel module symlinks from the initramfs into the rootfs with targets resolved against the host: relative targets became absolute host paths, and targets inside unreadable host directories aborted Node.  Symlinks are now copied verbatim.  #163
+
 ## 0.14.0
 
 - Fix `chmod` from the guest being silently ignored on VFS mounts (`MemoryProvider`, `RealFSProvider`, `ShadowProvider`, ...): sandboxfs now forwards mode changes to the host and providers gain an optional `chmod()` method.  `RealFSProvider` never applies setuid/setgid bits to host files.  Requires a guest image built with this version.  #115
