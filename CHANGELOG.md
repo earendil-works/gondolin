@@ -17,6 +17,7 @@ All notable changes to Gondolin are documented here.
   - After an upload fails, its remaining `file_write_data` frames are dropped silently instead of each producing an `invalid_request` error.
   - `sandboxssh`/`sandboxingress` wait for the host to reconnect their port instead of exiting.
   - Per-frame and per-exec logging on the serial console is now debug-level only.
+- Fix image builds copying kernel module symlinks from the initramfs into the rootfs with targets resolved against the host: relative targets became absolute host paths, and targets inside unreadable host directories aborted Node.  Symlinks are now copied verbatim.  #163
 
 ## 0.14.0
 
