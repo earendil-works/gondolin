@@ -421,6 +421,52 @@ test("oci rootfs: syncKernelModules handles /lib -> usr/lib symlink", () => {
   }
 });
 
+test("oci rootfs: syncKernelModules copies module symlinks verbatim", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-modules-"));
+  const rootfsDir = path.join(tmp, "rootfs");
+  const initramfsDir = path.join(tmp, "initramfs");
+  const kernelVersion = "6.18.9-0-virt";
+
+  fs.mkdirSync(rootfsDir, { recursive: true });
+
+  const initModulesDir = path.join(
+    initramfsDir,
+    "lib",
+    "modules",
+    kernelVersion,
+  );
+  fs.mkdirSync(path.join(initModulesDir, "kernel"), { recursive: true });
+  fs.writeFileSync(path.join(initModulesDir, "kernel", "target.ko"), "module");
+  fs.symlinkSync("target.ko", path.join(initModulesDir, "kernel", "link.ko"));
+  fs.symlinkSync(
+    "/usr/src/linux-headers-6.18.9-0-virt",
+    path.join(initModulesDir, "build"),
+  );
+
+  try {
+    syncKernelModules(rootfsDir, initramfsDir, () => {}, {
+      copyRootfsToInitramfs: false,
+    });
+
+    const rootfsModulesDir = path.join(
+      rootfsDir,
+      "lib",
+      "modules",
+      kernelVersion,
+    );
+    assert.equal(
+      fs.readlinkSync(path.join(rootfsModulesDir, "kernel", "link.ko")),
+      "target.ko",
+    );
+    assert.equal(
+      fs.readlinkSync(path.join(rootfsModulesDir, "build")),
+      "/usr/src/linux-headers-6.18.9-0-virt",
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("oci rootfs: ensureRootfsShell bootstraps busybox from initramfs", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-shell-"));
   const rootfsDir = path.join(tmp, "rootfs");
