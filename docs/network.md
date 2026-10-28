@@ -205,13 +205,15 @@ How it works:
 
 - The guest resolves `HOST` in synthetic DNS mode
 - In `syntheticHostMapping: "per-host"`, Gondolin can map destination synthetic IPs back to hostnames
-- If a `tcp.hosts` rule matches (`HOST` or `HOST:PORT`), the flow is marked as mapped TCP
+- If a `tcp.hosts` rule matches (`HOST`, `HOST:PORT`, or a leading subdomain wildcard such as `*.example.com:443`), the flow is marked as mapped TCP
 - The host opens a TCP socket to the configured upstream target and forwards bytes
 
 Important constraints:
 
 - Mapped TCP requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
 - Mapping values must be explicit `UPSTREAM_HOST:UPSTREAM_PORT`
+- Wildcards are only supported in mapping keys, and `*.example.com` does not match the apex `example.com`
+- Exact mappings win over wildcard mappings; overlapping wildcards use the longest matching suffix
 - Mapped TCP is a raw tunnel to the configured target
     - no HTTP parsing/hook pipeline
     - no HTTP secret placeholder substitution

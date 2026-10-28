@@ -108,6 +108,7 @@ const vm = await VM.create({
     hosts: {
       "foo.internal": "127.0.0.1:9999",
       "foo.internal:42": "192.168.0.1:443",
+      "*.gateway.example:443": "127.0.0.1:9443",
     },
   },
 });
@@ -117,8 +118,13 @@ Semantics:
 
 - Mapping key `HOST` matches all guest destination ports for that host
 - Mapping key `HOST:PORT` matches that specific destination port
+- Mapping keys may use a leading subdomain wildcard (`*.example.com[:PORT]`)
+    - the wildcard matches non-apex subdomains only; `*.example.com` does not match `example.com`
 - Mapping value is always `UPSTREAM_HOST:UPSTREAM_PORT`
+- Mapping values do not support wildcards
+- Exact mappings win over wildcard mappings
 - If both `HOST` and `HOST:PORT` exist, the port-specific mapping wins
+- If multiple wildcard mappings match, the longest matching suffix wins
 
 Safety model:
 
