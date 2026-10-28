@@ -17,6 +17,8 @@ export type VmVfsOptions = {
   hooks?: VfsHooks;
   /** guest path for the fuse mount (default: "/data") */
   fuseMount?: string;
+  /** report creating guest process UID/GID for newly created entries (default: false) */
+  mapCreatedOwnership?: boolean;
 };
 
 export type VmRootfsOptions = {
