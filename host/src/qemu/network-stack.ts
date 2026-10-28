@@ -993,8 +993,9 @@ export class NetworkStack extends EventEmitter {
       }
 
       // finSeq === session.myAck
-      this.callbacks.onTcpClose({ key, destroy: false });
+      // Advance first so a FIN sent from inside onTcpClose acks the guest's FIN
       session.myAck = wrapSeq(session.myAck + 1);
+      this.callbacks.onTcpClose({ key, destroy: false });
 
       this.sendTCP(
         session.srcIP,
