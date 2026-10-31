@@ -28,7 +28,10 @@ export const DEFAULT_GUEST_TMPFS: Readonly<GuestTmpfsMounts> = Object.freeze({
 /** Kernel cmdline parameter carrying the tmpfs mount list to `/init` */
 export const TMPFS_CMDLINE_PARAM = "gondolin.tmpfs";
 
-const RESERVED_PATHS = ["/proc", "/sys", "/dev", "/run"];
+/** Guest paths `/init` mounts itself, which no configurable mount may cover */
+export const RESERVED_GUEST_MOUNT_PATHS = ["/proc", "/sys", "/dev", "/run"];
+/** Characters that would split a path out of a kernel cmdline mount list, or glob */
+export const UNSUPPORTED_GUEST_MOUNT_PATH_CHARS = /[\s,:"'\\*?[\]\0]/;
 const SIZE_RE = /^[0-9]+[kKmMgG%]?$/;
 const MODE_RE = /^[0-7]{3,4}$/;
 
@@ -100,12 +103,12 @@ function normalizeTmpfsPath(value: string): string {
   if (normalized === "/") {
     throw new Error("tmpfs cannot be mounted over /");
   }
-  if (/[\s,:"'\\*?[\]\0]/.test(normalized)) {
+  if (UNSUPPORTED_GUEST_MOUNT_PATH_CHARS.test(normalized)) {
     throw new Error(
       `tmpfs path contains unsupported characters (whitespace, ',', ':', quotes, glob characters or '\\'): ${normalized}`,
     );
   }
-  for (const reserved of RESERVED_PATHS) {
+  for (const reserved of RESERVED_GUEST_MOUNT_PATHS) {
     if (normalized === reserved || normalized.startsWith(`${reserved}/`)) {
       throw new Error(
         `tmpfs cannot be mounted at reserved path: ${normalized}`,

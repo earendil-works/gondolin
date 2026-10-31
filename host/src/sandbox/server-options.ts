@@ -38,7 +38,16 @@ import {
 } from "../utils/empty-initrd.ts";
 import { isPathWithin } from "../utils/path.ts";
 import { inferDiskFormatFromPath } from "../qemu/img.ts";
-import { normalizeGuestTmpfs, type GuestTmpfsMounts } from "./tmpfs.ts";
+import {
+  DEFAULT_GUEST_TMPFS,
+  normalizeGuestTmpfs,
+  type GuestTmpfsMounts,
+} from "./tmpfs.ts";
+import {
+  assertExtraDiskMountsDoNotOverlap,
+  normalizeExtraDiskMountPath,
+  type ExtraDiskMount,
+} from "./extra-disks.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -59,8 +68,9 @@ export type SandboxVmm = "qemu" | "krun";
  * Additional block device attached after the root disk
  *
  * Disks appear in the guest as `/dev/vdb`, `/dev/vdc`, ... in the order given.
- * Gondolin does not mount them; the guest finds a disk by its serial in
- * `/sys/block/<dev>/serial` and mounts it itself.
+ * A disk with a `mountPath` is mounted by `/init` during boot; otherwise the
+ * guest finds it by its serial in `/sys/block/<dev>/serial` and mounts it
+ * itself.
  */
 export type SandboxExtraDisk = {
   /** host disk image path */
@@ -69,8 +79,10 @@ export type SandboxExtraDisk = {
   format?: "raw" | "qcow2";
   /** attach read-only (default: `true`) */
   readOnly?: boolean;
-  /** virtio-blk serial, at most 20 characters from `[A-Za-z0-9._-]` */
+  /** virtio-blk serial, at most 20 characters from `[A-Za-z0-9._-]` (default: generated when `mountPath` is set) */
   serial?: string;
+  /** absolute guest path `/init` mounts the disk at, read-only when `readOnly` */
+  mountPath?: string;
 };
 
 export type ResolvedSandboxExtraDisk = {
@@ -82,6 +94,8 @@ export type ResolvedSandboxExtraDisk = {
   readOnly: boolean;
   /** virtio-blk serial */
   serial?: string;
+  /** normalized guest mount point */
+  mountPath?: string;
 };
 
 /** Longest serial the virtio-blk device id field holds (`VIRTIO_BLK_ID_BYTES`) */
@@ -821,6 +835,7 @@ type ResolveSandboxServerOptionsDeps = {
 
 function resolveExtraDisks(
   disks: SandboxExtraDisk[] | undefined,
+  tmpfs: GuestTmpfsMounts,
 ): ResolvedSandboxExtraDisk[] {
   if (disks === undefined) return [];
   if (!Array.isArray(disks)) {
@@ -828,7 +843,7 @@ function resolveExtraDisks(
   }
 
   const serials = new Set<string>();
-  return disks.map((disk, index) => {
+  const resolved = disks.map((disk, index) => {
     const field = `sandbox.extraDisks[${index}]`;
     if (typeof disk?.path !== "string" || disk.path.length === 0) {
       throw new Error(`${field}.path must be a non-empty string`);
@@ -863,13 +878,54 @@ function resolveExtraDisks(
       serials.add(serial);
     }
 
+    const mountPath =
+      disk.mountPath === undefined
+        ? undefined
+        : normalizeExtraDiskMountPath(disk.mountPath, `${field}.mountPath`);
+
     return {
       path: diskPath,
       format,
       readOnly: disk.readOnly ?? true,
       ...(serial !== undefined ? { serial } : {}),
+      ...(mountPath !== undefined ? { mountPath } : {}),
     };
   });
+
+  // generated after every explicit serial is known, so neither can shadow the other
+  for (const [index, disk] of resolved.entries()) {
+    if (disk.mountPath === undefined || disk.serial !== undefined) continue;
+    const serial = `gondolin-disk${index}`;
+    if (serials.has(serial)) {
+      throw new Error(
+        `sandbox.extraDisks[${index}] needs a serial: the generated one (${serial}) is already in use`,
+      );
+    }
+    serials.add(serial);
+    disk.serial = serial;
+  }
+
+  assertExtraDiskMountsDoNotOverlap(extraDiskMounts(resolved), {
+    tmpfs: Object.keys(tmpfs),
+  });
+  return resolved;
+}
+
+/** Extra disks `/init` mounts during boot */
+export function extraDiskMounts(
+  disks: readonly ResolvedSandboxExtraDisk[],
+): ExtraDiskMount[] {
+  return disks.flatMap((disk) =>
+    disk.mountPath === undefined || disk.serial === undefined
+      ? []
+      : [
+          {
+            serial: disk.serial,
+            mountPath: disk.mountPath,
+            readOnly: disk.readOnly,
+          },
+        ],
+  );
 }
 
 export function resolveSandboxServerOptions(
@@ -1061,7 +1117,14 @@ export function resolveSandboxServerOptions(
   const rootDiskFormat =
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
-  const extraDisks = resolveExtraDisks(options.extraDisks);
+  const tmpfs =
+    options.tmpfs === undefined
+      ? undefined
+      : normalizeGuestTmpfs(options.tmpfs);
+  const extraDisks = resolveExtraDisks(
+    options.extraDisks,
+    tmpfs ?? DEFAULT_GUEST_TMPFS,
+  );
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -1103,10 +1166,7 @@ export function resolveSandboxServerOptions(
     autoRestart: options.autoRestart ?? false,
     qemuIdlePauseMs: resolveQemuIdlePauseMs(options, vmm),
     append: options.append,
-    tmpfs:
-      options.tmpfs === undefined
-        ? undefined
-        : normalizeGuestTmpfs(options.tmpfs),
+    tmpfs,
     maxStdinBytes,
     maxQueuedStdinBytes,
     maxTotalQueuedStdinBytes,

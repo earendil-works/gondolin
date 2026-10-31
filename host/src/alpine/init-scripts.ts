@@ -161,6 +161,8 @@ sandboxfs_mount="/data"
 sandboxfs_binds=""
 # scratch tmpfs mounts: "/path[:opt=value...][,/path...]" or "none"
 gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
+# extra disk mounts: "<serial>:/path:<ro|rw>[,...]"
+gondolin_disks=""
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -173,6 +175,9 @@ if [ -r /proc/cmdline ]; then
         ;;
       gondolin.tmpfs=*)
         gondolin_tmpfs="\${arg#gondolin.tmpfs=}"
+        ;;
+      gondolin.disks=*)
+        gondolin_disks="\${arg#gondolin.disks=}"
         ;;
     esac
   done
@@ -203,6 +208,55 @@ mkdir -p /tmp /home 2>/dev/null || true
 if [ "\${gondolin_tmpfs}" != "none" ]; then
   for tmpfs_entry in $(printf "%s" "\${gondolin_tmpfs}" | tr ',' ' '); do
     mount_tmpfs_entry "\${tmpfs_entry}"
+  done
+fi
+
+disk_mount_failed() {
+  log "[init] $1"
+  mkdir -p /run/gondolin 2>/dev/null || true
+  printf "%s\\n" "$1" >> /run/gondolin/disks.failed
+}
+
+find_disk_by_serial() {
+  for i in $(seq 1 50); do
+    for serial_path in /sys/block/vd*/serial; do
+      if [ -r "\${serial_path}" ] && [ "$(cat "\${serial_path}" 2>/dev/null || true)" = "$1" ]; then
+        disk_sys="\${serial_path%/serial}"
+        printf "/dev/%s\\n" "\${disk_sys##*/}"
+        return 0
+      fi
+    done
+    sleep 0.1
+  done
+  return 1
+}
+
+mount_disk_entry() {
+  disk_serial="\${1%%:*}"
+  disk_rest="\${1#*:}"
+  disk_path="\${disk_rest%:*}"
+  disk_mode="\${disk_rest##*:}"
+  if ! disk_dev="$(find_disk_by_serial "\${disk_serial}")"; then
+    disk_mount_failed "extra disk \${disk_serial}: no block device with this serial"
+    return 0
+  fi
+  if ! mkdir -p "\${disk_path}" 2>/dev/null; then
+    disk_mount_failed "extra disk \${disk_serial}: cannot create mount point \${disk_path}"
+    return 0
+  fi
+  if [ "\${disk_mode}" = "rw" ]; then
+    disk_error="$(mount "\${disk_dev}" "\${disk_path}" 2>&1)" && return 0
+  else
+    # noload keeps a read-only ext3/ext4 mount from replaying a dirty journal
+    mount -o ro,noload "\${disk_dev}" "\${disk_path}" 2>/dev/null && return 0
+    disk_error="$(mount -o ro "\${disk_dev}" "\${disk_path}" 2>&1)" && return 0
+  fi
+  disk_mount_failed "extra disk \${disk_serial}: mount \${disk_dev} at \${disk_path} failed: $(printf "%s" "\${disk_error}" | tr '\\n' ' ')"
+}
+
+if [ -n "\${gondolin_disks}" ]; then
+  for disk_entry in $(printf "%s" "\${gondolin_disks}" | tr ',' ' '); do
+    mount_disk_entry "\${disk_entry}"
   done
 fi
 

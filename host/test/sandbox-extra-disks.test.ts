@@ -7,9 +7,14 @@ import test, { after } from "node:test";
 import { __test as controllerTest } from "../src/sandbox/controller.ts";
 import type { SandboxConfig } from "../src/sandbox/controller.ts";
 import {
+  extraDiskMounts,
   resolveSandboxServerOptions,
   type SandboxExtraDisk,
 } from "../src/sandbox/server-options.ts";
+import {
+  assertExtraDiskMountsDoNotOverlap,
+  buildExtraDisksAppend,
+} from "../src/sandbox/extra-disks.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-extra-disks-"));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -212,4 +217,142 @@ test("buildQemuArgs: attaches extra disks without a root disk", () => {
   assert.deepEqual(optionValues(args, "-drive"), [
     "file=/disks/only.img,format=raw,if=none,id=drive1,readonly=on",
   ]);
+});
+
+test("extraDisks: mountPath is normalized and gets a generated serial", () => {
+  const first = touch("mounted-first.img");
+  const second = touch("mounted-second.img");
+
+  const resolved = resolveWith([
+    { path: first, serial: "toolchain", mountPath: "/opt/toolchain/" },
+    { path: second, mountPath: "/opt/data", readOnly: false },
+  ]);
+
+  assert.deepEqual(resolved.extraDisks, [
+    {
+      path: first,
+      format: "raw",
+      readOnly: true,
+      serial: "toolchain",
+      mountPath: "/opt/toolchain",
+    },
+    {
+      path: second,
+      format: "raw",
+      readOnly: false,
+      serial: "gondolin-disk1",
+      mountPath: "/opt/data",
+    },
+  ]);
+  assert.deepEqual(extraDiskMounts(resolved.extraDisks), [
+    { serial: "toolchain", mountPath: "/opt/toolchain", readOnly: true },
+    { serial: "gondolin-disk1", mountPath: "/opt/data", readOnly: false },
+  ]);
+});
+
+test("extraDisks: a disk without mountPath gets no generated serial", () => {
+  const disk = touch("unmounted.img");
+  assert.equal(resolveWith([{ path: disk }]).extraDisks[0]!.serial, undefined);
+});
+
+test("extraDisks: rejects an explicit serial that a generated one would reuse", () => {
+  const first = touch("generated-first.img");
+  const second = touch("generated-second.img");
+  assert.throws(
+    () =>
+      resolveWith([
+        { path: first, mountPath: "/opt/a" },
+        { path: second, serial: "gondolin-disk0" },
+      ]),
+    /sandbox\.extraDisks\[0\] needs a serial/,
+  );
+});
+
+test("extraDisks: rejects invalid mount paths", () => {
+  const disk = touch("bad-mount.img");
+  for (const mountPath of [
+    "relative",
+    "/",
+    "/with space",
+    "/with,comma",
+    "/with:colon",
+    "/glob*",
+    "/proc",
+    "/dev/disk",
+    "/run/x",
+  ]) {
+    assert.throws(
+      () => resolveWith([{ path: disk, mountPath }]),
+      /sandbox\.extraDisks\[0\]\.mountPath/,
+      mountPath,
+    );
+  }
+});
+
+test("extraDisks: rejects duplicate mount paths", () => {
+  const first = touch("dup-first.img");
+  const second = touch("dup-second.img");
+  assert.throws(
+    () =>
+      resolveWith([
+        { path: first, mountPath: "/opt/x" },
+        { path: second, mountPath: "/opt/x/" },
+      ]),
+    /mountPath specified more than once: \/opt\/x/,
+  );
+});
+
+test("extraDisks: may sit below a tmpfs mount but not on or above one", () => {
+  const disk = touch("tmpfs-overlap.img");
+  assert.equal(
+    resolveWith([{ path: disk, mountPath: "/tmp/tools" }]).extraDisks[0]!
+      .mountPath,
+    "/tmp/tools",
+  );
+  for (const mountPath of ["/tmp", "/var"]) {
+    assert.throws(
+      () => resolveWith([{ path: disk, mountPath }]),
+      /would hide the tmpfs mount/,
+      mountPath,
+    );
+  }
+  assert.equal(
+    resolveSandboxServerOptions({
+      imagePath: { kernelPath, initrdPath, rootfsPath },
+      tmpfs: {},
+      extraDisks: [{ path: disk, mountPath: "/tmp" }],
+    }).extraDisks[0]!.mountPath,
+    "/tmp",
+  );
+});
+
+test("extraDisks: mounts may not overlap VFS mounts", () => {
+  const mounts = [
+    { serial: "s", mountPath: "/workspace/tools", readOnly: true },
+  ];
+  assert.doesNotThrow(() =>
+    assertExtraDiskMountsDoNotOverlap(mounts, { vfs: ["/data", "/other"] }),
+  );
+  for (const vfsPath of [
+    "/workspace",
+    "/workspace/tools",
+    "/workspace/tools/x",
+    "/",
+  ]) {
+    assert.throws(
+      () => assertExtraDiskMountsDoNotOverlap(mounts, { vfs: [vfsPath] }),
+      /overlaps the VFS mount/,
+      vfsPath,
+    );
+  }
+});
+
+test("extraDisks: cmdline append lists mounts sorted by path", () => {
+  assert.equal(
+    buildExtraDisksAppend([
+      { serial: "inner", mountPath: "/opt/a/b", readOnly: false },
+      { serial: "outer", mountPath: "/opt/a", readOnly: true },
+    ]),
+    "gondolin.disks=outer:/opt/a:ro,inner:/opt/a/b:rw",
+  );
 });

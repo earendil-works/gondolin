@@ -26,6 +26,7 @@ import {
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
+  extraDiskMounts,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "./server-options.ts";
@@ -52,6 +53,7 @@ import {
 import { errorMessage } from "../utils/error.ts";
 import type { TimeSync } from "./virtio-protocol.ts";
 import { buildTmpfsAppend } from "./tmpfs.ts";
+import { buildExtraDisksAppend } from "./extra-disks.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const TIME_SYNC_TIMEOUT_MS = 3000;
@@ -401,11 +403,13 @@ export class SandboxServer extends EventEmitter {
         ? "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init"
         : `console=${consoleDevice} initramfs_async=1`;
 
+    const diskMounts = extraDiskMounts(this.options.extraDisks ?? []);
     const baseAppend = [
       (this.options.append ?? defaultAppend).trim(),
       this.options.tmpfs === undefined
         ? ""
         : buildTmpfsAppend(this.options.tmpfs),
+      diskMounts.length === 0 ? "" : buildExtraDisksAppend(diskMounts),
     ]
       .filter((piece) => piece.length > 0)
       .join(" ");
