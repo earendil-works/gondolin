@@ -45,6 +45,7 @@ import {
 } from "./tmpfs.ts";
 import {
   assertExtraDiskMountsDoNotOverlap,
+  isJournallessExtImage,
   normalizeExtraDiskMountPath,
   type ExtraDiskMount,
 } from "./extra-disks.ts";
@@ -860,6 +861,13 @@ function resolveExtraDisks(
       );
     }
 
+    const readOnly = disk.readOnly ?? true;
+    if (!readOnly && format === "raw" && isJournallessExtImage(diskPath)) {
+      throw new Error(
+        `${field} is writable, but its filesystem has no journal, so a VM stopped mid-write can corrupt it: build it with createDiskImage({ allowWrite: true }) or \`gondolin disk create --allow-write\`, or add a journal with \`tune2fs -O has_journal\``,
+      );
+    }
+
     const serial = disk.serial;
     if (serial !== undefined) {
       if (
@@ -886,7 +894,7 @@ function resolveExtraDisks(
     return {
       path: diskPath,
       format,
-      readOnly: disk.readOnly ?? true,
+      readOnly,
       ...(serial !== undefined ? { serial } : {}),
       ...(mountPath !== undefined ? { mountPath } : {}),
     };

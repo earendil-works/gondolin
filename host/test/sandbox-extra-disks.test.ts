@@ -87,6 +87,34 @@ test("extraDisks: defaults to read-only with the format inferred from the path",
   ]);
 });
 
+/** a raw image whose only content is an ext superblock */
+function extImage(name: string, journal: boolean): string {
+  const image = Buffer.alloc(4096);
+  image.writeUInt16LE(0xef53, 1024 + 0x38);
+  image.writeUInt32LE(journal ? 0x4 : 0, 1024 + 0x5c);
+  const file = path.join(tmp, name);
+  fs.writeFileSync(file, image);
+  return file;
+}
+
+test("extraDisks: refuses to attach a journal-less ext image writable", () => {
+  const image = extImage("journalless.ext4", false);
+
+  assert.throws(
+    () => resolveWith([{ path: image, readOnly: false }]),
+    /sandbox\.extraDisks\[0\] is writable, but its filesystem has no journal.*allowWrite: true.*--allow-write/,
+  );
+  assert.equal(resolveWith([{ path: image }]).extraDisks[0]!.readOnly, true);
+});
+
+test("extraDisks: attaches an ext image with a journal writable", () => {
+  const image = extImage("journalled.ext4", true);
+
+  const resolved = resolveWith([{ path: image, readOnly: false }]);
+
+  assert.equal(resolved.extraDisks[0]!.readOnly, false);
+});
+
 test("extraDisks: resolves relative paths to absolute ones", () => {
   const disk = touch("relative.img");
   const relative = path.relative(process.cwd(), disk);

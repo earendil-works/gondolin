@@ -518,6 +518,21 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 - image build id (`uuid`)
 - image ref (`name:tag`)
 
+### `gondolin disk`
+
+Build a disk image to attach with `sandbox.extraDisks` (see
+[Extra Disks](./sdk-storage.md#extra-disks)):
+
+```bash
+gondolin disk create <SOURCE_DIR> <OUTPUT> [--size SIZE] [--allow-write]
+```
+
+The image is ext4, with every file owned by root. `--size` defaults to `auto`,
+which fits the directory's contents with a little headroom. The image has no
+journal unless `--allow-write` is given, which a disk attached with
+`readOnly: false` needs. Requires e2fsprogs (see
+[Build Requirements](./custom-images.md#build-requirements)).
+
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`

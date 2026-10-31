@@ -29,6 +29,11 @@ export {
   type VmFsDeleteOptions,
 } from "./vm/core.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
+export {
+  createDiskImage,
+  type CreateDiskImageOptions,
+  type DiskImage,
+} from "./disk-image.ts";
 export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
 
 // Server for running the sandbox

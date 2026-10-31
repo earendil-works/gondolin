@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
+import { createDiskImage } from "../src/disk-image.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
 import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
 import { VM } from "../src/vm/core.ts";
@@ -230,6 +231,7 @@ function usage() {
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
   console.log("  image        Manage local image refs and objects");
+  console.log("  disk         Build disk images for sandbox.extraDisks");
   console.log("  tools        Inspect/download managed helper tools");
   console.log("  help         Show this help");
   console.log("\nRun gondolin <command> --help for command-specific flags.");
@@ -3063,6 +3065,73 @@ async function runTools(argv: string[]) {
   }
 }
 
+function diskUsage() {
+  console.log("Usage: gondolin disk <command> [options]");
+  console.log();
+  console.log("Build disk images to attach with sandbox.extraDisks.");
+  console.log();
+  console.log("Commands:");
+  console.log("  create <SOURCE_DIR> <OUTPUT> [--size SIZE] [--allow-write]");
+  console.log(
+    "      Build a root-owned ext4 image from a directory (size: auto, or e.g. 2G)",
+  );
+  console.log(
+    "      --allow-write adds a journal, so the disk can be attached with readOnly: false",
+  );
+}
+
+async function runDisk(argv: string[]) {
+  const [subcommand, ...rest] = argv;
+
+  if (
+    !subcommand ||
+    subcommand === "--help" ||
+    subcommand === "-h" ||
+    subcommand === "help"
+  ) {
+    diskUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  if (subcommand !== "create") {
+    throw new Error(`unknown disk command: ${subcommand}`);
+  }
+
+  const positional: string[] = [];
+  let size: string | undefined;
+  let allowWrite = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i]!;
+    if (arg === "--help" || arg === "-h") {
+      diskUsage();
+      return;
+    }
+    if (arg === "--size") {
+      size = rest[++i];
+      if (!size) {
+        throw new Error("--size requires a value");
+      }
+      continue;
+    }
+    if (arg === "--allow-write") {
+      allowWrite = true;
+      continue;
+    }
+    positional.push(arg);
+  }
+  if (positional.length !== 2) {
+    throw new Error("disk create requires <SOURCE_DIR> <OUTPUT>");
+  }
+
+  const image = await createDiskImage({
+    sourceDir: positional[0]!,
+    outputPath: positional[1]!,
+    size,
+    allowWrite,
+  });
+  console.log(`${image.path} (${image.sizeBytes} bytes)`);
+}
+
 function imageUsage() {
   console.log("Usage: gondolin image <command> [options]");
   console.log();
@@ -3435,6 +3504,9 @@ async function main() {
       return;
     case "image":
       await runImage(args);
+      return;
+    case "disk":
+      await runDisk(args);
       return;
     case "tools":
       await runTools(args);

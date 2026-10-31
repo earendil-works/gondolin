@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { findMke2fs } from "../src/alpine/utils.ts";
+import { findE2fsprogsTool, findMke2fs } from "../src/alpine/utils.ts";
+import { createDiskImage } from "../src/disk-image.ts";
 import {
   closeVm,
   scheduleForceExit,
@@ -15,34 +15,42 @@ import {
 
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 60000);
 
-function mke2fsOrNull() {
+function hasE2fsprogs() {
   try {
-    return findMke2fs();
+    const mke2fs = findMke2fs();
+    return (
+      findE2fsprogsTool(mke2fs, "debugfs") !== null &&
+      findE2fsprogsTool(mke2fs, "e2fsck") !== null
+    );
   } catch {
-    return null;
+    return false;
   }
 }
 
-const mke2fs = mke2fsOrNull();
 const skip = shouldSkipVmTests()
   ? "hardware virtualization unavailable"
-  : mke2fs === null
-    ? "mke2fs unavailable"
-    : false;
+  : hasE2fsprogs()
+    ? false
+    : "e2fsprogs unavailable";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-extra-disks-vm-"));
 
-function buildDisk(name: string, files: Record<string, string>) {
+async function buildDisk(
+  name: string,
+  files: Record<string, string>,
+  allowWrite = false,
+) {
   const source = path.join(tmp, `${name}-src`);
   fs.mkdirSync(source);
   for (const [file, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(source, file), content);
   }
-  const image = path.join(tmp, `${name}.ext4`);
-  execFileSync(mke2fs!, ["-q", "-t", "ext4", "-d", source, image, "8M"], {
-    stdio: "ignore",
+  const image = await createDiskImage({
+    sourceDir: source,
+    outputPath: path.join(tmp, `${name}.ext4`),
+    allowWrite,
   });
-  return image;
+  return image.path;
 }
 
 test.after(async () => {
@@ -55,8 +63,10 @@ test("extra disks with a mountPath are mounted before the first exec", {
   skip,
   timeout: timeoutMs,
 }, async () => {
-  const tools = buildDisk("tools", { "hello.txt": "from the tools disk\n" });
-  const scratch = buildDisk("scratch", {});
+  const tools = await buildDisk("tools", {
+    "hello.txt": "from the tools disk\n",
+  });
+  const scratch = await buildDisk("scratch", {}, true);
 
   await withVm(
     "extra-disks-mount",
@@ -73,6 +83,14 @@ test("extra disks with a mountPath are mounted before the first exec", {
       const read = await vm.exec(["cat", "/opt/tools/hello.txt"]);
       assert.equal(read.exitCode, 0, read.stderr);
       assert.equal(read.stdout, "from the tools disk\n");
+
+      const owner = await vm.exec([
+        "stat",
+        "-c",
+        "%u:%g",
+        "/opt/tools/hello.txt",
+      ]);
+      assert.equal(owner.stdout, "0:0\n", owner.stderr);
 
       const readOnly = await vm.exec(["touch", "/opt/tools/new"]);
       assert.notEqual(readOnly.exitCode, 0);

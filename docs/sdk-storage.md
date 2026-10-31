@@ -31,19 +31,34 @@ const vm = await VM.create({
 `sandbox.extraDisks` attaches additional disk images after the root disk. They
 appear in the guest as `/dev/vdb`, `/dev/vdc`, ... in the order given. A disk
 with a `mountPath` is mounted there by the guest `/init` during boot, before
-the first command runs:
+the first command runs. `createDiskImage()` builds an ext4 image from a host
+directory:
 
 ```ts
-import { VM } from "@earendil-works/gondolin";
+import { VM, createDiskImage } from "@earendil-works/gondolin";
+
+const disk = await createDiskImage({
+  sourceDir: "./toolchain",
+  outputPath: "/var/cache/toolchain.ext4",
+});
 
 const vm = await VM.create({
   sandbox: {
-    extraDisks: [
-      { path: "/var/cache/toolchain.ext4", mountPath: "/opt/toolchain" },
-    ],
+    extraDisks: [{ path: disk.path, mountPath: "/opt/toolchain" }],
   },
 });
 ```
+
+`createDiskImage()` (and `gondolin disk create <dir> <out>`) gives every file
+in the image to root, whoever owns it on the host, sizes the image to the
+contents with a little headroom unless `size` is given (e.g. `"2G"`), and
+writes it atomically, replacing an existing file only once the new image is
+complete. It needs e2fsprogs on the host (see
+[Build Requirements](./custom-images.md#build-requirements)). The image has no
+journal unless `allowWrite: true` is given: a read-only mount never uses one,
+but a writable disk needs it to survive a VM stopped mid-write, so a raw ext
+image without one is refused with `readOnly: false`. An `auto` size leaves
+little free space, so give a writable disk a `size`.
 
 Disks are attached read-only unless `readOnly: false` is set, and a read-only
 disk is mounted read-only (ext4 with `noload`, so a dirty journal is never

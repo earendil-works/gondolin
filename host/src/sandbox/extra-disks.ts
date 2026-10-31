@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import {
@@ -10,6 +11,36 @@ export const EXTRA_DISKS_CMDLINE_PARAM = "gondolin.disks";
 
 /** File `/init` appends a line to for every extra disk it fails to mount */
 export const EXTRA_DISKS_FAILED_PATH = "/run/gondolin/disks.failed";
+
+const EXT_SUPERBLOCK_OFFSET = 1024;
+const EXT_MAGIC = 0xef53;
+const EXT_FEATURE_COMPAT_HAS_JOURNAL = 0x4;
+
+/**
+ * Whether a raw image holds an ext2/3/4 filesystem without a journal
+ *
+ * Such a filesystem is only consistent after a clean unmount, so writing it
+ * from a VM that can be stopped at any point risks corrupting it.
+ */
+export function isJournallessExtImage(imagePath: string): boolean {
+  const superblock = Buffer.alloc(0x60);
+  const fd = fs.openSync(imagePath, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = fs.readSync(
+      fd,
+      superblock,
+      0,
+      superblock.length,
+      EXT_SUPERBLOCK_OFFSET,
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (bytesRead < superblock.length) return false;
+  if (superblock.readUInt16LE(0x38) !== EXT_MAGIC) return false;
+  return (superblock.readUInt32LE(0x5c) & EXT_FEATURE_COMPAT_HAS_JOURNAL) === 0;
+}
 
 /** Extra disk that `/init` mounts during boot */
 export type ExtraDiskMount = {
