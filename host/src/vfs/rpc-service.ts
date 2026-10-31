@@ -127,13 +127,23 @@ export class FsRpcService {
 
   private async handleRequestNow(message: FsRequest): Promise<FsResponse> {
     const start = Date.now();
-    const op = message.p.op;
+    // The payload is guest-controlled: a frame whose `p` is missing or not
+    // an object must not throw here, before the try below.  The caller
+    // reports a rejected handler by reading the payload again, so throwing
+    // here becomes a second throw there and escapes as an unhandled
+    // rejection that kills the host process.  Answer EINVAL instead.
+    const payload =
+      message.p && typeof message.p === "object" ? message.p : undefined;
+    const op = typeof payload?.op === "string" ? payload.op : "";
     let err = 0;
     let res: Record<string, unknown> | undefined;
     let messageText: string | undefined;
 
     try {
-      res = await this.dispatch(op, message.p.req);
+      if (!payload) {
+        throw createErrnoError(ERRNO.EINVAL, "fs_request");
+      }
+      res = await this.dispatch(op, payload.req ?? {});
     } catch (error) {
       const normalized = normalizeError(error);
       err = normalized.errno;

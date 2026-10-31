@@ -1674,3 +1674,59 @@ test("fs rpc service.close closes all open handles", async () => {
   const after = await send(service, "release", { fh });
   assert.equal(after.p.err, ERRNO.EBADF);
 });
+
+test("fs rpc malformed frames are answered, not thrown", async () => {
+  const service = createService();
+
+  // A frame with no `p` key at all: handleRequest used to throw a
+  // TypeError here, before its try block, and the caller crashed trying
+  // to read the payload again while reporting the failure.
+  const missing = await service.handleRequest({
+    v: 1,
+    t: "fs_request",
+    id: 41,
+  } as any);
+  assert.equal(missing.t, "fs_response");
+  assert.equal(missing.id, 41);
+  assert.equal(missing.p.err, ERRNO.EINVAL);
+
+  const nullPayload = await service.handleRequest({
+    v: 1,
+    t: "fs_request",
+    id: 42,
+    p: null,
+  } as any);
+  assert.equal(nullPayload.p.err, ERRNO.EINVAL);
+
+  const stringPayload = await service.handleRequest({
+    v: 1,
+    t: "fs_request",
+    id: 43,
+    p: "lookup",
+  } as any);
+  assert.equal(stringPayload.p.err, ERRNO.EINVAL);
+
+  // Payload present but op missing or not a string: dispatch has no such
+  // op and answers ENOSYS, like any other unknown op.
+  const noOp = await service.handleRequest({
+    v: 1,
+    t: "fs_request",
+    id: 44,
+    p: { req: {} },
+  } as any);
+  assert.equal(noOp.p.err, ERRNO.ENOSYS);
+
+  const numericOp = await service.handleRequest({
+    v: 1,
+    t: "fs_request",
+    id: 45,
+    p: { op: 42, req: {} },
+  } as any);
+  assert.equal(numericOp.p.err, ERRNO.ENOSYS);
+
+  // The service keeps working after malformed frames.
+  const statfs = await send(service, "statfs", { ino: 1 }, 46);
+  assert.equal(statfs.p.err, 0);
+
+  await service.close();
+});

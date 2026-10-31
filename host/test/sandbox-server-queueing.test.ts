@@ -3,6 +3,8 @@ import test from "node:test";
 
 import { SandboxServer } from "../src/sandbox/server.ts";
 import type { ResolvedSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import { LINUX_ERRNO } from "../src/vfs/linux-errno.ts";
+import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
@@ -635,4 +637,65 @@ test("allocateFileOpId does not reuse active guest exec ids", () => {
 
   const id = (server as any).allocateFileOpId();
   assert.equal(id, 2);
+});
+
+async function waitForFsResponse(sent: any[]) {
+  for (let i = 0; i < 200 && sent.length === 0; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(sent.length, 1, "expected exactly one fs_response");
+  return sent[0];
+}
+
+test("fs_request frame without a payload is answered, not crashed", async () => {
+  const server = new SandboxServer(
+    makeResolvedOptions({ vfsProvider: new MemoryProvider() }),
+  );
+  const sent: any[] = [];
+  (server as any).fsBridge.send = (msg: any) => {
+    sent.push(msg);
+    return true;
+  };
+  const errors: Error[] = [];
+  server.on("error", (err) => errors.push(err));
+
+  // No `p` key: this used to throw inside the fs handler, throw again in
+  // its catch block, and escape as an unhandled rejection that killed
+  // the host process.
+  (server as any).fsBridge.onMessage({ v: 1, t: "fs_request", id: 7 });
+
+  const response = await waitForFsResponse(sent);
+  assert.equal(response.t, "fs_response");
+  assert.equal(response.id, 7);
+  assert.equal(response.p.err, LINUX_ERRNO.EINVAL);
+  assert.deepEqual(errors, []);
+  assert.equal((server as any).activeVfsRequests, 0);
+});
+
+test("fs handler failure on a payload-less frame reports EIO, not a crash", async () => {
+  const server = new SandboxServer(
+    makeResolvedOptions({ vfsProvider: new MemoryProvider() }),
+  );
+  (server as any).fsService = {
+    handleRequest: async () => {
+      throw new Error("boom");
+    },
+  };
+  const sent: any[] = [];
+  (server as any).fsBridge.send = (msg: any) => {
+    sent.push(msg);
+    return true;
+  };
+  const errors: Error[] = [];
+  server.on("error", (err) => errors.push(err));
+
+  (server as any).fsBridge.onMessage({ v: 1, t: "fs_request", id: 8 });
+
+  const response = await waitForFsResponse(sent);
+  assert.equal(response.t, "fs_response");
+  assert.equal(response.id, 8);
+  assert.equal(response.p.err, LINUX_ERRNO.EIO);
+  assert.equal(response.p.message, "boom");
+  assert.equal(errors.length, 1);
+  assert.equal((server as any).activeVfsRequests, 0);
 });
