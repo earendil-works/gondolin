@@ -443,6 +443,7 @@ export class SandboxServer extends EventEmitter {
         rootDiskFormat: this.options.rootDiskFormat,
         rootDiskVolatileMode: this.internalOptions.qemuRootDiskVolatileMode,
         rootDiskReadOnly: this.options.rootDiskReadOnly,
+        extraDisks: this.options.extraDisks,
         memory: this.options.memory,
         cpus: this.options.cpus,
         virtioSocketPath: this.options.virtioSocketPath,

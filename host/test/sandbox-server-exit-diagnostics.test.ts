@@ -18,6 +18,7 @@ function makeResolvedOptions(
     rootDiskPath: "/tmp/rootfs.ext4",
     rootDiskFormat: "raw",
     rootDiskReadOnly: false,
+    extraDisks: [],
 
     memory: "256M",
     cpus: 1,

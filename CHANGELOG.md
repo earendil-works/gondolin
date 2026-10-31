@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Add a `sandbox.extraDisks` option that attaches additional disk images after the root disk (`/dev/vdb`, `/dev/vdc`, ...), each with an optional virtio-blk `serial` the guest can find it by in `/sys/block/vd*/serial`.  Disks are read-only by default, so one image (a toolchain, a dataset) can be shared by any number of concurrently running VMs.  qemu only for now; `vmm=krun` rejects the option.
+
 ## 0.14.0
 
 - Fix `chmod` from the guest being silently ignored on VFS mounts (`MemoryProvider`, `RealFSProvider`, `ShadowProvider`, ...): sandboxfs now forwards mode changes to the host and providers gain an optional `chmod()` method.  `RealFSProvider` never applies setuid/setgid bits to host files.  Requires a guest image built with this version.  #115

@@ -37,6 +37,7 @@ import {
   getDefaultKrunInitrdPath,
 } from "../utils/empty-initrd.ts";
 import { isPathWithin } from "../utils/path.ts";
+import { inferDiskFormatFromPath } from "../qemu/img.ts";
 import { normalizeGuestTmpfs, type GuestTmpfsMounts } from "./tmpfs.ts";
 
 const require = createRequire(import.meta.url);
@@ -53,6 +54,39 @@ export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
 export type SandboxVmm = "qemu" | "krun";
+
+/**
+ * Additional block device attached after the root disk
+ *
+ * Disks appear in the guest as `/dev/vdb`, `/dev/vdc`, ... in the order given.
+ * Gondolin does not mount them; the guest finds a disk by its serial in
+ * `/sys/block/<dev>/serial` and mounts it itself.
+ */
+export type SandboxExtraDisk = {
+  /** host disk image path */
+  path: string;
+  /** disk image format (default: `qcow2` for `.qcow2`/`.qcow` paths, `raw` otherwise) */
+  format?: "raw" | "qcow2";
+  /** attach read-only (default: `true`) */
+  readOnly?: boolean;
+  /** virtio-blk serial, at most 20 characters from `[A-Za-z0-9._-]` */
+  serial?: string;
+};
+
+export type ResolvedSandboxExtraDisk = {
+  /** absolute host disk image path */
+  path: string;
+  /** disk image format */
+  format: "raw" | "qcow2";
+  /** attach read-only */
+  readOnly: boolean;
+  /** virtio-blk serial */
+  serial?: string;
+};
+
+/** Longest serial the virtio-blk device id field holds (`VIRTIO_BLK_ID_BYTES`) */
+const MAX_EXTRA_DISK_SERIAL_LENGTH = 20;
+const EXTRA_DISK_SERIAL_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
@@ -118,6 +152,13 @@ export type SandboxServerOptions = {
    * higher-level {@link VM} wrapper.
    */
   rootDiskDeleteOnClose?: boolean;
+
+  /**
+   * Additional block devices attached after the root disk (qemu only)
+   *
+   * Read-only disks may be shared by any number of concurrently running VMs.
+   */
+  extraDisks?: SandboxExtraDisk[];
 
   /**
    * Debug configuration
@@ -198,6 +239,8 @@ export type ResolvedSandboxServerOptions = {
   rootDiskFormat: "raw" | "qcow2";
   /** qemu readonly mode for the root disk */
   rootDiskReadOnly: boolean;
+  /** additional block devices attached after the root disk */
+  extraDisks: ResolvedSandboxExtraDisk[];
 
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
@@ -776,6 +819,59 @@ type ResolveSandboxServerOptionsDeps = {
   resolveDefaultKrunRunnerPath?: () => string;
 };
 
+function resolveExtraDisks(
+  disks: SandboxExtraDisk[] | undefined,
+): ResolvedSandboxExtraDisk[] {
+  if (disks === undefined) return [];
+  if (!Array.isArray(disks)) {
+    throw new Error("sandbox.extraDisks must be an array");
+  }
+
+  const serials = new Set<string>();
+  return disks.map((disk, index) => {
+    const field = `sandbox.extraDisks[${index}]`;
+    if (typeof disk?.path !== "string" || disk.path.length === 0) {
+      throw new Error(`${field}.path must be a non-empty string`);
+    }
+    const diskPath = path.resolve(disk.path);
+    if (!fs.existsSync(diskPath)) {
+      throw new Error(`${field}.path does not exist: ${diskPath}`);
+    }
+
+    const format = disk.format ?? inferDiskFormatFromPath(diskPath);
+    if (format !== "raw" && format !== "qcow2") {
+      throw new Error(
+        `${field}.format must be "raw" or "qcow2", got ${String(format)}`,
+      );
+    }
+
+    const serial = disk.serial;
+    if (serial !== undefined) {
+      if (
+        typeof serial !== "string" ||
+        serial.length === 0 ||
+        serial.length > MAX_EXTRA_DISK_SERIAL_LENGTH ||
+        !EXTRA_DISK_SERIAL_PATTERN.test(serial)
+      ) {
+        throw new Error(
+          `${field}.serial must be 1-${MAX_EXTRA_DISK_SERIAL_LENGTH} characters from [A-Za-z0-9._-], got ${JSON.stringify(serial)}`,
+        );
+      }
+      if (serials.has(serial)) {
+        throw new Error(`${field}.serial is not unique: ${serial}`);
+      }
+      serials.add(serial);
+    }
+
+    return {
+      path: diskPath,
+      format,
+      readOnly: disk.readOnly ?? true,
+      ...(serial !== undefined ? { serial } : {}),
+    };
+  });
+}
+
 export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
   assets?: GuestAssets,
@@ -874,6 +970,8 @@ export function resolveSandboxServerOptions(
     if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
     if (options.qemuIdlePauseMs !== undefined)
       unsupported.push("sandbox.qemuIdlePauseMs");
+    if (options.extraDisks !== undefined && options.extraDisks.length > 0)
+      unsupported.push("sandbox.extraDisks");
 
     if (unsupported.length > 0) {
       throw new Error(
@@ -963,6 +1061,7 @@ export function resolveSandboxServerOptions(
   const rootDiskFormat =
     options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
+  const extraDisks = resolveExtraDisks(options.extraDisks);
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -984,6 +1083,7 @@ export function resolveSandboxServerOptions(
     rootDiskPath,
     rootDiskFormat,
     rootDiskReadOnly,
+    extraDisks,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,

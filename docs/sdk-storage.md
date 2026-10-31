@@ -26,6 +26,50 @@ const vm = await VM.create({
 });
 ```
 
+## Extra Disks
+
+`sandbox.extraDisks` attaches additional disk images after the root disk. They
+appear in the guest as `/dev/vdb`, `/dev/vdc`, ... in the order given; Gondolin
+does not mount them. Give each a `serial` and have the guest find it in
+`/sys/block/vd*/serial` (the guest image has no udev, so there is no
+`/dev/disk/by-id`).
+
+Disks are attached read-only unless `readOnly: false` is set. Nothing writes a
+read-only disk, so one image can be attached by any number of concurrently
+running VMs. This suits a large toolchain or dataset built once on the host and
+mounted in every VM, which reads at block-device speed rather than through the
+VFS.
+
+A writable disk must only be attached to one running VM at a time, as two
+writers corrupt the filesystem. qemu's image locking refuses a second writer on
+Linux, but it relies on open file description locks, so on macOS nothing stops
+one.
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create({
+  sandbox: {
+    extraDisks: [{ path: "/var/cache/toolchain.ext4", serial: "toolchain" }],
+  },
+});
+
+await vm.exec([
+  "sh",
+  "-c",
+  'for s in /sys/block/vd*/serial; do [ "$(cat $s)" = toolchain ] && dev=/dev/$(basename $(dirname $s)); done; mkdir -p /opt/toolchain && mount -o ro $dev /opt/toolchain',
+]);
+```
+
+| field      | default                                         | notes                                     |
+| ---------- | ----------------------------------------------- | ----------------------------------------- |
+| `path`     | required                                        | host disk image                           |
+| `format`   | `qcow2` for `.qcow2`/`.qcow` paths, else `raw`  |                                           |
+| `readOnly` | `true`                                          |                                           |
+| `serial`   | none                                            | 1-20 characters from `[A-Za-z0-9._-]`, unique |
+
+The option is qemu only; `vmm=krun` rejects it.
+
 ## Image Management
 
 Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
