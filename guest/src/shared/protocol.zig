@@ -355,6 +355,37 @@ test "envelope rejects malformed messages" {
     try testing.expectError(error.MissingField, (try Envelope.decode(arena, w.buffered())).id());
 }
 
+test "null is absent only for optional fields" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // exec_request whose payload has `field: null` (cbor.encode would omit it)
+    const withNull = struct {
+        fn encode(buf: []u8, field: []const u8) ![]const u8 {
+            var w: Writer = .fixed(buf);
+            try cbor.writeHead(&w, .map, 3);
+            try cbor.writeText(&w, "t");
+            try cbor.writeText(&w, "exec_request");
+            try cbor.writeText(&w, "id");
+            try cbor.writeInt(&w, 1);
+            try cbor.writeText(&w, "p");
+            try cbor.writeHead(&w, .map, 2);
+            try cbor.writeText(&w, "cmd");
+            try cbor.writeText(&w, "sh");
+            try cbor.writeText(&w, field);
+            try w.writeByte(0xf6);
+            return w.buffered();
+        }
+    }.encode;
+
+    var buf: [128]u8 = undefined;
+    const ok = try (try Envelope.decode(arena, try withNull(&buf, "cwd"))).payload(arena, .exec_request);
+    try testing.expect(ok.cwd == null);
+    try testing.expectError(error.InvalidType, (try Envelope.decode(arena, try withNull(&buf, "stdin"))).payload(arena, .exec_request));
+    try testing.expectError(error.InvalidType, (try Envelope.decode(arena, try withNull(&buf, "argv"))).payload(arena, .exec_request));
+}
+
 test "file read chunk size is clamped" {
     const req: FileReadRequest = .{ .path = "/x" };
     try testing.expectEqual(@as(u32, 64 * 1024), req.chunkSize());

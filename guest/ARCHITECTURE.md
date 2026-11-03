@@ -157,11 +157,18 @@ Encoding rules (guest → host):
 | `id` | correlation id: exec/file request id, stream id, fs request id; `0` for unsolicited messages |
 | `p` | payload map, **required** (send `{}` for empty payloads) |
 
-Payload parsing (host → guest): fields documented with a default may be
-absent; a `null` value counts as absent for optional fields; integer fields
-must be non-negative and fit the documented width, otherwise the payload is
-invalid (`InvalidValue`); a wrongly typed field is `InvalidType`; a missing
-required field is `MissingField`.
+Payload parsing (host → guest):
+
+- Fields documented with a default may be absent; a missing required field
+  is `MissingField`.
+- `null` is accepted only for *optional* fields, i.e. those whose default is
+  documented as "(none)" (`cwd`, and `res`/`message` of `fs_response`); it
+  means the same as absent.  For every other field — including fields with a
+  concrete default such as `stdin` (false), `argv` ([]) or `chunk_size` (0) —
+  `null` is a type error (`InvalidType`).
+- A wrongly typed field is `InvalidType`.  Integer fields must be
+  non-negative and fit the documented width (`u16`, `u32`, `u64`), otherwise
+  the payload is invalid (`InvalidValue`).
 
 ## 4. sandboxd: control protocol (`virtio-port`)
 
@@ -239,8 +246,10 @@ in practice because such integers fail CBOR decoding).
 The command is resolved like `execvpe(3)`: if `cmd` contains `/` it is used
 as is, otherwise each `PATH` entry (from the child's `envp`, default
 `/bin:/usr/bin`; an empty entry means the current directory) is tried in
-order; `ENOENT`/`ENOTDIR` continue the search, `EACCES` is remembered and
-reported if nothing else succeeds, any other error stops the search.
+order; `ENOENT`/`ENOTDIR` continue the search, `EACCES` and `EPERM` also
+continue it but are remembered (if no candidate succeeds the result is
+`EACCES`), and any other error stops the search.  Either way the child then
+prints `exec failed` and exits with 127.
 
 **Modes.**
 

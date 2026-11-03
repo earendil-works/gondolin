@@ -235,7 +235,7 @@ pub fn parse(comptime T: type, arena: Allocator, value: Value) ParseError!T {
 // ---------------------------------------------------------------------------
 // Encoding
 
-const Major = enum(u3) { uint = 0, nint = 1, bytes = 2, text = 3, array = 4, map = 5, simple = 7 };
+pub const Major = enum(u3) { uint = 0, nint = 1, bytes = 2, text = 3, array = 4, map = 5, simple = 7 };
 
 /// Write an item head with the shortest argument encoding.
 pub fn writeHead(w: *Writer, major: Major, arg: u64) Writer.Error!void {
