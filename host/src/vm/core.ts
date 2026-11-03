@@ -40,9 +40,14 @@ import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
   type SandboxVmm,
+  extraDiskMounts,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
+import {
+  EXTRA_DISKS_FAILED_PATH,
+  assertExtraDiskMountsDoNotOverlap,
+} from "../sandbox/extra-disks.ts";
 import type { SandboxConnection } from "../sandbox/client.ts";
 import type { SandboxState } from "../sandbox/controller.ts";
 import {
@@ -267,6 +272,8 @@ export class VM {
   private vfsReadyPromise: Promise<void> | null = null;
   private rootfsGuestResizePending = false;
   private rootfsGuestResizeDone = false;
+  /** whether `/init`'s extra disk mounts have been checked since boot */
+  private extraDisksMountChecked = false;
   private vmmChecked = false;
   private debugLog: DebugLogFn | null = null;
   private debugListener:
@@ -495,6 +502,10 @@ export class VM {
     const resolved = resolvedSandboxOptions
       ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(sandboxOptions);
+
+    assertExtraDiskMountsDoNotOverlap(extraDiskMounts(resolved.extraDisks), {
+      vfs: [this.fuseMount, ...this.fuseBinds],
+    });
 
     // Merge VFS provider into resolved options
     if (this.vfs) {
@@ -1226,6 +1237,9 @@ fi
         await this.ensureRootfsResized();
 
         this.ensureStartupGeneration(startupGeneration);
+        await this.ensureExtraDisksMounted();
+
+        this.ensureStartupGeneration(startupGeneration);
         // If VFS is configured, also wait for mounts to be ready.
         await this.ensureVfsReady();
 
@@ -1643,6 +1657,38 @@ fi
     }
 
     this.rootfsGuestResizeDone = true;
+  }
+
+  private async ensureExtraDisksMounted() {
+    // start() runs before every exec; the guest may unmount a disk after boot
+    if (this.extraDisksMountChecked) return;
+    const mountPaths = extraDiskMounts(
+      this.resolvedSandboxOptions.extraDisks ?? [],
+    ).map((disk) => disk.mountPath);
+    if (mountPaths.length === 0) return;
+
+    // /init mounts the disks before sandboxd starts, so a missing mount means
+    // it failed or the guest image predates extra disk mounts
+    const result = await this.execInternalNoVfsWait([
+      "/bin/sh",
+      "-c",
+      [
+        'if [ -s "$1" ]; then cat "$1" >&2; exit 1; fi',
+        "shift",
+        'for mount_path in "$@"; do',
+        '  grep -qF -- " ${mount_path} " /proc/mounts || { echo "extra disk not mounted at ${mount_path} (guest image may predate extra disk mountPath support)" >&2; exit 1; }',
+        "done",
+      ].join("\n"),
+      "sh",
+      EXTRA_DISKS_FAILED_PATH,
+      ...mountPaths,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `failed to mount extra disks: ${(result.stderr || result.stdout).trim()}`,
+      );
+    }
+    this.extraDisksMountChecked = true;
   }
 
   private async ensureVfsReady() {

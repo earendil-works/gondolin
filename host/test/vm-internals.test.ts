@@ -34,6 +34,7 @@ function makeTempResolvedServerOptions() {
       rootDiskPath: rootfsPath,
       rootDiskFormat: "raw" as const,
       rootDiskReadOnly: false,
+      extraDisks: [],
       memory: "256M",
       cpus: 1,
       virtioSocketPath: path.join(dir, "virtio.sock"),

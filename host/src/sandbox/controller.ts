@@ -14,6 +14,7 @@ import {
   trackChild,
 } from "./child-process.ts";
 import { errorMessage } from "../utils/error.ts";
+import type { ResolvedSandboxExtraDisk } from "./server-options.ts";
 
 const QMP_COMMAND_TIMEOUT_MS = 2000;
 
@@ -220,6 +221,8 @@ export type SandboxConfig = {
   rootDiskVolatileMode?: "snapshot";
   /** qemu readonly mode for the root disk */
   rootDiskReadOnly?: boolean;
+  /** additional block devices attached after the root disk */
+  extraDisks?: ResolvedSandboxExtraDisk[];
 
   /** vm memory size (qemu syntax, e.g. "1G") */
   memory: string;
@@ -588,6 +591,16 @@ export class SandboxController extends EventEmitter {
   }
 }
 
+// microvm has no PCI bus; use virtio-blk-device (MMIO) instead
+function blkDeviceForMachine(machineType: string) {
+  return machineType === "microvm" ? "virtio-blk-device" : "virtio-blk-pci";
+}
+
+/** Escape a value for a qemu `-drive`/`-device` option list, where `,` separates options */
+function escapeQemuOptionValue(value: string) {
+  return value.replaceAll(",", ",,");
+}
+
 function buildQemuArgs(config: SandboxConfig) {
   const args: string[] = [
     "-nodefaults",
@@ -619,10 +632,18 @@ function buildQemuArgs(config: SandboxConfig) {
       "-drive",
       `file=${config.rootDiskPath},format=${format},if=none,id=drive0${snapshot ? ",snapshot=on" : ""}${readOnly ? ",readonly=on" : ""}`,
     );
-    // microvm has no PCI bus; use virtio-blk-device (MMIO) instead
-    const blkDevice =
-      machineType === "microvm" ? "virtio-blk-device" : "virtio-blk-pci";
-    args.push("-device", `${blkDevice},drive=drive0`);
+    args.push("-device", `${blkDeviceForMachine(machineType)},drive=drive0`);
+  }
+  for (const [index, disk] of (config.extraDisks ?? []).entries()) {
+    const id = `drive${index + 1}`;
+    args.push(
+      "-drive",
+      `file=${escapeQemuOptionValue(disk.path)},format=${disk.format},if=none,id=${id}${disk.readOnly ? ",readonly=on" : ""}`,
+    );
+    args.push(
+      "-device",
+      `${blkDeviceForMachine(machineType)},drive=${id}${disk.serial ? `,serial=${disk.serial}` : ""}`,
+    );
   }
   if (machineType === "microvm") {
     // microvm has no PCI bus and uses virtio-mmio devices.

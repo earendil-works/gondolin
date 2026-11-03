@@ -318,20 +318,33 @@ function applyOwnershipMetadataToRootfsImage(
 }
 
 function findDebugfs(mkfsCmd: string): string | null {
+  return findE2fsprogsTool(mkfsCmd, "debugfs");
+}
+
+/**
+ * Find an e2fsprogs tool, preferring the one installed beside `mkfsCmd`
+ *
+ * Homebrew's e2fsprogs is keg-only, so its tools are often only reachable by
+ * absolute path.
+ */
+export function findE2fsprogsTool(
+  mkfsCmd: string,
+  tool: "debugfs" | "e2fsck",
+): string | null {
   const candidates: string[] = [];
 
   if (path.isAbsolute(mkfsCmd)) {
-    candidates.push(path.join(path.dirname(mkfsCmd), "debugfs"));
+    candidates.push(path.join(path.dirname(mkfsCmd), tool));
   }
 
-  candidates.push("debugfs");
+  candidates.push(tool);
 
   if (process.platform === "darwin") {
     candidates.push(
-      "/opt/homebrew/opt/e2fsprogs/sbin/debugfs",
-      "/opt/homebrew/opt/e2fsprogs/bin/debugfs",
-      "/usr/local/opt/e2fsprogs/sbin/debugfs",
-      "/usr/local/opt/e2fsprogs/bin/debugfs",
+      `/opt/homebrew/opt/e2fsprogs/sbin/${tool}`,
+      `/opt/homebrew/opt/e2fsprogs/bin/${tool}`,
+      `/usr/local/opt/e2fsprogs/sbin/${tool}`,
+      `/usr/local/opt/e2fsprogs/bin/${tool}`,
     );
   }
 

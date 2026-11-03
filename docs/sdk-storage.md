@@ -26,6 +26,79 @@ const vm = await VM.create({
 });
 ```
 
+## Extra Disks
+
+`sandbox.extraDisks` attaches additional disk images after the root disk. They
+appear in the guest as `/dev/vdb`, `/dev/vdc`, ... in the order given. A disk
+with a `mountPath` is mounted there by the guest `/init` during boot, before
+the first command runs. `createDiskImage()` builds an ext4 image from a host
+directory:
+
+```ts
+import { VM, createDiskImage } from "@earendil-works/gondolin";
+
+const disk = await createDiskImage({
+  sourceDir: "./toolchain",
+  outputPath: "/var/cache/toolchain.ext4",
+});
+
+const vm = await VM.create({
+  sandbox: {
+    extraDisks: [{ path: disk.path, mountPath: "/opt/toolchain" }],
+  },
+});
+```
+
+`createDiskImage()` (and `gondolin disk create <dir> <out>`) gives every file
+in the image to root, whoever owns it on the host, sizes the image to the
+contents with a little headroom unless `size` is given (e.g. `"2G"`), and
+writes it atomically, replacing an existing file only once the new image is
+complete. It needs e2fsprogs on the host (see
+[Build Requirements](./custom-images.md#build-requirements)). The image has no
+journal unless `allowWrite: true` is given: a read-only mount never uses one,
+but a writable disk needs it to survive a VM stopped mid-write, so a raw ext
+image without one is refused with `readOnly: false`. An `auto` size leaves
+little free space, so give a writable disk a `size`.
+
+Disks are attached read-only unless `readOnly: false` is set, and a read-only
+disk is mounted read-only (ext4 with `noload`, so a dirty journal is never
+replayed). Nothing writes a read-only disk, so one image can be attached by any
+number of concurrently running VMs. This suits a large toolchain or dataset
+built once on the host and mounted in every VM, which reads at block-device
+speed rather than through the VFS.
+
+A writable disk must only be attached to one running VM at a time, as two
+writers corrupt the filesystem. qemu's image locking refuses a second writer on
+Linux, but it relies on open file description locks, so on macOS nothing stops
+one.
+
+If a disk cannot be mounted (no filesystem the guest kernel recognises, or a
+mount point that cannot be created), `vm.start()` fails with the reason. A
+`mountPath` must be absolute, may not be `/` or under `/proc`, `/sys`, `/dev`
+or `/run`, and may not overlap a VFS mount or sit on or above a tmpfs mount;
+it may sit below a tmpfs mount. Mounting requires a guest image built with
+this Gondolin version or newer; with an older image `vm.start()` fails
+reporting the disk as not mounted.
+
+| field       | default                                         | notes                                                       |
+| ----------- | ----------------------------------------------- | ----------------------------------------------------------- |
+| `path`      | required                                        | host disk image                                             |
+| `format`    | `qcow2` for `.qcow2`/`.qcow` paths, else `raw`  |                                                             |
+| `readOnly`  | `true`                                          |                                                             |
+| `mountPath` | none                                            | absolute guest path the disk is mounted at during boot      |
+| `serial`    | none, or `gondolin-disk<index>` with `mountPath` | 1-20 characters from `[A-Za-z0-9._-]`, unique               |
+
+A disk without a `mountPath` is left for the guest to mount. Give it a `serial`
+and find it in `/sys/block/vd*/serial` (the guest image has no udev, so there
+is no `/dev/disk/by-id`):
+
+```sh
+for s in /sys/block/vd*/serial; do [ "$(cat $s)" = toolchain ] && dev=/dev/$(basename $(dirname $s)); done
+mount -o ro "$dev" /opt/toolchain
+```
+
+The option is qemu only; `vmm=krun` rejects it.
+
 ## Image Management
 
 Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
