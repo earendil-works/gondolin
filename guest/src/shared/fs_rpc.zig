@@ -2,7 +2,8 @@
 //!
 //! Strictly request/response: one `fs_request` is written and the matching
 //! `fs_response` is read before the next request is issued, so responses are
-//! never interleaved.
+//! never interleaved.  Responses with an older id (left over from a call that
+//! failed before reading its response) are skipped.
 //!
 //!   request:  { v: 1, t: "fs_request",  id, p: { op, req: { ...fields } } }
 //!   response: { v: 1, t: "fs_response", id, p: { op, err, res?, message? } }
@@ -65,9 +66,16 @@ pub const Client = struct {
         protocol.encodeRaw(&self.send_buf.writer, "fs_request", id, .{ .op = op, .req = req }) catch return error.OutOfMemory;
         try framing.writeFrame(self.fd, self.send_buf.writer.buffered());
 
-        const frame = try framing.readFrame(self.gpa, self.fd, &self.recv_buf);
-        const env = try protocol.Envelope.decode(arena, frame);
-        if (env.tag() != .fs_response or try env.id() != id) return error.UnexpectedResponse;
+        // Responses to earlier requests whose call failed before reading
+        // them (e.g. a transport error) are skipped so the stream recovers.
+        const env = while (true) {
+            const frame = try framing.readFrame(self.gpa, self.fd, &self.recv_buf);
+            const env = try protocol.Envelope.decode(arena, frame);
+            if (env.tag() != .fs_response) return error.UnexpectedResponse;
+            const response_id = try env.id();
+            if (response_id == id) break env;
+            std.log.scoped(.fs_rpc).warn("skipping stale response {d} (waiting for {d})", .{ response_id, id });
+        };
         const p = try env.payload(arena, .fs_response);
         if (!std.mem.eql(u8, p.op, op)) return error.UnexpectedResponse;
 
@@ -91,4 +99,28 @@ test "wire errno mapping" {
     try std.testing.expectEqual(sys.E.NOENT, errnoFromWire(-2));
     try std.testing.expectEqual(sys.E.IO, errnoFromWire(1 << 40));
     try std.testing.expectEqual(sys.E.IO, errnoFromWire(std.math.minInt(i64)));
+}
+
+test "stale responses are skipped" {
+    const linux = std.os.linux;
+    var pair: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair)) != .SUCCESS) return error.SocketPairFailed;
+    defer sys.close(pair[1]);
+
+    var outbox: framing.Outbox = .init(std.testing.allocator);
+    defer outbox.deinit();
+    try outbox.sendRaw("fs_response", 7, .{ .op = "getattr", .err = 0 });
+    try outbox.sendRaw("fs_response", 1, .{ .op = "getattr", .err = -2 });
+    try sys.writeAll(pair[1], outbox.aw.writer.buffered());
+
+    var client: Client = .init(std.testing.allocator, pair[0]);
+    defer {
+        sys.close(client.fd);
+        client.deinit();
+    }
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const response = try client.call(arena_state.allocator(), "getattr", .{ .ino = @as(u64, 1) });
+    try std.testing.expectEqual(sys.E.NOENT, response.err);
+    try std.testing.expect(response.res == .null);
 }

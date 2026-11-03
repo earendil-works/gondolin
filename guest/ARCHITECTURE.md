@@ -610,8 +610,12 @@ response: { v: 1, t: "fs_response", id, p: { op: <text>, err: <int>, res?: <map|
 ```
 
 - `id` starts at 1 and increments (wrapping from 2³²−1 to 1).
-- The response must have `t = "fs_response"`, the same `id`, and the same
-  `op`; otherwise the request fails with `EIO`.
+- `fs_response` frames with a different `id` are stale (left over from an
+  earlier call that failed before reading its response, e.g. on a transport
+  error) and are skipped.  The matching response must have `t =
+  "fs_response"` and the same `op`; anything else fails the request with
+  `EIO`.  An oversized response frame is consumed and fails the request with
+  `EIO`, keeping the stream in sync.
 - `err` is an errno (sign ignored; 0 = success; values ≥ 4096 → `EIO`).
 - All request fields are unsigned integers unless noted.
 

@@ -174,12 +174,23 @@ pub fn writeFrame(fd: sys.fd_t, payload: []const u8) (sys.WriteError || error{Fr
     try sys.writevAll(fd, &iov);
 }
 
-/// Blocking: read one frame into `buf` (replacing its contents).
+/// Blocking: read one frame into `buf` (replacing its contents).  An
+/// oversized frame is consumed and reported as `error.FrameTooLarge`.
 pub fn readFrame(gpa: Allocator, fd: sys.fd_t, buf: *std.ArrayList(u8)) (Allocator.Error || sys.ReadError || error{ EndOfStream, FrameTooLarge })![]u8 {
     var header: [4]u8 = undefined;
     try readExact(fd, &header);
     const len = std.mem.readInt(u32, &header, .big);
-    if (len > max_frame_len) return error.FrameTooLarge;
+    if (len > max_frame_len) {
+        // Skip the payload so the stream stays in sync.
+        var scratch: [4096]u8 = undefined;
+        var left: usize = len;
+        while (left > 0) {
+            const n = @min(left, scratch.len);
+            try readExact(fd, scratch[0..n]);
+            left -= n;
+        }
+        return error.FrameTooLarge;
+    }
     buf.clearRetainingCapacity();
     try buf.resize(gpa, len);
     try readExact(fd, buf.items);
