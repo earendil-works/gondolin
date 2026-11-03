@@ -656,11 +656,13 @@ the host).
   `tcp_opened{ok: false, message: "only loopback allowed"}` (an existing
   stream with that id is left alone).  Otherwise an existing stream with that
   id is closed (sending `tcp_close`), a blocking `connect` to
-  `127.0.0.1:port` is made, and the result is reported: `tcp_opened{ok:
-  true}`, or `ok: false` with the error name (`ConnectionRefused`,
+  `127.0.0.1:port` is made and the socket is switched to non-blocking mode.
+  Every `tcp_open` is answered: `tcp_opened{ok: true}`, or `ok: false` with
+  the error name of whichever setup step failed (`ConnectionRefused`,
   `AccessDenied`, `NetworkUnreachable`, `ConnectionTimedOut`, `AddressInUse`,
-  `ProcessFdQuotaExceeded`, `SystemFdQuotaExceeded`, `SystemResources`,
-  `Unexpected`).  The socket is then made non-blocking.
+  `WouldBlock`, `ProcessFdQuotaExceeded`, `SystemFdQuotaExceeded`,
+  `SystemResources`, `OutOfMemory`, `Unexpected`); on failure the socket is
+  closed and no stream is registered.
 - `tcp_data` (host → guest) is appended to the stream's pending buffer and
   written as the socket becomes writable.  If pending + new data would
   exceed 256 KiB the stream is closed (guest sends `tcp_close`).  Data for

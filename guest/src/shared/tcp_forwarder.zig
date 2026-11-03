@@ -201,13 +201,21 @@ pub const Forwarder = struct {
         }
         self.close(id);
 
-        const fd = sys.tcpConnectLoopback(req.port) catch |err| {
+        // Every tcp_open gets a tcp_opened; on failure the socket is closed.
+        const fd = self.connect(req.port) catch |err| {
             return self.channel.outbox.send(.tcp_opened, id, .{ .ok = false, .message = @errorName(err) });
         };
+        self.conns.putAssumeCapacity(id, .{ .fd = fd });
+        try self.channel.outbox.send(.tcp_opened, id, .{ .ok = true });
+    }
+
+    /// Connect to the loopback port and prepare the socket for the loop.
+    fn connect(self: *Forwarder, port: u16) !sys.fd_t {
+        try self.conns.ensureUnusedCapacity(self.gpa, 1);
+        const fd = try sys.tcpConnectLoopback(port);
         errdefer sys.close(fd);
         try sys.setNonblocking(fd, true);
-        try self.conns.put(self.gpa, id, .{ .fd = fd });
-        try self.channel.outbox.send(.tcp_opened, id, .{ .ok = true });
+        return fd;
     }
 
     fn onConnReady(self: *Forwarder, id: u32, revents: i16) !void {
@@ -336,4 +344,50 @@ test "tcp messages drive stream state" {
     try protocol.encode(&w, .tcp_open, 4, .{ .host = "10.0.0.1", .port = 22 });
     try forwarder.handleFrame(w.buffered());
     try testing.expect(!forwarder.conns.contains(4));
+}
+
+fn expectOpened(forwarder: *Forwarder, id: u32, ok: bool, message: ?[]const u8) !void {
+    var reader: @import("framing.zig").FrameReader = .{};
+    defer reader.deinit(testing.allocator);
+    try reader.feed(testing.allocator, forwarder.channel.outbox.aw.writer.buffered());
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const env = try protocol.Envelope.decode(arena_state.allocator(), (try reader.next()).?);
+    try testing.expectEqual(protocol.Tag.tcp_opened, env.tag().?);
+    try testing.expectEqual(id, try env.id());
+    const opened = try env.payload(arena_state.allocator(), .tcp_opened);
+    try testing.expectEqual(ok, opened.ok);
+    if (message) |m| try testing.expectEqualStrings(m, opened.message.?) else try testing.expect(opened.message == null);
+}
+
+test "every tcp_open is answered, also when setup fails" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    const gpa = failing.allocator();
+    const virtio = try sys.pipe(true);
+    defer sys.close(virtio[0]);
+    defer sys.close(virtio[1]);
+
+    var forwarder: Forwarder = .init(gpa, virtio[1]);
+    defer forwarder.deinit();
+
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try protocol.encode(&w, .tcp_open, 1, .{ .host = "127.0.0.1", .port = 1 });
+    const open_frame = w.buffered();
+
+    // nothing listens on port 1
+    try forwarder.handleFrame(open_frame);
+    try expectOpened(&forwarder, 1, false, "ConnectionRefused");
+    try testing.expect(!forwarder.conns.contains(1));
+
+    // stream table cannot grow: the reply still goes out (the outbox buffer
+    // is pre-grown) and no socket is leaked
+    var fresh: Forwarder = .init(gpa, virtio[1]);
+    defer fresh.deinit();
+    try fresh.channel.outbox.send(.tcp_data, 9, .{ .data = .{ .data = &(@as([256]u8, @splat(0))) } });
+    fresh.channel.outbox.clear();
+    failing.fail_index = failing.alloc_index;
+    try fresh.open(1, .{ .host = "127.0.0.1", .port = 1 });
+    try expectOpened(&fresh, 1, false, "OutOfMemory");
+    try testing.expect(!fresh.conns.contains(1));
 }
