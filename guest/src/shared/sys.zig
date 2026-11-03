@@ -799,3 +799,95 @@ pub const DirIterator = struct {
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Tests
+
+// The error names of these mappings are reported verbatim to the host
+// (`file_*_failed` messages, `tcp_opened.message`); this table pins them and
+// must stay in sync with ARCHITECTURE.md §4.5.
+test "host-visible errno to error name mapping" {
+    const Case = struct { E, []const u8 };
+    const expectMapping = struct {
+        fn run(comptime f: anytype, cases: []const Case) !void {
+            for (cases) |case| {
+                try std.testing.expectEqualStrings(case[1], @errorName(f(case[0])));
+            }
+            // anything not listed is `Unexpected`
+            for ([_]E{ .CHILD, .SPIPE, .XDEV, .MLINK }) |err| {
+                try std.testing.expectEqualStrings("Unexpected", @errorName(f(err)));
+            }
+        }
+    }.run;
+
+    try expectMapping(openErrno, &.{
+        .{ .NOENT, "FileNotFound" },          .{ .SRCH, "FileNotFound" },
+        .{ .ACCES, "AccessDenied" },          .{ .PERM, "PermissionDenied" },
+        .{ .ISDIR, "IsDir" },                 .{ .NOTDIR, "NotDir" },
+        .{ .NAMETOOLONG, "NameTooLong" },     .{ .INVAL, "BadPathName" },
+        .{ .ILSEQ, "BadPathName" },           .{ .LOOP, "SymLinkLoop" },
+        .{ .NODEV, "NoDevice" },              .{ .NXIO, "NoDevice" },
+        .{ .BUSY, "DeviceBusy" },             .{ .TXTBSY, "FileBusy" },
+        .{ .FBIG, "FileTooBig" },             .{ .OVERFLOW, "FileTooBig" },
+        .{ .NOSPC, "NoSpaceLeft" },           .{ .EXIST, "PathAlreadyExists" },
+        .{ .ROFS, "ReadOnlyFileSystem" },     .{ .OPNOTSUPP, "FileLocksUnsupported" },
+        .{ .AGAIN, "WouldBlock" },            .{ .MFILE, "ProcessFdQuotaExceeded" },
+        .{ .NFILE, "SystemFdQuotaExceeded" }, .{ .NOMEM, "SystemResources" },
+    });
+    try expectMapping(readErrno, &.{
+        .{ .AGAIN, "WouldBlock" },                .{ .IO, "InputOutput" },
+        .{ .ISDIR, "IsDir" },                     .{ .NOBUFS, "SystemResources" },
+        .{ .NOMEM, "SystemResources" },           .{ .NOTCONN, "SocketUnconnected" },
+        .{ .CONNRESET, "ConnectionResetByPeer" }, .{ .TIMEDOUT, "ConnectionTimedOut" },
+        .{ .BADF, "NotOpenForReading" },
+    });
+    try expectMapping(writeErrno, &.{
+        .{ .AGAIN, "WouldBlock" },       .{ .PIPE, "BrokenPipe" },
+        .{ .IO, "InputOutput" },         .{ .CONNRESET, "ConnectionResetByPeer" },
+        .{ .NOSPC, "NoSpaceLeft" },      .{ .DQUOT, "DiskQuota" },
+        .{ .FBIG, "FileTooBig" },        .{ .BUSY, "DeviceBusy" },
+        .{ .ACCES, "AccessDenied" },     .{ .PERM, "PermissionDenied" },
+        .{ .BADF, "NotOpenForWriting" },
+    });
+    const unlink_common = [_]Case{
+        .{ .NOENT, "FileNotFound" },    .{ .ACCES, "AccessDenied" },
+        .{ .PERM, "PermissionDenied" }, .{ .BUSY, "FileBusy" },
+        .{ .IO, "FileSystem" },         .{ .NOTDIR, "NotDir" },
+        .{ .LOOP, "SymLinkLoop" },      .{ .NAMETOOLONG, "NameTooLong" },
+        .{ .ILSEQ, "BadPathName" },     .{ .ROFS, "ReadOnlyFileSystem" },
+        .{ .NOMEM, "SystemResources" },
+    };
+    try expectMapping(struct {
+        fn f(err: E) UnlinkError {
+            return unlinkErrno(err, false);
+        }
+    }.f, &(unlink_common ++ [_]Case{ .{ .ISDIR, "IsDir" }, .{ .NOTEMPTY, "Unexpected" } }));
+    try expectMapping(struct {
+        fn f(err: E) UnlinkError {
+            return unlinkErrno(err, true);
+        }
+    }.f, &(unlink_common ++ [_]Case{ .{ .NOTEMPTY, "DirNotEmpty" }, .{ .ISDIR, "Unexpected" } }));
+    try expectMapping(openDirErrno, &.{
+        .{ .NOENT, "FileNotFound" },           .{ .ACCES, "AccessDenied" },
+        .{ .PERM, "PermissionDenied" },        .{ .NOTDIR, "NotDir" },
+        .{ .NAMETOOLONG, "NameTooLong" },      .{ .INVAL, "BadPathName" },
+        .{ .ILSEQ, "BadPathName" },            .{ .LOOP, "SymLinkLoop" },
+        .{ .NODEV, "NoDevice" },               .{ .NXIO, "NoDevice" },
+        .{ .MFILE, "ProcessFdQuotaExceeded" }, .{ .NFILE, "SystemFdQuotaExceeded" },
+        .{ .NOMEM, "SystemResources" },
+    });
+    try expectMapping(statErrno, &.{
+        .{ .NOENT, "FileNotFound" },    .{ .ACCES, "AccessDenied" },
+        .{ .NOTDIR, "NotDir" },         .{ .LOOP, "SymLinkLoop" },
+        .{ .NOMEM, "SystemResources" }, .{ .NAMETOOLONG, "Unexpected" },
+    });
+
+    var buf: [path_max]u8 = undefined;
+    try std.testing.expectError(error.BadPathName, toPathZ(&buf, "/a\x00b"));
+    try std.testing.expectError(error.NameTooLong, toPathZ(&buf, &(@as([path_max]u8, @splat('a')))));
+}
+
+test "tcp connect errors are reported by name" {
+    // nothing listens on port 1 in the test environment
+    try std.testing.expectError(error.ConnectionRefused, tcpConnectLoopback(1));
+}

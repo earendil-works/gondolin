@@ -373,32 +373,68 @@ following `file_write_data` with the same `id` is written completely
 Success → `file_delete_done`; failure → `error{id, "file_delete_failed",
 <error name>}`.
 
-**Error names.**  The `message` of `file_*_failed` errors is the name of the
-failure in the Zig standard library's vocabulary.  The host relies on
-`FileNotFound` (tests match it); implementations should use these names:
+**Error names.**  The `message` of `file_*_failed` errors is a name from the
+Zig standard library's error vocabulary (the host's tests match
+`FileNotFound`).  The mapping is exact and pinned by the unit test
+`host-visible errno to error name mapping` in `src/shared/sys.zig`;
+implementations must reproduce it.  Which system calls can fail for each
+operation:
 
-| errno / condition | name |
+- `file_read_failed`: open (`O_RDONLY | O_NOCTTY`), read.
+- `file_write_failed`: open (`O_WRONLY | O_CREAT [| O_TRUNC]`), write.
+- `file_delete_failed`: unlink; for recursive deletes also lstat (unless
+  `force`), open dir, `getdents64` and rmdir of the walk.
+
+| errno | open | open dir | read | write | unlink | rmdir | lstat |
+|---|---|---|---|---|---|---|---|
+| `ENOENT` | `FileNotFound` | `FileNotFound` | | | `FileNotFound` | `FileNotFound` | `FileNotFound` |
+| `ESRCH` | `FileNotFound` | | | | | | |
+| `EACCES` | `AccessDenied` | `AccessDenied` | | `AccessDenied` | `AccessDenied` | `AccessDenied` | `AccessDenied` |
+| `EPERM` | `PermissionDenied` | `PermissionDenied` | | `PermissionDenied` | `PermissionDenied` | `PermissionDenied` | |
+| `EISDIR` | `IsDir` | | `IsDir` | | `IsDir` | | |
+| `ENOTDIR` | `NotDir` | `NotDir` | | | `NotDir` | `NotDir` | `NotDir` |
+| `ENAMETOOLONG` | `NameTooLong` | `NameTooLong` | | | `NameTooLong` | `NameTooLong` | |
+| `EINVAL` | `BadPathName` | `BadPathName` | | | | | |
+| `EILSEQ` | `BadPathName` | `BadPathName` | | | `BadPathName` | `BadPathName` | |
+| `ELOOP` | `SymLinkLoop` | `SymLinkLoop` | | | `SymLinkLoop` | `SymLinkLoop` | `SymLinkLoop` |
+| `ENODEV`, `ENXIO` | `NoDevice` | `NoDevice` | | | | | |
+| `EBUSY` | `DeviceBusy` | | | `DeviceBusy` | `FileBusy` | `FileBusy` | |
+| `ETXTBSY` | `FileBusy` | | | | | | |
+| `EFBIG`, `EOVERFLOW` | `FileTooBig` | | | `FileTooBig` (`EFBIG` only) | | | |
+| `ENOSPC` | `NoSpaceLeft` | | | `NoSpaceLeft` | | | |
+| `EDQUOT` | | | | `DiskQuota` | | | |
+| `EEXIST` | `PathAlreadyExists` | | | | | | |
+| `EROFS` | `ReadOnlyFileSystem` | | | | `ReadOnlyFileSystem` | `ReadOnlyFileSystem` | |
+| `EOPNOTSUPP` | `FileLocksUnsupported` | | | | | | |
+| `EAGAIN` | `WouldBlock` | | `WouldBlock` | `WouldBlock` | | | |
+| `EMFILE` | `ProcessFdQuotaExceeded` | `ProcessFdQuotaExceeded` | | | | | |
+| `ENFILE` | `SystemFdQuotaExceeded` | `SystemFdQuotaExceeded` | | | | | |
+| `ENOMEM` | `SystemResources` | `SystemResources` | `SystemResources` | | `SystemResources` | `SystemResources` | `SystemResources` |
+| `ENOBUFS` | | | `SystemResources` | | | | |
+| `EIO` | | | `InputOutput` | `InputOutput` | `FileSystem` | `FileSystem` | |
+| `ENOTCONN` | | | `SocketUnconnected` | | | | |
+| `ECONNRESET` | | | `ConnectionResetByPeer` | `ConnectionResetByPeer` | | | |
+| `ETIMEDOUT` | | | `ConnectionTimedOut` | | | | |
+| `EBADF` | | | `NotOpenForReading` | `NotOpenForWriting` | | | |
+| `EPIPE` | | | | `BrokenPipe` | | | |
+| `ENOTEMPTY` | | | | | | (retried) | |
+| any other | `Unexpected` | `Unexpected` | `Unexpected` | `Unexpected` | `Unexpected` | `Unexpected` | `Unexpected` |
+
+`EINTR` is always retried.  `getdents64` in the delete walk: `EACCES` →
+`AccessDenied`, `ENOENT` → end of directory, anything else `Unexpected`.
+An `ENOTEMPTY` from rmdir is never reported: the directory is scanned again.
+Within the delete walk `ENOENT` on an entry is skipped and `ENOTDIR`/`ELOOP`
+when opening an entry as a directory lead to unlinking it (§4.5 Delete).
+
+Names that do not come from an errno:
+
+| condition | name |
 |---|---|
-| `ENOENT` | `FileNotFound` |
-| `EACCES` | `AccessDenied` |
-| `EPERM` | `PermissionDenied` (open: `AccessDenied`) |
-| `EISDIR` | `IsDir` |
-| `ENOTDIR` | `NotDir` |
-| `ENAMETOOLONG` | `NameTooLong` |
-| `ELOOP` | `SymLinkLoop` |
-| `EEXIST` | `PathAlreadyExists` |
-| `ENOTEMPTY` | `DirNotEmpty` |
-| `EROFS` | `ReadOnlyFileSystem` |
-| `ENOSPC` | `NoSpaceLeft` |
-| `EDQUOT` | `DiskQuota` |
-| `EFBIG` | `FileTooBig` |
-| `EBUSY` | `FileBusy` / `DeviceBusy` |
-| `EIO` | `InputOutput` |
-| `EMFILE` / `ENFILE` | `ProcessFdQuotaExceeded` / `SystemFdQuotaExceeded` |
-| `ENOMEM` | `SystemResources` |
-| bad path / `cwd` | `InvalidValue` |
+| empty path, NUL in path or `cwd`, relative path without absolute `cwd` | `InvalidValue` |
+| resolved path ≥ 4096 bytes | `NameTooLong` |
+| recursive delete of `/` | `CannotDeleteRootDirectory` |
+| allocation failure | `OutOfMemory` |
 | malformed `file_write_data` payload | `InvalidType` / `MissingField` / `InvalidValue` |
-| other | `Unexpected` |
 
 ### 4.6 Errors
 
