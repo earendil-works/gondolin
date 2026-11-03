@@ -56,6 +56,7 @@ import {
   gcSessions,
   listSessions,
 } from "../src/session-registry.ts";
+import { mergeEnvInputs } from "../src/utils/env.ts";
 import {
   decodeOutputFrame,
   type ServerMessage,
@@ -1076,6 +1077,9 @@ function buildVmOptions(common: CommonOptions) {
   const vmOptions: any = {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
     httpHooks,
+    // Served to `attach` over the session socket. Placeholders only; the real
+    // values stay in this process.
+    secretEnv: env,
     dns,
     ssh:
       common.sshAllowedHosts.length > 0
@@ -2205,6 +2209,9 @@ function parseAttachArgs(argv: string[]): AttachArgs {
   return args;
 }
 
+/** How long `attach` waits for the session's placeholder environment. */
+const SECRET_ENV_TIMEOUT_MS = 2000;
+
 async function runAttach(argv: string[]) {
   const args = parseAttachArgs(argv);
 
@@ -2225,6 +2232,16 @@ async function runAttach(argv: string[]) {
   let done = false;
   let exitCode = 1;
   const requestId = 1;
+  const secretEnvRequestId = 2;
+
+  // Resolves with the session's placeholder environment, or an empty map if
+  // the session reports none, rejects the request, or does not answer. Attach
+  // must still work against a session without secrets, so every failure path
+  // degrades to "no placeholders" rather than aborting.
+  let resolveSecretEnv!: (env: Record<string, string>) => void;
+  const secretEnvPromise = new Promise<Record<string, string>>((resolve) => {
+    resolveSecretEnv = resolve;
+  });
 
   const stdoutPipe = new PassThrough();
   const stderrPipe = new PassThrough();
@@ -2244,6 +2261,12 @@ async function runAttach(argv: string[]) {
         return;
       }
 
+      if (message.type === "secret_env_response") {
+        if (message.id !== secretEnvRequestId) return;
+        resolveSecretEnv(message.env);
+        return;
+      }
+
       if (message.type === "exec_response") {
         if (message.id !== requestId) return;
         done = true;
@@ -2255,6 +2278,11 @@ async function runAttach(argv: string[]) {
       }
 
       if (message.type === "error") {
+        if (message.id === secretEnvRequestId) {
+          // A session that cannot answer simply has no placeholders to give.
+          resolveSecretEnv({});
+          return;
+        }
         if (message.id !== undefined && message.id !== requestId) return;
         if (
           message.id === requestId &&
@@ -2294,12 +2322,27 @@ async function runAttach(argv: string[]) {
     },
   });
 
+  client.send({ type: "secret_env", id: secretEnvRequestId });
+
+  // Bounded, because an older session may ignore the request entirely and a
+  // shell that is merely missing placeholders beats a shell that never starts.
+  const secretEnv = await Promise.race([
+    secretEnvPromise,
+    new Promise<Record<string, string>>((resolve) =>
+      setTimeout(() => resolve({}), SECRET_ENV_TIMEOUT_MS).unref(),
+    ),
+  ]);
+
+  // Placeholders first so an explicit --env of the same name wins: the caller
+  // is more specific than the session.
+  const execEnv = mergeEnvInputs(secretEnv, args.env);
+
   client.send({
     type: "exec",
     id: requestId,
     cmd: command[0]!,
     argv: command.slice(1),
-    env: args.env.length > 0 ? args.env : undefined,
+    env: execEnv,
     cwd: args.cwd,
     stdin: true,
     pty: true,
