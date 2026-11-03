@@ -225,18 +225,19 @@ pub const Session = struct {
         if (self.stdin_queued + data.len > max_stdin_queued) return error.StdinBackpressure;
         // The host must not send more than it was granted.
         if (data.len > self.stdin_inflight) return error.StdinBackpressure;
-        self.stdin_inflight -= data.len;
 
         if (self.stdin_fd == null) {
-            // stdin already closed: discard but hand the credit back
-            self.stdin_inflight += data.len;
+            // stdin already closed: discard, handing the credit straight back
             self.stdin_grant += data.len;
             return;
         }
 
+        // Credit is only consumed once the chunk is queued, so an allocation
+        // failure leaves the accounting untouched.
         const copy = try self.gpa.dupe(u8, data);
         errdefer self.gpa.free(copy);
         try self.stdin_queue.pushBack(self.gpa, .{ .data = copy, .eof = eof });
+        self.stdin_inflight -= data.len;
         self.stdin_queued += data.len;
         self.flushStdin();
     }
@@ -524,6 +525,25 @@ test "stdin credit accounting" {
     session.stdin_grant = 0;
     try session.pushStdin("late", false);
     try testing.expectEqual(@as(usize, 4), session.stdin_grant);
+}
+
+test "stdin allocation failure does not consume credit" {
+    // fail the data copy (0) and the queue growth (1)
+    for ([_]usize{ 0, 1 }) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
+        const fds = try sys.pipe(true);
+        defer sys.close(fds[0]);
+
+        var session: Session = .{ .gpa = failing.allocator(), .id = 1, .pid = 0, .pty = false, .stdin_fd = fds[1] };
+        defer session.deinit();
+        session.grantInitialStdin();
+        session.stdin_grant = 0;
+
+        try testing.expectError(error.OutOfMemory, session.pushStdin("hello", false));
+        try testing.expectEqual(max_stdin_queued, session.stdin_inflight);
+        try testing.expectEqual(@as(usize, 0), session.stdin_queued);
+        try testing.expectEqual(@as(usize, 0), session.stdin_grant);
+    }
 }
 
 test "exit status mapping" {

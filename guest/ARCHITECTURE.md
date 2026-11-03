@@ -267,8 +267,10 @@ Additionally *no* output is read while the guest's outgoing queue exceeds
 1. `len(data) > 4 MiB` → `error{id, "stdin_chunk_too_large", "stdin chunk exceeds queue limit"}`.
 2. `queued + len(data) > 4 MiB` → `error{id, "stdin_backpressure", "stdin queue full"}`.
 3. `len(data) > inflight` (more than the host was granted) → `stdin_backpressure`.
-4. Otherwise `inflight -= len`, the chunk is queued and written to the child
-   as the fd becomes writable.
+4. Otherwise the chunk is queued, then `inflight -= len`, and it is written
+   to the child as the fd becomes writable.  If queueing fails (out of
+   memory) → `error{id, "exec_failed", "failed to queue exec input"}` and no
+   credit is consumed.
 
 Here `queued` counts host bytes not yet written to the child and `inflight`
 counts credit granted but not yet used; the guest maintains
