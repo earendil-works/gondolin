@@ -4,12 +4,19 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
-- Rework the guest helpers (`sandboxd`, `sandboxfs`, `sandboxssh`, `sandboxingress`) as static, libc-free, single-threaded binaries: `sandboxd` is now a single `poll(2)` event loop instead of a thread per exec session, and all helpers share one framing/CBOR/protocol layer.  Binaries are 40-85% smaller.  The wire protocol is unchanged; see `guest/ARCHITECTURE.md` for the full specification.
+- Rework the guest helpers (`sandboxd`, `sandboxfs`, `sandboxssh`, `sandboxingress`) as static, libc-free, single-threaded binaries.  `sandboxd` is now a single `poll(2)` event loop (virtio port, a `SIGCHLD` signalfd and every exec session's stdio) instead of a thread per exec session with a shared blocking writer; all output goes through one bounded queue, so a slow host backs up into the child's pipes instead of guest memory.  All helpers share one framing/CBOR/protocol layer and binaries are 75-85% smaller.  The wire protocol is unchanged; `guest/ARCHITECTURE.md` is the full specification.
 - Fix zombie processes accumulating in the guest: `sandboxd` (PID 1) now reaps orphaned children.
-- Fix `sandboxfs` exiting (breaking the VFS mount with `ENOTCONN`) when a directory listing with long file names overflowed the kernel's readdir buffer, when a request was interrupted, or when the host sent a malformed response.
+- Fix `sandboxfs` exiting (breaking the VFS mount with `ENOTCONN`) when a directory listing with long file names overflowed the kernel's readdir buffer, when a request was interrupted, or when the host sent a malformed response.  Such failures now return `EIO` for the affected request.
+- Fix `sandboxssh`/`sandboxingress` being killed by `SIGPIPE` when a guest service closed a connection, and never answering a `tcp_open` whose socket setup failed after connecting.
 - Fix uploads (`vm.fs.writeFile`) failing when exec control messages (e.g. output window updates) were interleaved with the upload, and stop `sandboxd` from blocking all exec I/O while streaming a file to the host.
-- Fix `sandboxssh`/`sandboxingress` dying on `SIGPIPE` when a guest service closed a connection, and exiting instead of waiting when the host end of their port disconnects.
-- Fix PTY exec drain deadlines being affected by guest clock changes (`time_sync`), and oversized frames desynchronizing the control channel.
+- Fix exec children inheriting `sandboxd`'s blocked `SIGCHLD` and ignored `SIGPIPE`, PTY drain deadlines being shifted by guest clock changes (`time_sync`), oversized frames desynchronizing the control channel, and stdin credit leaking when queueing stdin ran out of memory.
+- Recursive guest deletes (`vm.fs.deleteFile(..., { recursive: true })`) use a new symlink-safe walker with constant file descriptor usage, so very deep trees no longer hit descriptor or `PATH_MAX` limits.
+- Host-visible behavior changes of the guest helpers:
+  - Undecodable control frames are answered with `error{code: "invalid_request", message: "invalid message"}` (previously the misleading `"invalid time_sync"`).
+  - Returned stdin credit is batched into at most one `stdin_window` per exec per event loop iteration instead of one per written chunk.
+  - After an upload fails, its remaining `file_write_data` frames are dropped silently instead of each producing an `invalid_request` error.
+  - `sandboxssh`/`sandboxingress` wait for the host to reconnect their port instead of exiting.
+  - Per-frame and per-exec logging on the serial console is now debug-level only.
 
 ## 0.14.0
 
