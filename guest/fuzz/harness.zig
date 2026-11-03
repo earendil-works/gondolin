@@ -64,12 +64,12 @@ pub fn sanitizeFramedInput(buf: []u8, max_frame: usize) void {
 }
 
 /// Run a framed stream of file requests against `root_dir`.
-pub fn sandboxOne(gpa: Allocator, io: std.Io, root_dir: []const u8, input: []u8) void {
+pub fn sandboxOne(gpa: Allocator, root_dir: []const u8, input: []u8) void {
     sanitizeFramedInput(input, 16 * 1024);
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var transfers: file_requests.Transfers = .init(gpa, io, root_dir);
+    var transfers: file_requests.Transfers = .init(gpa, root_dir);
     defer transfers.deinit();
     var outbox: shared.framing.Outbox = .init(gpa);
     defer outbox.deinit();

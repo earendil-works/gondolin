@@ -23,5 +23,5 @@ pub fn main(init: std.process.Init) !void {
 
     // Ensure root exists once during setup. The input may delete it.
     std.Io.Dir.cwd().createDirPath(init.io, root_dir) catch {};
-    harness.sandboxOne(allocator, init.io, root_dir, input[0..len]);
+    harness.sandboxOne(allocator, root_dir, input[0..len]);
 }

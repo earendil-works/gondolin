@@ -70,5 +70,5 @@ fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
 
     // Note: in fuzz mode the test runner resets/leak-checks
     // `std.testing.allocator` per input; the harness frees everything it uses.
-    harness.sandboxOne(std.testing.allocator, std.testing.io, root_dir, input[0..len]);
+    harness.sandboxOne(std.testing.allocator, root_dir, input[0..len]);
 }

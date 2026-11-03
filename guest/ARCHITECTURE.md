@@ -352,7 +352,23 @@ following `file_write_data` with the same `id` is written completely
   `force`.  Directories fail (`IsDir`).
 - `recursive` true: a path that normalizes to `/` fails with
   `CannotDeleteRootDirectory`; unless `force`, the path must exist (`lstat`);
-  then the tree is removed without following symlinks.
+  then the tree is removed without following symlinks:
+  1. `unlink(path)`; success or `ENOENT` → done; `EISDIR` → walk it.
+  2. Walk: open directories with `openat(parent, name, O_RDONLY |
+     O_DIRECTORY | O_NOFOLLOW)` and list them with `getdents64`.  Entries of
+     type `DT_DIR` are descended into; every other entry (including
+     `DT_UNKNOWN`) is `unlinkat(dir, name, 0)`ed, and `EISDIR` turns it into
+     a descent.  An entry that vanished (`ENOENT`) is skipped; a directory
+     entry that is no longer a directory when opened (`ENOTDIR`, or `ELOOP`
+     for a symlink) is unlinked instead.
+  3. An emptied directory is removed with `unlinkat(parent, name,
+     AT_REMOVEDIR)` (`ENOENT` is fine; `ENOTEMPTY` means something was
+     created meanwhile and the directory is scanned again), then the scan of
+     the parent continues.
+  The walk holds a constant number of fds (the Zig code keeps the names of
+  the directories between the root and the current directory and re-opens
+  the parent by walking those names down from the root, so depth is only
+  limited by memory, not by fds or `PATH_MAX`).
 
 Success → `file_delete_done`; failure → `error{id, "file_delete_failed",
 <error name>}`.
@@ -722,6 +738,7 @@ src/shared/tcp_forwarder.zig sandboxssh/sandboxingress implementation
 src/sandboxd/main.zig        sandboxd event loop and message dispatch
 src/sandboxd/exec.zig        exec sessions: spawn, flow control, completion
 src/sandboxd/file_requests.zig  file read/write/delete
+src/sandboxd/delete_tree.zig symlink-safe recursive delete (constant fds)
 src/sandboxfs/main.zig       sandboxfs request loop and op mapping
 src/sandboxfs/fuse.zig       FUSE kernel ABI structs
 src/exe_tests.zig            test root for sandboxd + sandboxfs
@@ -757,12 +774,13 @@ Tests:
   restore the signal mask in children.
 - Error names in `file_*_failed` / `tcp_opened` messages follow the tables
   above; `FileNotFound` is relied upon by the host.
-- Recursive delete must not follow symlinks (Rust `std::fs::remove_dir_all`,
-  C `nftw(FTW_DEPTH | FTW_PHYS)` + `remove`).
-- *(Zig-specific choices:* no libc; `std.Io.Threaded` is used only in
-  sandboxd for filesystem operations (`openFile`, `createFile`,
-  `deleteTree`, ...), which accounts for most of its binary size; the event
-  loops use raw syscalls because readiness semantics such as `POLLHUP`
-  handling and credit-gated reads are not expressible through `std.Io`.
-  Protocol payloads are plain structs serialized by comptime reflection in
-  `cbor.zig`.)
+- Recursive delete must not follow symlinks and must produce the error
+  names of §4.5 (see the algorithm there).
+- *(Zig-specific choices:* no libc and no `std.Io` runtime: all system
+  calls, including file I/O and the recursive delete, go through
+  `src/shared/sys.zig`, whose errno → error mappings are pinned by a unit
+  test.  `std.Io` does not fit the event loops (readiness semantics such as
+  `POLLHUP` handling and credit-gated reads are not expressible through it)
+  and its vtable-based `Threaded` implementation would add ~100 KiB to
+  sandboxd.  Protocol payloads are plain structs serialized by comptime
+  reflection in `cbor.zig`.)

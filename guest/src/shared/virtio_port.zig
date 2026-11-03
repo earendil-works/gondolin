@@ -44,9 +44,9 @@ pub fn scan(name: []const u8, mode: Mode) sys.OpenError!?sys.fd_t {
 
     var path_buf: [64]u8 = undefined;
     while (dir.next()) |entry| {
-        if (!std.mem.startsWith(u8, entry, "vport")) continue;
-        if (!portMatches(entry, name)) continue;
-        const path = std.mem.print(&path_buf, "/dev/{s}", .{entry}) catch continue;
+        if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
+        if (!portMatches(entry.name, name)) continue;
+        const path = std.mem.print(&path_buf, "/dev/{s}", .{entry.name}) catch continue;
         if (try tryOpenPath(path, mode)) |fd| return fd;
     }
     return null;

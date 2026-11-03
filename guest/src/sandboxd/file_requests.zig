@@ -11,22 +11,26 @@
 //! - Deletes complete synchronously.
 //!
 //! Failures are reported by the caller as `error` messages whose message is
-//! the Zig error name (e.g. `FileNotFound`).  Filesystem access uses `std.Io`;
-//! regular file I/O is blocking but bounded per chunk.
+//! the Zig error name (e.g. `FileNotFound`, see `sys.zig` for the errno
+//! mapping).  Regular file I/O is blocking but bounded per chunk.
 
 const std = @import("std");
 const shared = @import("shared");
+const sys = shared.sys;
 const protocol = shared.protocol;
 const request_path = shared.request_path;
 const Outbox = shared.framing.Outbox;
+const delete_tree = @import("delete_tree.zig");
 
 const Allocator = std.mem.Allocator;
-const Io = std.Io;
-const File = std.Io.File;
+const AT_FDCWD = std.os.linux.AT.FDCWD;
+
+test {
+    _ = delete_tree;
+}
 
 pub const Transfers = struct {
     gpa: Allocator,
-    io: Io,
     /// directory all request paths are confined to (`/` in production)
     root_dir: []const u8,
     reads: std.ArrayList(Read) = .empty,
@@ -34,28 +38,33 @@ pub const Transfers = struct {
 
     const Read = struct {
         id: u32,
-        file: File,
+        fd: sys.fd_t,
         buf: []u8,
     };
 
     const Write = struct {
         /// null after a failure: discard data until `eof`
-        file: ?File,
+        fd: ?sys.fd_t,
     };
 
-    pub fn init(gpa: Allocator, io: Io, root_dir: []const u8) Transfers {
-        return .{ .gpa = gpa, .io = io, .root_dir = root_dir };
+    pub fn init(gpa: Allocator, root_dir: []const u8) Transfers {
+        return .{ .gpa = gpa, .root_dir = root_dir };
     }
 
     pub fn deinit(self: *Transfers) void {
         for (self.reads.items) |r| self.closeRead(r);
         self.reads.deinit(self.gpa);
-        for (self.writes.values()) |w| if (w.file) |f| f.close(self.io);
+        for (self.writes.values()) |w| if (w.fd) |fd| sys.close(fd);
         self.writes.deinit(self.gpa);
     }
 
-    fn resolve(self: *Transfers, path: []const u8, cwd: ?[]const u8) request_path.Error![]u8 {
-        return request_path.resolveRequestPathInRoot(self.gpa, self.root_dir, path, cwd);
+    /// Resolve a request path into a NUL-terminated absolute path.
+    fn resolve(self: *Transfers, path: []const u8, cwd: ?[]const u8) (request_path.Error || error{ NameTooLong, BadPathName })![:0]u8 {
+        const resolved = try request_path.resolveRequestPathInRoot(self.gpa, self.root_dir, path, cwd);
+        defer self.gpa.free(resolved);
+        if (resolved.len >= sys.path_max) return error.NameTooLong;
+        if (std.mem.findScalar(u8, resolved, 0) != null) return error.BadPathName;
+        return self.gpa.dupeSentinel(u8, resolved, 0);
     }
 
     // -- reads ------------------------------------------------------------
@@ -64,11 +73,11 @@ pub const Transfers = struct {
         const path = try self.resolve(req.path, req.cwd);
         defer self.gpa.free(path);
 
-        const file = try Io.Dir.cwd().openFile(self.io, path, .{});
-        errdefer file.close(self.io);
+        const fd = try sys.openZ(path, .{ .ACCMODE = .RDONLY, .NOCTTY = true }, 0);
+        errdefer sys.close(fd);
         const buf = try self.gpa.alloc(u8, req.chunkSize());
         errdefer self.gpa.free(buf);
-        try self.reads.append(self.gpa, .{ .id = id, .file = file, .buf = buf });
+        try self.reads.append(self.gpa, .{ .id = id, .fd = fd, .buf = buf });
     }
 
     pub fn hasPendingReads(self: *const Transfers) bool {
@@ -80,25 +89,23 @@ pub const Transfers = struct {
         var i: usize = 0;
         while (i < self.reads.items.len) {
             const r = self.reads.items[i];
-            const n = r.file.readStreaming(self.io, &.{r.buf}) catch |err| switch (err) {
-                error.EndOfStream => {
-                    try outbox.send(.file_read_done, r.id, .{});
-                    self.closeRead(self.reads.orderedRemove(i));
-                    continue;
-                },
-                else => {
-                    try outbox.send(.@"error", r.id, .{ .code = "file_read_failed", .message = @errorName(err) });
-                    self.closeRead(self.reads.orderedRemove(i));
-                    continue;
-                },
+            const n = sys.read(r.fd, r.buf) catch |err| {
+                try outbox.send(.@"error", r.id, .{ .code = "file_read_failed", .message = @errorName(err) });
+                self.closeRead(self.reads.orderedRemove(i));
+                continue;
             };
-            if (n > 0) try outbox.send(.file_read_data, r.id, .{ .data = .{ .data = r.buf[0..n] } });
+            if (n == 0) {
+                try outbox.send(.file_read_done, r.id, .{});
+                self.closeRead(self.reads.orderedRemove(i));
+                continue;
+            }
+            try outbox.send(.file_read_data, r.id, .{ .data = .{ .data = r.buf[0..n] } });
             i += 1;
         }
     }
 
     fn closeRead(self: *Transfers, r: Read) void {
-        r.file.close(self.io);
+        sys.close(r.fd);
         self.gpa.free(r.buf);
     }
 
@@ -110,21 +117,21 @@ pub const Transfers = struct {
         var i: usize = self.writes.count();
         while (i > 0) {
             i -= 1;
-            if (self.writes.values()[i].file == null) self.writes.swapRemoveAt(i);
+            if (self.writes.values()[i].fd == null) self.writes.swapRemoveAt(i);
         }
-        if (self.writes.fetchSwapRemove(id)) |old| if (old.value.file) |f| f.close(self.io);
+        if (self.writes.fetchSwapRemove(id)) |old| if (old.value.fd) |fd| sys.close(fd);
 
         try self.writes.ensureUnusedCapacity(self.gpa, 1);
         const path = self.resolve(req.path, req.cwd) catch |err| {
-            self.writes.putAssumeCapacity(id, .{ .file = null });
+            self.writes.putAssumeCapacity(id, .{ .fd = null });
             return err;
         };
         defer self.gpa.free(path);
-        const file = Io.Dir.cwd().createFile(self.io, path, .{ .truncate = req.truncate }) catch |err| {
-            self.writes.putAssumeCapacity(id, .{ .file = null });
+        const fd = sys.openZ(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = req.truncate }, 0o666) catch |err| {
+            self.writes.putAssumeCapacity(id, .{ .fd = null });
             return err;
         };
-        self.writes.putAssumeCapacity(id, .{ .file = file });
+        self.writes.putAssumeCapacity(id, .{ .fd = fd });
     }
 
     pub const WriteResult = enum {
@@ -145,17 +152,17 @@ pub const Transfers = struct {
     /// its remaining frames are discarded.
     pub fn writeData(self: *Transfers, id: u32, chunk: protocol.FileWriteData) !WriteResult {
         const entry = self.writes.getPtr(id) orelse unreachable;
-        const file = entry.file orelse {
+        const fd = entry.fd orelse {
             if (chunk.eof) _ = self.writes.swapRemove(id);
             return .discarded;
         };
-        file.writeStreamingAll(self.io, chunk.data.data) catch |err| {
+        sys.writeAll(fd, chunk.data.data) catch |err| {
             self.abortWrite(id);
             if (chunk.eof) _ = self.writes.swapRemove(id);
             return err;
         };
         if (!chunk.eof) return .pending;
-        file.close(self.io);
+        sys.close(fd);
         _ = self.writes.swapRemove(id);
         return .done;
     }
@@ -163,8 +170,8 @@ pub const Transfers = struct {
     /// Close the file of an upload and discard its remaining frames.
     pub fn abortWrite(self: *Transfers, id: u32) void {
         const entry = self.writes.getPtr(id) orelse return;
-        if (entry.file) |f| f.close(self.io);
-        entry.file = null;
+        if (entry.fd) |fd| sys.close(fd);
+        entry.fd = null;
     }
 
     // -- deletes ----------------------------------------------------------
@@ -172,15 +179,14 @@ pub const Transfers = struct {
     pub fn delete(self: *Transfers, req: protocol.FileDeleteRequest) !void {
         const path = try self.resolve(req.path, req.cwd);
         defer self.gpa.free(path);
-        const cwd = Io.Dir.cwd();
 
         if (req.recursive) {
             try ensureNotRoot(self.gpa, path);
             // deleteTree treats a missing path as success; honour force=false.
-            if (!req.force) _ = try cwd.statFile(self.io, path, .{ .follow_symlinks = false });
-            try cwd.deleteTree(self.io, path);
+            if (!req.force) try sys.lexists(path);
+            try delete_tree.deleteTree(self.gpa, path);
         } else {
-            cwd.deleteFile(self.io, path) catch |err| switch (err) {
+            sys.unlinkatZ(AT_FDCWD, path, false) catch |err| switch (err) {
                 error.FileNotFound => if (!req.force) return err,
                 else => return err,
             };
@@ -212,7 +218,7 @@ test "recursive delete reports missing path unless forced" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var transfers: Transfers = .init(testing.allocator, testing.io, try tmpRoot(&tmp, &root_buf));
+    var transfers: Transfers = .init(testing.allocator, try tmpRoot(&tmp, &root_buf));
     defer transfers.deinit();
 
     try testing.expectError(error.FileNotFound, transfers.delete(.{ .path = "/missing", .recursive = true }));
@@ -226,7 +232,7 @@ test "upload, stream back and delete a file" {
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = try tmpRoot(&tmp, &root_buf);
-    var transfers: Transfers = .init(testing.allocator, testing.io, root);
+    var transfers: Transfers = .init(testing.allocator, root);
     defer transfers.deinit();
 
     try transfers.startWrite(1, .{ .path = "/hello.txt" });
@@ -257,7 +263,7 @@ test "failed upload discards its remaining frames" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var transfers: Transfers = .init(testing.allocator, testing.io, try tmpRoot(&tmp, &root_buf));
+    var transfers: Transfers = .init(testing.allocator, try tmpRoot(&tmp, &root_buf));
     defer transfers.deinit();
 
     try testing.expectError(error.FileNotFound, transfers.startWrite(5, .{ .path = "/missing/dir/file" }));

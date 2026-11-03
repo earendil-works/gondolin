@@ -45,9 +45,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const gpa = shared.runtime.gpa();
     defer shared.runtime.deinitGpa();
 
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-
     log.info("starting", .{});
     const fd = try shared.virtio_port.open("virtio-port", .nonblocking);
     defer sys.close(fd);
@@ -64,7 +61,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .channel = .init(gpa, fd),
         .sigchld_fd = sigchld_fd,
         .spawn_ctx = .{ .environ = init.environ.block.slice.ptr, .sigmask = sigmask },
-        .transfers = .init(gpa, io, "/"),
+        .transfers = .init(gpa, "/"),
         .arena = .init(gpa),
     };
     defer daemon.deinit();

@@ -63,10 +63,27 @@ pub const ReadError = error{
     WouldBlock,
     InputOutput,
     IsDir,
+    SystemResources,
+    SocketUnconnected,
     ConnectionResetByPeer,
     ConnectionTimedOut,
     NotOpenForReading,
 } || Unexpected;
+
+/// errno → error for `read(2)` (`EINTR` is retried by the caller).
+pub fn readErrno(err: E) ReadError {
+    return switch (err) {
+        .AGAIN => error.WouldBlock,
+        .IO => error.InputOutput,
+        .ISDIR => error.IsDir,
+        .NOBUFS, .NOMEM => error.SystemResources,
+        .NOTCONN => error.SocketUnconnected,
+        .CONNRESET => error.ConnectionResetByPeer,
+        .TIMEDOUT => error.ConnectionTimedOut,
+        .BADF => error.NotOpenForReading,
+        else => unexpected(err),
+    };
+}
 
 /// Read up to `buf.len` bytes; returns 0 at end of stream.
 pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
@@ -75,13 +92,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
         switch (linux.errno(rc)) {
             .SUCCESS => return rc,
             .INTR => continue,
-            .AGAIN => return error.WouldBlock,
-            .IO => return error.InputOutput,
-            .ISDIR => return error.IsDir,
-            .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
-            .BADF => return error.NotOpenForReading,
-            else => |err| return unexpected(err),
+            else => |err| return readErrno(err),
         }
     }
 }
@@ -94,11 +105,14 @@ pub const WriteError = error{
     NoSpaceLeft,
     DiskQuota,
     FileTooBig,
-    NoDevice,
+    DeviceBusy,
+    AccessDenied,
+    PermissionDenied,
     NotOpenForWriting,
 } || Unexpected;
 
-fn writeErrno(err: E) WriteError {
+/// errno → error for `write(2)`/`writev(2)`.
+pub fn writeErrno(err: E) WriteError {
     return switch (err) {
         .AGAIN => error.WouldBlock,
         .PIPE => error.BrokenPipe,
@@ -107,7 +121,9 @@ fn writeErrno(err: E) WriteError {
         .NOSPC => error.NoSpaceLeft,
         .DQUOT => error.DiskQuota,
         .FBIG => error.FileTooBig,
-        .NODEV, .NXIO => error.NoDevice,
+        .BUSY => error.DeviceBusy,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
         .BADF => error.NotOpenForWriting,
         else => unexpected(err),
     };
@@ -164,6 +180,7 @@ pub fn writevAll(fd: fd_t, iov_in: []const iovec_const) WriteError!void {
 pub const OpenError = error{
     FileNotFound,
     AccessDenied,
+    PermissionDenied,
     IsDir,
     NotDir,
     NameTooLong,
@@ -171,37 +188,107 @@ pub const OpenError = error{
     SymLinkLoop,
     NoDevice,
     DeviceBusy,
+    FileBusy,
+    FileTooBig,
+    NoSpaceLeft,
     PathAlreadyExists,
     ReadOnlyFileSystem,
+    FileLocksUnsupported,
+    WouldBlock,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
     SystemResources,
 } || Unexpected;
 
-pub fn openZ(path: [*:0]const u8, flags: O, mode: linux.mode_t) OpenError!fd_t {
+/// errno → error for `open(2)`/`openat(2)` (also with `O_CREAT`).
+pub fn openErrno(err: E) OpenError {
+    return switch (err) {
+        .NOENT, .SRCH => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .ISDIR => error.IsDir,
+        .NOTDIR => error.NotDir,
+        .NAMETOOLONG => error.NameTooLong,
+        .INVAL, .ILSEQ => error.BadPathName,
+        .LOOP => error.SymLinkLoop,
+        .NODEV, .NXIO => error.NoDevice,
+        .BUSY => error.DeviceBusy,
+        .TXTBSY => error.FileBusy,
+        .FBIG, .OVERFLOW => error.FileTooBig,
+        .NOSPC => error.NoSpaceLeft,
+        .EXIST => error.PathAlreadyExists,
+        .ROFS => error.ReadOnlyFileSystem,
+        .OPNOTSUPP => error.FileLocksUnsupported,
+        .AGAIN => error.WouldBlock,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOMEM => error.SystemResources,
+        else => unexpected(err),
+    };
+}
+
+/// `openat(2)` relative to `dir` (`linux.AT.FDCWD` for the cwd); always CLOEXEC.
+pub fn openatZ(dir: fd_t, path: [*:0]const u8, flags: O, mode: linux.mode_t) OpenError!fd_t {
     var f = flags;
     f.CLOEXEC = true;
     while (true) {
-        const rc = linux.openat(linux.AT.FDCWD, path, f, mode);
+        const rc = linux.openat(dir, path, f, mode);
         switch (linux.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            .NOENT => return error.FileNotFound,
-            .ACCES, .PERM => return error.AccessDenied,
-            .ISDIR => return error.IsDir,
-            .NOTDIR => return error.NotDir,
-            .NAMETOOLONG => return error.NameTooLong,
-            .LOOP => return error.SymLinkLoop,
-            .NODEV, .NXIO => return error.NoDevice,
-            .BUSY => return error.DeviceBusy,
-            .EXIST => return error.PathAlreadyExists,
-            .ROFS => return error.ReadOnlyFileSystem,
-            .MFILE => return error.ProcessFdQuotaExceeded,
-            .NFILE => return error.SystemFdQuotaExceeded,
-            .NOMEM => return error.SystemResources,
-            else => |err| return unexpected(err),
+            else => |err| return openErrno(err),
         }
     }
+}
+
+pub const OpenDirError = error{
+    FileNotFound,
+    AccessDenied,
+    PermissionDenied,
+    NotDir,
+    NameTooLong,
+    BadPathName,
+    SymLinkLoop,
+    NoDevice,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+} || Unexpected;
+
+/// errno → error for opening a directory for iteration.
+pub fn openDirErrno(err: E) OpenDirError {
+    return switch (err) {
+        .NOENT => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .NOTDIR => error.NotDir,
+        .NAMETOOLONG => error.NameTooLong,
+        .INVAL, .ILSEQ => error.BadPathName,
+        .LOOP => error.SymLinkLoop,
+        .NODEV, .NXIO => error.NoDevice,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOMEM => error.SystemResources,
+        else => unexpected(err),
+    };
+}
+
+/// Open directory `path` (relative to `dir`) for iteration without following
+/// a final symlink: a symlink fails with `SymLinkLoop`, a non-directory with
+/// `NotDir`.
+pub fn openDirNoFollowZ(dir: fd_t, path: [*:0]const u8) OpenDirError!fd_t {
+    while (true) {
+        const rc = linux.openat(dir, path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return openDirErrno(err),
+        }
+    }
+}
+
+pub fn openZ(path: [*:0]const u8, flags: O, mode: linux.mode_t) OpenError!fd_t {
+    return openatZ(linux.AT.FDCWD, path, flags, mode);
 }
 
 pub fn open(path: []const u8, flags: O, mode: linux.mode_t) OpenError!fd_t {
@@ -577,12 +664,103 @@ pub fn mount(source: [*:0]const u8, target: [*:0]const u8, fstype: [*:0]const u8
     return linux.errno(linux.mount(source, target, fstype, flags, @intFromPtr(data)));
 }
 
-/// Iterates entry names of a directory using `getdents64(2)`.
+pub const UnlinkError = error{
+    FileNotFound,
+    AccessDenied,
+    PermissionDenied,
+    FileBusy,
+    FileSystem,
+    IsDir,
+    NotDir,
+    DirNotEmpty,
+    SymLinkLoop,
+    NameTooLong,
+    BadPathName,
+    ReadOnlyFileSystem,
+    SystemResources,
+} || Unexpected;
+
+/// errno → error for `unlinkat(2)`; `remove_dir` selects `AT_REMOVEDIR`
+/// semantics (`rmdir`).
+pub fn unlinkErrno(err: E, remove_dir: bool) UnlinkError {
+    return switch (err) {
+        .NOENT => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .BUSY => error.FileBusy,
+        .IO => error.FileSystem,
+        .ISDIR => if (remove_dir) unexpected(err) else error.IsDir,
+        .NOTDIR => error.NotDir,
+        .NOTEMPTY => if (remove_dir) error.DirNotEmpty else unexpected(err),
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .ILSEQ => error.BadPathName,
+        .ROFS => error.ReadOnlyFileSystem,
+        .NOMEM => error.SystemResources,
+        else => unexpected(err),
+    };
+}
+
+/// `unlinkat(2)`: remove a non-directory, or an empty directory when
+/// `remove_dir` is set.  Never follows a final symlink.
+pub fn unlinkatZ(dir: fd_t, path: [*:0]const u8, remove_dir: bool) UnlinkError!void {
+    while (true) {
+        const rc = linux.unlinkat(dir, path, if (remove_dir) linux.AT.REMOVEDIR else 0);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return unlinkErrno(err, remove_dir),
+        }
+    }
+}
+
+pub const StatError = error{
+    FileNotFound,
+    AccessDenied,
+    NotDir,
+    SymLinkLoop,
+    SystemResources,
+} || Unexpected;
+
+pub fn statErrno(err: E) StatError {
+    return switch (err) {
+        .NOENT => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .NOTDIR => error.NotDir,
+        .LOOP => error.SymLinkLoop,
+        .NOMEM => error.SystemResources,
+        else => unexpected(err),
+    };
+}
+
+/// Check that `path` exists without following a final symlink (`lstat`).
+pub fn lexists(path: [*:0]const u8) StatError!void {
+    var stx: linux.Statx = undefined;
+    while (true) {
+        const rc = linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW | linux.AT.NO_AUTOMOUNT, .{}, &stx);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return statErrno(err),
+        }
+    }
+}
+
+pub const DirEntry = struct {
+    name: [:0]const u8,
+    /// `DT_*` file type (`linux.DT.UNKNOWN` if the filesystem does not say)
+    type: u8,
+};
+
+/// Iterates the entries of a directory using `getdents64(2)`, skipping `.`
+/// and `..`.
 pub const DirIterator = struct {
     fd: fd_t,
-    buf: [1024]u8 align(@alignOf(linux.dirent64)) = undefined,
+    buf: [4096]u8 align(@alignOf(linux.dirent64)) = undefined,
     index: usize = 0,
     end: usize = 0,
+
+    pub const Error = error{AccessDenied} || Unexpected;
 
     pub fn open(path: [*:0]const u8) OpenError!DirIterator {
         return .{ .fd = try openZ(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) };
@@ -592,11 +770,23 @@ pub const DirIterator = struct {
         close(self.fd);
     }
 
-    pub fn next(self: *DirIterator) ?[]const u8 {
+    /// Next entry, or null at the end (or on error, see `nextChecked`).
+    pub fn next(self: *DirIterator) ?DirEntry {
+        return self.nextChecked() catch null;
+    }
+
+    pub fn nextChecked(self: *DirIterator) Error!?DirEntry {
         while (true) {
             if (self.index >= self.end) {
                 const rc = linux.getdents64(self.fd, &self.buf, self.buf.len);
-                if (linux.errno(rc) != .SUCCESS or rc == 0) return null;
+                switch (linux.errno(rc)) {
+                    .SUCCESS => {},
+                    .INTR => continue,
+                    .NOENT => return null, // directory was removed
+                    .ACCES => return error.AccessDenied,
+                    else => |err| return unexpected(err),
+                }
+                if (rc == 0) return null;
                 self.index = 0;
                 self.end = rc;
             }
@@ -605,7 +795,7 @@ pub const DirIterator = struct {
             self.index += entry.reclen;
             const name = std.mem.span(name_ptr);
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            return name;
+            return .{ .name = name, .type = entry.type };
         }
     }
 };
