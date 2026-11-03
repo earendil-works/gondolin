@@ -5,20 +5,29 @@ Zig sandbox helper daemons and Alpine initramfs build inputs.
 
 ## What it does
 
-- Builds sandbox helper binaries, including `sandboxd`, the supervisor that
-  listens on a virtio-serial port for exec requests, spawns processes inside the
-  guest, and streams stdout/stderr/stdin over the wire.
+- Builds the sandbox helper binaries (static, libc-free Linux executables):
+  `sandboxd`, the supervisor that listens on a virtio-serial port for exec
+  requests, spawns processes inside the guest, and streams stdout/stderr/stdin
+  over the wire; `sandboxfs` (FUSE); and the `sandboxssh`/`sandboxingress`
+  TCP forwarders.
 - Assembles a minimal Alpine initramfs with `sandboxd`, an init script, and
   optional packages for networking and certificates.
 
 ## Layout
 
-- `src/sandboxd/` — Zig sources for `sandboxd` and exec RPC handling.
-- `src/sandboxfs/` — Zig sources for the FUSE filesystem daemon.
-- `src/shared/` — Shared CBOR/protocol/RPC helpers.
+- `src/sandboxd/` — `sandboxd` (PID 1 supervisor): exec sessions, file
+  transfer, clock sync.
+- `src/sandboxfs/` — FUSE filesystem daemon forwarding to the host VFS.
+- `src/sandboxssh/`, `src/sandboxingress/` — virtio ⇄ loopback TCP forwarders.
+- `src/shared/` — shared code: Linux syscall layer, CBOR, protocol, framing,
+  virtio port handling, fs RPC client, TCP forwarder.
+- `fuzz/` — CBOR, protocol and file-request fuzzers.
 - `image/` — initramfs build scripts and the minimal `/init`.
 - `build.zig` — Zig build definition for the sandbox helper binaries.
 - `Makefile` — helpers to build and create images.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design of the helpers and the
+complete specification of the guest ↔ host protocols.
 
 ## Requirements
 
