@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const sandboxd = @import("sandboxd");
-
-const protocol = sandboxd.protocol;
+const harness = @import("harness.zig");
 
 const CacheDirArg = "--cache-dir=";
 
@@ -59,34 +57,8 @@ test "protocol decode" {
     try std.testing.fuzz({}, testOne, .{ .corpus = seeds });
 }
 
-fn beU32Prefix(input: []const u8) u32 {
-    if (input.len < 4) return 0;
-    return (@as(u32, input[0]) << 24) |
-        (@as(u32, input[1]) << 16) |
-        (@as(u32, input[2]) << 8) |
-        @as(u32, input[3]);
-}
-
 fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
     var input: [16 * 1024]u8 = undefined;
     const len = smith.slice(&input);
-    const slice = input[0..len];
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
-    const expected_id = beU32Prefix(slice);
-
-    _ = protocol.decodeExecRequest(allocator, slice) catch {};
-    _ = protocol.decodeFileReadRequest(allocator, slice) catch {};
-    _ = protocol.decodeFileWriteRequest(allocator, slice) catch {};
-    _ = protocol.decodeFileDeleteRequest(allocator, slice) catch {};
-    _ = protocol.decodeRoutedInputMessage(allocator, slice) catch {};
-    _ = protocol.decodeTcpMessage(allocator, slice) catch {};
-
-    // Decoders that validate against an expected id
-    _ = protocol.decodeStdinData(allocator, slice, expected_id) catch {};
-    _ = protocol.decodeInputMessage(allocator, slice, expected_id) catch {};
-    _ = protocol.decodeFileWriteData(allocator, slice, expected_id) catch {};
+    harness.protocolOne(std.testing.allocator, input[0..len]);
 }

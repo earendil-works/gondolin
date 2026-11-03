@@ -1,47 +1,7 @@
 const std = @import("std");
-const sandboxd = @import("sandboxd");
-const file_requests = @import("file_requests");
-
-const protocol = sandboxd.protocol;
-const posix = sandboxd.posix;
+const harness = @import("harness.zig");
 
 const root_dir = "/tmp/gondolin-sandbox-fuzz";
-
-const TxSink = struct {
-    bytes_sent: usize = 0,
-
-    pub fn sendPayload(self: *TxSink, payload: []const u8) !void {
-        // Keep payload referenced so the optimizer cannot drop encoding paths.
-        self.bytes_sent +%= payload.len;
-        std.mem.doNotOptimizeAway(payload.ptr);
-    }
-};
-
-fn writeU32be(buf: []u8, value: u32) void {
-    buf[0] = @intCast((value >> 24) & 0xff);
-    buf[1] = @intCast((value >> 16) & 0xff);
-    buf[2] = @intCast((value >> 8) & 0xff);
-    buf[3] = @intCast(value & 0xff);
-}
-
-fn sanitizeFramedInput(buf: []u8, max_frame: usize) void {
-    var off: usize = 0;
-    while (off + 4 <= buf.len) {
-        const remaining = buf.len - off;
-        if (remaining <= 4) break;
-
-        const len: u32 = (@as(u32, buf[off]) << 24) |
-            (@as(u32, buf[off + 1]) << 16) |
-            (@as(u32, buf[off + 2]) << 8) |
-            @as(u32, buf[off + 3]);
-
-        const max_allowed = @min(max_frame, remaining - 4);
-        const new_len: u32 = @intCast(@min(@as(usize, len), max_allowed));
-        writeU32be(buf[off .. off + 4], new_len);
-
-        off += 4 + @as(usize, new_len);
-    }
-}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -60,63 +20,8 @@ pub fn main(init: std.process.Init) !void {
     var smith: std.testing.Smith = .{ .in = data };
     var input: [64 * 1024]u8 = undefined;
     const len = smith.slice(&input);
-    const slice = input[0..len];
 
     // Ensure root exists once during setup. The input may delete it.
     std.Io.Dir.cwd().createDirPath(init.io, root_dir) catch {};
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const owned = try a.alloc(u8, slice.len);
-    @memcpy(owned, slice);
-    sanitizeFramedInput(owned, 16 * 1024);
-
-    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true });
-    defer posix.close(pipe_fds[0]);
-
-    protocol.writeAll(pipe_fds[1], owned) catch {};
-    posix.close(pipe_fds[1]);
-
-    var tx = TxSink{};
-
-    while (true) {
-        const frame = protocol.readFrame(a, pipe_fds[0]) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => break,
-        };
-        defer a.free(frame);
-
-        const file_read_req = protocol.decodeFileReadRequest(a, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_read_req) |req| {
-            file_requests.handleFileRead(a, &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        const file_write_req = protocol.decodeFileWriteRequest(a, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_write_req) |req| {
-            file_requests.handleFileWrite(a, pipe_fds[0], &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        const file_delete_req = protocol.decodeFileDeleteRequest(a, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_delete_req) |req| {
-            file_requests.handleFileDelete(a, &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        // Ignore any other message types.
-    }
-
-    std.mem.doNotOptimizeAway(tx.bytes_sent);
+    harness.sandboxOne(allocator, init.io, root_dir, input[0..len]);
 }

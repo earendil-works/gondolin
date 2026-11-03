@@ -1,11 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const sandboxd = @import("sandboxd");
-const file_requests = @import("file_requests");
-
-const protocol = sandboxd.protocol;
-const cbor = sandboxd.cbor;
-const posix = sandboxd.posix;
+const shared = @import("shared");
+const harness = @import("harness.zig");
 
 const CacheDirArg = "--cache-dir=";
 
@@ -17,44 +13,6 @@ fn ensureFuzzTmpDir() void {
     std.Io.Dir.cwd().createDirPath(std.testing.io, "cache/tmp") catch {};
 }
 
-const TxSink = struct {
-    bytes_sent: usize = 0,
-
-    pub fn sendPayload(self: *TxSink, payload: []const u8) !void {
-        // Keep payload referenced so the optimizer cannot drop encoding paths.
-        self.bytes_sent +%= payload.len;
-        std.mem.doNotOptimizeAway(payload.ptr);
-    }
-};
-
-fn writeU32be(buf: []u8, value: u32) void {
-    buf[0] = @intCast((value >> 24) & 0xff);
-    buf[1] = @intCast((value >> 16) & 0xff);
-    buf[2] = @intCast((value >> 8) & 0xff);
-    buf[3] = @intCast(value & 0xff);
-}
-
-fn sanitizeFramedInput(buf: []u8, max_frame: usize) void {
-    @disableInstrumentation();
-
-    var off: usize = 0;
-    while (off + 4 <= buf.len) {
-        const remaining = buf.len - off;
-        if (remaining <= 4) break;
-
-        const len: u32 = (@as(u32, buf[off]) << 24) |
-            (@as(u32, buf[off + 1]) << 16) |
-            (@as(u32, buf[off + 2]) << 8) |
-            @as(u32, buf[off + 3]);
-
-        const max_allowed = @min(max_frame, remaining - 4);
-        const new_len: u32 = @intCast(@min(@as(usize, len), max_allowed));
-        writeU32be(buf[off .. off + 4], new_len);
-
-        off += 4 + @as(usize, new_len);
-    }
-}
-
 fn smithSliceSeed(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, 4 + data.len);
     std.mem.writeInt(u32, out[0..4], @intCast(data.len), .little);
@@ -63,118 +21,13 @@ fn smithSliceSeed(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 }
 
 fn buildSeedStream(allocator: std.mem.Allocator, root_path: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-
-    const appendFrame = struct {
-        fn f(list: *std.ArrayList(u8), alloc: std.mem.Allocator, payload: []const u8) !void {
-            var len_buf: [4]u8 = undefined;
-            writeU32be(len_buf[0..], @intCast(payload.len));
-            try list.appendSlice(alloc, &len_buf);
-            try list.appendSlice(alloc, payload);
-        }
-    }.f;
-
-    // file_write_request(id=1, path="hello.txt", cwd=root_dir)
-    {
-        var payload = std.ArrayList(u8).empty;
-        const w = cbor.arrayListWriter(allocator, &payload);
-        try cbor.writeMapStart(w, 4);
-        try cbor.writeText(w, "v");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "t");
-        try cbor.writeText(w, "file_write_request");
-        try cbor.writeText(w, "id");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "p");
-        try cbor.writeMapStart(w, 3);
-        try cbor.writeText(w, "path");
-        try cbor.writeText(w, "hello.txt");
-        try cbor.writeText(w, "cwd");
-        try cbor.writeText(w, root_path);
-        try cbor.writeText(w, "truncate");
-        try cbor.writeBool(w, true);
-
-        const bytes = try payload.toOwnedSlice(allocator);
-        try appendFrame(&out, allocator, bytes);
-        allocator.free(bytes);
-    }
-
-    // file_write_data(id=1, data="hi", eof=true)
-    {
-        var payload = std.ArrayList(u8).empty;
-        const w = cbor.arrayListWriter(allocator, &payload);
-        try cbor.writeMapStart(w, 4);
-        try cbor.writeText(w, "v");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "t");
-        try cbor.writeText(w, "file_write_data");
-        try cbor.writeText(w, "id");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "p");
-        try cbor.writeMapStart(w, 2);
-        try cbor.writeText(w, "data");
-        try cbor.writeBytes(w, "hi");
-        try cbor.writeText(w, "eof");
-        try cbor.writeBool(w, true);
-
-        const bytes = try payload.toOwnedSlice(allocator);
-        try appendFrame(&out, allocator, bytes);
-        allocator.free(bytes);
-    }
-
-    // file_read_request(id=2, path="hello.txt", cwd=root_dir, chunk_size=1024)
-    {
-        var payload = std.ArrayList(u8).empty;
-        const w = cbor.arrayListWriter(allocator, &payload);
-        try cbor.writeMapStart(w, 4);
-        try cbor.writeText(w, "v");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "t");
-        try cbor.writeText(w, "file_read_request");
-        try cbor.writeText(w, "id");
-        try cbor.writeUInt(w, 2);
-        try cbor.writeText(w, "p");
-        try cbor.writeMapStart(w, 3);
-        try cbor.writeText(w, "path");
-        try cbor.writeText(w, "hello.txt");
-        try cbor.writeText(w, "cwd");
-        try cbor.writeText(w, root_path);
-        try cbor.writeText(w, "chunk_size");
-        try cbor.writeUInt(w, 1024);
-
-        const bytes = try payload.toOwnedSlice(allocator);
-        try appendFrame(&out, allocator, bytes);
-        allocator.free(bytes);
-    }
-
-    // file_delete_request(id=3, path="hello.txt", cwd=root_dir, force=true)
-    {
-        var payload = std.ArrayList(u8).empty;
-        const w = cbor.arrayListWriter(allocator, &payload);
-        try cbor.writeMapStart(w, 4);
-        try cbor.writeText(w, "v");
-        try cbor.writeUInt(w, 1);
-        try cbor.writeText(w, "t");
-        try cbor.writeText(w, "file_delete_request");
-        try cbor.writeText(w, "id");
-        try cbor.writeUInt(w, 3);
-        try cbor.writeText(w, "p");
-        try cbor.writeMapStart(w, 4);
-        try cbor.writeText(w, "path");
-        try cbor.writeText(w, "hello.txt");
-        try cbor.writeText(w, "cwd");
-        try cbor.writeText(w, root_path);
-        try cbor.writeText(w, "force");
-        try cbor.writeBool(w, true);
-        try cbor.writeText(w, "recursive");
-        try cbor.writeBool(w, false);
-
-        const bytes = try payload.toOwnedSlice(allocator);
-        try appendFrame(&out, allocator, bytes);
-        allocator.free(bytes);
-    }
-
-    return try out.toOwnedSlice(allocator);
+    var outbox: shared.framing.Outbox = .init(allocator);
+    defer outbox.deinit();
+    try outbox.send(.file_write_request, 1, .{ .path = "hello.txt", .cwd = root_path, .truncate = true });
+    try outbox.send(.file_write_data, 1, .{ .data = .{ .data = "hi" }, .eof = true });
+    try outbox.send(.file_read_request, 2, .{ .path = "hello.txt", .cwd = root_path, .chunk_size = 1024 });
+    try outbox.send(.file_delete_request, 3, .{ .path = "hello.txt", .cwd = root_path, .force = true });
+    return allocator.dupe(u8, outbox.aw.writer.buffered());
 }
 
 const root_dir = "/tmp/gondolin-sandbox-fuzz";
@@ -208,21 +61,6 @@ test "sandbox behavior (file requests)" {
 fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
     var input: [64 * 1024]u8 = undefined;
     const len = smith.slice(&input);
-    const slice = input[0..len];
-
-    // Sanitize the framed input to avoid OOM / blocking reads due to bogus length prefixes.
-    //
-    // Note: in fuzz mode the Zig test runner already resets/leak-checks `std.testing.allocator`
-    // per input. Using an arena on top keeps per-iteration allocations bounded without
-    // tripping the runner's "error logs detected" guard on allocator leak reports.
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const owned = try allocator.alloc(u8, slice.len);
-    defer allocator.free(owned);
-    @memcpy(owned, slice);
-    sanitizeFramedInput(owned, 16 * 1024);
 
     // Recreate root if a prior iteration deleted it.
     {
@@ -230,50 +68,7 @@ fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
         std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir) catch {};
     }
 
-    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true });
-    defer posix.close(pipe_fds[0]);
-
-    protocol.writeAll(pipe_fds[1], owned) catch {};
-    posix.close(pipe_fds[1]);
-
-    var tx = TxSink{};
-
-    while (true) {
-        const frame = protocol.readFrame(allocator, pipe_fds[0]) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => break,
-        };
-        defer allocator.free(frame);
-
-        const file_read_req = protocol.decodeFileReadRequest(allocator, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_read_req) |req| {
-            file_requests.handleFileRead(allocator, &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        const file_write_req = protocol.decodeFileWriteRequest(allocator, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_write_req) |req| {
-            file_requests.handleFileWrite(allocator, pipe_fds[0], &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        const file_delete_req = protocol.decodeFileDeleteRequest(allocator, frame) catch |err| switch (err) {
-            protocol.ProtocolError.UnexpectedType => null,
-            else => null,
-        };
-        if (file_delete_req) |req| {
-            file_requests.handleFileDelete(allocator, &tx, root_dir, req) catch {};
-            continue;
-        }
-
-        // Ignore any other message types.
-    }
-
-    std.mem.doNotOptimizeAway(tx.bytes_sent);
+    // Note: in fuzz mode the test runner resets/leak-checks
+    // `std.testing.allocator` per input; the harness frees everything it uses.
+    harness.sandboxOne(std.testing.allocator, std.testing.io, root_dir, input[0..len]);
 }

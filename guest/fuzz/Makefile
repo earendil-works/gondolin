@@ -42,7 +42,12 @@ REPO_ROOT := $(abspath ../..)
 OUT_DIR ?= $(abspath ./out/$(TARGET))
 CACHE_DIR ?= $(abspath ./cache)
 
-FUZZ_DEPS := $(shell find ../src -name '*.zig')
+FUZZ_DEPS := $(shell find ../src -name '*.zig') harness.zig
+
+# Every fuzzer/repro gets the shared module and sandboxd's file request code.
+ZIG_MODULES = --dep shared --dep file_requests -Mmain=$< \
+	-Mshared=../src/root.zig \
+	--dep shared -Mfile_requests=../src/sandboxd/file_requests.zig
 
 # Mount the repo read-only to avoid fuzzers accidentally modifying host files.
 # Mount the cache dir read/write at the same guest path where fuzzers store corpus/coverage.
@@ -106,36 +111,32 @@ zig-version-check:
 
 $(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 $(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 $(OUT_DIR)/sandbox-fuzz: sandbox_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd --dep file_requests -Mmain=$< \
-		-Msandboxd=../src/root.zig \
-		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 $(OUT_DIR)/cbor-repro: cbor_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 $(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 $(OUT_DIR)/sandbox-repro: sandbox_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd --dep file_requests -Mmain=$< \
-		-Msandboxd=../src/root.zig \
-		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 run-cbor: $(OUT_DIR)/cbor-fuzz

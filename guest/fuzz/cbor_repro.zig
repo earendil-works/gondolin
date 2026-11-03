@@ -1,7 +1,5 @@
 const std = @import("std");
-const sandboxd = @import("sandboxd");
-
-const cbor = sandboxd.cbor;
+const harness = @import("harness.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -20,12 +18,5 @@ pub fn main(init: std.process.Init) !void {
     var smith: std.testing.Smith = .{ .in = data };
     var input: [4096]u8 = undefined;
     const len = smith.slice(&input);
-    const slice = input[0..len];
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var dec = cbor.Decoder.init(arena.allocator(), slice);
-    const value = dec.decodeValue() catch return;
-    cbor.freeValue(arena.allocator(), value);
+    harness.cborOne(allocator, input[0..len]);
 }

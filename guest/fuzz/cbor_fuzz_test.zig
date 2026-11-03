@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const sandboxd = @import("sandboxd");
-
-const cbor = sandboxd.cbor;
+const harness = @import("harness.zig");
 
 const CacheDirArg = "--cache-dir=";
 
@@ -64,12 +62,5 @@ test "cbor decoder" {
 fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
     var input: [4096]u8 = undefined;
     const len = smith.slice(&input);
-    const slice = input[0..len];
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var dec = cbor.Decoder.init(arena.allocator(), slice);
-    const value = dec.decodeValue() catch return;
-    cbor.freeValue(arena.allocator(), value);
+    harness.cborOne(std.testing.allocator, input[0..len]);
 }
