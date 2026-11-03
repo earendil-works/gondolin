@@ -1,80 +1,74 @@
 //! Discovery and opening of named virtio-serial ports.
 //!
-//! Ports are normally exposed as `/dev/virtio-ports/<name>`, but when udev/mdev
-//! symlinks are not available we fall back to scanning `/dev/vport*` devices
-//! and matching their `/sys/class/virtio-ports/<dev>/name` attribute.
+//! Ports are normally exposed as `/dev/virtio-ports/<name>` (created by the
+//! init script); when that symlink is missing we scan `/dev/vport*` and match
+//! `/sys/class/virtio-ports/<dev>/name`.
 
 const std = @import("std");
-const posix = @import("posix_compat.zig");
+const sys = @import("sys.zig");
 
-/// Open a virtio port device path and return a blocking fd, or null if it does not exist (yet).
-pub fn tryOpenPath(path: []const u8) !?posix.fd_t {
-    const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+const log = std.log.scoped(.virtio_port);
+
+pub const Mode = enum { blocking, nonblocking };
+
+/// Open a port device; null if it does not exist (yet).
+pub fn tryOpenPath(path: []const u8, mode: Mode) sys.OpenError!?sys.fd_t {
+    // O_NONBLOCK on open so a missing host connection never blocks open(2).
+    const fd = sys.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| switch (err) {
         error.FileNotFound, error.NoDevice => return null,
         else => return err,
     };
-    errdefer posix.close(fd);
-
-    // switch to blocking
-    const original_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
-    _ = try posix.fcntl(fd, posix.F.SETFL, original_flags & ~nonblock_flag);
-
+    if (mode == .blocking) sys.setNonblocking(fd, false) catch |err| {
+        sys.close(fd);
+        return err;
+    };
     return fd;
 }
 
-/// Check whether the `/dev/<port_name>` device is the virtio port named `expected`.
-pub fn portMatches(port_name: []const u8, expected: []const u8) bool {
+/// Whether `/dev/<device>` is the virtio port named `expected`.
+fn portMatches(device: []const u8, expected: []const u8) bool {
     var path_buf: [128]u8 = undefined;
-    const sys_path = std.mem.print(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
-    const fd = posix.open(sys_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
-    defer posix.close(fd);
+    const sys_path = std.mem.printSentinel(&path_buf, "/sys/class/virtio-ports/{s}/name", .{device}, 0) catch return false;
+    const fd = sys.openZ(sys_path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
+    defer sys.close(fd);
 
     var name_buf: [64]u8 = undefined;
-    const size = posix.read(fd, &name_buf) catch return false;
-    const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
-    return std.mem.eql(u8, trimmed, expected);
+    const n = sys.read(fd, &name_buf) catch return false;
+    return std.mem.eql(u8, std.mem.trim(u8, name_buf[0..n], " \r\n\t"), expected);
 }
 
-/// Scan `/dev/vport*` for a port named `name` and open it.
-pub fn scan(name: []const u8) !?posix.fd_t {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-    var dev_dir = std.Io.Dir.openDirAbsolute(io, "/dev", .{ .iterate = true }) catch return null;
-    defer dev_dir.close(io);
+/// Scan `/dev/vport*` for the port named `name` and open it.
+pub fn scan(name: []const u8, mode: Mode) sys.OpenError!?sys.fd_t {
+    var dir = sys.DirIterator.open("/dev") catch return null;
+    defer dir.deinit();
 
-    var it = dev_dir.iterate();
     var path_buf: [64]u8 = undefined;
-    while (try it.next(io)) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
-        if (!portMatches(entry.name, name)) continue;
-        const path = try std.mem.print(&path_buf, "/dev/{s}", .{entry.name});
-        if (try tryOpenPath(path)) |fd| return fd;
+    while (dir.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry, "vport")) continue;
+        if (!portMatches(entry, name)) continue;
+        const path = std.mem.print(&path_buf, "/dev/{s}", .{entry}) catch continue;
+        if (try tryOpenPath(path, mode)) |fd| return fd;
     }
-
     return null;
 }
 
-/// Try to open the port named `name` once, via its well-known path or by scanning.
-pub fn tryOpen(name: []const u8) !?posix.fd_t {
+/// Try to open the port named `name` once, via the symlink or by scanning.
+pub fn tryOpen(name: []const u8, mode: Mode) sys.OpenError!?sys.fd_t {
     var path_buf: [128]u8 = undefined;
-    const direct_path = try std.mem.print(&path_buf, "/dev/virtio-ports/{s}", .{name});
-    if (try tryOpenPath(direct_path)) |fd| return fd;
-    return scan(name);
+    const direct = std.mem.print(&path_buf, "/dev/virtio-ports/{s}", .{name}) catch return error.NameTooLong;
+    if (try tryOpenPath(direct, mode)) |fd| return fd;
+    return scan(name, mode);
 }
 
-/// Open the port named `name`, waiting until it shows up.
-pub fn open(name: []const u8, log: anytype) !posix.fd_t {
+/// Open the port named `name`, polling every 100 ms until it shows up.
+pub fn open(name: []const u8, mode: Mode) sys.OpenError!sys.fd_t {
     var warned = false;
-
     while (true) {
-        if (try tryOpen(name)) |fd| return fd;
-
+        if (try tryOpen(name, mode)) |fd| return fd;
         if (!warned) {
             log.info("waiting for {s} port", .{name});
             warned = true;
         }
-
-        posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        sys.sleepMs(100);
     }
 }

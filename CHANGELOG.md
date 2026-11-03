@@ -4,6 +4,13 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Rework the guest helpers (`sandboxd`, `sandboxfs`, `sandboxssh`, `sandboxingress`) as static, libc-free, single-threaded binaries: `sandboxd` is now a single `poll(2)` event loop instead of a thread per exec session, and all helpers share one framing/CBOR/protocol layer.  Binaries are 40-85% smaller.  The wire protocol is unchanged; see `guest/ARCHITECTURE.md` for the full specification.
+- Fix zombie processes accumulating in the guest: `sandboxd` (PID 1) now reaps orphaned children.
+- Fix `sandboxfs` exiting (breaking the VFS mount with `ENOTCONN`) when a directory listing with long file names overflowed the kernel's readdir buffer, when a request was interrupted, or when the host sent a malformed response.
+- Fix uploads (`vm.fs.writeFile`) failing when exec control messages (e.g. output window updates) were interleaved with the upload, and stop `sandboxd` from blocking all exec I/O while streaming a file to the host.
+- Fix `sandboxssh`/`sandboxingress` dying on `SIGPIPE` when a guest service closed a connection, and exiting instead of waiting when the host end of their port disconnects.
+- Fix PTY exec drain deadlines being affected by guest clock changes (`time_sync`), and oversized frames desynchronizing the control channel.
+
 ## 0.14.0
 
 - Fix `chmod` from the guest being silently ignored on VFS mounts (`MemoryProvider`, `RealFSProvider`, `ShadowProvider`, ...): sandboxfs now forwards mode changes to the host and providers gain an optional `chmod()` method.  `RealFSProvider` never applies setuid/setgid bits to host files.  Requires a guest image built with this version.  #115

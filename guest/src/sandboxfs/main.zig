@@ -1,1104 +1,77 @@
+//! sandboxfs: FUSE filesystem that forwards every operation to the host.
+//!
+//! Single-threaded and synchronous: read one request from `/dev/fuse`,
+//! translate it into at most a few `fs_request` RPCs on the `virtio-fs` port
+//! (see `shared/fs_rpc.zig`), write the reply, repeat.  The kernel queues
+//! concurrent requests from guest processes.
+//!
+//! Inodes and file handles are owned by the host: `nodeid` and `fh` values
+//! are passed through unchanged.  Without an RPC port (it did not show up
+//! within 5 s) sandboxfs runs in stub mode: it mounts an empty root so that
+//! init can proceed, and most operations fail with `ENOSYS`.
+//!
+//! Failures: host errnos are returned to the kernel as-is; malformed host
+//! responses and RPC transport errors become `EIO` for that request.
+
 const std = @import("std");
-const sandboxd = @import("sandboxd");
-const cbor = sandboxd.cbor;
-const fs_rpc = sandboxd.fs_rpc;
-const posix = sandboxd.posix;
-const writeAll = sandboxd.protocol.writeAll;
+const shared = @import("shared");
+const fuse = @import("fuse.zig");
+
+const sys = shared.sys;
+const cbor = shared.cbor;
+const fs_rpc = shared.fs_rpc;
+const E = sys.E;
+const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
+
+pub const std_options = shared.runtime.std_options;
+pub const panic = shared.runtime.panic;
+
 const log = std.log.scoped(.sandboxfs);
 
-const FUSE_ROOT_ID: u64 = 1;
-const MAX_RPC_DATA = 60 * 1024;
-
-const FuseOp = struct {
-    pub const LOOKUP: u32 = 1;
-    pub const FORGET: u32 = 2;
-    pub const GETATTR: u32 = 3;
-    pub const SETATTR: u32 = 4;
-    pub const READLINK: u32 = 5;
-    pub const SYMLINK: u32 = 6;
-    pub const MKNOD: u32 = 8;
-    pub const MKDIR: u32 = 9;
-    pub const UNLINK: u32 = 10;
-    pub const RMDIR: u32 = 11;
-    pub const RENAME: u32 = 12;
-    pub const LINK: u32 = 13;
-    pub const OPEN: u32 = 14;
-    pub const READ: u32 = 15;
-    pub const WRITE: u32 = 16;
-    pub const STATFS: u32 = 17;
-    pub const RELEASE: u32 = 18;
-    pub const FSYNC: u32 = 20;
-    pub const SETXATTR: u32 = 21;
-    pub const GETXATTR: u32 = 22;
-    pub const LISTXATTR: u32 = 23;
-    pub const REMOVEXATTR: u32 = 24;
-    pub const FLUSH: u32 = 25;
-    pub const INIT: u32 = 26;
-    pub const OPENDIR: u32 = 27;
-    pub const READDIR: u32 = 28;
-    pub const RELEASEDIR: u32 = 29;
-    pub const FSYNCDIR: u32 = 30;
-    pub const ACCESS: u32 = 34;
-    pub const CREATE: u32 = 35;
-    pub const INTERRUPT: u32 = 36;
-    pub const DESTROY: u32 = 38;
-    pub const IOCTL: u32 = 39;
-    pub const BATCH_FORGET: u32 = 42;
-    pub const FALLOCATE: u32 = 43;
-    pub const RENAME2: u32 = 45;
-    pub const COPY_FILE_RANGE: u32 = 47;
-};
-
-const FuseAttr = extern struct {
-    ino: u64,
-    size: u64,
-    blocks: u64,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-    atimensec: u32,
-    mtimensec: u32,
-    ctimensec: u32,
-    mode: u32,
-    nlink: u32,
-    uid: u32,
-    gid: u32,
-    rdev: u32,
-    blksize: u32,
-    padding: u32,
-};
-
-const FuseEntryOut = extern struct {
-    nodeid: u64,
-    generation: u64,
-    entry_valid: u64,
-    attr_valid: u64,
-    entry_valid_nsec: u32,
-    attr_valid_nsec: u32,
-    attr: FuseAttr,
-};
-
-const FuseAttrOut = extern struct {
-    attr_valid: u64,
-    attr_valid_nsec: u32,
-    dummy: u32,
-    attr: FuseAttr,
-};
-
-const FuseOpenOut = extern struct {
-    fh: u64,
-    open_flags: u32,
-    padding: u32,
-};
-
-const FuseWriteOut = extern struct {
-    size: u32,
-    padding: u32,
-};
-
-const FuseOutHeader = extern struct {
-    len: u32,
-    @"error": i32,
-    unique: u64,
-};
-
-const FuseDirent = extern struct {
-    ino: u64,
-    off: u64,
-    namelen: u32,
-    type: u32,
-};
-
-const FuseKstatfs = extern struct {
-    blocks: u64,
-    bfree: u64,
-    bavail: u64,
-    files: u64,
-    ffree: u64,
-    bsize: u32,
-    namelen: u32,
-    frsize: u32,
-    padding: u32,
-    spare: [6]u32,
-};
-
-const FuseStatfsOut = extern struct {
-    st: FuseKstatfs,
-};
-
-const FuseInHeader = struct {
-    len: u32,
-    opcode: u32,
-    unique: u64,
-    nodeid: u64,
-    uid: u32,
-    gid: u32,
-    pid: u32,
-    padding: u32,
-};
-
-const FuseInitIn = struct {
-    major: u32,
-    minor: u32,
-    max_readahead: u32,
-    flags: u32,
-};
-
-const FuseInitOut = extern struct {
-    major: u32,
-    minor: u32,
-    max_readahead: u32,
-    flags: u32,
-    max_background: u16,
-    congestion_threshold: u16,
-    max_write: u32,
-    time_gran: u32,
-    max_pages: u16,
-    map_alignment: u16,
-    flags2: u32,
-    unused: [7]u32,
-};
-
-const FuseOpenIn = struct {
-    flags: u32,
-    open_flags: u32,
-};
-
-const FuseReadIn = struct {
-    fh: u64,
-    offset: u64,
-    size: u32,
-    read_flags: u32,
-    lock_owner: u64,
-    flags: u32,
-    padding: u32,
-};
-
-const FuseWriteIn = struct {
-    fh: u64,
-    offset: u64,
-    size: u32,
-    write_flags: u32,
-    lock_owner: u64,
-    flags: u32,
-    padding: u32,
-};
-
-const FuseCreateIn = struct {
-    flags: u32,
-    mode: u32,
-    umask: u32,
-    open_flags: u32,
-};
-
-const FuseMkdirIn = struct {
-    mode: u32,
-    umask: u32,
-};
-
-const FuseRenameIn = struct {
-    newdir: u64,
-};
-
-const FuseRename2In = struct {
-    newdir: u64,
-    flags: u32,
-    padding: u32,
-};
-
-const FuseLinkIn = struct {
-    oldnodeid: u64,
-};
-
-const FuseAccessIn = struct {
-    mask: u32,
-    padding: u32,
-};
-
-const FuseFallocateIn = struct {
-    fh: u64,
-    offset: u64,
-    length: u64,
-    mode: u32,
-    padding: u32,
-};
-
-const FuseCopyFileRangeIn = struct {
-    fh_in: u64,
-    off_in: u64,
-    nodeid_out: u64,
-    fh_out: u64,
-    off_out: u64,
-    len: u64,
-    flags: u64,
-};
-
-const FuseSetattrIn = struct {
-    valid: u32,
-    padding: u32,
-    fh: u64,
-    size: u64,
-    lock_owner: u64,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-    atimensec: u32,
-    mtimensec: u32,
-    ctimensec: u32,
-    mode: u32,
-    unused4: u32,
-    uid: u32,
-    gid: u32,
-    unused5: u32,
-};
-
-const FuseReleaseIn = struct {
-    fh: u64,
-    flags: u32,
-    release_flags: u32,
-    lock_owner: u64,
-};
-
-const FattrFlags = struct {
-    pub const MODE: u32 = 1 << 0;
-    pub const SIZE: u32 = 1 << 3;
-};
-
-const DefaultTtls = struct {
-    pub const attr_ms: u64 = 1000;
-    pub const entry_ms: u64 = 1000;
-};
-
-const SandboxFs = struct {
-    allocator: std.mem.Allocator,
-    fuse_fd: posix.fd_t,
-    rpc: ?fs_rpc.FsRpcClient,
-    unsupported_opcode_logged: [256]bool,
-
-    pub fn init(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
-        return .{
-            .allocator = allocator,
-            .fuse_fd = fuse_fd,
-            .rpc = rpc,
-            .unsupported_opcode_logged = @splat(false),
-        };
-    }
-
-    pub fn deinit(self: *SandboxFs) void {
-        _ = self;
-    }
-
-    pub fn run(self: *SandboxFs) !void {
-        var buffer: [128 * 1024]u8 = undefined;
-        while (true) {
-            const request = readFuseRequest(self.fuse_fd, buffer[0..]) catch |err| {
-                log.err("read fuse request failed: {s}", .{@errorName(err)});
-                return err;
-            };
-            const header = parseInHeader(request) catch |err| {
-                log.err("parse fuse header failed: {s}", .{@errorName(err)});
-                return err;
-            };
-            const payload = request[@sizeOf(FuseInHeader)..];
-            self.handleRequest(header, payload) catch |err| {
-                log.err("handle opcode {} failed: {s}", .{ header.opcode, @errorName(err) });
-                return err;
-            };
-        }
-    }
-
-    fn handleRequest(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        switch (header.opcode) {
-            FuseOp.INIT => try self.handleInit(header, payload),
-            FuseOp.LOOKUP => try self.handleLookup(header, payload),
-            FuseOp.GETATTR => try self.handleGetattr(header),
-            FuseOp.SETATTR => try self.handleSetattr(header, payload),
-            FuseOp.READLINK => try self.handleReadlink(header),
-            FuseOp.SYMLINK => try self.handleSymlink(header, payload),
-            FuseOp.MKDIR => try self.handleMkdir(header, payload),
-            FuseOp.UNLINK => try self.handleUnlink(header, payload),
-            FuseOp.RMDIR => try self.handleRmdir(header, payload),
-            FuseOp.RENAME => try self.handleRename(header, payload),
-            FuseOp.RENAME2 => try self.handleRename2(header, payload),
-            FuseOp.LINK => try self.handleLink(header, payload),
-            FuseOp.OPEN => try self.handleOpen(header, payload),
-            FuseOp.OPENDIR => try self.handleOpendir(header),
-            FuseOp.READDIR => try self.handleReaddir(header, payload),
-            FuseOp.RELEASEDIR => try self.handleReleaseDir(header),
-            FuseOp.READ => try self.handleRead(header, payload),
-            FuseOp.WRITE => try self.handleWrite(header, payload),
-            FuseOp.CREATE => try self.handleCreate(header, payload),
-            FuseOp.RELEASE => try self.handleRelease(header, payload),
-            FuseOp.FSYNC => try self.handleFsync(header),
-            FuseOp.FSYNCDIR => try self.handleFsyncDir(header),
-            FuseOp.STATFS => try self.handleStatfs(header),
-            FuseOp.FLUSH => try self.handleFlush(header),
-            FuseOp.ACCESS => try self.handleAccess(header, payload),
-            FuseOp.FALLOCATE => try self.handleFallocate(header, payload),
-            FuseOp.COPY_FILE_RANGE => try self.handleCopyFileRange(header, payload),
-            FuseOp.DESTROY => try sendResponse(self.fuse_fd, header.unique, 0, &.{}),
-            FuseOp.FORGET, FuseOp.BATCH_FORGET, FuseOp.INTERRUPT => return,
-            FuseOp.MKNOD,
-            FuseOp.SETXATTR,
-            FuseOp.GETXATTR,
-            FuseOp.LISTXATTR,
-            FuseOp.REMOVEXATTR,
-            => try self.sendUnsupported(header, std.os.linux.E.OPNOTSUPP),
-            FuseOp.IOCTL => try self.sendUnsupported(header, std.os.linux.E.NOTTY),
-            else => try self.sendUnsupported(header, std.os.linux.E.NOSYS),
-        }
-    }
-
-    fn sendUnsupported(self: *SandboxFs, header: FuseInHeader, err: std.os.linux.E) !void {
-        const opcode = header.opcode;
-        if (opcode < self.unsupported_opcode_logged.len and !self.unsupported_opcode_logged[opcode]) {
-            self.unsupported_opcode_logged[opcode] = true;
-            log.warn("unsupported fuse opcode {} -> errno {}", .{ opcode, @backingInt(err) });
-        }
-        try sendError(self.fuse_fd, header.unique, err);
-    }
-
-    fn handleInit(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        const init_in = try parseFuseInit(payload);
-        // FUSE_BIG_WRITES and FUSE_ATOMIC_O_TRUNC.  With atomic O_TRUNC the
-        // kernel forwards O_TRUNC in OPEN and the host truncates through the
-        // opened handle, instead of following up with a separate SETATTR.
-        const supported_flags: u32 = (1 << 5) | (1 << 3);
-        const enabled_flags = init_in.flags & supported_flags;
-
-        const out = FuseInitOut{
-            .major = init_in.major,
-            .minor = init_in.minor,
-            .max_readahead = init_in.max_readahead,
-            .flags = enabled_flags,
-            .max_background = 0,
-            .congestion_threshold = 0,
-            .max_write = MAX_RPC_DATA,
-            .time_gran = 1,
-            .max_pages = 0,
-            .map_alignment = 0,
-            .flags2 = 0,
-            .unused = @splat(0),
-        };
-
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleLookup(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        const name = parseName(payload);
-        if (self.rpc) |*rpc| {
-            var fields = [_]fs_rpc.Field{
-                .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-                .{ .name = "name", .value = .{ .Text = name } },
-            };
-            var response = try rpc.request("lookup", &fields);
-            defer response.deinit();
-
-            if (response.err != 0) {
-                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-                return;
-            }
-
-            const res_map = response.res orelse return error.InvalidResponse;
-            const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
-            const entry_map = try expectMap(entry_val);
-            const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-
-            try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
-            return;
-        }
-
-        if (header.nodeid == FUSE_ROOT_ID and std.mem.eql(u8, name, "data")) {
-            const root = defaultDirAttr(FUSE_ROOT_ID + 1);
-            const entry = buildEntry(root, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-            try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry));
-            return;
-        }
-
-        try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOENT);
-    }
-
-    fn handleGetattr(self: *SandboxFs, header: FuseInHeader) !void {
-        if (self.rpc) |*rpc| {
-            var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-            var response = try rpc.request("getattr", &fields);
-            defer response.deinit();
-
-            if (response.err != 0) {
-                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-                return;
-            }
-
-            const res_map = response.res orelse return error.InvalidResponse;
-            const attr_val = cbor.getMapValue(res_map, "attr") orelse return error.InvalidResponse;
-            const attr_map = try expectMap(attr_val);
-            const attr = try parseAttr(attr_map, header.nodeid);
-            const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
-
-            const out = buildAttrOut(attr, attr_ttl_ms);
-            try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-            return;
-        }
-
-        const attr = defaultDirAttr(header.nodeid);
-        const out = buildAttrOut(attr, DefaultTtls.attr_ms);
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleReadlink(self: *SandboxFs, header: FuseInHeader) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-        var response = try self.rpc.?.request("readlink", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const target_val = cbor.getMapValue(res_map, "target") orelse return error.InvalidResponse;
-        const target = try expectText(target_val);
-        try sendResponse(self.fuse_fd, header.unique, 0, target);
-    }
-
-    fn handleSetattr(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const setattr = try parseSetattr(payload);
-        if ((setattr.valid & FattrFlags.MODE) != 0) {
-            var fields = [_]fs_rpc.Field{
-                .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-                .{ .name = "mode", .value = .{ .UInt = setattr.mode & 0o7777 } },
-            };
-            var response = try self.rpc.?.request("chmod", &fields);
-            defer response.deinit();
-
-            // Older hosts and providers without chmod support report ENOSYS;
-            // keep the historical behavior of ignoring mode changes there.
-            if (response.err != 0 and errnoFromResponse(response.err) != .NOSYS) {
-                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-                return;
-            }
-        }
-
-        if ((setattr.valid & FattrFlags.SIZE) != 0) {
-            var fields = [_]fs_rpc.Field{
-                .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-                .{ .name = "size", .value = .{ .UInt = setattr.size } },
-            };
-            var response = try self.rpc.?.request("truncate", &fields);
-            defer response.deinit();
-
-            if (response.err != 0) {
-                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-                return;
-            }
-        }
-
-        var attr_fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-        var attr_response = try self.rpc.?.request("getattr", &attr_fields);
-        defer attr_response.deinit();
-
-        if (attr_response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(attr_response.err));
-            return;
-        }
-
-        const res_map = attr_response.res orelse return error.InvalidResponse;
-        const attr_val = cbor.getMapValue(res_map, "attr") orelse return error.InvalidResponse;
-        const attr_map = try expectMap(attr_val);
-        const attr = try parseAttr(attr_map, header.nodeid);
-        const attr_ttl_ms = getMapU64(res_map, "attr_ttl_ms") orelse DefaultTtls.attr_ms;
-
-        const out = buildAttrOut(attr, attr_ttl_ms);
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleSymlink(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const name = parseName(payload);
-        if (name.len + 1 > payload.len) return error.InvalidRequest;
-        const target = parseName(payload[name.len + 1 ..]);
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "name", .value = .{ .Text = name } },
-            .{ .name = "target", .value = .{ .Text = target } },
-        };
-        var response = try self.rpc.?.request("symlink", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
-        const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
-    }
-
-    fn handleMkdir(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const mkdir = try parseMkdir(payload);
-        const name = parseName(payload[@sizeOf(FuseMkdirIn)..]);
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "name", .value = .{ .Text = name } },
-            .{ .name = "mode", .value = .{ .UInt = mkdir.mode } },
-        };
-        var response = try self.rpc.?.request("mkdir", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
-        const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
-    }
-
-    fn handleUnlink(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const name = parseName(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "name", .value = .{ .Text = name } },
-        };
-        var response = try self.rpc.?.request("unlink", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleRmdir(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const name = parseName(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "name", .value = .{ .Text = name } },
-        };
-        var response = try self.rpc.?.request("rmdir", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleRename(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        const rename = try parseRename(payload);
-        const names = payload[@sizeOf(FuseRenameIn)..];
-        const old_name = parseName(names);
-        const rest = names[old_name.len + 1 ..];
-        const new_name = parseName(rest);
-        try self.handleRenameRequest(header, old_name, new_name, rename.newdir, 0);
-    }
-
-    fn handleRename2(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        const rename = try parseRename2(payload);
-        if (rename.flags != 0) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.OPNOTSUPP);
-            return;
-        }
-
-        const names = payload[@sizeOf(FuseRename2In)..];
-        const old_name = parseName(names);
-        const rest = names[old_name.len + 1 ..];
-        const new_name = parseName(rest);
-        try self.handleRenameRequest(header, old_name, new_name, rename.newdir, rename.flags);
-    }
-
-    fn handleRenameRequest(self: *SandboxFs, header: FuseInHeader, old_name: []const u8, new_name: []const u8, new_parent_ino: u64, flags: u32) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "old_parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "old_name", .value = .{ .Text = old_name } },
-            .{ .name = "new_parent_ino", .value = .{ .UInt = new_parent_ino } },
-            .{ .name = "new_name", .value = .{ .Text = new_name } },
-            .{ .name = "flags", .value = .{ .UInt = flags } },
-        };
-        var response = try self.rpc.?.request("rename", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleLink(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const link = try parseLink(payload);
-        const name = parseName(payload[@sizeOf(FuseLinkIn)..]);
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "old_ino", .value = .{ .UInt = link.oldnodeid } },
-            .{ .name = "new_parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "new_name", .value = .{ .Text = name } },
-        };
-        var response = try self.rpc.?.request("link", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
-        const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
-    }
-
-    fn handleOpen(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const open = try parseOpen(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "flags", .value = .{ .UInt = open.flags } },
-        };
-        var response = try self.rpc.?.request("open", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const fh = getMapU64(res_map, "fh") orelse return error.InvalidResponse;
-        const open_flags = getMapU32(res_map, "open_flags") orelse 0;
-        const out = FuseOpenOut{ .fh = fh, .open_flags = open_flags, .padding = 0 };
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleOpendir(self: *SandboxFs, header: FuseInHeader) !void {
-        const out = FuseOpenOut{ .fh = header.nodeid, .open_flags = 0, .padding = 0 };
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleReaddir(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const read_in = try parseRead(payload);
-        const max_entries = @max(@as(u32, 1), read_in.size / 256);
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "offset", .value = .{ .UInt = read_in.offset } },
-            .{ .name = "max_entries", .value = .{ .UInt = max_entries } },
-        };
-        var response = try self.rpc.?.request("readdir", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const entries_val = cbor.getMapValue(res_map, "entries") orelse return error.InvalidResponse;
-        const entries = try expectArray(entries_val);
-
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.allocator);
-
-        for (entries) |entry_val| {
-            const entry_map = try expectMap(entry_val);
-            const ino = getMapU64(entry_map, "ino") orelse return error.InvalidResponse;
-            const name_val = cbor.getMapValue(entry_map, "name") orelse return error.InvalidResponse;
-            const name = try expectText(name_val);
-            const entry_type = getMapU32(entry_map, "type") orelse 0;
-            const offset = getMapU64(entry_map, "offset") orelse 0;
-
-            const dirent = FuseDirent{
-                .ino = ino,
-                .off = offset,
-                .namelen = @intCast(name.len),
-                .type = entry_type,
-            };
-
-            const start_len = buf.items.len;
-            try buf.appendSlice(self.allocator, std.mem.asBytes(&dirent));
-            try buf.appendSlice(self.allocator, name);
-
-            const padded_len = alignDirent(buf.items.len - start_len);
-            const padding = padded_len - (buf.items.len - start_len);
-            if (padding > 0) {
-                try buf.appendNTimes(self.allocator, 0, padding);
-            }
-
-            if (buf.items.len >= @as(usize, @intCast(read_in.size))) {
-                break;
-            }
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, buf.items);
-    }
-
-    fn handleReleaseDir(self: *SandboxFs, header: FuseInHeader) !void {
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleRead(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        // The kernel can issue reads larger than our RPC payload budget.
-        // Returning a short read for a non-EOF region can cause the kernel
-        // to cache an early EOF and silently truncate subsequent reads.
-        //
-        // To avoid this, fulfill the kernel's requested size by chunking the
-        // request into multiple RPC calls and concatenating the results.
-        const read_in = try parseRead(payload);
-
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.allocator);
-
-        var offset: u64 = read_in.offset;
-        var remaining: u32 = read_in.size;
-
-        while (remaining > 0) {
-            const chunk_size: u32 = @min(remaining, @as(u32, MAX_RPC_DATA));
-
-            var fields = [_]fs_rpc.Field{
-                .{ .name = "fh", .value = .{ .UInt = read_in.fh } },
-                .{ .name = "offset", .value = .{ .UInt = offset } },
-                .{ .name = "size", .value = .{ .UInt = chunk_size } },
-            };
-            var response = try self.rpc.?.request("read", &fields);
-            defer response.deinit();
-
-            if (response.err != 0) {
-                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-                return;
-            }
-
-            const res_map = response.res orelse return error.InvalidResponse;
-            const data_val = cbor.getMapValue(res_map, "data") orelse return error.InvalidResponse;
-            const data = try expectBytes(data_val);
-
-            try buf.appendSlice(self.allocator, data);
-
-            // A short read is only valid at EOF.
-            if (data.len < @as(usize, @intCast(chunk_size))) {
-                break;
-            }
-
-            offset += @intCast(data.len);
-            remaining -= @intCast(data.len);
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, buf.items);
-    }
-
-    fn handleWrite(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const write_in = try parseWrite(payload);
-        const data_offset = @sizeOf(FuseWriteIn);
-        if (payload.len < data_offset) return error.InvalidRequest;
-        const data = payload[data_offset..];
-        const size = @min(@min(write_in.size, @as(u32, @intCast(data.len))), @as(u32, MAX_RPC_DATA));
-        const clipped = data[0..@intCast(size)];
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "fh", .value = .{ .UInt = write_in.fh } },
-            .{ .name = "offset", .value = .{ .UInt = write_in.offset } },
-            .{ .name = "data", .value = .{ .Bytes = clipped } },
-        };
-        var response = try self.rpc.?.request("write", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const written = getMapU32(res_map, "size") orelse size;
-        const out = FuseWriteOut{ .size = written, .padding = 0 };
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleCreate(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const create = try parseCreate(payload);
-        const name = parseName(payload[@sizeOf(FuseCreateIn)..]);
-
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "name", .value = .{ .Text = name } },
-            .{ .name = "mode", .value = .{ .UInt = create.mode } },
-            .{ .name = "flags", .value = .{ .UInt = create.flags } },
-        };
-        var response = try self.rpc.?.request("create", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            log.err("create failed name='{s}' flags=0x{x} err={}", .{ name, create.flags, response.err });
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
-        const entry_map = try expectMap(entry_val);
-        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
-        const fh = getMapU64(res_map, "fh") orelse return error.InvalidResponse;
-        const open_flags = getMapU32(res_map, "open_flags") orelse 0;
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.allocator);
-        try buf.appendSlice(self.allocator, std.mem.asBytes(&entry.out));
-        const open_out = FuseOpenOut{ .fh = fh, .open_flags = open_flags, .padding = 0 };
-        try buf.appendSlice(self.allocator, std.mem.asBytes(&open_out));
-
-        try sendResponse(self.fuse_fd, header.unique, 0, buf.items);
-    }
-
-    fn handleRelease(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const release = try parseRelease(payload);
-        var fields = [_]fs_rpc.Field{.{ .name = "fh", .value = .{ .UInt = release.fh } }};
-        var response = try self.rpc.?.request("release", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleFsync(self: *SandboxFs, header: FuseInHeader) !void {
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleFsyncDir(self: *SandboxFs, header: FuseInHeader) !void {
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleFlush(self: *SandboxFs, header: FuseInHeader) !void {
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleAccess(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const access = try parseAccess(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "mask", .value = .{ .UInt = access.mask } },
-            .{ .name = "uid", .value = .{ .UInt = header.uid } },
-            .{ .name = "gid", .value = .{ .UInt = header.gid } },
-        };
-        var response = try self.rpc.?.request("access", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleFallocate(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const fallocate = try parseFallocate(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "fh", .value = .{ .UInt = fallocate.fh } },
-            .{ .name = "offset", .value = .{ .UInt = fallocate.offset } },
-            .{ .name = "length", .value = .{ .UInt = fallocate.length } },
-            .{ .name = "mode", .value = .{ .UInt = fallocate.mode } },
-        };
-        var response = try self.rpc.?.request("fallocate", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
-    }
-
-    fn handleCopyFileRange(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
-        if (self.rpc == null) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
-
-        const copy = try parseCopyFileRange(payload);
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "fh_in", .value = .{ .UInt = copy.fh_in } },
-            .{ .name = "off_in", .value = .{ .UInt = copy.off_in } },
-            .{ .name = "fh_out", .value = .{ .UInt = copy.fh_out } },
-            .{ .name = "off_out", .value = .{ .UInt = copy.off_out } },
-            .{ .name = "len", .value = .{ .UInt = copy.len } },
-            .{ .name = "flags", .value = .{ .UInt = copy.flags } },
-        };
-        var response = try self.rpc.?.request("copy_file_range", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
-        }
-
-        const res_map = response.res orelse return error.InvalidResponse;
-        const size = getMapU32(res_map, "size") orelse return error.InvalidResponse;
-        const out = FuseWriteOut{ .size = size, .padding = 0 };
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-
-    fn handleStatfs(self: *SandboxFs, header: FuseInHeader) !void {
-        if (self.rpc) |*rpc| {
-            var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-            var response = try rpc.request("statfs", &fields);
-            defer response.deinit();
-
-            if (response.err != 0) {
-                const errno = errnoFromResponse(response.err);
-                if (errno == std.os.linux.E.NOSYS) {
-                    const out = defaultStatfs();
-                    try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-                    return;
-                }
-                try sendError(self.fuse_fd, header.unique, errno);
-                return;
-            }
-
-            const res_map = response.res orelse return error.InvalidResponse;
-            const statfs_val = cbor.getMapValue(res_map, "statfs") orelse return error.InvalidResponse;
-            const statfs_map = try expectMap(statfs_val);
-
-            const out = statfsFromMap(statfs_map);
-            try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-            return;
-        }
-
-        const out = defaultStatfs();
-        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
-    }
-};
-
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+/// Largest data payload of one read/write RPC (also the FUSE `max_write`) in `bytes`
+const max_rpc_data: u32 = 60 * 1024;
+/// Request buffer size; must exceed `max_write` plus headers, in `bytes`
+const request_buf_size = 128 * 1024;
+
+const default_attr_ttl_ms: u64 = 1000;
+const default_entry_ttl_ms: u64 = 1000;
+
+test {
+    _ = fuse;
+}
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    shared.runtime.init();
+    const gpa = shared.runtime.gpa();
+    defer shared.runtime.deinitGpa();
 
     var mount_point: []const u8 = "/data";
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
     var binds_file: ?[]const u8 = null;
-
+    const args = init.args.vector;
     var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--mount") and i + 1 < args.len) {
-            mount_point = args[i + 1];
-            i += 1;
-            continue;
-        }
-        if (std.mem.eql(u8, args[i], "--rpc-path") and i + 1 < args.len) {
-            rpc_path = args[i + 1];
-            i += 1;
-            continue;
-        }
-        if (std.mem.eql(u8, args[i], "--binds-file") and i + 1 < args.len) {
-            binds_file = args[i + 1];
-            i += 1;
-            continue;
-        }
+    while (i + 1 < args.len) : (i += 1) {
+        const arg = std.mem.span(args[i]);
+        const value = std.mem.span(args[i + 1]);
+        if (std.mem.eql(u8, arg, "--mount")) {
+            mount_point = value;
+        } else if (std.mem.eql(u8, arg, "--rpc-path")) {
+            rpc_path = value;
+        } else if (std.mem.eql(u8, arg, "--binds-file")) {
+            binds_file = value;
+        } else continue;
+        i += 1;
     }
 
-    const fuse_fd = try posix.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
-    defer posix.close(fuse_fd);
+    const fuse_fd = try sys.openZ("/dev/fuse", .{ .ACCMODE = .RDWR }, 0);
+    defer sys.close(fuse_fd);
 
-    const rpc_fd = openRpcPort(rpc_path);
-    var rpc_client: ?fs_rpc.FsRpcClient = null;
-    if (rpc_fd) |fd| {
-        rpc_client = fs_rpc.FsRpcClient.init(allocator, fd);
+    var fs: Fs = .{ .gpa = gpa, .fuse_fd = fuse_fd, .arena = .init(gpa) };
+    defer fs.deinit();
+
+    if (openRpcPort(rpc_path)) |fd| {
+        fs.rpc = .init(gpa, fd);
         log.info("connected rpc at {s}", .{rpc_path});
     } else {
         log.warn("rpc port {s} unavailable; running in stub mode", .{rpc_path});
@@ -1107,519 +80,512 @@ pub fn main(init: std.process.Init) !void {
     // The bind list is written before mounting so that init can rely on the
     // file being complete once the fuse mount shows up in /proc/mounts.
     if (binds_file) |path| {
-        if (rpc_client) |*rpc| {
-            writeBindsFile(allocator, rpc, path) catch |err| {
-                log.warn("unable to fetch bind mounts: {s}", .{@errorName(err)});
-            };
-        }
+        if (fs.rpc != null) fs.writeBindsFile(path) catch |err| {
+            log.warn("unable to fetch bind mounts: {t}", .{err});
+        };
     }
 
-    try mountFuse(allocator, fuse_fd, mount_point);
+    try mountFuse(fuse_fd, mount_point);
     log.info("mounted sandboxfs at {s}", .{mount_point});
-
-    var sandboxfs = SandboxFs.init(allocator, fuse_fd, rpc_client);
-    defer sandboxfs.deinit();
-
-    sandboxfs.run() catch |err| {
-        log.err("sandboxfs failed: {s}", .{@errorName(err)});
-        return err;
-    };
+    try fs.run();
 }
 
-/// Fetch the bind mount list from the host and write it newline-separated to `path`.
-///
-/// The file is only created when the host supports the `mounts` op so that
-/// init can fall back to the legacy kernel cmdline list otherwise.
-fn writeBindsFile(allocator: std.mem.Allocator, rpc: *fs_rpc.FsRpcClient, path: []const u8) !void {
-    var response = try rpc.request("mounts", &.{});
-    defer response.deinit();
-
-    if (response.err != 0) {
-        return error.MountsUnavailable;
-    }
-
-    const res_map = response.res orelse return error.InvalidResponse;
-    const binds_val = cbor.getMapValue(res_map, "binds") orelse return error.InvalidResponse;
-    const binds = try expectArray(binds_val);
-
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(allocator);
-    for (binds) |entry| {
-        const bind = try expectText(entry);
-        if (bind.len == 0 or bind[0] != '/' or std.mem.indexOfAny(u8, bind, "\n\x00") != null) {
-            return error.InvalidResponse;
-        }
-        try buf.appendSlice(allocator, bind);
-        try buf.append(allocator, '\n');
-    }
-
-    const fd = try posix.open(path, .{
-        .ACCMODE = .WRONLY,
-        .CREAT = true,
-        .TRUNC = true,
-        .CLOEXEC = true,
-    }, 0o644);
-    defer posix.close(fd);
-    try writeAll(fd, buf.items);
-    log.info("wrote {d} bind mounts to {s}", .{ binds.len, path });
-}
-
-fn mountFuse(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, mount_point: []const u8) !void {
-    const data = try allocator.print("fd={d},rootmode=40000,user_id=0,group_id=0,default_permissions", .{fuse_fd});
-    defer allocator.free(data);
-    const data_z = try makeZ(allocator, data);
-    defer allocator.free(data_z);
-    const mount_z = try makeZ(allocator, mount_point);
-    defer allocator.free(mount_z);
-    const source_z = try makeZ(allocator, "sandboxfs");
-    defer allocator.free(source_z);
-    const fstype_z = try makeZ(allocator, "fuse.sandboxfs");
-    defer allocator.free(fstype_z);
-
-    const rc = std.os.linux.mount(source_z.ptr, mount_z.ptr, fstype_z.ptr, std.os.linux.MS.NOSUID | std.os.linux.MS.NODEV, @intFromPtr(data_z.ptr));
-    const err = std.os.linux.errno(rc);
-    if (err != .SUCCESS) {
-        log.err("mount failed: {s}", .{@tagName(err)});
-        return error.MountFailed;
-    }
-}
-
-fn makeZ(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
-    const buf = try allocator.alloc(u8, text.len + 1);
-    @memcpy(buf[0..text.len], text);
-    buf[text.len] = 0;
-    return buf[0..text.len :0];
-}
-
-fn openRpcPort(path: []const u8) ?posix.fd_t {
-    const expected = std.fs.path.basename(path);
-    var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
-        if (posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
-            return fd;
-        } else |_| {
-            if (sandboxd.virtio_port.scan(expected) catch null) |fd| return fd;
-        }
-        posix.nanosleep(0, 100 * std.time.ns_per_ms);
+fn openRpcPort(path: []const u8) ?sys.fd_t {
+    const name = std.fs.path.basename(path);
+    for (0..50) |_| {
+        if (shared.virtio_port.tryOpenPath(path, .blocking) catch null) |fd| return fd;
+        if (shared.virtio_port.scan(name, .blocking) catch null) |fd| return fd;
+        sys.sleepMs(100);
     }
     return null;
 }
 
-fn readFuseRequest(fd: posix.fd_t, buffer: []u8) ![]u8 {
-    var total: usize = 0;
-    var expected: ?usize = null;
-    while (true) {
-        if (total >= buffer.len) return error.BufferTooSmall;
-        const n = try posix.read(fd, buffer[total..]);
-        if (n == 0) return error.EndOfStream;
-        total += n;
-        if (expected == null and total >= 4) {
-            const len = readIntLittle(u32, buffer[0..4]);
-            expected = len;
+fn mountFuse(fuse_fd: sys.fd_t, mount_point: []const u8) !void {
+    var opts_buf: [128]u8 = undefined;
+    const opts = try std.mem.printSentinel(&opts_buf, "fd={d},rootmode=40000,user_id=0,group_id=0,default_permissions", .{fuse_fd}, 0);
+    var path_buf: [sys.path_max]u8 = undefined;
+    const target = try sys.toPathZ(&path_buf, mount_point);
+    const err = sys.mount("sandboxfs", target, "fuse.sandboxfs", linux.MS.NOSUID | linux.MS.NODEV, opts);
+    if (err != .SUCCESS) {
+        log.err("mount failed: {t}", .{err});
+        return error.MountFailed;
+    }
+}
+
+/// Result of handling one request.
+const Reply = union(enum) {
+    /// no reply (FORGET, BATCH_FORGET, INTERRUPT)
+    none,
+    err: E,
+    /// reply payload; lives in the request arena
+    data: []const u8,
+};
+
+const HandlerError = error{
+    /// the host answered with an errno, see `Fs.host_errno`
+    HostErrno,
+    InvalidRequest,
+    InvalidResponse,
+} || fs_rpc.CallError;
+
+const Fs = struct {
+    gpa: Allocator,
+    fuse_fd: sys.fd_t,
+    rpc: ?fs_rpc.Client = null,
+    /// per-request scratch memory (replies, decoded responses)
+    arena: std.heap.ArenaAllocator,
+    /// errno of the last failed RPC (valid after `error.HostErrno`)
+    host_errno: E = .SUCCESS,
+    /// opcodes already reported as unsupported
+    unsupported_logged: std.StaticBitSet(64) = .empty,
+
+    fn deinit(self: *Fs) void {
+        if (self.rpc) |*rpc| {
+            sys.close(rpc.fd);
+            rpc.deinit();
         }
-        if (expected) |len| {
-            if (total >= len) return buffer[0..len];
-        }
-    }
-}
-
-fn parseInHeader(request: []const u8) !FuseInHeader {
-    if (request.len < @sizeOf(FuseInHeader)) return error.InvalidRequest;
-    var offset: usize = 0;
-    const len = try readU32(request, &offset);
-    const opcode = try readU32(request, &offset);
-    const unique = try readU64(request, &offset);
-    const nodeid = try readU64(request, &offset);
-    const uid = try readU32(request, &offset);
-    const gid = try readU32(request, &offset);
-    const pid = try readU32(request, &offset);
-    const padding = try readU32(request, &offset);
-    return .{
-        .len = len,
-        .opcode = opcode,
-        .unique = unique,
-        .nodeid = nodeid,
-        .uid = uid,
-        .gid = gid,
-        .pid = pid,
-        .padding = padding,
-    };
-}
-
-fn parseFuseInit(payload: []const u8) !FuseInitIn {
-    var offset: usize = 0;
-    const major = try readU32(payload, &offset);
-    const minor = try readU32(payload, &offset);
-    const max_readahead = try readU32(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    return .{ .major = major, .minor = minor, .max_readahead = max_readahead, .flags = flags };
-}
-
-fn parseOpen(payload: []const u8) !FuseOpenIn {
-    var offset: usize = 0;
-    const flags = try readU32(payload, &offset);
-    const open_flags = try readU32(payload, &offset);
-    return .{ .flags = flags, .open_flags = open_flags };
-}
-
-fn parseRead(payload: []const u8) !FuseReadIn {
-    var offset: usize = 0;
-    const fh = try readU64(payload, &offset);
-    const off = try readU64(payload, &offset);
-    const size = try readU32(payload, &offset);
-    const read_flags = try readU32(payload, &offset);
-    const lock_owner = try readU64(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    return .{
-        .fh = fh,
-        .offset = off,
-        .size = size,
-        .read_flags = read_flags,
-        .lock_owner = lock_owner,
-        .flags = flags,
-        .padding = padding,
-    };
-}
-
-fn parseWrite(payload: []const u8) !FuseWriteIn {
-    var offset: usize = 0;
-    const fh = try readU64(payload, &offset);
-    const off = try readU64(payload, &offset);
-    const size = try readU32(payload, &offset);
-    const write_flags = try readU32(payload, &offset);
-    const lock_owner = try readU64(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    return .{
-        .fh = fh,
-        .offset = off,
-        .size = size,
-        .write_flags = write_flags,
-        .lock_owner = lock_owner,
-        .flags = flags,
-        .padding = padding,
-    };
-}
-
-fn parseCreate(payload: []const u8) !FuseCreateIn {
-    var offset: usize = 0;
-    const flags = try readU32(payload, &offset);
-    const mode = try readU32(payload, &offset);
-    const umask = try readU32(payload, &offset);
-    const open_flags = try readU32(payload, &offset);
-    return .{ .flags = flags, .mode = mode, .umask = umask, .open_flags = open_flags };
-}
-
-fn parseMkdir(payload: []const u8) !FuseMkdirIn {
-    var offset: usize = 0;
-    const mode = try readU32(payload, &offset);
-    const umask = try readU32(payload, &offset);
-    return .{ .mode = mode, .umask = umask };
-}
-
-fn parseAccess(payload: []const u8) !FuseAccessIn {
-    var offset: usize = 0;
-    const mask = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    return .{ .mask = mask, .padding = padding };
-}
-
-fn parseRename(payload: []const u8) !FuseRenameIn {
-    var offset: usize = 0;
-    const newdir = try readU64(payload, &offset);
-    return .{ .newdir = newdir };
-}
-
-fn parseRename2(payload: []const u8) !FuseRename2In {
-    var offset: usize = 0;
-    const newdir = try readU64(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    return .{ .newdir = newdir, .flags = flags, .padding = padding };
-}
-
-fn parseLink(payload: []const u8) !FuseLinkIn {
-    var offset: usize = 0;
-    const oldnodeid = try readU64(payload, &offset);
-    return .{ .oldnodeid = oldnodeid };
-}
-
-fn parseSetattr(payload: []const u8) !FuseSetattrIn {
-    var offset: usize = 0;
-    const valid = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    const fh = try readU64(payload, &offset);
-    const size = try readU64(payload, &offset);
-    const lock_owner = try readU64(payload, &offset);
-    const atime = try readU64(payload, &offset);
-    const mtime = try readU64(payload, &offset);
-    const ctime = try readU64(payload, &offset);
-    const atimensec = try readU32(payload, &offset);
-    const mtimensec = try readU32(payload, &offset);
-    const ctimensec = try readU32(payload, &offset);
-    const mode = try readU32(payload, &offset);
-    const unused4 = try readU32(payload, &offset);
-    const uid = try readU32(payload, &offset);
-    const gid = try readU32(payload, &offset);
-    const unused5 = try readU32(payload, &offset);
-    return .{
-        .valid = valid,
-        .padding = padding,
-        .fh = fh,
-        .size = size,
-        .lock_owner = lock_owner,
-        .atime = atime,
-        .mtime = mtime,
-        .ctime = ctime,
-        .atimensec = atimensec,
-        .mtimensec = mtimensec,
-        .ctimensec = ctimensec,
-        .mode = mode,
-        .unused4 = unused4,
-        .uid = uid,
-        .gid = gid,
-        .unused5 = unused5,
-    };
-}
-
-fn parseRelease(payload: []const u8) !FuseReleaseIn {
-    var offset: usize = 0;
-    const fh = try readU64(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    const release_flags = try readU32(payload, &offset);
-    const lock_owner = try readU64(payload, &offset);
-    return .{ .fh = fh, .flags = flags, .release_flags = release_flags, .lock_owner = lock_owner };
-}
-
-fn parseFallocate(payload: []const u8) !FuseFallocateIn {
-    var offset: usize = 0;
-    const fh = try readU64(payload, &offset);
-    const off = try readU64(payload, &offset);
-    const length = try readU64(payload, &offset);
-    const mode = try readU32(payload, &offset);
-    const padding = try readU32(payload, &offset);
-    return .{ .fh = fh, .offset = off, .length = length, .mode = mode, .padding = padding };
-}
-
-fn parseCopyFileRange(payload: []const u8) !FuseCopyFileRangeIn {
-    var offset: usize = 0;
-    const fh_in = try readU64(payload, &offset);
-    const off_in = try readU64(payload, &offset);
-    const nodeid_out = try readU64(payload, &offset);
-    const fh_out = try readU64(payload, &offset);
-    const off_out = try readU64(payload, &offset);
-    const len = try readU64(payload, &offset);
-    const flags = try readU64(payload, &offset);
-    return .{
-        .fh_in = fh_in,
-        .off_in = off_in,
-        .nodeid_out = nodeid_out,
-        .fh_out = fh_out,
-        .off_out = off_out,
-        .len = len,
-        .flags = flags,
-    };
-}
-
-fn parseName(payload: []const u8) []const u8 {
-    if (std.mem.findScalar(u8, payload, 0)) |idx| {
-        return payload[0..idx];
-    }
-    return payload;
-}
-
-fn alignDirent(len: usize) usize {
-    return (len + 7) & ~@as(usize, 7);
-}
-
-fn errnoFromResponse(err: i32) std.os.linux.E {
-    const code: i32 = if (err < 0) -err else err;
-    return @fromBackingInt(@as(u16, @intCast(code)));
-}
-
-fn sendError(fd: posix.fd_t, unique: u64, err: std.os.linux.E) !void {
-    var out = FuseOutHeader{
-        .len = @sizeOf(FuseOutHeader),
-        .@"error" = -@as(i32, @intCast(@backingInt(err))),
-        .unique = unique,
-    };
-    try writeAll(fd, std.mem.asBytes(&out));
-}
-
-fn sendResponse(fd: posix.fd_t, unique: u64, err: i32, payload: []const u8) !void {
-    var out = FuseOutHeader{
-        .len = @intCast(@sizeOf(FuseOutHeader) + payload.len),
-        .@"error" = err,
-        .unique = unique,
-    };
-
-    if (payload.len == 0) {
-        try writeAll(fd, std.mem.asBytes(&out));
-        return;
+        self.arena.deinit();
     }
 
-    var iovecs = [_]posix.iovec_const{
-        .{ .base = std.mem.asBytes(&out).ptr, .len = @sizeOf(FuseOutHeader) },
-        .{ .base = payload.ptr, .len = payload.len },
-    };
-    try writevAll(fd, &iovecs);
-}
+    fn run(self: *Fs) !void {
+        const buf = try self.gpa.alignedAlloc(u8, .of(fuse.InHeader), request_buf_size);
+        defer self.gpa.free(buf);
 
-fn writevAll(fd: posix.fd_t, iovecs: []const posix.iovec_const) !void {
-    var local_iovecs: [2]posix.iovec_const = undefined;
-    if (iovecs.len > local_iovecs.len) return error.InvalidRequest;
+        while (true) {
+            const n = while (true) {
+                const rc = linux.read(self.fuse_fd, buf.ptr, buf.len);
+                switch (linux.errno(rc)) {
+                    .SUCCESS => break rc,
+                    // ENOENT: the request was interrupted before we read it
+                    .INTR, .AGAIN, .NOENT => continue,
+                    .NODEV => {
+                        log.info("filesystem unmounted", .{});
+                        return;
+                    },
+                    else => |err| {
+                        log.err("read fuse request failed: {t}", .{err});
+                        return error.FuseReadFailed;
+                    },
+                }
+            };
+            if (n < @sizeOf(fuse.InHeader)) {
+                log.warn("short fuse request ({d} bytes)", .{n});
+                continue;
+            }
+            const header = std.mem.bytesToValue(fuse.InHeader, buf[0..@sizeOf(fuse.InHeader)]);
+            const payload = buf[@sizeOf(fuse.InHeader)..@min(n, @max(header.len, @sizeOf(fuse.InHeader)))];
 
-    for (iovecs, 0..) |vec, idx| {
-        local_iovecs[idx] = vec;
-    }
-
-    var slice = local_iovecs[0..iovecs.len];
-    var remaining: usize = 0;
-    for (slice) |vec| {
-        remaining += vec.len;
-    }
-
-    while (remaining > 0) {
-        const written = try posix.writev(fd, slice);
-        if (written == 0) return error.EndOfStream;
-        remaining -= written;
-
-        var consumed = written;
-        var index: usize = 0;
-        while (index < slice.len and consumed >= slice[index].len) : (index += 1) {
-            consumed -= slice[index].len;
-        }
-
-        slice = slice[index..];
-        if (slice.len == 0) return;
-        if (consumed > 0) {
-            slice[0].base = @ptrFromInt(@intFromPtr(slice[0].base) + consumed);
-            slice[0].len -= consumed;
+            defer _ = self.arena.reset(.retain_capacity);
+            const reply = self.handle(header, payload) catch |err| switch (err) {
+                error.HostErrno => Reply{ .err = self.host_errno },
+                else => blk: {
+                    log.warn("opcode {d} failed: {t}", .{ header.opcode, err });
+                    break :blk Reply{ .err = .IO };
+                },
+            };
+            if (try self.sendReply(header.unique, reply) == .unmounted) return;
         }
     }
-}
 
-fn readU32(buf: []const u8, offset: *usize) !u32 {
-    if (offset.* + 4 > buf.len) return error.InvalidRequest;
-    const value = readIntLittle(u32, buf[offset.* .. offset.* + 4]);
-    offset.* += 4;
-    return value;
-}
+    fn sendReply(self: *Fs, unique: u64, reply: Reply) !enum { ok, unmounted } {
+        const payload: []const u8, const err: i32 = switch (reply) {
+            .none => return .ok,
+            .err => |e| .{ &.{}, -@as(i32, @backingInt(e)) },
+            .data => |d| .{ d, 0 },
+        };
+        const out: fuse.OutHeader = .{
+            .len = @intCast(@sizeOf(fuse.OutHeader) + payload.len),
+            .@"error" = err,
+            .unique = unique,
+        };
+        const iov = [_]sys.iovec_const{
+            .{ .base = std.mem.asBytes(&out), .len = @sizeOf(fuse.OutHeader) },
+            .{ .base = payload.ptr, .len = payload.len },
+        };
+        // Writes to /dev/fuse are all-or-nothing.
+        while (true) {
+            const rc = linux.writev(self.fuse_fd, &iov, if (payload.len == 0) 1 else 2);
+            switch (linux.errno(rc)) {
+                .SUCCESS => return .ok,
+                .INTR => continue,
+                // ENOENT: the request was interrupted/aborted meanwhile
+                .NOENT => return .ok,
+                .NODEV => return .unmounted,
+                else => |e| {
+                    log.err("write fuse reply failed: {t}", .{e});
+                    return error.FuseWriteFailed;
+                },
+            }
+        }
+    }
 
-fn readU64(buf: []const u8, offset: *usize) !u64 {
-    if (offset.* + 8 > buf.len) return error.InvalidRequest;
-    const value = readIntLittle(u64, buf[offset.* .. offset.* + 8]);
-    offset.* += 8;
-    return value;
-}
+    /// Perform an RPC; host errnos surface as `error.HostErrno`.  Without an
+    /// RPC port every call fails with `ENOSYS`.
+    fn call(self: *Fs, op: []const u8, req: anytype) HandlerError!fs_rpc.Response {
+        const rpc = if (self.rpc) |*rpc| rpc else return self.hostErrno(.NOSYS);
+        const response = try rpc.call(self.arena.allocator(), op, req);
+        if (response.err != .SUCCESS) return self.hostErrno(response.err);
+        return response;
+    }
 
-fn readIntLittle(comptime T: type, bytes: []const u8) T {
-    const ptr: *const [@sizeOf(T)]u8 = @ptrCast(bytes.ptr);
-    return std.mem.readInt(T, ptr, .little);
-}
+    fn hostErrno(self: *Fs, err: E) error{HostErrno} {
+        self.host_errno = err;
+        return error.HostErrno;
+    }
 
-fn expectMap(value: cbor.Value) ![]cbor.Entry {
-    return switch (value) {
-        .Map => |entries| entries,
+    /// Reply with the bytes of `value` (copied into the request arena).
+    fn ok(self: *Fs, value: anytype) Allocator.Error!Reply {
+        return .{ .data = try self.arena.allocator().dupe(u8, std.mem.asBytes(&value)) };
+    }
+
+    const empty: Reply = .{ .data = &.{} };
+
+    fn handle(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const op: fuse.Opcode = @fromBackingInt(h.opcode);
+        return switch (op) {
+            .init => self.init(payload),
+            .lookup => self.lookup(h, payload),
+            .getattr => self.getattr(h),
+            .setattr => self.setattr(h, payload),
+            .readlink => .{ .data = try expectText((try self.call("readlink", .{ .ino = h.nodeid })).get("target")) },
+            .symlink => self.symlink(h, payload),
+            .mkdir => self.mkdir(h, payload),
+            .unlink, .rmdir => blk: {
+                _ = try self.call(@tagName(op), .{ .parent_ino = h.nodeid, .name = fuse.name(payload)[0] });
+                break :blk empty;
+            },
+            .rename => blk: {
+                const req, const names = try fuse.parse(fuse.RenameIn, payload);
+                break :blk self.rename(h, req.newdir, 0, names);
+            },
+            .rename2 => blk: {
+                const req, const names = try fuse.parse(fuse.Rename2In, payload);
+                if (req.flags != 0) break :blk .{ .err = .OPNOTSUPP };
+                break :blk self.rename(h, req.newdir, req.flags, names);
+            },
+            .link => self.link(h, payload),
+            .open => blk: {
+                const open, _ = try fuse.parse(fuse.OpenIn, payload);
+                const res = try self.call("open", .{ .ino = h.nodeid, .flags = open.flags });
+                break :blk self.ok(try openOut(res));
+            },
+            .opendir => self.ok(fuse.OpenOut{ .fh = h.nodeid, .open_flags = 0 }),
+            .readdir => self.readdir(h, payload),
+            .read => self.read(payload),
+            .write => self.write(payload),
+            .create => self.create(h, payload),
+            .release => blk: {
+                const release, _ = try fuse.parse(fuse.ReleaseIn, payload);
+                _ = try self.call("release", .{ .fh = release.fh });
+                break :blk empty;
+            },
+            .releasedir, .fsync, .fsyncdir, .flush, .destroy => empty,
+            .access => blk: {
+                const access, _ = try fuse.parse(fuse.AccessIn, payload);
+                _ = try self.call("access", .{ .ino = h.nodeid, .mask = access.mask, .uid = h.uid, .gid = h.gid });
+                break :blk empty;
+            },
+            .fallocate => blk: {
+                const req, _ = try fuse.parse(fuse.FallocateIn, payload);
+                _ = try self.call("fallocate", .{ .fh = req.fh, .offset = req.offset, .length = req.length, .mode = req.mode });
+                break :blk empty;
+            },
+            .copy_file_range => blk: {
+                const req, _ = try fuse.parse(fuse.CopyFileRangeIn, payload);
+                const res = try self.call("copy_file_range", .{
+                    .fh_in = req.fh_in,
+                    .off_in = req.off_in,
+                    .fh_out = req.fh_out,
+                    .off_out = req.off_out,
+                    .len = req.len,
+                    .flags = req.flags,
+                });
+                break :blk self.ok(fuse.WriteOut{ .size = getU32(res.res, "size") orelse return error.InvalidResponse });
+            },
+            .statfs => self.statfs(h),
+            .forget, .batch_forget, .interrupt => .none,
+            .mknod, .setxattr, .getxattr, .listxattr, .removexattr => self.unsupported(h.opcode, .OPNOTSUPP),
+            .ioctl => self.unsupported(h.opcode, .NOTTY),
+            _ => self.unsupported(h.opcode, .NOSYS),
+        };
+    }
+
+    fn unsupported(self: *Fs, opcode: u32, err: E) Reply {
+        if (opcode < 64 and !self.unsupported_logged.isSet(opcode)) {
+            self.unsupported_logged.set(opcode);
+            log.warn("unsupported fuse opcode {d} -> {t}", .{ opcode, err });
+        } else if (opcode >= 64) {
+            log.warn("unsupported fuse opcode {d} -> {t}", .{ opcode, err });
+        }
+        return .{ .err = err };
+    }
+
+    fn init(self: *Fs, payload: []const u8) HandlerError!Reply {
+        const in, _ = try fuse.parse(fuse.InitIn, payload);
+        // FUSE_ATOMIC_O_TRUNC: the kernel forwards O_TRUNC in OPEN and the host
+        // truncates through the opened handle instead of a separate SETATTR.
+        return self.ok(fuse.InitOut{
+            .major = in.major,
+            .minor = in.minor,
+            .max_readahead = in.max_readahead,
+            .flags = in.flags & (fuse.init_flags.big_writes | fuse.init_flags.atomic_o_trunc),
+            .max_write = max_rpc_data,
+            .time_gran = 1,
+        });
+    }
+
+    fn lookup(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const name = fuse.name(payload)[0];
+        if (self.rpc == null) {
+            // stub mode: an empty `/data` directory below the root
+            if (h.nodeid == fuse.root_id and std.mem.eql(u8, name, "data")) {
+                return self.ok(entryOutFromAttr(defaultDirAttr(fuse.root_id + 1), default_attr_ttl_ms, default_entry_ttl_ms));
+            }
+            return .{ .err = .NOENT };
+        }
+        const res = try self.call("lookup", .{ .parent_ino = h.nodeid, .name = name });
+        return self.ok(try entryOut(res.get("entry")));
+    }
+
+    fn getattr(self: *Fs, h: fuse.InHeader) HandlerError!Reply {
+        if (self.rpc == null) return self.ok(attrOut(defaultDirAttr(h.nodeid), default_attr_ttl_ms));
+        return self.fetchAttr(h.nodeid);
+    }
+
+    fn fetchAttr(self: *Fs, ino: u64) HandlerError!Reply {
+        const res = try self.call("getattr", .{ .ino = ino });
+        const attr = try parseAttr(res.get("attr"), ino);
+        return self.ok(attrOut(attr, getU64(res.res, "attr_ttl_ms") orelse default_attr_ttl_ms));
+    }
+
+    fn setattr(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        if (self.rpc == null) return .{ .err = .NOSYS };
+        const req, _ = try fuse.parse(fuse.SetattrIn, payload);
+        if (req.valid & fuse.fattr.mode != 0) {
+            _ = self.call("chmod", .{ .ino = h.nodeid, .mode = req.mode & 0o7777 }) catch |err| switch (err) {
+                // Hosts without chmod support: mode changes are ignored.
+                error.HostErrno => if (self.host_errno != .NOSYS) return err,
+                else => return err,
+            };
+        }
+        if (req.valid & fuse.fattr.size != 0) {
+            _ = try self.call("truncate", .{ .ino = h.nodeid, .size = req.size });
+        }
+        // Other attributes (owner, times) are accepted and ignored.
+        return self.fetchAttr(h.nodeid);
+    }
+
+    fn symlink(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const name, const rest = fuse.name(payload);
+        const res = try self.call("symlink", .{ .parent_ino = h.nodeid, .name = name, .target = fuse.name(rest)[0] });
+        return self.ok(try entryOut(res.get("entry")));
+    }
+
+    fn mkdir(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, const rest = try fuse.parse(fuse.MkdirIn, payload);
+        const res = try self.call("mkdir", .{ .parent_ino = h.nodeid, .name = fuse.name(rest)[0], .mode = req.mode });
+        return self.ok(try entryOut(res.get("entry")));
+    }
+
+    fn rename(self: *Fs, h: fuse.InHeader, new_parent: u64, flags: u32, names: []const u8) HandlerError!Reply {
+        const old_name, const rest = fuse.name(names);
+        _ = try self.call("rename", .{
+            .old_parent_ino = h.nodeid,
+            .old_name = old_name,
+            .new_parent_ino = new_parent,
+            .new_name = fuse.name(rest)[0],
+            .flags = flags,
+        });
+        return empty;
+    }
+
+    fn link(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, const rest = try fuse.parse(fuse.LinkIn, payload);
+        const res = try self.call("link", .{ .old_ino = req.oldnodeid, .new_parent_ino = h.nodeid, .new_name = fuse.name(rest)[0] });
+        return self.ok(try entryOut(res.get("entry")));
+    }
+
+    fn create(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, const rest = try fuse.parse(fuse.CreateIn, payload);
+        const name = fuse.name(rest)[0];
+        const res = self.call("create", .{ .parent_ino = h.nodeid, .name = name, .mode = req.mode, .flags = req.flags }) catch |err| {
+            if (err == error.HostErrno) log.debug("create '{s}' flags=0x{x} failed: {t}", .{ name, req.flags, self.host_errno });
+            return err;
+        };
+        const Out = extern struct { entry: fuse.EntryOut, open: fuse.OpenOut };
+        return self.ok(Out{ .entry = try entryOut(res.get("entry")), .open = try openOut(res) });
+    }
+
+    fn readdir(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, _ = try fuse.parse(fuse.ReadIn, payload);
+        const res = try self.call("readdir", .{ .ino = h.nodeid, .offset = req.offset, .max_entries = @max(1, req.size / 256) });
+        const entries = switch (res.get("entries") orelse return error.InvalidResponse) {
+            .array => |a| a,
+            else => return error.InvalidResponse,
+        };
+
+        var out: std.ArrayList(u8) = try .initCapacity(self.arena.allocator(), req.size);
+        for (entries) |entry| {
+            const name = try expectText(entry.get("name"));
+            const record = fuse.direntSize(name.len);
+            // The reply must not exceed the requested size; the kernel resumes
+            // at the `off` of the last entry returned.
+            if (out.items.len + record > req.size) break;
+            const dirent: fuse.Dirent = .{
+                .ino = getU64(entry, "ino") orelse return error.InvalidResponse,
+                .off = getU64(entry, "offset") orelse 0,
+                .namelen = @intCast(name.len),
+                .type = getU32(entry, "type") orelse 0,
+            };
+            out.appendSliceAssumeCapacity(std.mem.asBytes(&dirent));
+            out.appendSliceAssumeCapacity(name);
+            out.appendNTimesAssumeCapacity(0, record - @sizeOf(fuse.Dirent) - name.len);
+        }
+        return .{ .data = out.items };
+    }
+
+    fn read(self: *Fs, payload: []const u8) HandlerError!Reply {
+        const req, _ = try fuse.parse(fuse.ReadIn, payload);
+        // Fill the whole request: a short reply for a non-EOF region makes the
+        // kernel assume EOF and truncates reads, so large reads are split into
+        // several RPCs.
+        var out: std.ArrayList(u8) = try .initCapacity(self.arena.allocator(), req.size);
+        while (out.items.len < req.size) {
+            const chunk: u32 = @min(req.size - @as(u32, @intCast(out.items.len)), max_rpc_data);
+            const res = try self.call("read", .{ .fh = req.fh, .offset = req.offset + out.items.len, .size = chunk });
+            const data = switch (res.get("data") orelse return error.InvalidResponse) {
+                .bytes => |b| b,
+                else => return error.InvalidResponse,
+            };
+            const take = @min(data.len, chunk);
+            out.appendSliceAssumeCapacity(data[0..take]);
+            if (take < chunk) break; // short read: EOF
+        }
+        return .{ .data = out.items };
+    }
+
+    fn write(self: *Fs, payload: []const u8) HandlerError!Reply {
+        const req, const data = try fuse.parse(fuse.WriteIn, payload);
+        const size: u32 = @intCast(@min(req.size, data.len, max_rpc_data));
+        const res = try self.call("write", .{ .fh = req.fh, .offset = req.offset, .data = cbor.Bytes{ .data = data[0..size] } });
+        return self.ok(fuse.WriteOut{ .size = getU32(res.res, "size") orelse size });
+    }
+
+    fn statfs(self: *Fs, h: fuse.InHeader) HandlerError!Reply {
+        const res = self.call("statfs", .{ .ino = h.nodeid }) catch |err| switch (err) {
+            error.HostErrno => if (self.host_errno == .NOSYS) return self.ok(default_statfs) else return err,
+            else => return err,
+        };
+        const st = res.get("statfs") orelse return error.InvalidResponse;
+        if (st != .map) return error.InvalidResponse;
+        var out = default_statfs;
+        inline for (.{ "blocks", "bfree", "bavail", "files", "ffree" }) |field| {
+            if (getU64(st, field)) |v| @field(out, field) = v;
+        }
+        inline for (.{ "bsize", "namelen", "frsize" }) |field| {
+            if (getU32(st, field)) |v| @field(out, field) = v;
+        }
+        return self.ok(out);
+    }
+
+    /// Fetch the bind mount list from the host and write it newline separated
+    /// to `path`.  The file is only created when the host supports `mounts`
+    /// so that init can fall back to the kernel command line list.
+    fn writeBindsFile(self: *Fs, path: []const u8) !void {
+        defer _ = self.arena.reset(.retain_capacity);
+        const res = self.call("mounts", .{}) catch |err| switch (err) {
+            error.HostErrno => return error.MountsUnavailable,
+            else => return err,
+        };
+        const binds = switch (res.get("binds") orelse return error.InvalidResponse) {
+            .array => |a| a,
+            else => return error.InvalidResponse,
+        };
+
+        var out: std.ArrayList(u8) = .empty;
+        for (binds) |entry| {
+            const bind = try expectText(entry);
+            if (bind.len == 0 or bind[0] != '/' or std.mem.findAny(u8, bind, "\n\x00") != null) return error.InvalidResponse;
+            try out.appendSlice(self.arena.allocator(), bind);
+            try out.append(self.arena.allocator(), '\n');
+        }
+
+        const fd = try sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+        defer sys.close(fd);
+        try sys.writeAll(fd, out.items);
+        log.info("wrote {d} bind mounts to {s}", .{ binds.len, path });
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Host response → FUSE structs
+
+fn expectText(value: ?cbor.Value) error{InvalidResponse}![]const u8 {
+    return switch (value orelse return error.InvalidResponse) {
+        .text => |t| t,
         else => error.InvalidResponse,
     };
 }
 
-fn expectArray(value: cbor.Value) ![]cbor.Value {
-    return switch (value) {
-        .Array => |entries| entries,
-        else => error.InvalidResponse,
-    };
-}
-
-fn expectText(value: cbor.Value) ![]const u8 {
-    return switch (value) {
-        .Text => |text| text,
-        else => error.InvalidResponse,
-    };
-}
-
-fn expectBytes(value: cbor.Value) ![]const u8 {
-    return switch (value) {
-        .Bytes => |bytes| bytes,
-        else => error.InvalidResponse,
-    };
-}
-
-fn getMapU64(map: []cbor.Entry, key: []const u8) ?u64 {
-    const value = cbor.getMapValue(map, key) orelse return null;
-    return switch (value) {
-        .Int => |v| if (v >= 0) @intCast(v) else null,
+/// Non-negative integer map entry; absent or mistyped values yield null.
+fn getU64(map: cbor.Value, key: []const u8) ?u64 {
+    return switch (map.get(key) orelse return null) {
+        .int => |v| std.math.cast(u64, v),
         else => null,
     };
 }
 
-fn getMapU32(map: []cbor.Entry, key: []const u8) ?u32 {
-    const value = getMapU64(map, key) orelse return null;
-    if (value > std.math.maxInt(u32)) return null;
-    return @intCast(value);
+fn getU32(map: cbor.Value, key: []const u8) ?u32 {
+    return std.math.cast(u32, getU64(map, key) orelse return null);
 }
 
-const ParsedEntry = struct {
-    out: FuseEntryOut,
-    attr: FuseAttr,
-};
-
-fn parseEntry(entry_map: []cbor.Entry, default_attr_ttl: u64, default_entry_ttl: u64) !ParsedEntry {
-    const ino = getMapU64(entry_map, "ino") orelse return error.InvalidResponse;
-    const attr_val = cbor.getMapValue(entry_map, "attr") orelse return error.InvalidResponse;
-    const attr_map = try expectMap(attr_val);
-    const attr = try parseAttr(attr_map, ino);
-
-    const attr_ttl_ms = getMapU64(entry_map, "attr_ttl_ms") orelse default_attr_ttl;
-    const entry_ttl_ms = getMapU64(entry_map, "entry_ttl_ms") orelse default_entry_ttl;
-
-    const out = buildEntry(attr, attr_ttl_ms, entry_ttl_ms);
-    return .{ .out = out, .attr = attr };
-}
-
-fn parseAttr(attr_map: []cbor.Entry, fallback_ino: u64) !FuseAttr {
-    const ino = getMapU64(attr_map, "ino") orelse fallback_ino;
-    const size = getMapU64(attr_map, "size") orelse 0;
-    const blocks = getMapU64(attr_map, "blocks") orelse ((size + 511) / 512);
-    const atime_ms = getMapU64(attr_map, "atime_ms") orelse 0;
-    const mtime_ms = getMapU64(attr_map, "mtime_ms") orelse 0;
-    const ctime_ms = getMapU64(attr_map, "ctime_ms") orelse 0;
-    const mode = getMapU32(attr_map, "mode") orelse 0;
-    const nlink = getMapU32(attr_map, "nlink") orelse 1;
-    const uid = getMapU32(attr_map, "uid") orelse 0;
-    const gid = getMapU32(attr_map, "gid") orelse 0;
-    const rdev = getMapU32(attr_map, "rdev") orelse 0;
-    const blksize = getMapU32(attr_map, "blksize") orelse 4096;
-
-    const at = msToTimespec(atime_ms);
-    const mt = msToTimespec(mtime_ms);
-    const ct = msToTimespec(ctime_ms);
-
-    return FuseAttr{
-        .ino = ino,
-        .size = size,
-        .blocks = blocks,
-        .atime = at.sec,
-        .mtime = mt.sec,
-        .ctime = ct.sec,
-        .atimensec = at.nsec,
-        .mtimensec = mt.nsec,
-        .ctimensec = ct.nsec,
-        .mode = mode,
-        .nlink = nlink,
-        .uid = uid,
-        .gid = gid,
-        .rdev = rdev,
-        .blksize = blksize,
-        .padding = 0,
+fn openOut(res: fs_rpc.Response) error{InvalidResponse}!fuse.OpenOut {
+    return .{
+        .fh = getU64(res.res, "fh") orelse return error.InvalidResponse,
+        .open_flags = getU32(res.res, "open_flags") orelse 0,
     };
 }
 
-fn buildEntry(attr: FuseAttr, attr_ttl_ms: u64, entry_ttl_ms: u64) FuseEntryOut {
-    const attr_ttl = msToTimespec(attr_ttl_ms);
-    const entry_ttl = msToTimespec(entry_ttl_ms);
+fn entryOut(value: ?cbor.Value) error{InvalidResponse}!fuse.EntryOut {
+    const entry = value orelse return error.InvalidResponse;
+    if (entry != .map) return error.InvalidResponse;
+    const ino = getU64(entry, "ino") orelse return error.InvalidResponse;
+    return entryOutFromAttr(
+        try parseAttr(entry.get("attr"), ino),
+        getU64(entry, "attr_ttl_ms") orelse default_attr_ttl_ms,
+        getU64(entry, "entry_ttl_ms") orelse default_entry_ttl_ms,
+    );
+}
+
+fn parseAttr(value: ?cbor.Value, fallback_ino: u64) error{InvalidResponse}!fuse.Attr {
+    const attr = value orelse return error.InvalidResponse;
+    if (attr != .map) return error.InvalidResponse;
+    const size = getU64(attr, "size") orelse 0;
+    const atime = splitMs(getU64(attr, "atime_ms") orelse 0);
+    const mtime = splitMs(getU64(attr, "mtime_ms") orelse 0);
+    const ctime = splitMs(getU64(attr, "ctime_ms") orelse 0);
+    return .{
+        .ino = getU64(attr, "ino") orelse fallback_ino,
+        .size = size,
+        .blocks = getU64(attr, "blocks") orelse (size + 511) / 512,
+        .atime = atime.sec,
+        .mtime = mtime.sec,
+        .ctime = ctime.sec,
+        .atimensec = atime.nsec,
+        .mtimensec = mtime.nsec,
+        .ctimensec = ctime.nsec,
+        .mode = getU32(attr, "mode") orelse 0,
+        .nlink = getU32(attr, "nlink") orelse 1,
+        .uid = getU32(attr, "uid") orelse 0,
+        .gid = getU32(attr, "gid") orelse 0,
+        .rdev = getU32(attr, "rdev") orelse 0,
+        .blksize = getU32(attr, "blksize") orelse 4096,
+    };
+}
+
+fn entryOutFromAttr(attr: fuse.Attr, attr_ttl_ms: u64, entry_ttl_ms: u64) fuse.EntryOut {
+    const attr_ttl = splitMs(attr_ttl_ms);
+    const entry_ttl = splitMs(entry_ttl_ms);
     return .{
         .nodeid = attr.ino,
         .generation = 0,
@@ -1631,21 +597,16 @@ fn buildEntry(attr: FuseAttr, attr_ttl_ms: u64, entry_ttl_ms: u64) FuseEntryOut 
     };
 }
 
-fn buildAttrOut(attr: FuseAttr, attr_ttl_ms: u64) FuseAttrOut {
-    const ttl = msToTimespec(attr_ttl_ms);
-    return .{
-        .attr_valid = ttl.sec,
-        .attr_valid_nsec = ttl.nsec,
-        .dummy = 0,
-        .attr = attr,
-    };
+fn attrOut(attr: fuse.Attr, ttl_ms: u64) fuse.AttrOut {
+    const ttl = splitMs(ttl_ms);
+    return .{ .attr_valid = ttl.sec, .attr_valid_nsec = ttl.nsec, .attr = attr };
 }
 
-fn msToTimespec(ms: u64) struct { sec: u64, nsec: u32 } {
-    return .{ .sec = ms / 1000, .nsec = @intCast((ms % 1000) * 1_000_000) };
+fn splitMs(ms: u64) struct { sec: u64, nsec: u32 } {
+    return .{ .sec = ms / 1000, .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
 }
 
-fn defaultDirAttr(ino: u64) FuseAttr {
+fn defaultDirAttr(ino: u64) fuse.Attr {
     return .{
         .ino = ino,
         .size = 0,
@@ -1662,34 +623,37 @@ fn defaultDirAttr(ino: u64) FuseAttr {
         .gid = 0,
         .rdev = 0,
         .blksize = 4096,
-        .padding = 0,
     };
 }
 
-fn defaultStatfs() FuseStatfsOut {
-    return .{ .st = .{
-        .blocks = 16_777_216,
-        .bfree = 16_777_216,
-        .bavail = 16_777_216,
-        .files = 16_777_216,
-        .ffree = 16_777_216,
-        .bsize = 4096,
-        .namelen = 255,
-        .frsize = 4096,
-        .padding = 0,
-        .spare = @splat(0),
-    } };
-}
+const default_statfs: fuse.StatfsOut = .{
+    .blocks = 16_777_216,
+    .bfree = 16_777_216,
+    .bavail = 16_777_216,
+    .files = 16_777_216,
+    .ffree = 16_777_216,
+    .bsize = 4096,
+    .namelen = 255,
+    .frsize = 4096,
+};
 
-fn statfsFromMap(statfs_map: []cbor.Entry) FuseStatfsOut {
-    var out = defaultStatfs();
-    out.st.blocks = getMapU64(statfs_map, "blocks") orelse out.st.blocks;
-    out.st.bfree = getMapU64(statfs_map, "bfree") orelse out.st.bfree;
-    out.st.bavail = getMapU64(statfs_map, "bavail") orelse out.st.bavail;
-    out.st.files = getMapU64(statfs_map, "files") orelse out.st.files;
-    out.st.ffree = getMapU64(statfs_map, "ffree") orelse out.st.ffree;
-    out.st.bsize = getMapU32(statfs_map, "bsize") orelse out.st.bsize;
-    out.st.namelen = getMapU32(statfs_map, "namelen") orelse out.st.namelen;
-    out.st.frsize = getMapU32(statfs_map, "frsize") orelse out.st.frsize;
-    return out;
+test "attribute parsing applies defaults" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try cbor.encode(&w, .{ .ino = @as(u64, 9), .attr = .{ .size = @as(u64, 1000), .mode = @as(u32, 0o100644), .mtime_ms = @as(u64, 1500) } });
+    const value = try cbor.decode(arena, w.buffered());
+
+    const entry = try entryOut(value);
+    try std.testing.expectEqual(@as(u64, 9), entry.nodeid);
+    try std.testing.expectEqual(@as(u64, 9), entry.attr.ino);
+    try std.testing.expectEqual(@as(u64, 2), entry.attr.blocks);
+    try std.testing.expectEqual(@as(u64, 1), entry.attr.mtime);
+    try std.testing.expectEqual(@as(u32, 500_000_000), entry.attr.mtimensec);
+    try std.testing.expectEqual(@as(u32, 1), entry.attr.nlink);
+    try std.testing.expectEqual(@as(u64, 1), entry.entry_valid);
+    try std.testing.expectError(error.InvalidResponse, entryOut(null));
 }

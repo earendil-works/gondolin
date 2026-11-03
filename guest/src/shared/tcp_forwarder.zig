@@ -1,421 +1,339 @@
-//! Generic virtio-serial TCP forwarder used by sandboxssh and sandboxingress.
+//! Virtio-serial ⇄ loopback TCP forwarder used by `sandboxssh` and
+//! `sandboxingress`.
 //!
-//! The host opens a virtio-serial connection and speaks the `tcp_*` messages from
-//! `protocol.zig`. For each logical stream id, we open a non-blocking TCP
-//! connection to a loopback service inside the guest and proxy data in both
-//! directions with basic backpressure.
+//! The host multiplexes logical streams over one virtio-serial port using the
+//! `tcp_*` messages.  For each stream id the forwarder connects to a loopback
+//! TCP service inside the guest and proxies bytes in both directions.
+//!
+//! Single-threaded `poll(2)` loop over the virtio fd and every TCP socket:
+//! - host → guest: `tcp_data` is appended to the stream's pending buffer and
+//!   written when the socket is writable.  More than `max_pending_tcp` unsent
+//!   bytes closes the stream (the host is expected to respect TCP
+//!   backpressure on its side).
+//! - guest → host: sockets are only polled for input while the virtio outbox
+//!   holds less than `max_pending_virtio` bytes, which propagates virtio
+//!   backpressure to the guest services through TCP flow control.
+//! - When the host end of the port disconnects all streams are dropped and
+//!   the forwarder waits for the host to reconnect.
 
 const std = @import("std");
-const posix = @import("posix_compat.zig");
+const sys = @import("sys.zig");
 const protocol = @import("protocol.zig");
 const virtio_port = @import("virtio_port.zig");
+const Channel = @import("channel.zig").Channel;
+const reconnect_poll_ms = @import("channel.zig").reconnect_poll_ms;
 
-const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
-const MAX_BUFFERED_TCP: usize = 256 * 1024;
+const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.tcp_forwarder);
 
-const BackendReadResult = enum {
-    would_block,
-    forwarded,
-    closed,
-};
+/// Outbox high-water mark above which sockets are not read, in `bytes`
+pub const max_pending_virtio: usize = 256 * 1024;
+/// Maximum unsent host data per stream before it is closed, in `bytes`
+pub const max_pending_tcp: usize = 256 * 1024;
+/// Maximum payload of one `tcp_data` frame sent to the host, in `bytes`
+pub const read_chunk: usize = 8 * 1024;
 
 const Conn = struct {
-    fd: posix.fd_t,
-    /// pending bytes to write to tcp socket
-    pending: std.ArrayList(u8),
-    /// whether the host half-closed the write side
-    host_eof: bool,
-    /// whether we've half-closed the backend TCP socket write side
-    backend_shutdown: bool,
+    fd: sys.fd_t,
+    /// host data not yet written to the socket: `pending.items[pending_head..]`
+    pending: std.ArrayList(u8) = .empty,
+    pending_head: usize = 0,
+    /// host sent `tcp_eof`; shut down our write side once `pending` drains
+    host_eof: bool = false,
+    /// `shutdown(SHUT_WR)` already issued
+    backend_shutdown: bool = false,
+
+    fn pendingBytes(self: *const Conn) []const u8 {
+        return self.pending.items[self.pending_head..];
+    }
+
+    fn consume(self: *Conn, n: usize) void {
+        self.pending_head += n;
+        if (self.pending_head == self.pending.items.len) {
+            self.pending.clearRetainingCapacity();
+            self.pending_head = 0;
+        }
+    }
+
+    fn append(self: *Conn, gpa: Allocator, data: []const u8) Allocator.Error!void {
+        if (self.pending_head > 0) {
+            const rest = self.pending.items[self.pending_head..];
+            std.mem.copyForwards(u8, self.pending.items[0..rest.len], rest);
+            self.pending.items.len = rest.len;
+            self.pending_head = 0;
+        }
+        try self.pending.appendSlice(gpa, data);
+    }
+
+    fn maybeShutdown(self: *Conn) void {
+        if (self.host_eof and !self.backend_shutdown and self.pendingBytes().len == 0) {
+            self.backend_shutdown = true;
+            sys.shutdownWrite(self.fd);
+        }
+    }
 };
 
-pub fn run(virtio_port_name: []const u8, log: anytype) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub const Forwarder = struct {
+    gpa: Allocator,
+    channel: Channel,
+    conns: std.array_hash_map.Auto(u32, Conn) = .empty,
+    /// per-message decode arena, reset after every frame
+    arena: std.heap.ArenaAllocator,
+    read_buf: [read_chunk]u8 = undefined,
 
-    log.info("starting", .{});
-
-    const virtio_fd = try virtio_port.open(virtio_port_name, log);
-    defer posix.close(virtio_fd);
-
-    // Non-blocking virtio makes the event loop easier.
-    const original_flags = try posix.fcntl(virtio_fd, posix.F.GETFL, 0);
-    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
-    _ = try posix.fcntl(virtio_fd, posix.F.SETFL, original_flags | nonblock_flag);
-    defer _ = posix.fcntl(virtio_fd, posix.F.SETFL, original_flags) catch {};
-
-    var reader = protocol.FrameReader.init(allocator);
-    defer reader.deinit();
-
-    var writer = protocol.FrameWriter.init(allocator);
-    defer writer.deinit();
-
-    var conns = std.AutoHashMap(u32, Conn).init(allocator);
-    defer {
-        var it = conns.iterator();
-        while (it.next()) |entry| {
-            posix.close(entry.value_ptr.fd);
-            entry.value_ptr.pending.deinit(allocator);
-        }
-        conns.deinit();
+    pub fn init(gpa: Allocator, virtio_fd: sys.fd_t) Forwarder {
+        return .{
+            .gpa = gpa,
+            .channel = .init(gpa, virtio_fd),
+            .arena = .init(gpa),
+        };
     }
 
-    var buffer: [8192]u8 = undefined;
+    pub fn deinit(self: *Forwarder) void {
+        self.dropAll();
+        self.conns.deinit(self.gpa);
+        self.channel.deinit(self.gpa);
+        self.arena.deinit();
+    }
 
-    while (true) {
-        // Build pollfds: virtio + each tcp fd
-        var pollfds = std.ArrayList(posix.pollfd).empty;
-        defer pollfds.deinit(allocator);
+    pub fn run(self: *Forwarder) !void {
+        var pollfds: std.ArrayList(sys.pollfd) = .empty;
+        defer pollfds.deinit(self.gpa);
+        var poll_ids: std.ArrayList(u32) = .empty;
+        defer poll_ids.deinit(self.gpa);
 
-        var virtio_events: i16 = posix.POLL.IN;
-        if (writer.hasPending()) virtio_events |= posix.POLL.OUT;
-        try pollfds.append(allocator, .{ .fd = virtio_fd, .events = virtio_events, .revents = 0 });
+        while (true) {
+            pollfds.clearRetainingCapacity();
+            poll_ids.clearRetainingCapacity();
 
-        // Backpressure: if virtio writer is too backed up, stop reading from tcp sockets.
-        const backpressure_virtio = writer.pendingBytes() >= MAX_BUFFERED_VIRTIO;
-
-        var conn_ids = std.ArrayList(u32).empty;
-        defer conn_ids.deinit(allocator);
-
-        var it = conns.iterator();
-        while (it.next()) |entry| {
-            const id = entry.key_ptr.*;
-            const conn = entry.value_ptr.*;
-            try conn_ids.append(allocator, id);
-
-            var events: i16 = 0;
-            if (!backpressure_virtio) {
-                events |= posix.POLL.IN;
+            var timeout: i32 = -1;
+            const virtio_events = self.channel.pollEvents();
+            if (virtio_events) |events| {
+                try pollfds.append(self.gpa, .{ .fd = self.channel.fd, .events = events, .revents = 0 });
+            } else {
+                timeout = reconnect_poll_ms;
             }
-            if (conn.pending.items.len > 0) {
-                events |= posix.POLL.OUT;
+
+            const read_allowed = self.channel.outbox.pending() < max_pending_virtio;
+            for (self.conns.keys(), self.conns.values()) |id, *conn| {
+                var events: i16 = 0;
+                if (read_allowed) events |= sys.POLL.IN;
+                if (conn.pendingBytes().len > 0) events |= sys.POLL.OUT;
+                // A hung-up socket reports POLLHUP even with no events
+                // requested; leave idle sockets out to avoid spinning.
+                if (events == 0) continue;
+                try pollfds.append(self.gpa, .{ .fd = conn.fd, .events = events, .revents = 0 });
+                try poll_ids.append(self.gpa, id);
             }
-            // Always watch HUP/ERR
-            events |= posix.POLL.HUP;
-            try pollfds.append(allocator, .{ .fd = conn.fd, .events = events, .revents = 0 });
+
+            _ = try sys.poll(pollfds.items, timeout);
+
+            var conn_fds = pollfds.items;
+            if (virtio_events != null) {
+                try self.onVirtioReady(pollfds.items[0].revents);
+                conn_fds = conn_fds[1..];
+            } else if (self.channel.probeReconnect()) {
+                continue;
+            }
+
+            for (conn_fds, poll_ids.items) |pfd, id| {
+                if (pfd.revents != 0) try self.onConnReady(id, pfd.revents);
+            }
+            _ = self.channel.flush();
         }
+    }
 
-        _ = posix.poll(pollfds.items, 100) catch |err| {
-            log.err("poll failed: {s}", .{@errorName(err)});
-            continue;
-        };
-
-        // virtio ready
-        const v_revents = pollfds.items[0].revents;
-        if ((v_revents & posix.POLL.OUT) != 0) {
-            writer.flush(virtio_fd) catch |err| {
-                log.err("virtio flush failed: {s}", .{@errorName(err)});
+    fn onVirtioReady(self: *Forwarder, revents: i16) !void {
+        switch (try self.channel.onReady(self.gpa, revents)) {
+            .ok => {},
+            .disconnected => {
+                self.dropAll();
+                self.channel.outbox.clear();
+                return;
+            },
+        }
+        while (true) {
+            const frame = self.channel.reader.next() catch |err| {
+                log.err("dropping frame: {t}", .{err});
+                continue;
+            } orelse break;
+            defer _ = self.arena.reset(.retain_capacity);
+            self.handleFrame(frame) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => log.err("invalid tcp message: {t}", .{err}),
             };
         }
+    }
 
-        if ((v_revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
-            while (true) {
-                const frame = reader.readFrame(virtio_fd) catch |err| {
-                    if (err == error.EndOfStream) return;
-                    log.err("read frame failed: {s}", .{@errorName(err)});
-                    break;
-                };
-                if (frame == null) break;
-                const frame_buf = frame.?;
-                defer allocator.free(frame_buf);
-
-                const msg = protocol.decodeTcpMessage(allocator, frame_buf) catch |err| {
-                    log.err("decode tcp message failed: {s}", .{@errorName(err)});
-                    continue;
-                };
-
-                switch (msg) {
-                    .open => |open| {
-                        handleOpen(allocator, &conns, &writer, virtio_fd, open) catch |err| {
-                            log.err("tcp_open failed: {s}", .{@errorName(err)});
-                        };
-                    },
-                    .data => |data| {
-                        if (conns.getPtr(data.id)) |conn| {
-                            if (conn.pending.items.len + data.data.len > MAX_BUFFERED_TCP) {
-                                // Too much queued, close.
-                                try closeConn(allocator, &conns, &writer, data.id);
-                                continue;
-                            }
-                            try conn.pending.appendSlice(allocator, data.data);
-                        }
-                    },
-                    .eof => |id| {
-                        if (conns.getPtr(id)) |conn| {
-                            conn.host_eof = true;
-                            // Only half-close the backend after we've flushed all pending bytes.
-                            if (!conn.backend_shutdown and conn.pending.items.len == 0) {
-                                conn.backend_shutdown = true;
-                                _ = posix.shutdown(conn.fd, posix.SHUT.WR) catch {};
-                            }
-                        }
-                    },
-                    .close => |id| {
-                        try closeConn(allocator, &conns, &writer, id);
-                    },
+    fn handleFrame(self: *Forwarder, frame: []const u8) !void {
+        const arena = self.arena.allocator();
+        const env = try protocol.Envelope.decode(arena, frame);
+        const tag = env.tag() orelse return error.UnexpectedType;
+        const id = try env.id();
+        switch (tag) {
+            .tcp_open => try self.open(id, try env.payload(arena, .tcp_open)),
+            .tcp_data => {
+                const data = (try env.payload(arena, .tcp_data)).data.data;
+                const conn = self.conns.getPtr(id) orelse return;
+                if (conn.pendingBytes().len + data.len > max_pending_tcp) {
+                    log.warn("stream {d}: host overran the pending buffer; closing", .{id});
+                    return self.close(id);
                 }
-            }
-        }
-
-        // tcp fds
-        var idx: usize = 1;
-        for (conn_ids.items) |id| {
-            if (idx >= pollfds.items.len) break;
-            const revents = pollfds.items[idx].revents;
-            idx += 1;
-
-            const conn_ptr = conns.getPtr(id) orelse continue;
-
-            if ((revents & posix.POLL.OUT) != 0 and conn_ptr.pending.items.len > 0) {
-                const n = posix.write(conn_ptr.fd, conn_ptr.pending.items) catch |err| blk: {
-                    if (err == error.WouldBlock) break :blk @as(usize, 0);
-                    // Remote closed
-                    try closeConn(allocator, &conns, &writer, id);
-                    break :blk @as(usize, 0);
-                };
-
-                const active_conn = conns.getPtr(id) orelse continue;
-
-                if (n > 0) {
-                    const remaining = active_conn.pending.items.len - n;
-                    std.mem.copyForwards(u8, active_conn.pending.items[0..remaining], active_conn.pending.items[n..]);
-                    active_conn.pending.items = active_conn.pending.items[0..remaining];
-                }
-
-                if (active_conn.pending.items.len == 0 and active_conn.host_eof and !active_conn.backend_shutdown) {
-                    active_conn.backend_shutdown = true;
-                    _ = posix.shutdown(active_conn.fd, posix.SHUT.WR) catch {};
-                }
-            }
-
-            if ((revents & (posix.POLL.IN | posix.POLL.HUP)) != 0) {
-                const should_drain_backend = (revents & posix.POLL.HUP) != 0;
-
-                while (writer.pendingBytes() < MAX_BUFFERED_VIRTIO) {
-                    switch (try forwardBackendReadChunk(
-                        allocator,
-                        &conns,
-                        &writer,
-                        virtio_fd,
-                        log,
-                        id,
-                        conn_ptr.fd,
-                        buffer[0..],
-                    )) {
-                        .forwarded => {
-                            if (!should_drain_backend) break;
-                        },
-                        .would_block, .closed => break,
-                    }
-                }
-            }
+                try conn.append(self.gpa, data);
+            },
+            .tcp_eof => {
+                _ = try env.payload(arena, .tcp_eof);
+                const conn = self.conns.getPtr(id) orelse return;
+                conn.host_eof = true;
+                conn.maybeShutdown();
+            },
+            .tcp_close => {
+                _ = try env.payload(arena, .tcp_close);
+                self.close(id);
+            },
+            else => return error.UnexpectedType,
         }
     }
-}
 
-fn forwardBackendReadChunk(
-    allocator: std.mem.Allocator,
-    conns: *std.AutoHashMap(u32, Conn),
-    writer: *protocol.FrameWriter,
-    virtio_fd: posix.fd_t,
-    log: anytype,
-    id: u32,
-    backend_fd: posix.fd_t,
-    buffer: []u8,
-) !BackendReadResult {
-    const n = posix.read(backend_fd, buffer) catch |err| {
-        if (err == error.WouldBlock) return .would_block;
-        try closeConn(allocator, conns, writer, id);
-        return .closed;
-    };
-    if (n == 0) {
-        try closeConn(allocator, conns, writer, id);
-        return .closed;
-    }
-
-    return try forwardBackendPayload(allocator, conns, writer, virtio_fd, log, id, buffer[0..n]);
-}
-
-fn forwardBackendPayload(
-    allocator: std.mem.Allocator,
-    conns: *std.AutoHashMap(u32, Conn),
-    writer: *protocol.FrameWriter,
-    virtio_fd: posix.fd_t,
-    log: anytype,
-    id: u32,
-    payload_bytes: []const u8,
-) !BackendReadResult {
-    const payload = protocol.encodeTcpData(allocator, id, payload_bytes) catch |err| {
-        log.err("encode tcp_data failed: {s}", .{@errorName(err)});
-        try closeConn(allocator, conns, writer, id);
-        return .closed;
-    };
-    defer allocator.free(payload);
-
-    writer.enqueue(payload) catch |err| {
-        log.err("virtio enqueue failed: {s}", .{@errorName(err)});
-        try closeConn(allocator, conns, writer, id);
-        return .closed;
-    };
-    writer.flush(virtio_fd) catch |err| {
-        log.err("virtio flush failed for conn {d}: {s}", .{ id, @errorName(err) });
-    };
-    return .forwarded;
-}
-
-fn closeConn(
-    allocator: std.mem.Allocator,
-    conns: *std.AutoHashMap(u32, Conn),
-    writer: *protocol.FrameWriter,
-    id: u32,
-) !void {
-    if (conns.fetchRemove(id)) |entry| {
-        posix.close(entry.value.fd);
-        var pending = entry.value.pending;
-        pending.deinit(allocator);
-
-        const payload = try protocol.encodeTcpClose(allocator, id);
-        defer allocator.free(payload);
-        try writer.enqueue(payload);
-    }
-}
-
-test "forwardBackendPayload closes connection when encoding fails after read" {
-    const silent_log = struct {
-        fn err(_: @This(), comptime _: []const u8, _: anytype) void {}
-    }{};
-
-    var allocator_bytes: [4096]u8 = undefined;
-    var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&allocator_bytes);
-    const allocator = fixed_buffer_allocator.allocator();
-
-    var writer = protocol.FrameWriter.init(allocator);
-    defer writer.deinit();
-
-    var conns = std.AutoHashMap(u32, Conn).init(allocator);
-    defer {
-        var it = conns.iterator();
-        while (it.next()) |entry| {
-            posix.close(entry.value_ptr.fd);
-            entry.value_ptr.pending.deinit(allocator);
+    fn open(self: *Forwarder, id: u32, req: protocol.TcpOpen) !void {
+        if (!std.mem.eql(u8, req.host, "127.0.0.1") and !std.mem.eql(u8, req.host, "localhost")) {
+            return self.channel.outbox.send(.tcp_opened, id, .{ .ok = false, .message = "only loopback allowed" });
         }
-        conns.deinit();
+        self.close(id);
+
+        const fd = sys.tcpConnectLoopback(req.port) catch |err| {
+            return self.channel.outbox.send(.tcp_opened, id, .{ .ok = false, .message = @errorName(err) });
+        };
+        errdefer sys.close(fd);
+        try sys.setNonblocking(fd, true);
+        try self.conns.put(self.gpa, id, .{ .fd = fd });
+        try self.channel.outbox.send(.tcp_opened, id, .{ .ok = true });
     }
 
-    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
-    defer posix.close(pipe_fds[1]);
+    fn onConnReady(self: *Forwarder, id: u32, revents: i16) !void {
+        const conn = self.conns.getPtr(id) orelse return;
 
-    try conns.put(7, .{
-        .fd = pipe_fds[0],
-        .pending = .empty,
-        .host_eof = false,
-        .backend_shutdown = false,
-    });
-
-    const payload: [8192]u8 = @splat(0xaa);
-    const result = try forwardBackendPayload(
-        allocator,
-        &conns,
-        &writer,
-        pipe_fds[1],
-        silent_log,
-        7,
-        payload[0..],
-    );
-
-    try std.testing.expectEqual(BackendReadResult.closed, result);
-    try std.testing.expect(conns.getPtr(7) == null);
-}
-
-test "forwardBackendPayload propagates close failure when tcp_close cannot be encoded" {
-    const silent_log = struct {
-        fn err(_: @This(), comptime _: []const u8, _: anytype) void {}
-    }{};
-
-    var failing_allocator_state = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const allocator = failing_allocator_state.allocator();
-
-    var writer = protocol.FrameWriter.init(allocator);
-    defer writer.deinit();
-
-    var conns = std.AutoHashMap(u32, Conn).init(allocator);
-    defer {
-        var it = conns.iterator();
-        while (it.next()) |entry| {
-            posix.close(entry.value_ptr.fd);
-            entry.value_ptr.pending.deinit(allocator);
+        if (revents & (sys.POLL.OUT | sys.POLL.ERR | sys.POLL.HUP) != 0 and conn.pendingBytes().len > 0) {
+            const n = sys.write(conn.fd, conn.pendingBytes()) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return self.close(id),
+            };
+            conn.consume(n);
+            conn.maybeShutdown();
         }
-        conns.deinit();
+
+        if (revents & (sys.POLL.IN | sys.POLL.HUP | sys.POLL.ERR) == 0) return;
+        // After a hang-up drain everything that is still buffered; otherwise
+        // read one chunk per wakeup to stay fair across streams.
+        const drain = revents & (sys.POLL.HUP | sys.POLL.ERR) != 0;
+        while (self.channel.outbox.pending() < max_pending_virtio) {
+            const fd = (self.conns.getPtr(id) orelse return).fd;
+            const n = sys.read(fd, &self.read_buf) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => return self.close(id),
+            };
+            if (n == 0) return self.close(id);
+            self.forward(id, self.read_buf[0..n]);
+            if (!drain) return;
+        }
     }
 
-    const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
-    defer posix.close(pipe_fds[1]);
-
-    try conns.put(9, .{
-        .fd = pipe_fds[0],
-        .pending = .empty,
-        .host_eof = false,
-        .backend_shutdown = false,
-    });
-
-    failing_allocator_state.fail_index = failing_allocator_state.alloc_index;
-
-    const payload: [8192]u8 = @splat(0xbb);
-    try std.testing.expectError(error.OutOfMemory, forwardBackendPayload(
-        allocator,
-        &conns,
-        &writer,
-        pipe_fds[1],
-        silent_log,
-        9,
-        payload[0..],
-    ));
-    try std.testing.expect(conns.getPtr(9) == null);
-}
-
-fn handleOpen(
-    allocator: std.mem.Allocator,
-    conns: *std.AutoHashMap(u32, Conn),
-    writer: *protocol.FrameWriter,
-    virtio_fd: posix.fd_t,
-    open: protocol.TcpOpen,
-) !void {
-    // Only allow loopback
-    if (!std.mem.eql(u8, open.host, "127.0.0.1") and !std.mem.eql(u8, open.host, "localhost")) {
-        try sendOpened(allocator, writer, virtio_fd, open.id, false, "only loopback allowed");
-        return;
+    /// Queue socket data for the host; a stream whose data cannot be queued
+    /// is closed instead of silently losing bytes.
+    fn forward(self: *Forwarder, id: u32, data: []const u8) void {
+        self.channel.outbox.send(.tcp_data, id, .{ .data = .{ .data = data } }) catch |err| {
+            log.warn("stream {d}: cannot queue tcp_data: {t}", .{ id, err });
+            return self.close(id);
+        };
+        _ = self.channel.flush();
     }
 
-    // Close existing
-    try closeConn(allocator, conns, writer, open.id);
+    /// Close a stream and tell the host (no-op for unknown ids).
+    fn close(self: *Forwarder, id: u32) void {
+        var entry = self.conns.fetchSwapRemove(id) orelse return;
+        sys.close(entry.value.fd);
+        entry.value.pending.deinit(self.gpa);
+        self.channel.outbox.send(.tcp_close, id, .{}) catch |err| {
+            log.warn("stream {d}: cannot queue tcp_close: {t}", .{ id, err });
+        };
+    }
 
-    const fd = posix.tcpConnectLoopback(open.port) catch |err| {
-        try sendOpened(allocator, writer, virtio_fd, open.id, false, @errorName(err));
-        return;
-    };
+    /// Close every stream without notifying the host (it is gone).
+    fn dropAll(self: *Forwarder) void {
+        for (self.conns.values()) |*conn| {
+            sys.close(conn.fd);
+            conn.pending.deinit(self.gpa);
+        }
+        self.conns.clearRetainingCapacity();
+    }
+};
 
-    // Set nonblocking
-    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
-    _ = try posix.fcntl(fd, posix.F.SETFL, flags | nonblock_flag);
+/// Entry point shared by `sandboxssh` and `sandboxingress`.
+pub fn main(port_name: []const u8) !void {
+    const runtime = @import("runtime.zig");
+    runtime.init();
+    const gpa = runtime.gpa();
+    defer runtime.deinitGpa();
 
-    const pending = std.ArrayList(u8).empty;
-    try conns.put(open.id, .{ .fd = fd, .pending = pending, .host_eof = false, .backend_shutdown = false });
+    log.info("starting on {s}", .{port_name});
+    const fd = try virtio_port.open(port_name, .nonblocking);
+    defer sys.close(fd);
 
-    try sendOpened(allocator, writer, virtio_fd, open.id, true, null);
+    var forwarder: Forwarder = .init(gpa, fd);
+    defer forwarder.deinit();
+    try forwarder.run();
 }
 
-fn sendOpened(
-    allocator: std.mem.Allocator,
-    writer: *protocol.FrameWriter,
-    virtio_fd: posix.fd_t,
-    id: u32,
-    ok: bool,
-    message: ?[]const u8,
-) !void {
-    const payload = try protocol.encodeTcpOpened(allocator, id, ok, message);
-    defer allocator.free(payload);
-    try writer.enqueue(payload);
-    try writer.flush(virtio_fd);
+const testing = std.testing;
+
+test "socket data that cannot be queued closes the stream" {
+    var fba_buf: [16 * 1024]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&fba_buf);
+    const gpa = fba.allocator();
+
+    const pipe = try sys.pipe(true);
+    defer sys.close(pipe[1]);
+
+    var forwarder: Forwarder = .init(gpa, pipe[1]);
+    defer forwarder.deinit();
+    try forwarder.conns.put(gpa, 7, .{ .fd = pipe[0] });
+
+    // larger than the remaining allocator space: tcp_data cannot be queued
+    const payload: [12 * 1024]u8 = @splat(0xaa);
+    forwarder.forward(7, &payload);
+    try testing.expect(!forwarder.conns.contains(7));
+}
+
+test "tcp messages drive stream state" {
+    const gpa = testing.allocator;
+    const virtio = try sys.pipe(true);
+    defer sys.close(virtio[0]);
+    defer sys.close(virtio[1]);
+    const sock = try sys.pipe(true);
+    defer sys.close(sock[0]);
+
+    var forwarder: Forwarder = .init(gpa, virtio[1]);
+    defer forwarder.deinit();
+    try forwarder.conns.put(gpa, 3, .{ .fd = sock[1] });
+
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try protocol.encode(&w, .tcp_data, 3, .{ .data = .{ .data = "ping" } });
+    try forwarder.handleFrame(w.buffered());
+    try testing.expectEqualStrings("ping", forwarder.conns.getPtr(3).?.pendingBytes());
+
+    try forwarder.onConnReady(3, sys.POLL.OUT);
+    var out: [8]u8 = undefined;
+    try testing.expectEqualStrings("ping", out[0..try sys.read(sock[0], &out)]);
+
+    w = .fixed(&buf);
+    try protocol.encode(&w, .tcp_close, 3, .{});
+    try forwarder.handleFrame(w.buffered());
+    try testing.expect(!forwarder.conns.contains(3));
+    try testing.expect(forwarder.channel.outbox.pending() > 0); // tcp_close echoed
+
+    w = .fixed(&buf);
+    try protocol.encode(&w, .tcp_open, 4, .{ .host = "10.0.0.1", .port = 22 });
+    try forwarder.handleFrame(w.buffered());
+    try testing.expect(!forwarder.conns.contains(4));
 }

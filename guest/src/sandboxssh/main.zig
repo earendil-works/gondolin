@@ -1,8 +1,11 @@
-const std = @import("std");
-const tcp_forwarder = @import("sandboxd").tcp_forwarder;
+//! sandboxssh: forwards host SSH streams on `virtio-ssh` to the guest's
+//! loopback sshd (see `shared/tcp_forwarder.zig`).
 
-const log = std.log.scoped(.sandboxssh);
+const shared = @import("shared");
+
+pub const std_options = shared.runtime.std_options;
+pub const panic = shared.runtime.panic;
 
 pub fn main() !void {
-    try tcp_forwarder.run("virtio-ssh", log);
+    try shared.tcp_forwarder.main("virtio-ssh");
 }

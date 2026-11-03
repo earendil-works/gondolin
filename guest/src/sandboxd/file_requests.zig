@@ -1,160 +1,268 @@
-//! sandboxd handlers for guest-side file operations
+//! Guest file operations requested by the host over `virtio-port`.
+//!
+//! - Reads are streamed: after `file_read_request` the file is read one chunk
+//!   per event loop iteration (only while the outbox is below its high-water
+//!   mark) and sent as `file_read_data` frames followed by `file_read_done`.
+//! - Writes are driven by the host: `file_write_request` opens the file, each
+//!   `file_write_data` frame is written synchronously, and the frame with
+//!   `eof` closes it and produces `file_write_done`.  Other messages may be
+//!   interleaved with an upload.  After a failure the remaining data frames of
+//!   that upload are discarded silently (the error was already reported).
+//! - Deletes complete synchronously.
+//!
+//! Failures are reported by the caller as `error` messages whose message is
+//! the Zig error name (e.g. `FileNotFound`).  Filesystem access uses `std.Io`;
+//! regular file I/O is blocking but bounded per chunk.
 
 const std = @import("std");
-const sandboxd = @import("sandboxd");
+const shared = @import("shared");
+const protocol = shared.protocol;
+const request_path = shared.request_path;
+const Outbox = shared.framing.Outbox;
 
-const protocol = sandboxd.protocol;
-const request_path = sandboxd.request_path;
-const posix = sandboxd.posix;
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const File = std.Io.File;
 
-pub fn handleFileRead(
-    allocator: std.mem.Allocator,
-    tx: anytype,
+pub const Transfers = struct {
+    gpa: Allocator,
+    io: Io,
+    /// directory all request paths are confined to (`/` in production)
     root_dir: []const u8,
-    req: protocol.FileReadRequest,
-) !void {
-    const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
-    defer allocator.free(resolved_path);
+    reads: std.ArrayList(Read) = .empty,
+    writes: std.array_hash_map.Auto(u32, Write) = .empty,
 
-    const fd = try posix.open(resolved_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    defer posix.close(fd);
+    const Read = struct {
+        id: u32,
+        file: File,
+        buf: []u8,
+    };
 
-    const chunk_size: usize = @intCast(req.chunk_size);
-    const buffer = try allocator.alloc(u8, chunk_size);
-    defer allocator.free(buffer);
+    const Write = struct {
+        /// null after a failure: discard data until `eof`
+        file: ?File,
+    };
 
-    while (true) {
-        const n = try posix.read(fd, buffer);
-        if (n == 0) break;
-
-        const payload = try protocol.encodeFileReadData(allocator, req.id, buffer[0..n]);
-        defer allocator.free(payload);
-        try tx.sendPayload(payload);
+    pub fn init(gpa: Allocator, io: Io, root_dir: []const u8) Transfers {
+        return .{ .gpa = gpa, .io = io, .root_dir = root_dir };
     }
 
-    const done_payload = try protocol.encodeFileReadDone(allocator, req.id);
-    defer allocator.free(done_payload);
-    try tx.sendPayload(done_payload);
-}
-
-pub fn handleFileWrite(
-    allocator: std.mem.Allocator,
-    virtio_fd: posix.fd_t,
-    tx: anytype,
-    root_dir: []const u8,
-    req: protocol.FileWriteRequest,
-) !void {
-    const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
-    defer allocator.free(resolved_path);
-
-    const fd = try posix.open(resolved_path, .{
-        .ACCMODE = .WRONLY,
-        .CREAT = true,
-        .TRUNC = req.truncate,
-        .CLOEXEC = true,
-    }, 0o666);
-    defer posix.close(fd);
-
-    while (true) {
-        const frame = try protocol.readFrame(allocator, virtio_fd);
-        defer allocator.free(frame);
-
-        const input = try protocol.decodeFileWriteData(allocator, frame, req.id);
-        if (input.data.len > 0) {
-            try protocol.writeAll(fd, input.data);
-        }
-        if (input.eof) break;
+    pub fn deinit(self: *Transfers) void {
+        for (self.reads.items) |r| self.closeRead(r);
+        self.reads.deinit(self.gpa);
+        for (self.writes.values()) |w| if (w.file) |f| f.close(self.io);
+        self.writes.deinit(self.gpa);
     }
 
-    const done_payload = try protocol.encodeFileWriteDone(allocator, req.id);
-    defer allocator.free(done_payload);
-    try tx.sendPayload(done_payload);
-}
+    fn resolve(self: *Transfers, path: []const u8, cwd: ?[]const u8) request_path.Error![]u8 {
+        return request_path.resolveRequestPathInRoot(self.gpa, self.root_dir, path, cwd);
+    }
 
-fn ensureRecursiveDeleteTargetAllowed(allocator: std.mem.Allocator, resolved_path: []const u8) !void {
-    const normalized_path = try std.fs.path.resolve(allocator, &.{resolved_path});
-    defer allocator.free(normalized_path);
+    // -- reads ------------------------------------------------------------
 
-    if (std.mem.eql(u8, normalized_path, "/")) return error.CannotDeleteRootDirectory;
-}
+    pub fn startRead(self: *Transfers, id: u32, req: protocol.FileReadRequest) !void {
+        const path = try self.resolve(req.path, req.cwd);
+        defer self.gpa.free(path);
 
-pub fn handleFileDelete(
-    allocator: std.mem.Allocator,
-    tx: anytype,
-    root_dir: []const u8,
-    req: protocol.FileDeleteRequest,
-) !void {
-    const resolved_path = try request_path.resolveRequestPathInRoot(allocator, root_dir, req.path, req.cwd);
-    defer allocator.free(resolved_path);
+        const file = try Io.Dir.cwd().openFile(self.io, path, .{});
+        errdefer file.close(self.io);
+        const buf = try self.gpa.alloc(u8, req.chunkSize());
+        errdefer self.gpa.free(buf);
+        try self.reads.append(self.gpa, .{ .id = id, .file = file, .buf = buf });
+    }
 
-    if (req.recursive) {
-        try ensureRecursiveDeleteTargetAllowed(allocator, resolved_path);
-        var threaded: std.Io.Threaded = .init_single_threaded;
-        const io = threaded.io();
-        const cwd = std.Io.Dir.cwd();
-        // deleteTree treats a missing root as success; preserve force=false semantics
-        if (!req.force) {
-            _ = try cwd.statFile(io, resolved_path, .{ .follow_symlinks = false });
+    pub fn hasPendingReads(self: *const Transfers) bool {
+        return self.reads.items.len > 0;
+    }
+
+    /// Send one chunk for every active read (round robin).
+    pub fn pumpReads(self: *Transfers, outbox: *Outbox) Outbox.Error!void {
+        var i: usize = 0;
+        while (i < self.reads.items.len) {
+            const r = self.reads.items[i];
+            const n = r.file.readStreaming(self.io, &.{r.buf}) catch |err| switch (err) {
+                error.EndOfStream => {
+                    try outbox.send(.file_read_done, r.id, .{});
+                    self.closeRead(self.reads.orderedRemove(i));
+                    continue;
+                },
+                else => {
+                    try outbox.send(.@"error", r.id, .{ .code = "file_read_failed", .message = @errorName(err) });
+                    self.closeRead(self.reads.orderedRemove(i));
+                    continue;
+                },
+            };
+            if (n > 0) try outbox.send(.file_read_data, r.id, .{ .data = .{ .data = r.buf[0..n] } });
+            i += 1;
         }
-        try cwd.deleteTree(io, resolved_path);
-    } else {
-        posix.unlink(resolved_path) catch |err| switch (err) {
-            error.FileNotFound => {
-                if (!req.force) return err;
-            },
-            else => return err,
+    }
+
+    fn closeRead(self: *Transfers, r: Read) void {
+        r.file.close(self.io);
+        self.gpa.free(r.buf);
+    }
+
+    // -- writes -----------------------------------------------------------
+
+    pub fn startWrite(self: *Transfers, id: u32, req: protocol.FileWriteRequest) !void {
+        // Uploads that failed earlier and never sent `eof` are forgotten when
+        // a new upload starts (the host runs one file operation at a time).
+        var i: usize = self.writes.count();
+        while (i > 0) {
+            i -= 1;
+            if (self.writes.values()[i].file == null) self.writes.swapRemoveAt(i);
+        }
+        if (self.writes.fetchSwapRemove(id)) |old| if (old.value.file) |f| f.close(self.io);
+
+        try self.writes.ensureUnusedCapacity(self.gpa, 1);
+        const path = self.resolve(req.path, req.cwd) catch |err| {
+            self.writes.putAssumeCapacity(id, .{ .file = null });
+            return err;
         };
+        defer self.gpa.free(path);
+        const file = Io.Dir.cwd().createFile(self.io, path, .{ .truncate = req.truncate }) catch |err| {
+            self.writes.putAssumeCapacity(id, .{ .file = null });
+            return err;
+        };
+        self.writes.putAssumeCapacity(id, .{ .file = file });
     }
 
-    const done_payload = try protocol.encodeFileDeleteDone(allocator, req.id);
-    defer allocator.free(done_payload);
-    try tx.sendPayload(done_payload);
+    pub const WriteResult = enum {
+        /// more data expected
+        pending,
+        /// upload finished; send `file_write_done`
+        done,
+        /// data for a failed upload was discarded
+        discarded,
+    };
+
+    /// Whether `id` names an upload in progress (or one being discarded).
+    pub fn isWriting(self: *const Transfers, id: u32) bool {
+        return self.writes.contains(id);
+    }
+
+    /// Apply one `file_write_data` frame.  On error the upload is aborted and
+    /// its remaining frames are discarded.
+    pub fn writeData(self: *Transfers, id: u32, chunk: protocol.FileWriteData) !WriteResult {
+        const entry = self.writes.getPtr(id) orelse unreachable;
+        const file = entry.file orelse {
+            if (chunk.eof) _ = self.writes.swapRemove(id);
+            return .discarded;
+        };
+        file.writeStreamingAll(self.io, chunk.data.data) catch |err| {
+            self.abortWrite(id);
+            if (chunk.eof) _ = self.writes.swapRemove(id);
+            return err;
+        };
+        if (!chunk.eof) return .pending;
+        file.close(self.io);
+        _ = self.writes.swapRemove(id);
+        return .done;
+    }
+
+    /// Close the file of an upload and discard its remaining frames.
+    pub fn abortWrite(self: *Transfers, id: u32) void {
+        const entry = self.writes.getPtr(id) orelse return;
+        if (entry.file) |f| f.close(self.io);
+        entry.file = null;
+    }
+
+    // -- deletes ----------------------------------------------------------
+
+    pub fn delete(self: *Transfers, req: protocol.FileDeleteRequest) !void {
+        const path = try self.resolve(req.path, req.cwd);
+        defer self.gpa.free(path);
+        const cwd = Io.Dir.cwd();
+
+        if (req.recursive) {
+            try ensureNotRoot(self.gpa, path);
+            // deleteTree treats a missing path as success; honour force=false.
+            if (!req.force) _ = try cwd.statFile(self.io, path, .{ .follow_symlinks = false });
+            try cwd.deleteTree(self.io, path);
+        } else {
+            cwd.deleteFile(self.io, path) catch |err| switch (err) {
+                error.FileNotFound => if (!req.force) return err,
+                else => return err,
+            };
+        }
+    }
+};
+
+fn ensureNotRoot(gpa: Allocator, path: []const u8) !void {
+    const normalized = try std.fs.path.resolve(gpa, &.{path});
+    defer gpa.free(normalized);
+    if (std.mem.eql(u8, normalized, "/")) return error.CannotDeleteRootDirectory;
+}
+
+const testing = std.testing;
+
+fn tmpRoot(tmp: *testing.TmpDir, buf: []u8) ![]const u8 {
+    return buf[0..try tmp.dir.realPath(testing.io, buf)];
 }
 
 test "recursive delete rejects filesystem root equivalents" {
-    const allocator = std.testing.allocator;
-
-    const root_equivalent_paths = [_][]const u8{ "/", "/.", "//", "/tmp/.." };
-    for (root_equivalent_paths) |path| {
-        try std.testing.expectError(error.CannotDeleteRootDirectory, ensureRecursiveDeleteTargetAllowed(allocator, path));
+    for ([_][]const u8{ "/", "/.", "//", "/tmp/.." }) |path| {
+        try testing.expectError(error.CannotDeleteRootDirectory, ensureNotRoot(testing.allocator, path));
     }
-
-    try ensureRecursiveDeleteTargetAllowed(allocator, "/tmp/gondolin-delete-root-test");
-    try ensureRecursiveDeleteTargetAllowed(allocator, "/tmp/../tmp/gondolin-delete-root-test");
+    try ensureNotRoot(testing.allocator, "/tmp/gondolin-delete-root-test");
+    try ensureNotRoot(testing.allocator, "/tmp/../tmp/gondolin-delete-root-test");
 }
 
 test "recursive delete reports missing path unless forced" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_dir = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    var transfers: Transfers = .init(testing.allocator, testing.io, try tmpRoot(&tmp, &root_buf));
+    defer transfers.deinit();
 
-    const TestTx = struct {
-        payloads: usize = 0,
+    try testing.expectError(error.FileNotFound, transfers.delete(.{ .path = "/missing", .recursive = true }));
+    try transfers.delete(.{ .path = "/missing", .recursive = true, .force = true });
+    try testing.expectError(error.FileNotFound, transfers.delete(.{ .path = "/missing" }));
+    try transfers.delete(.{ .path = "/missing", .force = true });
+}
 
-        pub fn sendPayload(self: *@This(), payload: []const u8) !void {
-            _ = payload;
-            self.payloads += 1;
-        }
-    };
+test "upload, stream back and delete a file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmpRoot(&tmp, &root_buf);
+    var transfers: Transfers = .init(testing.allocator, testing.io, root);
+    defer transfers.deinit();
 
-    var tx: TestTx = .{};
-    try std.testing.expectError(error.FileNotFound, handleFileDelete(std.testing.allocator, &tx, root_dir, .{
-        .id = 1,
-        .path = "/missing",
-        .cwd = null,
-        .force = false,
-        .recursive = true,
-    }));
-    try std.testing.expectEqual(@as(usize, 0), tx.payloads);
+    try transfers.startWrite(1, .{ .path = "/hello.txt" });
+    try testing.expectEqual(Transfers.WriteResult.pending, try transfers.writeData(1, .{ .data = .{ .data = "hello " } }));
+    try testing.expectEqual(Transfers.WriteResult.done, try transfers.writeData(1, .{ .data = .{ .data = "world" }, .eof = true }));
+    try testing.expect(!transfers.isWriting(1));
 
-    try handleFileDelete(std.testing.allocator, &tx, root_dir, .{
-        .id = 2,
-        .path = "/missing",
-        .cwd = null,
-        .force = true,
-        .recursive = true,
-    });
-    try std.testing.expectEqual(@as(usize, 1), tx.payloads);
+    var outbox: Outbox = .init(testing.allocator);
+    defer outbox.deinit();
+    try transfers.startRead(2, .{ .path = "hello.txt", .cwd = root, .chunk_size = 1024 });
+    while (transfers.hasPendingReads()) try transfers.pumpReads(&outbox);
+
+    var reader: shared.framing.FrameReader = .{};
+    defer reader.deinit(testing.allocator);
+    try reader.feed(testing.allocator, outbox.aw.writer.buffered());
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const data = try protocol.Envelope.decode(arena, (try reader.next()).?);
+    try testing.expectEqualStrings("hello world", (try data.payload(arena, .file_read_data)).data.data);
+    try testing.expectEqual(protocol.Tag.file_read_done, (try protocol.Envelope.decode(arena, (try reader.next()).?)).tag().?);
+
+    try transfers.delete(.{ .path = "/hello.txt" });
+    try testing.expectError(error.FileNotFound, transfers.startRead(3, .{ .path = "/hello.txt" }));
+}
+
+test "failed upload discards its remaining frames" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var transfers: Transfers = .init(testing.allocator, testing.io, try tmpRoot(&tmp, &root_buf));
+    defer transfers.deinit();
+
+    try testing.expectError(error.FileNotFound, transfers.startWrite(5, .{ .path = "/missing/dir/file" }));
+    try testing.expect(transfers.isWriting(5));
+    try testing.expectEqual(Transfers.WriteResult.discarded, try transfers.writeData(5, .{ .data = .{ .data = "x" } }));
+    try testing.expectEqual(Transfers.WriteResult.discarded, try transfers.writeData(5, .{ .data = .{ .data = "" }, .eof = true }));
+    try testing.expect(!transfers.isWriting(5));
 }
