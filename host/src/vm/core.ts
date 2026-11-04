@@ -321,6 +321,12 @@ export class VM {
         options.maxHttpResponseBodyBytes;
     }
     if (
+      options.followRedirects !== undefined &&
+      sandboxOptions.followRedirects === undefined
+    ) {
+      sandboxOptions.followRedirects = options.followRedirects;
+    }
+    if (
       options.allowWebSockets !== undefined &&
       sandboxOptions.allowWebSockets === undefined
     ) {
@@ -468,6 +474,12 @@ export class VM {
     ) {
       (sandboxOptions as any).maxHttpResponseBodyBytes =
         options.maxHttpResponseBodyBytes;
+    }
+    if (
+      options.followRedirects !== undefined &&
+      sandboxOptions.followRedirects === undefined
+    ) {
+      sandboxOptions.followRedirects = options.followRedirects;
     }
     if (
       options.allowWebSockets !== undefined &&

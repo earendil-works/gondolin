@@ -44,6 +44,7 @@ function makeResolvedOptions(
     maxQueuedExecs: 64,
     maxHttpBodyBytes: 1024 * 1024,
     maxHttpResponseBodyBytes: 1024 * 1024,
+    followRedirects: true,
     fetch: undefined,
     httpHooks: undefined,
     dns: undefined,

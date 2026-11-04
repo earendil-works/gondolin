@@ -172,6 +172,8 @@ export type SandboxServerOptions = {
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes?: number;
+  /** whether the http bridge follows upstream redirects (default: `true`) */
+  followRedirects?: boolean;
   /** mitm ca directory path */
   mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
@@ -252,6 +254,8 @@ export type ResolvedSandboxServerOptions = {
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes: number;
+  /** whether the http bridge follows upstream redirects */
+  followRedirects: boolean;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
   /** http interception hooks */
@@ -1014,6 +1018,7 @@ export function resolveSandboxServerOptions(
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+    followRedirects: options.followRedirects ?? true,
     fetch: options.fetch,
     httpHooks: options.httpHooks,
     dns: options.dns,

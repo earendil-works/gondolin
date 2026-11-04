@@ -37,6 +37,8 @@ export type VMOptions = {
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
+  /** whether the http bridge follows upstream redirects (default: `true`) */
+  followRedirects?: boolean;
 
   /** dns configuration */
   dns?: DnsOptions;

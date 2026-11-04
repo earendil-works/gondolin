@@ -251,6 +251,8 @@ export type QemuHttpInternals = {
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes: number;
+  /** whether the http bridge follows upstream redirects */
+  followRedirects: boolean;
   /** whether to allow WebSocket upgrades */
   allowWebSockets: boolean;
   /** websocket upstream connect + tls handshake timeout in `ms` */
@@ -308,6 +310,8 @@ export type QemuNetworkOptions = {
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes?: number;
+  /** whether the http bridge follows upstream redirects (default: `true`) */
+  followRedirects?: boolean;
 
   /** whether to allow WebSocket upgrades (default: true) */
   allowWebSockets?: boolean;
@@ -466,6 +470,7 @@ export class QemuNetworkBackend extends EventEmitter {
       maxHttpResponseBodyBytes:
         options.maxHttpResponseBodyBytes ??
         DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+      followRedirects: options.followRedirects ?? true,
       allowWebSockets: options.allowWebSockets ?? true,
       webSocketUpstreamConnectTimeoutMs:
         options.webSocketUpstreamConnectTimeoutMs ??

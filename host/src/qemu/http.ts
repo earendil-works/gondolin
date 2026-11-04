@@ -1417,7 +1417,12 @@ export async function fetchHookRequestAndRespond(
       throw err;
     }
 
-    const redirectUrl = getRedirectUrl(response, currentUrl);
+    // With `followRedirects: false` the 3xx goes to the guest untouched: clients
+    // that handle redirects themselves need the `Location` header, and following
+    // it here also loses the request body it may have to replay.
+    const redirectUrl = backend.http.followRedirects
+      ? getRedirectUrl(response, currentUrl)
+      : null;
     if (redirectUrl) {
       if (response.body) {
         await response.body.cancel();

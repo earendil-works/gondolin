@@ -518,6 +518,7 @@ export class SandboxServer extends EventEmitter {
           mitmCertDir: this.options.mitmCertDir,
           maxHttpBodyBytes: this.options.maxHttpBodyBytes,
           maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,
+          followRedirects: this.options.followRedirects,
           allowWebSockets: this.options.allowWebSockets,
         })
       : null;

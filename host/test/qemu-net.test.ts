@@ -4924,3 +4924,47 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
   releaseBlockedFetches();
   await Promise.all(runs);
 });
+
+test("qemu-net: http bridge can hand redirects back to the guest", async () => {
+  const fetched: string[] = [];
+
+  const backend = makeBackend({
+    followRedirects: false,
+    fetch: (async (url: any) => {
+      fetched.push(String(url));
+      return new Response(null, {
+        status: 308,
+        headers: { location: "https://example.com/next" },
+      });
+    }) as any,
+  });
+
+  const written: Buffer[] = [];
+  const session: any = { http: undefined };
+  let finished = false;
+
+  const request = Buffer.from(
+    "POST /start HTTP/1.1\r\n" +
+      "Host: example.com\r\n" +
+      "Content-Length: 0\r\n" +
+      "\r\n",
+  );
+
+  await qemuHttp.handleHttpDataWithWriter(backend, "key", session, request, {
+    scheme: "http",
+    write: (chunk: Buffer) => written.push(Buffer.from(chunk)),
+    finish: () => {
+      finished = true;
+    },
+  });
+
+  assert.equal(fetched.length, 1, "the bridge must not follow the redirect");
+  assert.equal(finished, true);
+
+  const response = Buffer.concat(written).toString("latin1");
+  assert.match(response, /^HTTP\/1\.1 308/);
+  assert.ok(
+    response.toLowerCase().includes("location: https://example.com/next"),
+    `unexpected response: ${response}`,
+  );
+});

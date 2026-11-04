@@ -106,6 +106,7 @@ export type SharedDispatcherEntry = {
 export type QemuHttpInternalsLike = {
   maxHttpBodyBytes: number;
   maxHttpResponseBodyBytes: number;
+  followRedirects: boolean;
   allowWebSockets: boolean;
   webSocketUpstreamConnectTimeoutMs: number;
   webSocketUpstreamHeaderTimeoutMs: number;
