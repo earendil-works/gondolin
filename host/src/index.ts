@@ -173,12 +173,14 @@ export {
 
 // Asset management
 export {
+  computeAssetBuildId,
   ensureGuestAssets,
   getAssetVersion,
   getAssetDirectory,
   hasGuestAssets,
   loadGuestAssets,
   loadAssetManifest,
+  type AssetBuildIdInput,
   type GuestAssets,
   type AssetManifest,
 } from "./assets.ts";
