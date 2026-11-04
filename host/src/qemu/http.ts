@@ -25,6 +25,11 @@ import {
 } from "./ws.ts";
 
 import {
+  createChunkedBodyProgress,
+  decodeChunkedBody,
+  type ChunkedBodyProgress,
+} from "../http/chunked.ts";
+import {
   HttpReceiveBuffer,
   HttpRequestBlockedError,
   MAX_HTTP_HEADER_BYTES,
@@ -107,6 +112,9 @@ export type HttpSession = {
 
     bodyMode: "none" | "content-length" | "chunked";
     contentLength: number;
+
+    /** decode progress for a chunked body, so repeated segments resume instead of re-parsing */
+    chunkedBody?: ChunkedBodyProgress;
   };
 
   /** active streaming request body state (Content-Length only) */
@@ -702,10 +710,12 @@ export async function handleHttpDataWithWriter(
         );
       }
 
-      const chunked = decodeChunkedBodyFromReceiveBuffer(
+      state.chunkedBody ??= createChunkedBodyProgress(state.bodyOffset);
+      const chunked = decodeChunkedBody(
         httpSession.buffer,
         state.bodyOffset,
         state.maxBodyBytes,
+        state.chunkedBody,
       );
 
       if (!chunked.complete) {
@@ -1184,80 +1194,6 @@ function validateExpectHeader(
       417,
       "Expectation Failed",
     );
-  }
-}
-
-function decodeChunkedBodyFromReceiveBuffer(
-  receiveBuffer: HttpReceiveBuffer,
-  bodyOffset: number,
-  maxBodyBytes: number,
-): { complete: boolean; body: Buffer; bytesConsumed: number } {
-  const cursor = receiveBuffer.cursor(bodyOffset);
-  const chunks: Buffer[] = [];
-  const enforceLimit = Number.isFinite(maxBodyBytes) && maxBodyBytes >= 0;
-
-  let totalBytes = 0;
-  const startOffset = cursor.offset;
-
-  while (true) {
-    const sizeLineRaw = cursor.tryReadLineAscii(1024);
-    if (sizeLineRaw === null) {
-      return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-    }
-
-    const sizeLine = sizeLineRaw.split(";")[0]!.trim();
-    const size = parseInt(sizeLine, 16);
-    if (!Number.isFinite(size) || size < 0) {
-      throw new Error("invalid chunk size");
-    }
-
-    // last-chunk + trailer-section
-    if (size === 0) {
-      const emptyTrailers = cursor.tryConsumeSequenceIfPresent([0x0d, 0x0a]);
-      if (emptyTrailers === null) {
-        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-      }
-
-      if (emptyTrailers) {
-        return {
-          complete: true,
-          body: Buffer.concat(chunks, totalBytes),
-          bytesConsumed: cursor.offset - startOffset,
-        };
-      }
-
-      const consumedTrailers = cursor.tryConsumeUntilDoubleCrlf();
-      if (consumedTrailers === null) {
-        return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-      }
-
-      return {
-        complete: true,
-        body: Buffer.concat(chunks, totalBytes),
-        bytesConsumed: cursor.offset - startOffset,
-      };
-    }
-
-    if (enforceLimit && totalBytes + size > maxBodyBytes) {
-      throw new HttpRequestBlockedError(
-        `request body exceeds ${maxBodyBytes} bytes`,
-        413,
-        "Payload Too Large",
-      );
-    }
-
-    const chunkData = cursor.tryReadBytes(size);
-    if (chunkData === null) {
-      return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-    }
-
-    totalBytes += size;
-    chunks.push(chunkData);
-
-    const terminator = cursor.tryConsumeExactSequence([0x0d, 0x0a]);
-    if (terminator === null) {
-      return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
-    }
   }
 }
 
