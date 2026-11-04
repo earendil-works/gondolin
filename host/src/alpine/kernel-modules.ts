@@ -69,7 +69,14 @@ function copyAllKernelModules(srcDir: string, dstDir: string): void {
 
   fs.rmSync(dstDir, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(dstDir), { recursive: true });
-  fs.cpSync(srcDir, dstDir, { recursive: true, dereference: false });
+  fs.cpSync(srcDir, dstDir, {
+    recursive: true,
+    dereference: false,
+    // `dereference: false` alone still resolves symlink targets, which rewrites
+    // guest-relative links into absolute host paths (and aborts Node when the
+    // target sits in an unreadable host directory).
+    verbatimSymlinks: true,
+  });
 }
 
 function copyInitramfsModules(srcDir: string, dstDir: string): void {
