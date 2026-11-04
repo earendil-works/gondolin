@@ -335,6 +335,25 @@ else
   printf "%s\\n" "\${sandboxfs_error}" > /run/sandboxfs.failed
 fi
 
+setup_hostname() {
+  guest_hostname="gondolin"
+
+  # The kernel hostname is unset unless init sets it. Tools such as sudo then
+  # warn that "(none)" cannot be resolved, so give the guest a name and the
+  # loopback entries that make it resolve.
+  if [ -w /proc/sys/kernel/hostname ]; then
+    printf "%s\\n" "\${guest_hostname}" > /proc/sys/kernel/hostname 2>/dev/null || true
+  fi
+
+  printf "%s\\n" "\${guest_hostname}" > /etc/hostname 2>/dev/null || true
+
+  if [ -f /etc/hosts ] && ! grep -q "[[:space:]]\${guest_hostname}$" /etc/hosts 2>/dev/null; then
+    printf "127.0.0.1\\t%s\\n::1\\t%s\\n" "\${guest_hostname}" "\${guest_hostname}" >> /etc/hosts 2>/dev/null || true
+  fi
+}
+
+setup_hostname
+
 setup_mitm_ca
 
 if [ -x /usr/bin/sandboxssh ]; then
