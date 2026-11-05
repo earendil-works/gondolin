@@ -18,5 +18,5 @@ host/dist/
 host/var/
 host/fuzz/artifacts/
 
-# Zensical docs output
+# Docs output (make docs)
 site/

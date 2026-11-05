@@ -27,6 +27,18 @@ cd host && node --test test/specific.test.ts  # Single test
 
 Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build/alpine.ts`).
 
+### Documentation
+
+```bash
+make docs        # Build docs/ into site/ (scripts/docs/build.py)
+make serve-docs  # Serve on http://127.0.0.1:8000/, rebuilding on change
+```
+
+The navigation lives in `docs/SUMMARY.md`; a page missing from it is not built.
+The theme (shared with Earendil's other docs) lives in `scripts/docs/assets/`;
+Elanor's tokens and fonts come from npm, pinned in `scripts/docs/elanor.json`
+(`scripts/docs/build.py update-elanor`).
+
 ## Version Updates & Releases
 
 When preparing a package release, keep all package versions in sync with the release tag:

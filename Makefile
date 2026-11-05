@@ -55,8 +55,8 @@ help:
 	@echo "  make fuzz-protocol-repro [FILE=path] - Run protocol repro in VM (defaults to newest)"
 	@echo "  make fuzz-sandbox-repro [FILE=path] - Run sandbox repro in VM (defaults to newest)"
 	@echo "  make fuzz-clean  - Remove fuzz binaries + cache"
-	@echo "  make docs        - Build documentation site (Zensical)"
-	@echo "  make serve-docs  - Serve documentation locally (Zensical)"
+	@echo "  make docs        - Build documentation site (docs/ -> site/)"
+	@echo "  make serve-docs  - Serve documentation locally, rebuilding on change"
 	@echo "  make hooks       - Install git hooks"
 	@echo "  make libkrun     - Build + stage libkrun locally under .cache/"
 	@echo "  make krun-runner - Build libkrun + host/krun-runner helper"
@@ -179,14 +179,13 @@ krun-runner: libkrun
 	@echo "Bundled libs: host/krun-runner/zig-out/lib/libkrun*"
 	@echo "Run with: GONDOLIN_VMM=krun GONDOLIN_KRUN_RUNNER=$$(pwd)/host/krun-runner/zig-out/bin/gondolin-krun-runner npx @earendil-works/gondolin bash"
 
-ZENSICAL_VERSION ?= 0.0.21
-
+# Build documentation site (docs/ -> site/)
 docs:
-	@uvx --from "zensical==$(ZENSICAL_VERSION)" zensical build
-	@touch site/.nojekyll
+	@uv run --script scripts/docs/build.py build
 
+# Serve documentation locally, rebuilding on change
 serve-docs:
-	@uvx --from "zensical==$(ZENSICAL_VERSION)" zensical serve
+	@uv run --script scripts/docs/build.py serve
 
 fuzz:
 	@$(MAKE) -C guest fuzz
