@@ -235,6 +235,7 @@ export class VM {
   private readonly autoStart: boolean;
   private readonly startTimeoutMs: number;
   private readonly sessionLabel: string | undefined;
+  private readonly secretEnv: Record<string, string>;
   private server: SandboxServer | null;
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
   private rootDisk: RootDiskState | null = null;
@@ -366,6 +367,7 @@ export class VM {
     this.autoStart = options.autoStart ?? true;
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
     this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
+    this.secretEnv = { ...(options.secretEnv ?? {}) };
     const rootfsSizeBytes =
       options.rootfs?.size === undefined
         ? null
@@ -1325,6 +1327,7 @@ fi
           return server.connect(onMessage, onClose);
         },
         {
+          onSecretEnv: () => ({ ...this.secretEnv }),
           onSnapshot: async (message) => {
             const checkpoint = await this.checkpointInternal(message.path, {
               keepSessionIpc: true,

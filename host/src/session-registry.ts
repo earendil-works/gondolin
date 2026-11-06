@@ -14,6 +14,8 @@ import {
   type ExecWindowCommandMessage,
   type PtyResizeCommandMessage,
   type ServerMessage,
+  type SecretEnvCommandMessage,
+  type SecretEnvResponseMessage,
   type SnapshotCommandMessage,
   type SnapshotResponseMessage,
   type StdinCommandMessage,
@@ -309,6 +311,8 @@ type SessionIpcServerHandlers = {
   onSnapshot?: (
     message: SnapshotCommandMessage,
   ) => Promise<SessionSnapshotResult>;
+  /** placeholder environment for the session's configured secrets */
+  onSecretEnv?: () => Record<string, string>;
 };
 
 export class SessionIpcServer {
@@ -581,6 +585,23 @@ export class SessionIpcServer {
       }
     };
 
+    const handleSecretEnv = (message: SecretEnvCommandMessage): void => {
+      if (!Number.isInteger(message.id) || message.id < 0) {
+        sendError(socket, "invalid_request", "secret_env requires a uint32 id");
+        return;
+      }
+
+      // An attached process needs the same placeholders the original one had.
+      // Real secret values stay in this process; only placeholders are ever
+      // sent, so an empty map simply means no secrets are configured.
+      const response: SecretEnvResponseMessage = {
+        type: "secret_env_response",
+        id: message.id,
+        env: this.handlers.onSecretEnv?.() ?? {},
+      };
+      sendJson(socket, response);
+    };
+
     const handleSnapshot = (message: SnapshotCommandMessage): void => {
       if (!Number.isInteger(message.id) || message.id < 0) {
         sendError(socket, "invalid_request", "snapshot requires a uint32 id");
@@ -666,6 +687,11 @@ export class SessionIpcServer {
 
       if (message.type === "snapshot") {
         handleSnapshot(message);
+        return;
+      }
+
+      if (message.type === "secret_env") {
+        handleSecretEnv(message);
         return;
       }
 

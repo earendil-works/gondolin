@@ -54,6 +54,13 @@ export type VMOptions = {
   vfs?: VmVfsOptions | null;
   /** default environment variables */
   env?: EnvInput;
+  /**
+   * Placeholder environment for configured secrets, served to `attach` over
+   * the session socket so an attached process sees the same placeholders the
+   * original one did. Real values never leave the host process that owns the
+   * VM, so only placeholders belong here.
+   */
+  secretEnv?: Record<string, string>;
   /** vm memory size (qemu syntax, default: "1G") */
   memory?: string;
   /** vm cpu count (default: 2) */

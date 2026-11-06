@@ -100,6 +100,12 @@ export type ExecWindowCommandMessage = {
   stderr?: number;
 };
 
+export type SecretEnvCommandMessage = {
+  type: "secret_env";
+  /** request id */
+  id: number;
+};
+
 export type ClientMessage =
   | BootCommandMessage
   | ExecCommandMessage
@@ -107,7 +113,8 @@ export type ClientMessage =
   | PtyResizeCommandMessage
   | ExecWindowCommandMessage
   | LifecycleCommandMessage
-  | SnapshotCommandMessage;
+  | SnapshotCommandMessage
+  | SecretEnvCommandMessage;
 
 export type ExecResponseMessage = {
   type: "exec_response";
@@ -145,10 +152,19 @@ export type StatusMessage = {
   state: "starting" | "running" | "stopped";
 };
 
+export type SecretEnvResponseMessage = {
+  type: "secret_env_response";
+  /** request id */
+  id: number;
+  /** placeholder environment for the session's configured secrets */
+  env: Record<string, string>;
+};
+
 export type ServerMessage =
   | ExecResponseMessage
   | ErrorMessage
   | SnapshotResponseMessage
+  | SecretEnvResponseMessage
   | StatusMessage;
 
 export type OutputStream = "stdout" | "stderr";
