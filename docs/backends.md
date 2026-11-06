@@ -38,11 +38,11 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 ### krun
 
 - Guest architecture must match the **host** architecture
-- Requires image manifest krun boot assets:
+- On x86_64, krun boots the image's `vmlinuz-virt` and `initramfs.cpio.lz4`,
+  the same assets qemu uses.
+- On aarch64, the image manifest must provide krun boot assets:
     - `assets.krunKernel`
     - `assets.krunInitrd` (optional; defaults to an empty initrd)
-- On x86_64 the boot assets are the Alpine kernel and initramfs; on aarch64
-  they are the libkrunfw kernel and an empty initrd.
 - Build/setup path: `gondolin build` (or published image assets)
 - `make krun-runner` builds the runner binary; it does not provide kernel assets
 
@@ -54,7 +54,7 @@ Runner path resolution:
 ## Runtime Caveats
 
 - `krun` backend is still experimental and has less runtime parity coverage than `qemu`
-- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
+- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires aarch64 assets that include `manifest.assets.krunKernel`; x86_64 uses the base kernel/initramfs
 - Some krun networking edge cases are still under investigation
 - Host CA trust configuration can cause guest-visible HTTP `502` errors on both backends when upstream TLS validation fails
 

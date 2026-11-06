@@ -30,7 +30,8 @@ function makeTempAssetsDir(
   fs.writeFileSync(path.join(dir, initrdRel), "");
   fs.writeFileSync(path.join(dir, rootfsRel), "");
   if (includeKrunAssets) {
-    fs.writeFileSync(path.join(dir, krunKernelRel), "");
+    // Keep the kernel loadable so x86_64 keeps the manifest override.
+    fs.writeFileSync(path.join(dir, krunKernelRel), "MZ\u0000\u0000");
     fs.writeFileSync(path.join(dir, krunInitrdRel), "");
   }
 
@@ -201,19 +202,28 @@ test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () 
   }
 });
 
-test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
+test("resolveSandboxServerOptions falls back to base assets for x86_64 krun without krun assets", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });
 
   try {
-    assert.throws(
-      () =>
-        resolveSandboxServerOptions({
-          imagePath: dir,
-          vmm: "krun",
-        }),
-      /Selected image does not provide krun boot assets/,
-    );
+    if (hostArch === "x86_64") {
+      const resolved = resolveSandboxServerOptions({
+        imagePath: dir,
+        vmm: "krun",
+      });
+      assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
+      assert.equal(path.basename(resolved.initrdPath), "initramfs.cpio.lz4");
+    } else {
+      assert.throws(
+        () =>
+          resolveSandboxServerOptions({
+            imagePath: dir,
+            vmm: "krun",
+          }),
+        /Selected image does not provide krun boot assets/,
+      );
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -264,7 +274,7 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
 
   const krunKernel = path.join(dir, "krun-kernel");
   const krunInitrd = path.join(dir, "krun-initrd");
-  fs.writeFileSync(krunKernel, "kernel");
+  fs.writeFileSync(krunKernel, "MZ\u0000\u0000");
   fs.writeFileSync(krunInitrd, "");
 
   const manifestPath = path.join(dir, "manifest.json");
