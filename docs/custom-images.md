@@ -23,8 +23,8 @@ GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
 `gondolin build` produces qemu boot assets and, on aarch64, krun boot
-artifacts (`krun-kernel` + `krun-initrd`) recorded in `manifest.json`.  On
-x86_64, krun reuses `vmlinuz-virt` and `initramfs.cpio.lz4`, so no separate
+artifacts (`krun-kernel` + `krun-empty-initrd`) recorded in `manifest.json`.
+On x86_64, krun reuses `vmlinuz-virt` and `initramfs.cpio.lz4`, so no separate
 krun assets are written.
 
 During image builds, Gondolin resolves exact-version prebuilt sandbox helper
@@ -378,7 +378,7 @@ my-assets/
   initramfs.cpio.lz4   # Compressed initramfs (qemu and x86_64 krun)
   rootfs.ext4          # Root filesystem image
   krun-kernel          # aarch64 krun kernel (libkrunfw)
-  krun-initrd          # aarch64 krun initrd (empty cpio)
+  krun-empty-initrd    # aarch64 krun initrd (empty cpio)
 ```
 
 The `manifest.json` contains the build configuration, timestamps, SHA-256

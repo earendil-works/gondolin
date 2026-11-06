@@ -36,7 +36,7 @@ function makeManifestAssets(
       path.join(dir, "krun-kernel"),
       options.krunKernelBytes ?? Buffer.from([0xfc, 0x8b, 0x03, 0x8d]),
     );
-    fs.writeFileSync(path.join(dir, "krun-initrd"), "krun-initrd");
+    fs.writeFileSync(path.join(dir, "krun-empty-initrd"), "krun-empty-initrd");
   }
 
   fs.writeFileSync(
@@ -51,7 +51,7 @@ function makeManifestAssets(
           initramfs: "initramfs.cpio.lz4",
           rootfs: "rootfs.ext4",
           ...(includeKrunAssets
-            ? { krunKernel: "krun-kernel", krunInitrd: "krun-initrd" }
+            ? { krunKernel: "krun-kernel", krunInitrd: "krun-empty-initrd" }
             : {}),
         },
         checksums: {
@@ -179,7 +179,7 @@ test("x86_64 krun keeps a loadable manifest kernel", (t) => {
     });
 
     assert.equal(path.basename(resolved.kernelPath), "krun-kernel");
-    assert.equal(path.basename(resolved.initrdPath), "krun-initrd");
+    assert.equal(path.basename(resolved.initrdPath), "krun-empty-initrd");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

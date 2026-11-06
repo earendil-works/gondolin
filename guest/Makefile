@@ -21,7 +21,7 @@ IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.lz4
 IMAGE_ROOTFS ?= $(IMAGE_OUT)/rootfs.ext4
 KERNEL ?= $(IMAGE_OUT)/vmlinuz-virt
 KRUN_KERNEL ?= $(IMAGE_OUT)/krun-kernel
-KRUN_INITRD ?= $(IMAGE_OUT)/krun-initrd
+KRUN_INITRD ?= $(IMAGE_OUT)/krun-empty-initrd
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -s)

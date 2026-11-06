@@ -180,7 +180,7 @@ jobs:
           test -s ./tmp-container-assets/rootfs.ext4
           # x86_64 reuses the base kernel/initramfs for krun
           test ! -e ./tmp-container-assets/krun-kernel
-          test ! -e ./tmp-container-assets/krun-initrd
+          test ! -e ./tmp-container-assets/krun-empty-initrd
 
   krun-linux-build:
     name: Build krun runner (Linux x86_64 smoke)

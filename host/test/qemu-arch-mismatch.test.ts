@@ -20,7 +20,9 @@ function makeTempAssetsDir(
     : "initramfs.cpio.lz4";
   const rootfsRel = splitAssetDirs ? "img/rootfs.ext4" : "rootfs.ext4";
   const krunKernelRel = splitAssetDirs ? "boot/krun-kernel" : "krun-kernel";
-  const krunInitrdRel = splitAssetDirs ? "boot/krun-initrd" : "krun-initrd";
+  const krunInitrdRel = splitAssetDirs
+    ? "boot/krun-empty-initrd"
+    : "krun-empty-initrd";
 
   // Required asset files (can be empty for this test).
   fs.mkdirSync(path.dirname(path.join(dir, kernelRel)), { recursive: true });
@@ -273,14 +275,14 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
   const dir = makeTempAssetsDir(hostArch);
 
   const krunKernel = path.join(dir, "krun-kernel");
-  const krunInitrd = path.join(dir, "krun-initrd");
+  const krunInitrd = path.join(dir, "krun-empty-initrd");
   fs.writeFileSync(krunKernel, "MZ\u0000\u0000");
   fs.writeFileSync(krunInitrd, "");
 
   const manifestPath = path.join(dir, "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   manifest.assets.krunKernel = "krun-kernel";
-  manifest.assets.krunInitrd = "krun-initrd";
+  manifest.assets.krunInitrd = "krun-empty-initrd";
   fs.writeFileSync(manifestPath, JSON.stringify(manifest));
 
   try {
@@ -307,7 +309,10 @@ test("resolveSandboxServerOptions supports split manifest asset directories for 
     });
 
     assert.equal(resolved.kernelPath, path.join(dir, "boot", "krun-kernel"));
-    assert.equal(resolved.initrdPath, path.join(dir, "boot", "krun-initrd"));
+    assert.equal(
+      resolved.initrdPath,
+      path.join(dir, "boot", "krun-empty-initrd"),
+    );
     assert.equal(resolved.rootfsPath, path.join(dir, "img", "rootfs.ext4"));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
