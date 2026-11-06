@@ -4,6 +4,7 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Fix `krun` on x86_64: builds now use the Alpine kernel and initramfs as `krun-kernel`/`krun-initrd` (renamed from `krun-empty-initrd`).  The libkrunfw bundle was loaded at the wrong guest address, so krun panicked with the default guest memory and never booted with more; aarch64 still uses libkrunfw.  Rebuild images built before this change.
 - Fix `gondolin build` silently producing an empty 4-byte initramfs when `cpio` was missing: the archiver and compressor now run as separate steps with actionable errors, and an empty archive fails the build.
 - Rework the guest helpers (`sandboxd`, `sandboxfs`, `sandboxssh`, `sandboxingress`) as static, libc-free, single-threaded binaries.  `sandboxd` is now a single `poll(2)` event loop (virtio port, a `SIGCHLD` signalfd and every exec session's stdio) instead of a thread per exec session with a shared blocking writer; all output goes through one bounded queue, so a slow host backs up into the child's pipes instead of guest memory.  All helpers share one framing/CBOR/protocol layer and binaries are 75-85% smaller.  The wire protocol is unchanged; `guest/ARCHITECTURE.md` is the full specification.
 - Fix zombie processes accumulating in the guest: `sandboxd` (PID 1) now reaps orphaned children.

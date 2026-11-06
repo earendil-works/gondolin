@@ -153,14 +153,19 @@ export async function buildNative(
     log,
   });
 
-  log("Fetching libkrunfw-compatible kernel...");
-  await fetchKrunBootAssets(
-    workDir,
-    config.arch,
-    alpineConfig.krunfwVersion,
-    cacheDir,
-    log,
-  );
+  if (config.arch === "x86_64") {
+    log("Using the Alpine kernel and initramfs as krun boot assets...");
+    writeKrunAssetsFromAlpine(workDir, alpineBuild.kernel);
+  } else {
+    log("Fetching libkrunfw-compatible kernel...");
+    await fetchKrunBootAssets(
+      workDir,
+      config.arch,
+      alpineConfig.krunfwVersion,
+      cacheDir,
+      log,
+    );
+  }
 
   log("Copying assets to output directory...");
 
@@ -242,6 +247,26 @@ type KrunArchive = {
 
 type DownloadFileFn = (url: string, dest: string) => Promise<void>;
 
+/**
+ * Copy the Alpine kernel and initramfs for use as krun boot assets.
+ *
+ * libkrun's raw x86_64 kernel path loads the image at 0x80000000, which does
+ * not match where the libkrunfw bundle is linked; its compressed-Image path
+ * loads the Alpine bzImage at the right address. The initramfs is required
+ * because the Alpine kernel has virtio/ext4 as modules.
+ */
+function writeKrunAssetsFromAlpine(
+  outputDir: string,
+  alpineKernelPath: string,
+): void {
+  fs.copyFileSync(alpineKernelPath, path.join(outputDir, KRUN_KERNEL_FILENAME));
+  fs.copyFileSync(
+    path.join(outputDir, INITRAMFS_FILENAME),
+    path.join(outputDir, KRUN_INITRD_FILENAME),
+  );
+}
+
+/** Fetch libkrunfw kernel assets (aarch64 only) */
 async function fetchKrunBootAssets(
   outputDir: string,
   arch: Architecture,
@@ -1029,4 +1054,5 @@ export const __test = {
   downloadKrunArchive,
   extractKernelBundleFromCSource,
   extractKernelBundleFromSharedLibraryBytes,
+  writeKrunAssetsFromAlpine,
 };

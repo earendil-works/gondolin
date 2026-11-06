@@ -18,7 +18,7 @@ export const KERNEL_FILENAME = "vmlinuz-virt";
 export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
 export const KRUN_KERNEL_FILENAME = "krun-kernel";
-export const KRUN_INITRD_FILENAME = "krun-empty-initrd";
+export const KRUN_INITRD_FILENAME = "krun-initrd";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {

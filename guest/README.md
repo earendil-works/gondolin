@@ -35,7 +35,7 @@ For image assembly (`make build`, via the shared `gondolin build` pipeline):
 
 | macOS | Linux (Debian/Ubuntu) |
 |-------|----------------------|
-| `brew install lz4 e2fsprogs` | `sudo apt install lz4 cpio e2fsprogs` |
+| `brew install cpio lz4 e2fsprogs` | `sudo apt install lz4 cpio e2fsprogs` |
 
 The build resolves prebuilt sandbox helper binaries by default, so Zig is not
 required for ordinary image builds. Make sure host Node dependencies are
