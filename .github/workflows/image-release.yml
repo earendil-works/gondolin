@@ -164,7 +164,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.qemu }} lz4
+          sudo apt-get install -y ${{ matrix.qemu }} lz4 cpio
           curl -LsSf https://astral.sh/uv/install.sh | sh
 
           UV_BIN_DIR=""
@@ -201,7 +201,8 @@ jobs:
         run: |
           ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
           cd guest/image/out
-          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 krun-kernel krun-empty-initrd
+          FILES="$(node -e 'const m = require("./manifest.json"); console.log(["manifest.json", ...new Set(Object.values(m.assets))].join(" "))')"
+          tar -czvf "../../../${ARCHIVE}" $FILES
 
       - name: Compute sha256 + metadata
         run: |

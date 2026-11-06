@@ -521,12 +521,13 @@ export function writeAssetManifest(
     rootfs: ROOTFS_FILENAME,
   };
 
-  if (fs.existsSync(krunKernelDst)) {
+  // x86_64 krun reuses the base kernel and initramfs; aarch64 has its own.
+  if (config.arch !== "x86_64" && fs.existsSync(krunKernelDst)) {
     assets.krunKernel = KRUN_KERNEL_FILENAME;
     checksums.krunKernel = computeFileHash(krunKernelDst);
   }
 
-  if (fs.existsSync(krunInitrdDst)) {
+  if (config.arch !== "x86_64" && fs.existsSync(krunInitrdDst)) {
     assets.krunInitrd = KRUN_INITRD_FILENAME;
     checksums.krunInitrd = computeFileHash(krunInitrdDst);
   }

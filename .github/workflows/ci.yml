@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.qemu }} lz4
+          sudo apt-get install -y ${{ matrix.qemu }} lz4 cpio
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           pnpm install
@@ -100,9 +100,8 @@ jobs:
       - name: Package assets
         run: |
           cd guest/image/out
-          tar -czvf ../../../${{ matrix.artifact }}.tar.gz \
-            manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 \
-            krun-kernel krun-empty-initrd
+          FILES="$(node -e 'const m = require("./manifest.json"); console.log(["manifest.json", ...new Set(Object.values(m.assets))].join(" "))')"
+          tar -czvf ../../../${{ matrix.artifact }}.tar.gz $FILES
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -179,8 +178,9 @@ jobs:
           test -s ./tmp-container-assets/vmlinuz-virt
           test -s ./tmp-container-assets/initramfs.cpio.lz4
           test -s ./tmp-container-assets/rootfs.ext4
-          test -s ./tmp-container-assets/krun-kernel
-          test -f ./tmp-container-assets/krun-empty-initrd
+          # x86_64 reuses the base kernel/initramfs for krun
+          test ! -e ./tmp-container-assets/krun-kernel
+          test ! -e ./tmp-container-assets/krun-empty-initrd
 
   krun-linux-build:
     name: Build krun runner (Linux x86_64 smoke)
@@ -211,6 +211,9 @@ jobs:
 
       - name: Verify krun runner binary
         run: host/krun-runner/zig-out/bin/gondolin-krun-runner --version
+
+      - name: Test krun runner
+        run: make krun-runner-test
 
   krun-runner-package-smoke:
     name: Package krun runner (Linux x86_64 smoke)
@@ -361,7 +364,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 lz4
+          sudo apt-get install -y qemu-system-x86 lz4 cpio
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 

@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner krun-runner-test
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -60,6 +60,7 @@ help:
 	@echo "  make hooks       - Install git hooks"
 	@echo "  make libkrun     - Build + stage libkrun locally under .cache/"
 	@echo "  make krun-runner - Build libkrun + host/krun-runner helper"
+	@echo "  make krun-runner-test - Run host/krun-runner unit tests"
 
 build:
 	@$(RUN_PARALLEL) -j 2 \
@@ -178,6 +179,11 @@ krun-runner: libkrun
 	@echo "Built runner: host/krun-runner/zig-out/bin/gondolin-krun-runner"
 	@echo "Bundled libs: host/krun-runner/zig-out/lib/libkrun*"
 	@echo "Run with: GONDOLIN_VMM=krun GONDOLIN_KRUN_RUNNER=$$(pwd)/host/krun-runner/zig-out/bin/gondolin-krun-runner npx @earendil-works/gondolin bash"
+
+krun-runner-test:
+	@command -v zig >/dev/null 2>&1 || (echo "zig is required to test host/krun-runner" && exit 1)
+	@v="$$(zig version)"; case "$$v" in 0.17.*) ;; *) echo "Zig 0.17.x is required to test host/krun-runner (found $$v); install it with scripts/install-zig.sh 0.17.0" >&2; exit 1;; esac
+	@cd host/krun-runner && zig build test
 
 # Build documentation site (docs/ -> site/)
 docs:

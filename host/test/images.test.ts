@@ -150,13 +150,13 @@ test("images: import preserves optional krun assets from manifest", () => {
 
   const assets = createFakeAssets("aarch64");
   const krunKernel = path.join(assets.dir, "krun-kernel");
-  const krunInitrd = path.join(assets.dir, "krun-initrd");
+  const krunInitrd = path.join(assets.dir, "krun-empty-initrd");
   fs.writeFileSync(krunKernel, "krun-kernel");
   fs.writeFileSync(krunInitrd, "");
 
   patchManifestAssets(assets.dir, {
     krunKernel: "krun-kernel",
-    krunInitrd: "krun-initrd",
+    krunInitrd: "krun-empty-initrd",
   });
 
   try {
@@ -167,7 +167,7 @@ test("images: import preserves optional krun assets from manifest", () => {
       "krun-kernel",
     );
     assert.equal(
-      fs.existsSync(path.join(imported.assetDir, "krun-initrd")),
+      fs.existsSync(path.join(imported.assetDir, "krun-empty-initrd")),
       true,
     );
   } finally {

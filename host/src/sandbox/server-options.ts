@@ -36,6 +36,7 @@ import {
   ensureEmptyInitrdFile,
   getDefaultKrunInitrdPath,
 } from "../utils/empty-initrd.ts";
+import { isLoadableX86Kernel } from "../utils/kernel-image.ts";
 import { isPathWithin } from "../utils/path.ts";
 import { normalizeGuestTmpfs, type GuestTmpfsMounts } from "./tmpfs.ts";
 
@@ -653,6 +654,22 @@ function resolveKrunKernelOverride(
   };
 }
 
+/**
+ * Whether a manifest's krun kernel override is usable for the guest arch.
+ *
+ * x86_64 images published before the bzImage fix ship a raw libkrunfw bundle
+ * as `krunKernel`, which libkrun cannot boot; use the image's base kernel and
+ * initramfs instead.
+ */
+function shouldUseKrunManifestOverride(
+  override: KrunKernelOverride | null,
+  guestArch: "arm64" | "x64" | null,
+): boolean {
+  if (!override) return false;
+  if (guestArch !== "x64") return true;
+  return isLoadableX86Kernel(override.kernelPath);
+}
+
 function findSharedAssetAncestor(assets: Partial<GuestAssets>): string | null {
   const assetPaths = [assets.kernelPath, assets.initrdPath, assets.rootfsPath];
   if (assetPaths.some((value) => !value)) {
@@ -885,15 +902,26 @@ export function resolveSandboxServerOptions(
 
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
+  // Detect the guest arch before choosing krun assets so an x86_64 image can
+  // fall back to its base kernel. krun requires guest arch == host arch, so
+  // the host arch is a safe fallback when the manifest has no arch.
+  const guestFromManifest = detectGuestArchFromManifest({
+    kernelPath: baseKernelPath,
+    initrdPath: baseInitrdPath,
+    rootfsPath,
+  });
+  const krunGuestArch = guestFromManifest?.arch ?? normalizeArch(hostArch);
+
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
   let krunKernelOverride: KrunKernelOverride | null = null;
 
   if (vmm === "krun" && !explicitImageObject) {
-    krunKernelOverride = resolveKrunKernelOverride(imageManifest, imageDir);
-    if (krunKernelOverride) {
-      kernelPath = krunKernelOverride.kernelPath;
-      initrdPath = krunKernelOverride.initrdPath;
+    const candidate = resolveKrunKernelOverride(imageManifest, imageDir);
+    if (candidate && shouldUseKrunManifestOverride(candidate, krunGuestArch)) {
+      krunKernelOverride = candidate;
+      kernelPath = candidate.kernelPath;
+      initrdPath = candidate.initrdPath;
     }
   }
 
@@ -906,14 +934,6 @@ export function resolveSandboxServerOptions(
         "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
   }
-
-  // Fail fast if we can detect that the guest image doesn't match the selected backend target.
-  // Without this, the VM often just "hangs" until some higher-level timeout.
-  const guestFromManifest = detectGuestArchFromManifest({
-    kernelPath: baseKernelPath,
-    initrdPath: baseInitrdPath,
-    rootfsPath,
-  });
 
   if (
     vmm === "qemu" &&
@@ -951,7 +971,12 @@ export function resolveSandboxServerOptions(
     }
   }
 
-  if (vmm === "krun" && !explicitImageObject && !krunKernelOverride) {
+  if (
+    vmm === "krun" &&
+    !explicitImageObject &&
+    !krunKernelOverride &&
+    krunGuestArch !== "x64"
+  ) {
     throw new Error(
       "Selected image does not provide krun boot assets.\n" +
         "Expected manifest assets `krunKernel` (and optional `krunInitrd`).\n" +
@@ -1054,4 +1079,5 @@ export const __test = {
   probeKrunRunnerCandidate,
   resolvePackagedKrunRunnerPath,
   resolveDefaultKrunRunnerPath,
+  shouldUseKrunManifestOverride,
 };

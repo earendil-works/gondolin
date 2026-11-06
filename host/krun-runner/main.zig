@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
+const kernel_image = @import("kernel_image.zig");
 const krun = @import("libkrun.zig");
 const c = std.c;
 
@@ -38,7 +40,8 @@ const CliConfig = struct {
 pub fn main(init: std.process.Init) void {
     mainInner(init) catch |err| {
         switch (err) {
-            error.InvalidArguments, error.KrunError => {},
+            // These already logged a message describing the failure.
+            error.InvalidArguments, error.KrunError, error.UnsupportedKernelImage => {},
             else => std.log.err("fatal: {s}", .{@errorName(err)}),
         }
         std.process.exit(1);
@@ -101,7 +104,7 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     const initrd_path_z = try c_allocator.dupeSentinel(u8, cfg.initrdPath, 0);
     const append_z = try c_allocator.dupeSentinel(u8, cfg.append, 0);
 
-    const kernel_format: u32 = try detectKernelFormat(cfg.kernelPath);
+    const kernel_format: u32 = try detectKernelFormat(allocator, cfg.kernelPath);
 
     const kernel_rc = krun.krun_set_kernel(
         ctx,
@@ -218,7 +221,7 @@ fn connectUnixStream(socket_path: []const u8) !c_int {
     return fd;
 }
 
-fn detectKernelFormat(kernel_path: []const u8) !u32 {
+fn detectKernelFormat(allocator: std.mem.Allocator, kernel_path: []const u8) !u32 {
     var threaded: std.Io.Threaded = .init_single_threaded;
     const io = threaded.io();
     const file = try std.Io.Dir.cwd().openFile(io, kernel_path, .{});
@@ -227,12 +230,15 @@ fn detectKernelFormat(kernel_path: []const u8) !u32 {
     var header: [4]u8 = .{ 0, 0, 0, 0 };
     const n = try file.readPositionalAll(io, &header, 0);
 
-    if (n >= 2 and header[0] == 'M' and header[1] == 'Z') {
-        return krun.KERNEL_FORMAT_PE_GZ;
-    }
-
     if (n >= 4 and header[0] == 0x7f and header[1] == 'E' and header[2] == 'L' and header[3] == 'F') {
         return krun.KERNEL_FORMAT_ELF;
+    }
+
+    if (n >= 2 and header[0] == 'M' and header[1] == 'Z') {
+        // libkrun only handles PE_GZ on aarch64/riscv64; x86_64 bzImages must
+        // be reported as their compressed payload (see kernel_image.zig).
+        if (builtin.target.cpu.arch != .x86_64) return krun.KERNEL_FORMAT_PE_GZ;
+        return detectX86ImagePayload(allocator, io, kernel_path);
     }
 
     if (n >= 2 and header[0] == 0x1f and header[1] == 0x8b) {
@@ -247,7 +253,43 @@ fn detectKernelFormat(kernel_path: []const u8) !u32 {
         return krun.KERNEL_FORMAT_IMAGE_ZSTD;
     }
 
+    if (builtin.target.cpu.arch == .x86_64) {
+        std.log.err(
+            "kernel image '{s}' is neither an ELF kernel nor a compressed bzImage; " ++
+                "rebuild the guest image with a current gondolin build",
+            .{kernel_path},
+        );
+        return error.UnsupportedKernelImage;
+    }
+
     return krun.KERNEL_FORMAT_RAW;
+}
+
+/// Pick the compressed payload format libkrun expects for an x86_64 bzImage.
+fn detectX86ImagePayload(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    kernel_path: []const u8,
+) !u32 {
+    const data = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        kernel_path,
+        allocator,
+        .limited(kernel_image.MAX_KERNEL_IMAGE_BYTES),
+    ) catch |err| {
+        std.log.err("failed to read kernel image '{s}': {s}", .{ kernel_path, @errorName(err) });
+        return error.UnsupportedKernelImage;
+    };
+    defer allocator.free(data);
+
+    return kernel_image.detectX86Payload(data) orelse {
+        std.log.err(
+            "kernel image '{s}' has no gzip, zstd or bzip2 payload; " ++
+                "x86_64 libkrun needs an ELF kernel or a compressed bzImage",
+            .{kernel_path},
+        );
+        return error.UnsupportedKernelImage;
+    };
 }
 
 fn parseMac(value: []const u8) ![6]u8 {

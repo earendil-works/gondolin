@@ -153,14 +153,20 @@ export async function buildNative(
     log,
   });
 
-  log("Fetching libkrunfw-compatible kernel...");
-  await fetchKrunBootAssets(
-    workDir,
-    config.arch,
-    alpineConfig.krunfwVersion,
-    cacheDir,
-    log,
-  );
+  if (config.arch === "x86_64") {
+    // krun boots the same Alpine bzImage and initramfs as qemu through
+    // libkrun's compressed-Image path; no separate krun assets are needed.
+    log("Using the Alpine kernel and initramfs for krun...");
+  } else {
+    log("Fetching libkrunfw-compatible kernel...");
+    await fetchKrunBootAssets(
+      workDir,
+      config.arch,
+      alpineConfig.krunfwVersion,
+      cacheDir,
+      log,
+    );
+  }
 
   log("Copying assets to output directory...");
 
@@ -179,8 +185,14 @@ export async function buildNative(
   fs.copyFileSync(kernelSrc, kernelDst);
   fs.copyFileSync(initramfsSrc, initramfsDst);
   fs.copyFileSync(rootfsSrc, rootfsDst);
-  fs.copyFileSync(krunKernelSrc, krunKernelDst);
-  fs.copyFileSync(krunInitrdSrc, krunInitrdDst);
+  if (config.arch === "x86_64") {
+    // Drop assets left behind by a previous build into the same directory.
+    fs.rmSync(krunKernelDst, { force: true });
+    fs.rmSync(krunInitrdDst, { force: true });
+  } else {
+    fs.copyFileSync(krunKernelSrc, krunKernelDst);
+    fs.copyFileSync(krunInitrdSrc, krunInitrdDst);
+  }
 
   log("Generating manifest...");
   const { manifestPath, manifest } = writeAssetManifest(
@@ -242,6 +254,7 @@ type KrunArchive = {
 
 type DownloadFileFn = (url: string, dest: string) => Promise<void>;
 
+/** Fetch libkrunfw kernel assets (aarch64 only) */
 async function fetchKrunBootAssets(
   outputDir: string,
   arch: Architecture,

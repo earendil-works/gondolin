@@ -15,9 +15,9 @@ import {
 } from "../src/build/shared.ts";
 import type { BuildConfig } from "../src/build/config.ts";
 
-function makeConfig(): BuildConfig {
+function makeConfig(arch: "aarch64" | "x86_64" = "aarch64"): BuildConfig {
   return {
-    arch: "x86_64",
+    arch,
     distro: "alpine",
     alpine: {
       version: "3.23.0",
@@ -44,8 +44,29 @@ test("builder: writeAssetManifest includes krun checksums when krun assets exist
     assert.ok(manifest.checksums.krunInitrd);
     assert.equal(
       manifest.buildId,
-      computeAssetBuildId({ checksums: manifest.checksums, arch: "x86_64" }),
+      computeAssetBuildId({ checksums: manifest.checksums, arch: "aarch64" }),
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("builder: writeAssetManifest omits x86_64 krun assets", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-manifest-"));
+
+  try {
+    fs.writeFileSync(path.join(dir, KERNEL_FILENAME), "kernel");
+    fs.writeFileSync(path.join(dir, INITRAMFS_FILENAME), "initramfs");
+    fs.writeFileSync(path.join(dir, ROOTFS_FILENAME), "rootfs");
+    fs.writeFileSync(path.join(dir, KRUN_KERNEL_FILENAME), "krun-kernel");
+    fs.writeFileSync(path.join(dir, KRUN_INITRD_FILENAME), "");
+
+    const { manifest } = writeAssetManifest(dir, makeConfig("x86_64"));
+
+    assert.equal(manifest.assets.krunKernel, undefined);
+    assert.equal(manifest.assets.krunInitrd, undefined);
+    assert.equal(manifest.checksums.krunKernel, undefined);
+    assert.equal(manifest.checksums.krunInitrd, undefined);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

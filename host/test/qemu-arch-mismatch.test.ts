@@ -20,7 +20,9 @@ function makeTempAssetsDir(
     : "initramfs.cpio.lz4";
   const rootfsRel = splitAssetDirs ? "img/rootfs.ext4" : "rootfs.ext4";
   const krunKernelRel = splitAssetDirs ? "boot/krun-kernel" : "krun-kernel";
-  const krunInitrdRel = splitAssetDirs ? "boot/krun-initrd" : "krun-initrd";
+  const krunInitrdRel = splitAssetDirs
+    ? "boot/krun-empty-initrd"
+    : "krun-empty-initrd";
 
   // Required asset files (can be empty for this test).
   fs.mkdirSync(path.dirname(path.join(dir, kernelRel)), { recursive: true });
@@ -30,7 +32,8 @@ function makeTempAssetsDir(
   fs.writeFileSync(path.join(dir, initrdRel), "");
   fs.writeFileSync(path.join(dir, rootfsRel), "");
   if (includeKrunAssets) {
-    fs.writeFileSync(path.join(dir, krunKernelRel), "");
+    // Keep the kernel loadable so x86_64 keeps the manifest override.
+    fs.writeFileSync(path.join(dir, krunKernelRel), "MZ\u0000\u0000");
     fs.writeFileSync(path.join(dir, krunInitrdRel), "");
   }
 
@@ -201,19 +204,28 @@ test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () 
   }
 });
 
-test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
+test("resolveSandboxServerOptions falls back to base assets for x86_64 krun without krun assets", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });
 
   try {
-    assert.throws(
-      () =>
-        resolveSandboxServerOptions({
-          imagePath: dir,
-          vmm: "krun",
-        }),
-      /Selected image does not provide krun boot assets/,
-    );
+    if (hostArch === "x86_64") {
+      const resolved = resolveSandboxServerOptions({
+        imagePath: dir,
+        vmm: "krun",
+      });
+      assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
+      assert.equal(path.basename(resolved.initrdPath), "initramfs.cpio.lz4");
+    } else {
+      assert.throws(
+        () =>
+          resolveSandboxServerOptions({
+            imagePath: dir,
+            vmm: "krun",
+          }),
+        /Selected image does not provide krun boot assets/,
+      );
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -263,14 +275,14 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
   const dir = makeTempAssetsDir(hostArch);
 
   const krunKernel = path.join(dir, "krun-kernel");
-  const krunInitrd = path.join(dir, "krun-initrd");
-  fs.writeFileSync(krunKernel, "kernel");
+  const krunInitrd = path.join(dir, "krun-empty-initrd");
+  fs.writeFileSync(krunKernel, "MZ\u0000\u0000");
   fs.writeFileSync(krunInitrd, "");
 
   const manifestPath = path.join(dir, "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   manifest.assets.krunKernel = "krun-kernel";
-  manifest.assets.krunInitrd = "krun-initrd";
+  manifest.assets.krunInitrd = "krun-empty-initrd";
   fs.writeFileSync(manifestPath, JSON.stringify(manifest));
 
   try {
@@ -297,7 +309,10 @@ test("resolveSandboxServerOptions supports split manifest asset directories for 
     });
 
     assert.equal(resolved.kernelPath, path.join(dir, "boot", "krun-kernel"));
-    assert.equal(resolved.initrdPath, path.join(dir, "boot", "krun-initrd"));
+    assert.equal(
+      resolved.initrdPath,
+      path.join(dir, "boot", "krun-empty-initrd"),
+    );
     assert.equal(resolved.rootfsPath, path.join(dir, "img", "rootfs.ext4"));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

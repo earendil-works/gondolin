@@ -22,9 +22,10 @@ gondolin build --config build-config.json --output ./my-assets
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
-`gondolin build` produces both qemu boot assets and libkrun-compatible boot
-artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
-`manifest.json`.
+`gondolin build` produces qemu boot assets and, on aarch64, krun boot
+artifacts (`krun-kernel` + `krun-empty-initrd`) recorded in `manifest.json`.
+On x86_64, krun reuses `vmlinuz-virt` and `initramfs.cpio.lz4`, so no separate
+krun assets are written.
 
 During image builds, Gondolin resolves exact-version prebuilt sandbox helper
 binaries (`sandboxd`, `sandboxfs`, `sandboxssh`, and `sandboxingress`) and
@@ -71,7 +72,7 @@ helpers from source.
 ### macOS
 
 ```bash
-brew install lz4 e2fsprogs
+brew install cpio lz4 e2fsprogs
 ```
 
 The build tries to locate `mke2fs` automatically (including common Homebrew locations). If you still see `mke2fs: command not found`, make sure `mke2fs` is available on your `PATH` (you can check where Homebrew installed it with `brew --prefix e2fsprogs`).
@@ -197,7 +198,7 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `kernelImage` | string | `"vmlinuz-virt"` | Kernel image filename |
 | `rootfsPackages` | string[] | see below | Packages for the root filesystem |
 | `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
-| `krunfwVersion` | string | `"v5.2.1"` | libkrunfw release tag used to fetch `krun-kernel` |
+| `krunfwVersion` | string | `"v5.2.1"` | libkrunfw release tag for the aarch64 krun kernel |
 
 ### OCI Support
 
@@ -323,9 +324,9 @@ gondolin build --arch aarch64 --config build-config.json --output ./arm64-assets
 Cross-architecture builds may use a container (Docker/Podman) automatically
 when native tools aren't available.
 
-Note: krun boot artifact extraction falls back to `libkrunfw-<arch>.tgz` when a
-prebuilt archive is unavailable; that fallback requires a host matching the
-target architecture.
+Note: aarch64 krun boot artifact extraction falls back to
+`libkrunfw-<arch>.tgz` when a prebuilt archive is unavailable; that fallback
+requires a host matching the target architecture.
 
 ## Verifying Built Assets
 
@@ -373,11 +374,11 @@ A successful build creates:
 ```
 my-assets/
   manifest.json        # Build metadata and checksums
-  vmlinuz-virt         # Linux kernel (qemu/default)
-  initramfs.cpio.lz4   # Compressed initramfs
+  vmlinuz-virt         # Linux kernel (qemu and x86_64 krun)
+  initramfs.cpio.lz4   # Compressed initramfs (qemu and x86_64 krun)
   rootfs.ext4          # Root filesystem image
-  krun-kernel          # libkrunfw-compatible kernel
-  krun-empty-initrd    # Empty initrd for krun boot
+  krun-kernel          # aarch64 krun kernel (libkrunfw)
+  krun-empty-initrd    # aarch64 krun initrd (empty cpio)
 ```
 
 The `manifest.json` contains the build configuration, timestamps, SHA-256
