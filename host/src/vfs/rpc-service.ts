@@ -23,6 +23,11 @@ const DEFAULT_ATTR_TTL_MS = 1000;
 const DEFAULT_NEGATIVE_TTL_MS = 250;
 const READDIR_CACHE_TTL_MS = 5000;
 const READDIR_CACHE_MAX_DIRS = 128;
+// A readdir offset packs a pagination stream id into the high bits and the
+// entry index into the low bits. The guest passes offsets back verbatim, so a
+// stream can keep reading the snapshot it started with.
+const READDIR_STREAM_SHIFT = 0x100000000;
+const READDIR_STREAM_MAX = 128;
 
 const DT_REG = 8;
 const DT_DIR = 4;
@@ -78,6 +83,12 @@ type ReaddirCacheEntry = {
   expiresAt: number;
 };
 
+type ReaddirStreamSnapshot = {
+  path: string;
+  entries: Array<string | Dirent>;
+  expiresAt: number;
+};
+
 export class FsRpcService {
   private nextIno = 2;
   private nextHandle = 1;
@@ -85,6 +96,8 @@ export class FsRpcService {
   private readonly inoToPaths = new Map<number, Set<string>>();
   private readonly handles = new Map<number, HandleEntry>();
   private readonly readdirCache = new Map<string, ReaddirCacheEntry>();
+  private readonly readdirStreams = new Map<number, ReaddirStreamSnapshot>();
+  private nextReaddirStreamId = 1;
   private readonly readdirInFlight = new Map<
     string,
     Promise<Array<string | Dirent>>
@@ -162,6 +175,7 @@ export class FsRpcService {
     const handles = Array.from(this.handles.values());
     this.handles.clear();
     this.readdirCache.clear();
+    this.readdirStreams.clear();
     this.readdirInFlight.clear();
     this.readdirCacheVersion += 1;
     await Promise.all(
@@ -278,8 +292,31 @@ export class FsRpcService {
         requireUint(req.max_entries ?? 1024, "readdir", "max_entries"),
       ),
     );
-    const entries = await this.readCachedDirEntries(entryPath);
-    const start = Math.min(offset, entries.length);
+    const streamId = Math.floor(offset / READDIR_STREAM_SHIFT);
+    const startIndex = offset % READDIR_STREAM_SHIFT;
+    const normalized = normalizePath(entryPath);
+    const snapshot =
+      streamId > 0 ? this.readdirStreams.get(streamId) : undefined;
+    let resolvedStreamId: number;
+    let entries: Array<string | Dirent>;
+
+    if (
+      snapshot &&
+      snapshot.path === normalized &&
+      snapshot.expiresAt > Date.now()
+    ) {
+      // Mutations invalidate the shared directory cache, but an in-flight
+      // pagination stream must keep using the listing it started with.
+      resolvedStreamId = streamId;
+      entries = snapshot.entries;
+      snapshot.expiresAt = Date.now() + READDIR_CACHE_TTL_MS;
+    } else {
+      entries = await this.readCachedDirEntries(entryPath);
+      resolvedStreamId = this.nextReaddirStreamId++;
+      this.setReaddirStream(resolvedStreamId, normalized, entries);
+    }
+
+    const start = Math.min(startIndex, entries.length);
 
     const responseEntries: Array<Record<string, unknown>> = [];
     for (
@@ -299,14 +336,16 @@ export class FsRpcService {
         ino: childIno,
         name,
         type,
-        offset: index + 1,
+        offset: resolvedStreamId * READDIR_STREAM_SHIFT + index + 1,
       });
     }
 
     const nextOffset =
       start + responseEntries.length >= entries.length
         ? 0
-        : start + responseEntries.length;
+        : resolvedStreamId * READDIR_STREAM_SHIFT +
+          start +
+          responseEntries.length;
 
     return {
       entries: responseEntries,
@@ -841,6 +880,29 @@ export class FsRpcService {
     }
 
     this.readdirCache.set(entryPath, { entries, expiresAt });
+  }
+
+  private setReaddirStream(
+    streamId: number,
+    entryPath: string,
+    entries: Array<string | Dirent>,
+  ) {
+    const now = Date.now();
+    for (const [id, snapshot] of this.readdirStreams) {
+      if (snapshot.expiresAt <= now) {
+        this.readdirStreams.delete(id);
+      }
+    }
+    while (this.readdirStreams.size >= READDIR_STREAM_MAX) {
+      const oldest = this.readdirStreams.keys().next().value;
+      if (oldest === undefined) break;
+      this.readdirStreams.delete(oldest);
+    }
+    this.readdirStreams.set(streamId, {
+      path: entryPath,
+      entries,
+      expiresAt: now + READDIR_CACHE_TTL_MS,
+    });
   }
 
   private invalidateReaddirCacheEntries(
