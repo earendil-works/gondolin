@@ -654,9 +654,16 @@ function containsControlCharacter(value: string): boolean {
   return /[\x00-\x1f\x7f]/.test(value);
 }
 
+// GNU/BSD tar apply the caller's umask and drop special permission bits when
+// extracting as a non-root user. `-p` restores the modes recorded in the
+// archive (setuid, sticky, and 0755 directories), which the guest rootfs needs.
+function rootfsTarArgs(tarPath: string, destDir: string): string[] {
+  return ["-x", "-p", "-f", tarPath, "-C", destDir];
+}
+
 function extractTarFile(tarPath: string, destDir: string): void {
   try {
-    execFileSync("tar", ["-xf", tarPath, "-C", destDir], {
+    execFileSync("tar", rootfsTarArgs(tarPath, destDir), {
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf8",
     });
@@ -687,4 +694,5 @@ function extractTarFile(tarPath: string, destDir: string): void {
 
 export const __test = {
   readTarOwnershipEntries,
+  rootfsTarArgs,
 };
