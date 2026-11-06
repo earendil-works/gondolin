@@ -873,6 +873,11 @@ export class SandboxServer extends EventEmitter {
       if (message.t !== "fs_request") {
         return;
       }
+      // The payload is guest-controlled and may be missing entirely; read
+      // the op once here so the error path below can still name it.
+      // Reading message.p.op inside the catch would throw a second time
+      // and escape this async handler as an unhandled rejection.
+      const op = typeof message.p?.op === "string" ? message.p.op : "";
       this.controller.cancelIdlePause?.();
       this.activeVfsRequests += 1;
       void (async () => {
@@ -880,7 +885,7 @@ export class SandboxServer extends EventEmitter {
           const resume = this.resumeControllerForActivity();
           if (resume) await resume;
 
-          if (message.p.op === "mounts") {
+          if (op === "mounts") {
             // Bind mount list for guest init; served here instead of by the
             // fs service because it is boot configuration, not vfs state.
             const config = this.bootConfig;
@@ -890,12 +895,12 @@ export class SandboxServer extends EventEmitter {
               id: message.id,
               p: config
                 ? {
-                    op: message.p.op,
+                    op,
                     err: 0,
                     res: buildSandboxfsMountsResult(config),
                   }
                 : {
-                    op: message.p.op,
+                    op,
                     err: LINUX_ERRNO.EAGAIN,
                     message: "boot configuration unavailable",
                   },
@@ -909,7 +914,7 @@ export class SandboxServer extends EventEmitter {
               t: "fs_response",
               id: message.id,
               p: {
-                op: message.p.op,
+                op,
                 err: LINUX_ERRNO.ENOSYS,
                 message: "filesystem service unavailable",
               },
@@ -929,7 +934,7 @@ export class SandboxServer extends EventEmitter {
             t: "fs_response",
             id: message.id,
             p: {
-              op: message.p.op,
+              op,
               err: LINUX_ERRNO.EIO,
               message: detail,
             },
