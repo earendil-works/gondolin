@@ -151,7 +151,7 @@ impl Session {
         let ctl = self.ctl.clone();
         let build_id = self.ckpt.image_build_id.clone();
         tokio::spawn(async move {
-            let res = async {
+            let res = crate::panics::CatchUnwind::new(async {
                 let mut file = std::fs::File::open(&path)
                     .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
                 let mut buf = vec![0u8; CHUNK];
@@ -165,8 +165,9 @@ impl Session {
                     total += n as u64;
                     ctl.send(CHECKPOINT_DATA, id, &Data { data: &buf[..n] });
                 }
-            }
-            .await;
+            })
+            .await
+            .unwrap_or_else(|panic| Err(format!("internal error: {panic}")));
             match res {
                 Ok(bytes) => {
                     let mut fields =

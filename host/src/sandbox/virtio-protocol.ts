@@ -472,7 +472,18 @@ export function normalize(value: unknown): unknown {
   if (value instanceof Map) {
     const obj: Record<string, unknown> = {};
     for (const [key, entry] of value.entries()) {
-      obj[String(key)] = normalize(entry);
+      const name = String(key);
+      if (name === "__proto__") {
+        // an own property, never the object's prototype (untrusted peers)
+        Object.defineProperty(obj, name, {
+          value: normalize(entry),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } else {
+        obj[name] = normalize(entry);
+      }
     }
     return obj;
   }

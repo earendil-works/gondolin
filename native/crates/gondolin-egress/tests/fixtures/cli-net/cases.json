@@ -1,0 +1,1051 @@
+[
+  {
+    "name": "empty",
+    "flags": {},
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "allow-hosts",
+    "flags": {
+      "allow_hosts": [
+        "api.example.com",
+        "*.GitHub.com",
+        "api.example.com"
+      ]
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "rules": {
+          "allowed_hosts": [
+            "api.example.com",
+            "*.github.com"
+          ],
+          "allowed_internal_hosts": [],
+          "block_internal_ranges": true,
+          "secrets": [],
+          "replace_secrets_in_query": false,
+          "placeholder_mode": "shared",
+          "marker": "<MARKER>"
+        },
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "secrets-and-hosts",
+    "flags": {
+      "allow_hosts": [
+        "api.example.com"
+      ],
+      "secrets": [
+        {
+          "name": "API_KEY",
+          "hosts": [
+            "api.example.com"
+          ],
+          "value": "s3cret"
+        },
+        {
+          "name": "other token",
+          "hosts": [
+            "*.example.org",
+            "API.example.org"
+          ],
+          "value": "v2"
+        }
+      ]
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "rules": {
+          "allowed_hosts": [
+            "api.example.com"
+          ],
+          "allowed_internal_hosts": [],
+          "block_internal_ranges": true,
+          "secrets": [
+            {
+              "name": "API_KEY",
+              "identifier": "api_key",
+              "placeholder": "<MARKER>.api_key",
+              "value": "s3cret",
+              "revoked_values": [],
+              "hosts": [
+                "api.example.com"
+              ],
+              "deleted": false
+            },
+            {
+              "name": "other token",
+              "identifier": "other_token",
+              "placeholder": "<MARKER>.other_token",
+              "value": "v2",
+              "revoked_values": [],
+              "hosts": [
+                "*.example.org",
+                "api.example.org"
+              ],
+              "deleted": false
+            }
+          ],
+          "replace_secrets_in_query": false,
+          "placeholder_mode": "shared",
+          "marker": "<MARKER>"
+        },
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {
+      "API_KEY": "<MARKER>.api_key",
+      "other token": "<MARKER>.other_token"
+    }
+  },
+  {
+    "name": "secrets-only",
+    "flags": {
+      "secrets": [
+        {
+          "name": "TOKEN",
+          "hosts": [],
+          "value": "x"
+        }
+      ]
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "rules": {
+          "allowed_hosts": [
+            "*"
+          ],
+          "allowed_internal_hosts": [],
+          "block_internal_ranges": true,
+          "secrets": [
+            {
+              "name": "TOKEN",
+              "identifier": "token",
+              "placeholder": "<MARKER>.token",
+              "value": "x",
+              "revoked_values": [],
+              "hosts": [],
+              "deleted": false
+            }
+          ],
+          "replace_secrets_in_query": false,
+          "placeholder_mode": "shared",
+          "marker": "<MARKER>"
+        },
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {
+      "TOKEN": "<MARKER>.token"
+    }
+  },
+  {
+    "name": "secret-duplicate-name",
+    "flags": {
+      "secrets": [
+        {
+          "name": "TOKEN",
+          "hosts": [
+            "a.example"
+          ],
+          "value": "first"
+        },
+        {
+          "name": "TOKEN",
+          "hosts": [
+            "b.example"
+          ],
+          "value": "second"
+        }
+      ]
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "rules": {
+          "allowed_hosts": [
+            "*"
+          ],
+          "allowed_internal_hosts": [],
+          "block_internal_ranges": true,
+          "secrets": [
+            {
+              "name": "TOKEN",
+              "identifier": "token",
+              "placeholder": "<MARKER>.token",
+              "value": "second",
+              "revoked_values": [],
+              "hosts": [
+                "b.example"
+              ],
+              "deleted": false
+            }
+          ],
+          "replace_secrets_in_query": false,
+          "placeholder_mode": "shared",
+          "marker": "<MARKER>"
+        },
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {
+      "TOKEN": "<MARKER>.token"
+    }
+  },
+  {
+    "name": "secret-identifier-collision",
+    "flags": {
+      "secrets": [
+        {
+          "name": "FOO BAR",
+          "hosts": [],
+          "value": "a"
+        },
+        {
+          "name": "foo_bar",
+          "hosts": [],
+          "value": "b"
+        }
+      ]
+    },
+    "ctx": {},
+    "error": "secret identifier for foo_bar collides with secret identifier for FOO BAR"
+  },
+  {
+    "name": "disable-websockets",
+    "flags": {
+      "disable_websockets": true
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": false
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "dns-trusted",
+    "flags": {
+      "dns": {
+        "mode": "trusted",
+        "trusted_servers": [
+          "1.1.1.1",
+          "9.9.9.9",
+          "1.1.1.1"
+        ]
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "trusted",
+          "trusted_servers": [
+            "1.1.1.1",
+            "9.9.9.9"
+          ],
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "dns-trusted-implicit",
+    "flags": {
+      "dns": {
+        "mode": "trusted"
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "trusted",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "dns-open",
+    "flags": {
+      "dns": {
+        "mode": "open"
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "open",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "dns-per-host",
+    "flags": {
+      "dns": {
+        "synthetic_host_mapping": "per-host"
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "per-host"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "dns-trusted-server-without-mode",
+    "flags": {
+      "dns": {
+        "trusted_servers": [
+          "1.1.1.1"
+        ]
+      }
+    },
+    "ctx": {},
+    "error": "--dns-trusted-server requires --dns trusted"
+  },
+  {
+    "name": "dns-trusted-server-wrong-mode",
+    "flags": {
+      "dns": {
+        "mode": "open",
+        "trusted_servers": [
+          "1.1.1.1"
+        ]
+      }
+    },
+    "ctx": {},
+    "error": "--dns-trusted-server can only be used with --dns trusted"
+  },
+  {
+    "name": "dns-mapping-wrong-mode",
+    "flags": {
+      "dns": {
+        "mode": "open",
+        "synthetic_host_mapping": "per-host"
+      }
+    },
+    "ctx": {},
+    "error": "--dns-synthetic-host-mapping requires --dns synthetic"
+  },
+  {
+    "name": "dns-invalid-mode",
+    "flags": {
+      "dns": {
+        "mode": "magic"
+      }
+    },
+    "ctx": {},
+    "error": "--dns must be one of: synthetic, trusted, open"
+  },
+  {
+    "name": "dns-invalid-mapping",
+    "flags": {
+      "dns": {
+        "synthetic_host_mapping": "many"
+      }
+    },
+    "ctx": {},
+    "error": "--dns-synthetic-host-mapping must be one of: single, per-host"
+  },
+  {
+    "name": "dns-invalid-server",
+    "flags": {
+      "dns": {
+        "mode": "trusted",
+        "trusted_servers": [
+          "::1"
+        ]
+      }
+    },
+    "ctx": {},
+    "error": "--dns-trusted-server must be a valid IPv4 address"
+  },
+  {
+    "name": "tcp-maps",
+    "flags": {
+      "tcp_maps": [
+        [
+          "DB.internal:5432",
+          "127.0.0.1:15432"
+        ],
+        [
+          "cache.internal.",
+          "[::1]:6379"
+        ],
+        [
+          "db.internal",
+          "db.example.com:5432"
+        ]
+      ]
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "tcp_hosts": [
+        {
+          "host": "db.internal",
+          "port": 5432,
+          "upstream_host": "127.0.0.1",
+          "upstream_port": 15432
+        },
+        {
+          "host": "cache.internal",
+          "upstream_host": "::1",
+          "upstream_port": 6379
+        },
+        {
+          "host": "db.internal",
+          "upstream_host": "db.example.com",
+          "upstream_port": 5432
+        }
+      ],
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "per-host"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "tcp-map-trusted-dns",
+    "flags": {
+      "tcp_maps": [
+        [
+          "db",
+          "127.0.0.1:1"
+        ]
+      ],
+      "dns": {
+        "mode": "trusted",
+        "trusted_servers": [
+          "1.1.1.1"
+        ]
+      }
+    },
+    "ctx": {},
+    "error": "--tcp-map requires --dns synthetic"
+  },
+  {
+    "name": "tcp-map-single-mapping",
+    "flags": {
+      "tcp_maps": [
+        [
+          "db",
+          "127.0.0.1:1"
+        ]
+      ],
+      "dns": {
+        "synthetic_host_mapping": "single"
+      }
+    },
+    "ctx": {},
+    "error": "tcp host mapping requires dns syntheticHostMapping='per-host'"
+  },
+  {
+    "name": "tcp-map-missing-port",
+    "flags": {
+      "tcp_maps": [
+        [
+          "db",
+          "127.0.0.1"
+        ]
+      ]
+    },
+    "ctx": {},
+    "error": "tcp.hosts value requires an explicit :PORT: 127.0.0.1"
+  },
+  {
+    "name": "tcp-map-wildcard",
+    "flags": {
+      "tcp_maps": [
+        [
+          "*.db",
+          "127.0.0.1:1"
+        ]
+      ]
+    },
+    "ctx": {},
+    "error": "tcp.hosts key does not support wildcard '*': *.db"
+  },
+  {
+    "name": "tcp-map-duplicate",
+    "flags": {
+      "tcp_maps": [
+        [
+          "DB:1",
+          "127.0.0.1:1"
+        ],
+        [
+          "db:1",
+          "127.0.0.1:2"
+        ]
+      ]
+    },
+    "ctx": {},
+    "error": "duplicate tcp.hosts mapping for db:1"
+  },
+  {
+    "name": "tcp-map-bad-port",
+    "flags": {
+      "tcp_maps": [
+        [
+          "db:70000",
+          "127.0.0.1:1"
+        ]
+      ]
+    },
+    "ctx": {},
+    "error": "tcp.hosts key port must be in range 1..65535: db:70000"
+  },
+  {
+    "name": "ssh-agent",
+    "flags": {
+      "ssh": {
+        "allow_hosts": [
+          "github.com",
+          "ssh.github.com:443",
+          "GitHub.com"
+        ],
+        "agent": "/tmp/agent.sock",
+        "known_hosts_files": [
+          "/etc/known_hosts",
+          " /etc/known_hosts "
+        ]
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "ssh": {
+        "ports": [
+          22,
+          443
+        ],
+        "allowed_hosts": [
+          "github.com",
+          "ssh.github.com:443",
+          "GitHub.com"
+        ],
+        "credentials": [],
+        "agent": "/tmp/agent.sock",
+        "known_hosts_files": [
+          "/etc/known_hosts"
+        ],
+        "host_verifier_hook": false,
+        "exec_policy_hook": false
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "per-host"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "ssh-default-known-hosts",
+    "flags": {
+      "ssh": {
+        "allow_hosts": [
+          "github.com"
+        ],
+        "agent": "/tmp/a.sock"
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "ssh": {
+        "ports": [
+          22
+        ],
+        "allowed_hosts": [
+          "github.com"
+        ],
+        "credentials": [],
+        "agent": "/tmp/a.sock",
+        "known_hosts_files": [
+          "<HOME>/.ssh/known_hosts",
+          "/etc/ssh/ssh_known_hosts"
+        ],
+        "host_verifier_hook": false,
+        "exec_policy_hook": false
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "per-host"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "ssh-credential",
+    "flags": {
+      "ssh": {
+        "known_hosts_files": [
+          "/etc/known_hosts"
+        ],
+        "credentials": [
+          {
+            "host": "git.example.com:2222",
+            "username": "git",
+            "private_key_pem": "KEY1"
+          },
+          {
+            "host": "github.com",
+            "private_key_pem": "KEY2",
+            "passphrase": "pw"
+          }
+        ]
+      }
+    },
+    "ctx": {},
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "ssh": {
+        "ports": [
+          2222,
+          22
+        ],
+        "allowed_hosts": [
+          "git.example.com:2222",
+          "github.com"
+        ],
+        "credentials": [
+          {
+            "host": "git.example.com:2222",
+            "username": "git",
+            "private_key": "KEY1"
+          },
+          {
+            "host": "github.com",
+            "private_key": "KEY2",
+            "passphrase": "pw"
+          }
+        ],
+        "known_hosts_files": [
+          "/etc/known_hosts"
+        ],
+        "host_verifier_hook": false,
+        "exec_policy_hook": false
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "per-host"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "ssh-agent-without-hosts",
+    "flags": {
+      "ssh": {
+        "agent": "/tmp/a.sock"
+      }
+    },
+    "ctx": {},
+    "error": "--ssh-agent requires at least one --ssh-allow-host (or --ssh-credential)"
+  },
+  {
+    "name": "ssh-trusted-dns",
+    "flags": {
+      "ssh": {
+        "allow_hosts": [
+          "github.com"
+        ],
+        "agent": "/a"
+      },
+      "dns": {
+        "mode": "trusted",
+        "trusted_servers": [
+          "1.1.1.1"
+        ]
+      }
+    },
+    "ctx": {},
+    "error": "--ssh-allow-host requires --dns synthetic"
+  },
+  {
+    "name": "ssh-single-mapping",
+    "flags": {
+      "ssh": {
+        "allow_hosts": [
+          "github.com"
+        ],
+        "agent": "/a"
+      },
+      "dns": {
+        "synthetic_host_mapping": "single"
+      }
+    },
+    "ctx": {},
+    "error": "ssh egress requires dns syntheticHostMapping='per-host'"
+  },
+  {
+    "name": "krun-offload",
+    "flags": {
+      "allow_hosts": [
+        "a.example"
+      ]
+    },
+    "ctx": {
+      "checksum_offload": true
+    },
+    "net": {
+      "mode": "native",
+      "policy": {
+        "rules": {
+          "allowed_hosts": [
+            "a.example"
+          ],
+          "allowed_internal_hosts": [],
+          "block_internal_ranges": true,
+          "secrets": [],
+          "replace_secrets_in_query": false,
+          "placeholder_mode": "shared",
+          "marker": "<MARKER>"
+        },
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:00:00:00:00:01",
+        "checksum_offload": true,
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  },
+  {
+    "name": "custom-mac",
+    "flags": {},
+    "ctx": {
+      "mac": "02:aa:bb:cc:dd:ee"
+    },
+    "net": {
+      "mode": "native",
+      "policy": {
+        "allow_websockets": true
+      },
+      "hooks": {
+        "is_request_allowed": false,
+        "is_ip_allowed": false
+      },
+      "limits": {
+        "max_request_body_bytes": 67108864,
+        "max_response_body_bytes": 67108864
+      },
+      "mitm": {
+        "cert_pem": "<CERT>",
+        "key_pem": "<KEY>"
+      },
+      "stack": {
+        "guest_mac": "02:aa:bb:cc:dd:ee",
+        "dns": {
+          "mode": "synthetic",
+          "synthetic_host_mapping": "single"
+        }
+      }
+    },
+    "guest_env": {}
+  }
+]

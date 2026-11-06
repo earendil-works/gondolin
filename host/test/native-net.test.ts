@@ -531,3 +531,71 @@ test("native net: remote ssh egress sends known_hosts contents, not paths", () =
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("native net: decoded hook bodies are limited (decompression bombs)", async () => {
+  const bomb = new Uint8Array(zlib.gzipSync(Buffer.alloc(4 * 1024 * 1024)));
+  const fake = fakeTransport({ 2: [bomb] });
+  const svc = new NativeHookService(
+    { onResponse: async (res) => new Response(await res.text()) },
+    {
+      transport: fake.transport,
+      maxRequestBodyBytes: 1024,
+      maxResponseBodyBytes: 64 * 1024,
+    },
+  );
+  const decision = await svc.handle({
+    phase: "on_response",
+    request: { method: "GET", url: "https://example.com/", headers: [] },
+    response: {
+      status: 200,
+      status_text: "OK",
+      headers: [["content-encoding", "gzip"]],
+      body: 2,
+    },
+  });
+  assert.deepEqual(decision, {
+    action: "block",
+    status: 502,
+    status_text: "Bad Gateway",
+    message: "response body exceeds 65536 bytes",
+  });
+});
+
+test("native net: inline body prefixes need no pulls", async () => {
+  const { svc, pulls } = service(
+    {
+      onRequest: async (req) => {
+        assert.equal(await req.clone().text(), "hello");
+        return undefined;
+      },
+      onResponse: async (res) => {
+        assert.equal(await res.clone().text(), "0123456789");
+        return undefined;
+      },
+    },
+    { 1: [enc("hello")], 2: [enc("0123456789")] },
+  );
+  assert.deepEqual(
+    await svc.handle({
+      phase: "on_request",
+      request: { ...postHead, body_prefix: enc("hello"), body_complete: true },
+    }),
+    { action: "continue" },
+  );
+  // partial prefix: the rest is pulled from its end
+  assert.deepEqual(
+    await svc.handle({
+      phase: "on_response",
+      request: { method: "GET", url: "https://example.com/", headers: [] },
+      response: {
+        status: 200,
+        status_text: "OK",
+        headers: [],
+        body: 2,
+        body_prefix: enc("0123"),
+      },
+    }),
+    { action: "continue" },
+  );
+  assert.deepEqual(pulls, [2, 2]);
+});

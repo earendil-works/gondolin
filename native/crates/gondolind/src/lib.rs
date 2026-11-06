@@ -13,6 +13,7 @@
 pub mod bootcfg;
 mod checkpoint;
 pub mod controller;
+pub mod embed;
 mod exec;
 pub mod fields;
 mod files;
@@ -25,12 +26,15 @@ pub mod mitm_ca;
 pub mod net;
 pub mod net_relay;
 mod netlog;
+pub mod panics;
 pub mod qemu;
 pub mod qmp;
 pub mod rootdisk;
 pub mod session;
+mod stdio;
 pub mod subsystem;
 pub mod tcpfwd;
+pub mod vfs;
 pub mod vfs_port;
 pub mod vfs_proxy;
 pub mod vmm;
@@ -66,7 +70,13 @@ const FEATURES: &[&str] = &[
 
 /// Process entry point (argument handling, runtime setup).
 pub fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    main_with_args(std::env::args().skip(1).collect());
+}
+
+/// Daemon entry point with explicit arguments (without the program name);
+/// the multi-call `gondolin` binary runs it as `gondolin daemon ...` or when
+/// invoked as `gondolind`.
+pub fn main_with_args(args: Vec<String>) {
     match args.first().map(String::as_str) {
         Some("--version") | Some("-V") => {
             println!("gondolind {}", env!("CARGO_PKG_VERSION"));
@@ -116,12 +126,8 @@ pub fn main() {
         None => {}
     }
 
-    // kill QEMU if we go down abnormally
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        vmm::kill_current();
-        default_hook(info);
-    }));
+    // report panics (they are contained where possible, see `panics.rs`)
+    panics::install_hook();
     // SAFETY: ignoring SIGPIPE so writes to a closed pipe fail with EPIPE.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -134,7 +140,7 @@ pub fn main() {
         .expect("tokio runtime");
     runtime.block_on(run());
     vmm::kill_current();
-    // stdin is read on a blocking thread that would keep the runtime alive
+    // stdin may be read on a blocking thread that would keep the runtime alive
     runtime.shutdown_background();
     std::process::exit(0);
 }
@@ -142,18 +148,9 @@ pub fn main() {
 async fn run() {
     let ctl = Controller::new();
     let dispatcher = Dispatcher::default();
-    let writer = tokio::spawn(ctl.clone().run_writer(tokio::io::stdout()));
+    let writer = tokio::spawn(ctl.clone().run_writer(stdio::writer()));
 
-    ctl.send(
-        HELLO,
-        0,
-        &Hello {
-            protocol: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            features: FEATURES.iter().map(|f| f.to_string()).collect(),
-            pid: std::process::id(),
-        },
-    );
+    send_hello(&ctl);
 
     dispatcher.register(mitm_ca::MITM_CA, std::sync::Arc::new(mitm_ca::MitmCaHandler));
     let (session, channels) = Session::new(ctl.clone(), dispatcher.clone(), HostInfo::detect());
@@ -162,23 +159,74 @@ async fn run() {
         let ctl = ctl.clone();
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
-            if let Err(err) = dispatcher.run_reader(tokio::io::stdin(), ctl, session_tx).await {
+            if let Err(err) = dispatcher.run_reader(stdio::reader(), ctl, session_tx).await {
                 eprintln!("gondolind: controller input failed: {err}");
             }
         })
     };
 
-    session.run(channels, session_rx).await;
+    panics::set_sink(ctl.clone());
+    // The session task is the single owner of session state: if it panics,
+    // nothing it guarded can be trusted any more. Fail closed: kill the VMM,
+    // report why, exit.
+    let session_task = tokio::spawn(session.run(channels, session_rx));
+    if let Err(err) = session_task.await {
+        let reason = match err.try_into_panic() {
+            Ok(payload) => {
+                format!("session task panicked: {}", panics::payload_message(payload.as_ref()))
+            }
+            Err(err) => format!("session task failed: {err}"),
+        };
+        vmm::kill_current();
+        let message = format!("gondolind internal error, VM stopped: {reason}");
+        ctl.send(
+            gondolin_proto::session::EXIT,
+            0,
+            &gondolin_proto::session::Exit {
+                code: None,
+                signal: None,
+                error: Some(message.clone()),
+            },
+        );
+        ctl.error_event("internal_error", &message, None);
+        flush_controller(&ctl).await;
+        ctl.close();
+        let _ = writer.await;
+        vmm::kill_current();
+        std::process::exit(70);
+    }
     reader.abort();
-    // flush what is queued, then stop the writer
+    flush_controller(&ctl).await;
+    ctl.close();
+    let _ = writer.await;
+}
+
+/// Queues the `hello` frame.
+pub(crate) fn send_hello(ctl: &Controller) {
+    ctl.send(
+        HELLO,
+        0,
+        &Hello {
+            protocol: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            features: FEATURES
+                .iter()
+                .map(|f| f.to_string())
+                .chain(panics::test_panics_enabled().then(|| "test_panics".to_string()))
+                .collect(),
+            pid: std::process::id(),
+        },
+    );
+}
+
+/// Waits (bounded) until queued controller output was written.
+async fn flush_controller(ctl: &Controller) {
     let flush = async {
         while ctl.queued_bytes() > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     };
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), flush).await;
-    ctl.close();
-    let _ = writer.await;
 }
 
 fn print_qemu_args() -> i32 {
@@ -218,6 +266,7 @@ fn print_qemu_args() -> i32 {
         chardevs: &chardevs,
         net_socket: net.as_deref(),
         qmp_socket: qmp.as_deref(),
+        virtiofs: None,
         host: &host,
     });
     println!("{}", serde_json::to_string(&args).unwrap());

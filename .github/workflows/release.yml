@@ -30,16 +30,16 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Get npm version
         id: npm_version
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
@@ -59,7 +59,7 @@ jobs:
 
             Platform runner packages are published as optional dependencies for supported krun targets.
 
-            The native engine (`gondolind`) is published as `@earendil-works/gondolin-native-<platform>-<arch>` optional dependencies (darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static).
+            The native engine is published as `@earendil-works/gondolin-native-<platform>-<arch>` optional dependencies (darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static), each containing one multi-call `gondolin` binary: the static CLI, and the `gondolind` daemon (`gondolin daemon`).
 
             ### Sandbox Helpers
 
@@ -95,7 +95,7 @@ jobs:
           - runner: ubuntu-latest
             package_dir: packages/gondolin-krun-runner-linux-x64
             package_name: '@earendil-works/gondolin-krun-runner-linux-x64'
-          - runner: macos-14
+          - runner: macos-15
             package_dir: packages/gondolin-krun-runner-darwin-arm64
             package_name: '@earendil-works/gondolin-krun-runner-darwin-arm64'
     steps:
@@ -169,11 +169,15 @@ jobs:
           npm publish --access public --provenance
 
   build-native:
-    name: Build gondolind (all platforms)
+    name: Build native binaries (all platforms)
     needs: [create-release]
     # Cross-compiles every target from one machine: darwin via Xcode, the
     # static linux-musl builds via `zig cc` (native/scripts/).
-    runs-on: macos-14
+    # Runner labels (github.com/actions/runner-images README, checked
+    # 2026-11-06): macos-14 was retired on GitHub Actions on 2026-11-02
+    # (actions/runner-images#15226); macos-15 is arm64, macos-15-intel x64
+    # (macos-26 / macos-26-intel are the newer images).
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
@@ -216,7 +220,7 @@ jobs:
           if-no-files-found: error
 
   publish-native:
-    name: Publish gondolind (${{ matrix.package_name }})
+    name: Publish native package (${{ matrix.package_name }})
     needs: [create-release, build-native, publish-sandbox-helpers]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -226,7 +230,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             package_dir: packages/gondolin-native-darwin-arm64
             package_name: '@earendil-works/gondolin-native-darwin-arm64'
           - runner: macos-15-intel
@@ -285,7 +289,10 @@ jobs:
           cd "$TMP_DIR"
           npm init -y >/dev/null
           npm install "$PKG_PATH" >/dev/null
-          ./node_modules/.bin/gondolind --version
+          # npm bin alias of the multi-call binary (argv[0] gondolind = daemon)
+          ./node_modules/.bin/gondolind --version | grep -q '^gondolind '
+          ./node_modules/${{ matrix.package_name }}/bin/gondolin daemon --version | grep -q '^gondolind '
+          ./node_modules/${{ matrix.package_name }}/bin/gondolin --version | grep -q ' (static)$'
 
       - name: Publish native package (with provenance)
         run: |
@@ -323,7 +330,7 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
           VERSION="${VERSION#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pnpm install
@@ -343,6 +350,7 @@ jobs:
       - name: Verify runner dependency versions
         run: |
           TAG_VERSION="${{ steps.tag_version.outputs.version }}"
+          # shellcheck disable=SC2016 # JavaScript template literals, not shell
           node -e 'const pkg = require("./host/package.json"); const deps = pkg.optionalDependencies || {}; for (const [name, version] of Object.entries(deps)) { if (version !== process.argv[1]) { console.error(`❌ ${name} version ${version} does not match tag version ${process.argv[1]}`); process.exit(1); } } console.log("✅ Runner and native optional dependency versions match tag");' "$TAG_VERSION"
 
       - name: Build package artifacts

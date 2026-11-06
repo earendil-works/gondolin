@@ -10,8 +10,11 @@ import {
   type VM,
   VirtualProviderClass,
   type VirtualProvider,
+  createObjectMount,
   createShadowPathPredicate,
+  nativeMounts,
 } from "../../src/index.ts";
+import { MapObjectProvider } from "../lib/map-object-provider.ts";
 import {
   createVm,
   enginePids,
@@ -121,15 +124,25 @@ type MountKind = {
   largeBytes?: number;
 };
 
+const VFS_WORKLOADS = [
+  "small-create",
+  "small-stat",
+  "small-read",
+  "readdir-large",
+  "tree-find",
+  "tree-ls-lR",
+  "untar",
+  "large-write",
+  "large-read",
+];
+
 export async function vfsSuite(bench: Bench) {
   const smallCount = bench.q(1000, 200);
   const smallSize = 4096;
   const bigDirCount = bench.q(5000, 500);
   const treeFiles = bench.q(2000, 200);
   const defaultLargeBytes = bench.q(256, 32) * MiB;
-  // MemoryProvider grows files by reallocating on every write (quadratic):
-  // 256 MiB takes ~80 s per iteration on the node engine, so memory-backed
-  // mounts use a smaller large file.
+  // Memory-backed mounts hold the file in host memory; keep it moderate.
   const memoryLargeBytes = bench.q(64, 32) * MiB;
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-bench-vfs-"));
@@ -172,9 +185,11 @@ export async function vfsSuite(bench: Bench) {
             writeMode: "tmpfs",
           }),
           "/mnt/readonly": new ReadonlyProvider(new RealFSProvider(ro)),
-          "/mnt/object": new ObjectStandInProvider(
+          "/mnt/js-wrapper": new ObjectStandInProvider(
             new MemoryProvider(),
           ) as unknown as VirtualProvider,
+          "/mnt/native-memory": nativeMounts.memory(),
+          "/mnt/object-mount": createObjectMount(new MapObjectProvider()),
         },
       },
     });
@@ -219,11 +234,27 @@ export async function vfsSuite(bench: Bench) {
         description: "ReadonlyProvider(RealFSProvider), host-populated",
       },
       {
-        kind: "object",
-        guestPath: "/mnt/object",
+        kind: "js-wrapper",
+        guestPath: "/mnt/js-wrapper",
         readonly: false,
         description:
-          "JS delegating provider over MemoryProvider (object tier stand-in)",
+          "custom JS VirtualProvider delegating to MemoryProvider (object tier adapter on native)",
+        largeBytes: memoryLargeBytes,
+      },
+      {
+        kind: "native-memory",
+        guestPath: "/mnt/native-memory",
+        readonly: false,
+        description:
+          "nativeMounts.memory() (daemon memory fs on native, MemoryProvider on node)",
+        largeBytes: memoryLargeBytes,
+      },
+      {
+        kind: "object-mount",
+        guestPath: "/mnt/object-mount",
+        readonly: false,
+        description:
+          "createObjectMount(in-memory ObjectProvider), default options (commit on close, 1 s cache)",
         largeBytes: memoryLargeBytes,
       },
     ];
@@ -232,6 +263,9 @@ export async function vfsSuite(bench: Bench) {
       nsToMs(await sh(guest, `python3 /tmp/bench/fsbench.py ${args}`, signal));
 
     for (const mount of kinds) {
+      if (!VFS_WORKLOADS.some((w) => bench.matches(`vfs.${w}.${mount.kind}`))) {
+        continue;
+      }
       const base = mount.readonly
         ? mount.guestPath
         : `${mount.guestPath}/bench`;

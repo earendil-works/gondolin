@@ -41,6 +41,45 @@ fn is_internal_v4(ip: Ipv4Addr) -> bool {
         || a == 255
 }
 
+fn v4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::new((hi >> 8) as u8, (hi & 0xff) as u8, (lo >> 8) as u8, (lo & 0xff) as u8)
+}
+
+/// IPv4 addresses embedded in IPv6 transition formats (NAT64 RFC 6052, 6to4,
+/// Teredo, IPv4-mapped/-compatible): a destination like `64:ff9b::127.0.0.1`
+/// reaches the embedded address through a translator.
+fn embedded_v4(h: &[u16; 8]) -> Vec<Ipv4Addr> {
+    let b = Ipv6Addr::from(*h).octets();
+    let mut out = Vec::new();
+    // IPv4-mapped ::ffff:a.b.c.d and IPv4-compatible ::a.b.c.d
+    if h[..5].iter().all(|&s| s == 0) && (h[5] == 0xffff || h[5] == 0) {
+        out.push(v4(h[6], h[7]));
+    }
+    // NAT64 well-known prefix 64:ff9b::/96
+    if h[0] == 0x64 && h[1] == 0xff9b && h[2..6].iter().all(|&s| s == 0) {
+        out.push(v4(h[6], h[7]));
+    }
+    // NAT64 local-use prefix 64:ff9b:1::/48: the embedding depends on the
+    // network's prefix length (/48../96, RFC 6052), so every candidate counts;
+    // the zero candidates make this fail closed for the whole prefix
+    if h[0] == 0x64 && h[1] == 0xff9b && h[2] == 1 {
+        out.push(Ipv4Addr::new(b[6], b[7], b[9], b[10])); // /48 (bits 64..71: "u" octet)
+        out.push(Ipv4Addr::new(b[7], b[9], b[10], b[11])); // /56
+        out.push(Ipv4Addr::new(b[9], b[10], b[11], b[12])); // /64
+        out.push(v4(h[6], h[7])); // /96
+    }
+    // 6to4 2002:a.b.c.d::/48
+    if h[0] == 0x2002 {
+        out.push(v4(h[1], h[2]));
+    }
+    // Teredo 2001:0::/32: server address and the obfuscated client address
+    if h[0] == 0x2001 && h[1] == 0 {
+        out.push(v4(h[2], h[3]));
+        out.push(v4(!h[6], !h[7]));
+    }
+    out
+}
+
 fn is_internal_v6(ip: Ipv6Addr) -> bool {
     let h = ip.segments();
     if h.iter().all(|&s| s == 0) {
@@ -52,16 +91,7 @@ fn is_internal_v6(ip: Ipv6Addr) -> bool {
     if (h[0] & 0xfe00) == 0xfc00 || (h[0] & 0xffc0) == 0xfe80 {
         return true;
     }
-    if h[..5].iter().all(|&s| s == 0) && h[5] == 0xffff {
-        let v4 = Ipv4Addr::new(
-            (h[6] >> 8) as u8,
-            (h[6] & 0xff) as u8,
-            (h[7] >> 8) as u8,
-            (h[7] & 0xff) as u8,
-        );
-        return is_internal_v4(v4);
-    }
-    false
+    embedded_v4(&h).into_iter().any(is_internal_v4)
 }
 
 #[cfg(test)]
@@ -104,6 +134,36 @@ mod tests {
             assert!(is_internal_ip_str(ip), "{ip}");
         }
         for ip in ["::ffff:8.8.8.8", "64:ff9b::8.8.8.8", "2001:db8::1", "zzzz::1"] {
+            assert!(!is_internal_ip_str(ip), "{ip}");
+        }
+    }
+
+    #[test]
+    fn v6_transition_formats_embed_v4() {
+        for ip in [
+            "64:ff9b::127.0.0.1",
+            "64:ff9b::10.1.2.3",
+            "64:ff9b::a9fe:a9fe",    // 169.254.169.254
+            "64:ff9b:1::7f00:1",     // local-use, /96
+            "64:ff9b:1:a00:1::",     // local-use, /48: 10.0.0.1
+            "64:ff9b:1:c0:a8:100::", // local-use, /56: 192.168.1.0 (u octet skipped)
+            "2002:7f00:1::1",        // 6to4 127.0.0.1
+            "2002:c0a8:101::",       // 6to4 192.168.1.1
+            "::127.0.0.1",           // IPv4-compatible
+            "::10.0.0.1",
+            "::ffff:169.254.169.254",
+            "2001:0:7f00:1::",           // Teredo server 127.0.0.1
+            "2001:0:808:808::f5ff:fffe", // Teredo client 10.0.0.1 (obfuscated)
+        ] {
+            assert!(is_internal_ip_str(ip), "{ip}");
+        }
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "::8.8.8.8",
+            "2001:0:808:808::f7f7:f7f7", // Teredo client 8.8.8.8
+            "2001:4860:4860::8888",
+        ] {
             assert!(!is_internal_ip_str(ip), "{ip}");
         }
     }

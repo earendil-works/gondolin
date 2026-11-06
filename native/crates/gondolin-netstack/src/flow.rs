@@ -6,52 +6,46 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::stack::{Phase, Shared, State};
+use crate::stack::{Entry, FlowKey, Phase, READ_HOLD, Shared, State};
 use crate::{FlowAbort, FlowControl, FlowMeta, TcpFlow};
 
-pub(crate) fn new_flow(
-    shared: Arc<Shared>,
-    session: u64,
-    handle: SocketHandle,
-    meta: FlowMeta,
-) -> TcpFlow {
+pub(crate) fn new_flow(shared: Arc<Shared>, session: u64, key: FlowKey, meta: FlowMeta) -> TcpFlow {
     let id = meta.id;
     let control =
-        FlowControl::new(Arc::new(StackAbort { shared: shared.clone(), session, handle, id }));
-    TcpFlow { meta, stream: Box::pin(NetTcpStream { shared, session, handle, id }), control }
+        FlowControl::new(Arc::new(StackAbort { shared: shared.clone(), session, key, id }));
+    TcpFlow { meta, stream: Box::pin(NetTcpStream { shared, session, key, id }), control }
 }
 
 /// Outcome of looking up the socket of a flow.
 enum Lookup<'a> {
-    Live(&'a mut tcp::Socket<'static>),
+    Live(&'a mut Entry),
     Aborted,
     Gone,
 }
 
-fn lookup<'a>(st: &'a mut State, session: u64, handle: SocketHandle, id: u64) -> Lookup<'a> {
+fn lookup<'a>(st: &'a mut State, session: u64, key: FlowKey, id: u64) -> Lookup<'a> {
     if !st.running || st.session != session {
         return Lookup::Gone;
     }
-    match st.entries.get(&handle) {
+    match st.entries.get_mut(&key) {
         Some(entry) if matches!(entry.phase, Phase::Open { id: open } if open == id) => {
             if entry.aborted {
                 return Lookup::Aborted;
             }
+            Lookup::Live(entry)
         }
-        _ => return Lookup::Gone,
+        _ => Lookup::Gone,
     }
-    Lookup::Live(st.sockets.get_mut::<tcp::Socket>(handle))
 }
 
 /// Guest TCP connection as an `AsyncRead + AsyncWrite` stream.
 pub(crate) struct NetTcpStream {
     shared: Arc<Shared>,
     session: u64,
-    handle: SocketHandle,
+    key: FlowKey,
     id: u64,
 }
 
@@ -67,10 +61,27 @@ impl AsyncRead for NetTcpStream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let mut st = this.shared.lock();
-        let socket = match lookup(&mut st, this.session, this.handle, this.id) {
-            Lookup::Live(socket) => socket,
+        let entry = match lookup(&mut st, this.session, this.key, this.id) {
+            Lookup::Live(entry) => entry,
             Lookup::Aborted | Lookup::Gone => return Poll::Ready(Err(aborted())),
         };
+        let push = entry.push;
+        let socket = entry.socket();
+        let queued = socket.recv_queue();
+        if queued > 0 && queued < this.shared.read_hold_bytes && !push && socket.may_recv() {
+            // More of the guest's write is on its way: wait for it (READ_HOLD).
+            entry.read_waker = Some(cx.waker().clone());
+            if entry.read_deadline.is_none() {
+                let deadline = Instant::now() + READ_HOLD;
+                entry.read_deadline = Some(deadline);
+                st.schedule(this.key, deadline);
+                if st.ticker_late() {
+                    drop(st);
+                    this.shared.poll_notify.notify_one();
+                }
+            }
+            return Poll::Pending;
+        }
         let mut read = 0;
         while buf.remaining() > 0 {
             let result = socket.recv(|data| {
@@ -99,8 +110,14 @@ impl AsyncRead for NetTcpStream {
             }
         }
         if read > 0 {
-            drop(st);
+            if socket.recv_queue() == 0 {
+                entry.push = false;
+            }
+            entry.read_waker = None;
+            entry.read_deadline = None;
             // Freed receive space may warrant a window update.
+            st.mark_dirty(this.key);
+            drop(st);
             this.shared.poll_notify.notify_one();
             return Poll::Ready(Ok(()));
         }
@@ -117,8 +134,8 @@ impl AsyncWrite for NetTcpStream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let mut st = this.shared.lock();
-        let socket = match lookup(&mut st, this.session, this.handle, this.id) {
-            Lookup::Live(socket) => socket,
+        let socket = match lookup(&mut st, this.session, this.key, this.id) {
+            Lookup::Live(entry) => entry.socket(),
             Lookup::Aborted | Lookup::Gone => return Poll::Ready(Err(aborted())),
         };
         if data.is_empty() {
@@ -138,6 +155,7 @@ impl AsyncWrite for NetTcpStream {
                 Poll::Pending
             }
             Ok(n) => {
+                st.mark_dirty(this.key);
                 drop(st);
                 this.shared.poll_notify.notify_one();
                 Poll::Ready(Ok(n))
@@ -156,10 +174,11 @@ impl AsyncWrite for NetTcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let mut st = this.shared.lock();
-        match lookup(&mut st, this.session, this.handle, this.id) {
-            Lookup::Live(socket) => socket.close(),
+        match lookup(&mut st, this.session, this.key, this.id) {
+            Lookup::Live(entry) => entry.socket().close(),
             Lookup::Aborted | Lookup::Gone => return Poll::Ready(Err(aborted())),
         }
+        st.mark_dirty(this.key);
         drop(st);
         this.shared.poll_notify.notify_one();
         Poll::Ready(Ok(()))
@@ -170,10 +189,13 @@ impl Drop for NetTcpStream {
     fn drop(&mut self) {
         let mut st = self.shared.lock();
         let linger = Duration::from_millis(self.shared_linger_ms());
-        let socket = match lookup(&mut st, self.session, self.handle, self.id) {
-            Lookup::Live(socket) => {
-                if socket.recv_queue() > 0 {
+        let socket = match lookup(&mut st, self.session, self.key, self.id) {
+            Lookup::Live(entry) => {
+                let socket = entry.socket();
+                if socket.recv_queue() > 0 || std::thread::panicking() {
                     // Unread guest data: reset like a Linux socket would.
+                    // Dropped while a flow handler panics: reset too, the
+                    // guest must not mistake the end for a clean close.
                     socket.abort();
                 } else {
                     socket.close();
@@ -183,8 +205,9 @@ impl Drop for NetTcpStream {
             Lookup::Aborted => true,
             Lookup::Gone => false,
         };
-        if socket && let Some(entry) = st.entries.get_mut(&self.handle) {
+        if socket && let Some(entry) = st.entries.get_mut(&self.key) {
             entry.phase = Phase::Orphan { deadline: Instant::now() + linger };
+            st.mark_dirty(self.key);
         }
         drop(st);
         self.shared.poll_notify.notify_one();
@@ -200,18 +223,19 @@ impl NetTcpStream {
 struct StackAbort {
     shared: Arc<Shared>,
     session: u64,
-    handle: SocketHandle,
+    key: FlowKey,
     id: u64,
 }
 
 impl FlowAbort for StackAbort {
     fn abort(&self) {
         let mut st = self.shared.lock();
-        if let Lookup::Live(socket) = lookup(&mut st, self.session, self.handle, self.id) {
-            socket.abort();
-            if let Some(entry) = st.entries.get_mut(&self.handle) {
-                entry.aborted = true;
-            }
+        if let Lookup::Live(entry) = lookup(&mut st, self.session, self.key, self.id) {
+            entry.socket().abort();
+            entry.aborted = true;
+            // a read held for a push sees the abort now
+            entry.wake_reader();
+            st.mark_dirty(self.key);
             drop(st);
             self.shared.poll_notify.notify_one();
         }

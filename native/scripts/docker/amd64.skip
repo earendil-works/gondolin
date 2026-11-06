@@ -1,0 +1,4 @@
+# Tests skipped in the emulated linux/amd64 container (Docker Desktop on Apple
+# silicon runs amd64 binaries through Rosetta/qemu-user, not a real kernel).
+# format: <test-binary-name> <test-name-filter>  # reason
+gondolin_vfs openat2_fast_path_and_fallbacks  # the emulator returns ENOSYS for openat2 (the fallback walk, which this test also covers, is exercised); passes on real x86_64 Linux

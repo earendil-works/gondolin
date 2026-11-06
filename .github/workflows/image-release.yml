@@ -185,6 +185,10 @@ jobs:
         run: |
           cd guest
           zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.zig_target }}
+          # The image must carry helpers from this source (sandboxfs
+          # --virtiofs for the native engine), not the published helpers of
+          # host/package.json's version.
+          grep -q -- '--virtiofs' zig-out/bin/sandboxfs
 
       - name: Build guest image
         run: |
@@ -193,7 +197,11 @@ jobs:
 
           NODE_BIN="$(node -p 'process.execPath')"
           cd guest
+          # Use the helpers just built (as CI does); without this, `gondolin
+          # build` downloads the registry's published helpers for
+          # host/package.json's version and ignores zig-out.
           ALPINE_ARCH=${{ matrix.arch }} \
+          GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" \
           GONDOLIN_BUILD_CONFIG="../${{ needs.prepare.outputs.build_config }}" \
           make build NODE="$NODE_BIN"
 
@@ -379,6 +387,8 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Registry updated" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Updated \`builtin-image-registry.json\` on \`${{ github.event.repository.default_branch }}\` for \`${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}\`." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Registry updated"
+            echo
+            echo "Updated \`builtin-image-registry.json\` on \`${{ github.event.repository.default_branch }}\` for \`${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

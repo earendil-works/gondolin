@@ -111,6 +111,67 @@ impl<'a> Writer<'a> {
         self.written
     }
 
+    /// Mutable views of the `len` bytes that follow `skip` bytes after the
+    /// current position, without advancing (zero-copy fills; see
+    /// [`Writer::advance`] and [`Writer::patch`]).
+    pub fn reserve(&mut self, skip: usize, len: usize) -> Vec<&'a mut [u8]> {
+        let mut out = Vec::new();
+        let (mut seg, mut off) = (self.seg, self.off);
+        let mut skip = skip;
+        let mut len = len;
+        while seg < self.segments.len() && len > 0 {
+            let (ptr, seg_len) = self.segments[seg];
+            let avail = seg_len - off;
+            if skip >= avail {
+                skip -= avail;
+                seg += 1;
+                off = 0;
+                continue;
+            }
+            let start = off + skip;
+            skip = 0;
+            let n = (seg_len - start).min(len);
+            // SAFETY: the segment is guest memory validated for `seg_len`
+            // bytes; views never overlap the header or each other.
+            out.push(unsafe { std::slice::from_raw_parts_mut(ptr.add(start), n) });
+            len -= n;
+            seg += 1;
+            off = 0;
+        }
+        out
+    }
+
+    /// Advances the position by `n` bytes filled through [`Writer::reserve`].
+    pub fn advance(&mut self, mut n: usize) {
+        self.written += n;
+        while n > 0 && self.seg < self.segments.len() {
+            let step = (self.segments[self.seg].1 - self.off).min(n);
+            self.off += step;
+            n -= step;
+            if self.off == self.segments[self.seg].1 {
+                self.seg += 1;
+                self.off = 0;
+            }
+        }
+    }
+
+    /// Overwrites already written bytes at absolute position `pos`.
+    pub fn patch(&mut self, mut pos: usize, mut data: &[u8]) {
+        for &(ptr, len) in &self.segments {
+            if data.is_empty() {
+                break;
+            }
+            if pos >= len {
+                pos -= len;
+                continue;
+            }
+            let n = (len - pos).min(data.len());
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(pos), n) };
+            data = &data[n..];
+            pos = 0;
+        }
+    }
+
     /// Copies as much of `data` as fits; returns the bytes written.
     pub fn write(&mut self, mut data: &[u8]) -> usize {
         let mut total = 0;

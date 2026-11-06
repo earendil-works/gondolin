@@ -559,3 +559,44 @@ async fn guest_that_never_reads_is_throttled() {
     // 100k RSTs of 4 + 14 + 20 + 20 bytes.
     assert_eq!(total, 100_000 * 58);
 }
+
+/// Guest data is handed to the flow at a PSH; without one, after `READ_HOLD`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_wait_for_push_or_hold_timeout() {
+    use tokio::io::AsyncReadExt;
+    let (mut h, mut flows) = channel_harness(NetConfig::default());
+    let mut g = RawGuest::new(&mut h);
+    let dst = Ipv4Addr::new(93, 184, 216, 34);
+    let send = |seq: u32, ack: u32, flags: u8, data: &[u8]| {
+        let seg = tcp_segment(GUEST_IP, 40000, dst, 80, seq, ack, flags, data);
+        guest_ip_frame(GUEST_IP, dst, wire::IP_PROTO_TCP, &seg)
+    };
+    g.send(&send(1000, 0, wire::TCP_SYN, b"")).await;
+    let syn_ack = parse_ip_frame(&g.recv().await).payload;
+    let isn = u32::from_be_bytes(syn_ack[4..8].try_into().unwrap());
+    g.send(&send(1001, isn + 1, wire::TCP_ACK, b"")).await;
+    let mut flow = flows.recv().await.unwrap();
+
+    // With PSH: no hold.
+    g.send(&send(1001, isn + 1, wire::TCP_ACK | wire::TCP_PSH, b"hello")).await;
+    let mut buf = [0u8; 16];
+    let n = flow.stream.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    assert_eq!(h.stack.stats().read_hold_timeouts, 0);
+
+    // Without: delivered once the hold expires.
+    g.send(&send(1006, isn + 1, wire::TCP_ACK, b"world")).await;
+    let start = std::time::Instant::now();
+    let n = flow.stream.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"world");
+    assert!(start.elapsed() >= gondolin_netstack::READ_HOLD / 2);
+    assert_eq!(h.stack.stats().read_hold_timeouts, 1);
+
+    // A FIN releases it too.
+    g.send(&send(1011, isn + 1, wire::TCP_ACK, b"bye")).await;
+    g.send(&send(1014, isn + 1, wire::TCP_ACK | wire::TCP_FIN, b"")).await;
+    let mut rest = Vec::new();
+    flow.stream.read_to_end(&mut rest).await.unwrap();
+    assert_eq!(rest, b"bye");
+    assert_eq!(h.stack.stats().read_hold_timeouts, 1);
+}

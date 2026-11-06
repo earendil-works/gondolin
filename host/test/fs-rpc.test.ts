@@ -1674,3 +1674,37 @@ test("fs rpc service.close closes all open handles", async () => {
   const after = await send(service, "release", { fh });
   assert.equal(after.p.err, ERRNO.EBADF);
 });
+
+test("fs rpc readdir continuations survive unlinks (rm -rf)", async () => {
+  const base = new MemoryProvider();
+  await base.mkdir("/d");
+  for (let i = 0; i < 300; i++) {
+    base.writeFileSync!(`/d/f${String(i).padStart(3, "0")}`, "x");
+  }
+  const service = new FsRpcService(base);
+  const lookup = await send(service, "lookup", { parent_ino: 1, name: "d" });
+  const dirIno = (lookup.p.res?.entry as { ino: number }).ino;
+
+  let offset = 0;
+  for (;;) {
+    const batch = await send(service, "readdir", {
+      ino: dirIno,
+      offset,
+      max_entries: 64,
+    });
+    const entries =
+      (batch.p.res?.entries as Array<{ name: string; offset: number }>) ?? [];
+    if (entries.length === 0) break;
+    offset = entries[entries.length - 1].offset;
+    for (const entry of entries) {
+      const unlink = await send(service, "unlink", {
+        parent_ino: dirIno,
+        name: entry.name,
+      });
+      assert.equal(unlink.p.err, 0);
+    }
+  }
+  const rmdir = await send(service, "rmdir", { parent_ino: 1, name: "d" });
+  assert.equal(rmdir.p.err, 0);
+  await service.close();
+});

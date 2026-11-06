@@ -7,6 +7,7 @@ import type {
   VfsStatfs,
 } from "./node/index.ts";
 import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs.ts";
+import { kProviderInternals } from "./native-marks.ts";
 import {
   createVirtualDirStats,
   ERRNO,
@@ -47,6 +48,11 @@ export class MountRouterProvider
 
   get readonly() {
     return this.allReadonly;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return { kind: "router" as const, mounts: this.mountMap };
   }
 
   get supportsSymlinks() {

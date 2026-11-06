@@ -39,6 +39,52 @@ impl Resolver for SystemResolver {
     }
 }
 
+/// Successful lookups of `R` reused for a short time. The system resolver
+/// costs ~0.2 ms per call on macOS (mDNSResponder IPC), paid by every
+/// request's policy check. Reusing the answer also keeps the policy check and
+/// the upstream connect on the same addresses.
+pub struct CachingResolver<R> {
+    inner: R,
+    ttl: std::time::Duration,
+    entries: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<IpAddr>)>>,
+}
+
+/// Lifetime of a cached answer.
+const RESOLVER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Hosts kept at most; the cache is cleared when full.
+const RESOLVER_CACHE_MAX: usize = 1024;
+
+impl<R: Resolver> CachingResolver<R> {
+    pub fn new(inner: R) -> Self {
+        Self::with_ttl(inner, RESOLVER_CACHE_TTL)
+    }
+
+    pub fn with_ttl(inner: R, ttl: std::time::Duration) -> Self {
+        Self { inner, ttl, entries: Default::default() }
+    }
+}
+
+#[async_trait]
+impl<R: Resolver> Resolver for CachingResolver<R> {
+    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+        let now = std::time::Instant::now();
+        if let Some((at, ips)) = self.entries.lock().unwrap().get(host)
+            && now.duration_since(*at) < self.ttl
+        {
+            return Ok(ips.clone());
+        }
+        let ips = self.inner.lookup(host).await?;
+        if !ips.is_empty() {
+            let mut entries = self.entries.lock().unwrap();
+            if entries.len() >= RESOLVER_CACHE_MAX {
+                entries.clear();
+            }
+            entries.insert(host.to_string(), (std::time::Instant::now(), ips.clone()));
+        }
+        Ok(ips)
+    }
+}
+
 /// Strips the brackets of an IPv6 URL host (`[::1]`).
 pub fn bare_host(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
@@ -75,6 +121,16 @@ impl PolicyEngine {
 
     pub fn registrations(&self) -> HookRegistrations {
         self.hooks.registrations()
+    }
+
+    /// Whether a lookup of `hostname` may start before the request hooks ran:
+    /// only for hosts the declarative allowlist admits anyway, so no lookup
+    /// happens that the node engine would not do.
+    pub fn may_prefetch_lookup(&self, hostname: &str) -> bool {
+        match &self.policy().rules {
+            Some(rules) => matches_any_host(hostname, &rules.allowed_hosts),
+            None => true,
+        }
     }
 
     /// Whether the built-in internal-range policy is in effect (no rules, no
@@ -166,7 +222,20 @@ impl PolicyEngine {
         protocol: &'static str,
         port: u16,
     ) -> Result<IpAddr, PipelineError> {
-        let ips = self.lookup(hostname).await?;
+        let ips = self.lookup(hostname).await;
+        self.resolve_allowed_from(hostname, protocol, port, ips).await
+    }
+
+    /// [`PolicyEngine::resolve_allowed`] with a lookup result obtained earlier
+    /// (speculatively, while a request hook ran).
+    pub async fn resolve_allowed_from(
+        &self,
+        hostname: &str,
+        protocol: &'static str,
+        port: u16,
+        ips: Result<Vec<IpAddr>, Blocked>,
+    ) -> Result<IpAddr, PipelineError> {
+        let ips = ips?;
         for ip in &ips {
             let info = IpAllowInfo { hostname: hostname.to_string(), ip: *ip, port, protocol };
             match self.is_ip_allowed(&info).await {
@@ -219,6 +288,37 @@ mod tests {
         async fn lookup(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
             Ok(self.0.clone())
         }
+    }
+
+    /// Counts lookups; fails for `fail.test`.
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl Resolver for Counting {
+        async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u8;
+            if host == "fail.test" {
+                return Err(io::Error::other("nope"));
+            }
+            Ok(vec![IpAddr::from([192, 0, 2, n])])
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_resolver_reuses_answers_until_ttl() {
+        let r = CachingResolver::with_ttl(
+            Counting(Default::default()),
+            std::time::Duration::from_millis(50),
+        );
+        let first = r.lookup("a.test").await.unwrap();
+        assert_eq!(r.lookup("a.test").await.unwrap(), first);
+        assert_ne!(r.lookup("b.test").await.unwrap(), first);
+        // failures are not cached
+        assert!(r.lookup("fail.test").await.is_err());
+        assert!(r.lookup("fail.test").await.is_err());
+        assert_eq!(r.inner.0.load(std::sync::atomic::Ordering::SeqCst), 4);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_ne!(r.lookup("a.test").await.unwrap(), first);
     }
 
     fn info(hostname: &str, ip: &str) -> IpAllowInfo {

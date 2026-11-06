@@ -129,6 +129,10 @@ export type WireRequestHead = {
   headers: Array<[string, string]>;
   /** daemon body stream id */
   body?: number;
+  /** start of the body, inline (pull the rest from offset `length`) */
+  body_prefix?: Uint8Array;
+  /** whether `body_prefix` is the whole body */
+  body_complete?: boolean;
 };
 
 export type WireResponseHead = {
@@ -137,6 +141,10 @@ export type WireResponseHead = {
   headers: Array<[string, string]>;
   /** daemon body stream id */
   body?: number;
+  /** start of the body, inline (pull the rest from offset `length`) */
+  body_prefix?: Uint8Array;
+  /** whether `body_prefix` is the whole body */
+  body_complete?: boolean;
 };
 
 export type HookCallWire = {
@@ -596,12 +604,28 @@ const PULL_CHUNK_BYTES = 256 * 1024;
 export function daemonBodyStream(
   transport: BodyTransport,
   stream: number,
+  inline?: { prefix?: Uint8Array; complete?: boolean },
 ): ReadableStream<Uint8Array> {
+  const prefix = inline?.prefix;
   let offset = 0;
   let done = false;
+  let sentPrefix = false;
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
+        // bytes the daemon sent inline with the hook call: no round trip
+        if (!sentPrefix) {
+          sentPrefix = true;
+          if (prefix && prefix.length > 0) {
+            offset = prefix.length;
+            controller.enqueue(new Uint8Array(prefix));
+          }
+          if (inline?.complete) {
+            done = true;
+            controller.close();
+          }
+          if (offset > 0 || done) return;
+        }
         const { data, eof } = await transport.pull(
           stream,
           PULL_CHUNK_BYTES,
@@ -770,6 +794,27 @@ function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
     offset += c.length;
   }
   return out;
+}
+
+/** Errors the stream once more than `max` bytes passed (`502`, like node) */
+function limitStream(max: number): TransformStream<Uint8Array, Uint8Array> {
+  let total = 0;
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      total += chunk.length;
+      if (total > max) {
+        controller.error(
+          new HttpRequestBlockedError(
+            `response body exceeds ${max} bytes`,
+            502,
+            "Bad Gateway",
+          ),
+        );
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  });
 }
 
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
@@ -973,7 +1018,13 @@ export class NativeHookService {
     const original = daemonRequest(
       head.url,
       { method: head.method, headers: head.headers },
-      bodyId !== undefined ? () => daemonBodyStream(transport, bodyId) : null,
+      bodyId !== undefined
+        ? () =>
+            daemonBodyStream(transport, bodyId, {
+              prefix: head.body_prefix,
+              complete: head.body_complete,
+            })
+        : null,
     );
     const releaseOriginal = () => {
       if (bodyId !== undefined) this.transport.release(bodyId);
@@ -1087,13 +1138,20 @@ export class NativeHookService {
       bodyId !== undefined && !NULL_BODY_STATUSES.has(head.status);
     const makeBody: BodyFactory | null = hasBody
       ? () => {
-          const raw = daemonBodyStream(transport, bodyId!);
+          const raw = daemonBodyStream(transport, bodyId!, {
+            prefix: head.body_prefix,
+            complete: head.body_complete,
+          });
           return format
-            ? raw.pipeThrough(
-                new DecompressionStream(
-                  format as "gzip",
-                ) as unknown as TransformStream<Uint8Array, Uint8Array>,
-              )
+            ? raw
+                .pipeThrough(
+                  new DecompressionStream(
+                    format as "gzip",
+                  ) as unknown as TransformStream<Uint8Array, Uint8Array>,
+                )
+                // the daemon limits the encoded bytes; bound the decoded ones
+                // too (decompression bombs), like node's buffered limit
+                .pipeThrough(limitStream(this.maxResponseBodyBytes))
             : raw;
         }
       : null;
@@ -1261,9 +1319,8 @@ export class NativeNetwork {
               eof: Boolean(r.eof),
             };
           },
-          release: (stream) => {
-            transport.send("body_release", { stream });
-          },
+          // daemon streams live until the hook call returns: no frame needed
+          release: () => {},
         },
         maxRequestBodyBytes: this.options.maxHttpBodyBytes ?? 64 * 1024 * 1024,
         maxResponseBodyBytes:

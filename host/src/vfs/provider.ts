@@ -6,6 +6,7 @@ import type {
 } from "./node/index.ts";
 import { delegateStatfsOrEnosys } from "./statfs.ts";
 import { ERRNO, VirtualProviderClass } from "./utils.ts";
+import { kProviderInternals } from "./native-marks.ts";
 
 export type VfsHookContext = {
   /** operation name */
@@ -297,6 +298,15 @@ export class SandboxVfsProvider
 
   get readonly() {
     return this.backend.readonly;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return {
+      kind: "hooked" as const,
+      backend: this.backend,
+      hooks: this.hooks,
+    };
   }
 
   get supportsSymlinks() {

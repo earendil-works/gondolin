@@ -11,9 +11,9 @@
  * - VFS: the daemon forwards sandboxfs requests (`vfs_rpc`) and this class
  *   serves them with the node engine's `FsRpcService`;
  * - network: served natively by the daemon (`NativeNetwork`: netstack, egress,
- *   SSH proxy; JS hooks are called back over the pipe). Fallback
- *   (`GONDOLIN_NATIVE_NET=external`, or a custom `fetch`): the node network
- *   stack (`QemuNetworkBackend`) listens on a local socket QEMU connects to.
+ *   SSH proxy; JS hooks are called back over the pipe). Internal, deprecated
+ *   fallback (`GONDOLIN_NATIVE_NET=external|relay`): the node network stack
+ *   (`QemuNetworkBackend`) listens on a local socket QEMU connects to.
  */
 
 import { EventEmitter } from "node:events";
@@ -60,6 +60,7 @@ import {
 } from "./config.ts";
 import { NativeNetwork } from "./net.ts";
 import { attachNetdevRelay } from "./netdev-relay.ts";
+import { NativeVfs, type NativeVfsSpec } from "./vfs.ts";
 import { NativeTcpChannelState } from "./tcp.ts";
 import {
   NativeTransport,
@@ -92,6 +93,8 @@ type NativeSandboxServerInternalOptions = {
   native?: NativeEngineOptions;
   /** remote session settings (daemon on another machine) */
   remote?: NativeRemoteConfig;
+  /** mounts for the native VFS (absent: serve `vfsProvider` from the controller) */
+  nativeVfs?: NativeVfsSpec;
   /** replaces the guest's MITM CA certificate (`/etc/gondolin/mitm/ca.crt`) */
   setMitmCaCert?: (certPem: string) => void;
 };
@@ -102,6 +105,8 @@ export class NativeSandboxServer extends EventEmitter {
   private readonly debugFlags: ReadonlySet<DebugFlag>;
   private readonly vfsProvider: SandboxVfsProvider | null;
   private readonly fsService: FsRpcService | null;
+  /** native VFS (daemon-side mount table), replaces `fsService` */
+  private readonly nativeVfs: NativeVfs | null;
   private readonly network: QemuNetworkBackend | null;
   private readonly nativeNetwork: NativeNetwork | null;
   private transport: NativeTransport | null = null;
@@ -137,24 +142,32 @@ export class NativeSandboxServer extends EventEmitter {
         ? options.vfsProvider
         : new SandboxVfsProvider(options.vfsProvider)
       : null;
-    this.fsService = this.vfsProvider
-      ? new FsRpcService(this.vfsProvider, {
-          logger: this.debugFlags.has("vfs")
-            ? (message) => this.emitDebug("vfs", message)
-            : undefined,
-        })
-      : null;
+    this.nativeVfs =
+      this.vfsProvider &&
+      internalOptions.nativeVfs &&
+      process.env.GONDOLIN_NATIVE_VFS !== "controller"
+        ? new NativeVfs(internalOptions.nativeVfs, {
+            remote: Boolean(internalOptions.remote),
+          })
+        : null;
+    this.fsService =
+      this.vfsProvider && !this.nativeVfs
+        ? new FsRpcService(this.vfsProvider, {
+            logger: this.debugFlags.has("vfs")
+              ? (message) => this.emitDebug("vfs", message)
+              : undefined,
+          })
+        : null;
 
     const mac =
       parseMac(options.netMac) ??
       Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    // node network stack in the controller: `external` socket locally, the
-    // netdev relay for remote daemons
+    // node network stack in the controller (internal, deprecated debugging
+    // fallback): `external` socket locally, the netdev relay for remote
+    // daemons. `VMOptions.fetch` is for asset downloads only and no longer
+    // selects it.
     const netMode = process.env.GONDOLIN_NATIVE_NET?.trim().toLowerCase();
-    const externalNet =
-      options.fetch !== undefined ||
-      netMode === "external" ||
-      netMode === "relay";
+    const externalNet = netMode === "external" || netMode === "relay";
     this.nativeNetwork =
       options.netEnabled && !externalNet
         ? new NativeNetwork({
@@ -288,6 +301,40 @@ export class NativeSandboxServer extends EventEmitter {
     );
   }
 
+  /**
+   * The `configure` payload for this server's options (also used by
+   * `gondolin --print-configure` without a daemon).
+   */
+  async buildConfigure(): Promise<ReturnType<typeof buildNativeConfigure>> {
+    const remote = this.internalOptions.remote;
+    const configure = buildNativeConfigure(
+      this.options,
+      this.internalOptions,
+      {
+        vfsController: this.fsService !== null,
+        vfs: this.nativeVfs?.config,
+        netSocketPath:
+          this.network && !remote ? this.options.netSocketPath : null,
+        netRelay: Boolean(this.network && remote),
+        netNative: this.nativeNetwork
+          ? await this.nativeNetwork.configure()
+          : null,
+      },
+      remote,
+    );
+    if (remote) {
+      assertRemoteConfigure(
+        configure,
+        [
+          remote.qemuPath,
+          remote.krunRunnerPath,
+          ...(this.nativeVfs?.daemonPaths ?? []),
+        ].filter((p): p is string => typeof p === "string"),
+      );
+    }
+    return configure;
+  }
+
   private async startInternal(): Promise<void> {
     if (this.started) return;
     const remote = this.internalOptions.remote;
@@ -301,28 +348,6 @@ export class NativeSandboxServer extends EventEmitter {
           `unsupported gondolind protocol version ${hello.protocol}`,
         );
       }
-      const configure = buildNativeConfigure(
-        this.options,
-        this.internalOptions,
-        {
-          vfsController: this.fsService !== null,
-          netSocketPath:
-            this.network && !remote ? this.options.netSocketPath : null,
-          netRelay: Boolean(this.network && remote),
-          netNative: this.nativeNetwork
-            ? await this.nativeNetwork.configure()
-            : null,
-        },
-        remote,
-      );
-      if (remote) {
-        assertRemoteConfigure(
-          configure,
-          [remote.qemuPath, remote.krunRunnerPath].filter(
-            (p): p is string => typeof p === "string",
-          ),
-        );
-      }
       if (remote && this.nativeNetwork) {
         // the remote daemon terminates TLS with its own CA: the guest trusts that one
         const ca = await transport.request("mitm_ca", {});
@@ -330,6 +355,7 @@ export class NativeSandboxServer extends EventEmitter {
           this.internalOptions.setMitmCaCert?.(ca.cert_pem);
         }
       }
+      const configure = await this.buildConfigure();
       const configured = await transport.request("configure", configure);
       this.resolvedImage =
         configured && typeof configured.image === "object"
@@ -415,6 +441,7 @@ export class NativeSandboxServer extends EventEmitter {
       this.emit("error", new Error(String(p.message ?? "gondolind error")));
     });
     transport.handleRequest("vfs_rpc", (p) => this.handleVfsRpc(p));
+    this.nativeVfs?.install(transport, (err) => this.emit("error", err));
     this.nativeNetwork?.install(transport);
     const channel = (p: any) =>
       p.channel === "ssh" || p.channel === "ingress"
@@ -429,6 +456,26 @@ export class NativeSandboxServer extends EventEmitter {
     transport.on("closed", (err: Error) => {
       if (this.transport !== transport) return;
       this.handleDaemonGone(err);
+    });
+  }
+
+  /** The native VFS, when the daemon serves the guest filesystem */
+  getNativeVfs(): NativeVfs | null {
+    return this.nativeVfs;
+  }
+
+  /** Controller fs API on the daemon's mount table (`fs_call`) */
+  async fsCall(p: Record<string, unknown>): Promise<any> {
+    const transport = this.transport;
+    if (!transport) throw new Error("gondolind is not running");
+    return transport.request("fs_call", p);
+  }
+
+  /** Drop cached state of the daemon's object mounts (`vfs_invalidate`) */
+  async invalidateVfs(mountId: number, entryPath?: string): Promise<void> {
+    await this.transport?.request("vfs_invalidate", {
+      mount_id: mountId,
+      path: entryPath,
     });
   }
 

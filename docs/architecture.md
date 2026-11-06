@@ -60,6 +60,20 @@ Guest daemons/components:
 - `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
 - `/init`: mounts tmpfs, brings up networking, starts services
 
+### Host engines (node or native)
+
+The host side comes in two engines with the same SDK and CLI:
+
+- **`node`** (default): everything above runs inside your Node.js process.
+- **`native`**: `gondolind`, a static Rust daemon, runs the VM, the guest
+  protocols, the network stack and the HTTP/TLS mediation. Your Node.js
+  process stays the *controller*: it owns the configuration, your hooks and VFS
+  providers, and talks to the daemon over its stdin/stdout. Because the daemon
+  needs no runtime, it can also run on another machine (for example over SSH)
+  while the controller, credentials and providers stay local.
+
+See [Native Engine](./native.md).
+
 ### VM backend (QEMU default, optional krun)
 
 QEMU is the default VM engine (and primary isolation boundary). Gondolin also
@@ -92,6 +106,17 @@ See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
 
 The important architectural choice: **the host is the enforcement point** for
 both networking and persistence.
+
+With the native engine the right-hand side of this diagram (sandbox server,
+network backend, VFS RPC, forwarders) lives in `gondolind`; the controller is
+reached over the daemon's stdin/stdout for hooks, VFS providers and the
+`vm.exec`/`vm.fs` API:
+
+```
+ Node.js controller  <-- stdio (local child, or SSH) -->  gondolind  <-- virtio -->  guest
+ (VM API, policy,                                         (QEMU, exec, network,
+  hooks, providers)                                        TLS mediation, VFS port)
+```
 
 ## Control Plane vs Data Plane
 

@@ -1,0 +1,3076 @@
+{
+  "version": 1,
+  "engine": "native",
+  "suite": "vfs",
+  "quick": false,
+  "filter": null,
+  "interleaved": [
+    "node",
+    "native"
+  ],
+  "note": "interim: native VFS not merged yet; mounts run through the node providers over the controller pipe (vfs_rpc proxy), so this measures proxy overhead",
+  "iterations": null,
+  "startedAt": "2026-11-06T18:09:45.411Z",
+  "finishedAt": "2026-11-06T18:47:26.411Z",
+  "machine": {
+    "hostname": "saratoga",
+    "platform": "darwin",
+    "osRelease": "25.6.0",
+    "osVersion": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050",
+    "productVersion": "26.6.2",
+    "arch": "arm64",
+    "cpuModel": "Apple M5 Max",
+    "cpuCount": 18,
+    "loadAvg": [
+      36.82,
+      36.42,
+      38.45
+    ],
+    "totalMemGB": 128,
+    "node": "v26.10.0",
+    "qemu": "QEMU emulator version 10.2.1",
+    "gitCommit": "ee286a2",
+    "gitDirty": true,
+    "image": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe)",
+    "nativeBin": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../native/target/release/gondolind",
+    "loadAvgEnd": [
+      15.76,
+      20.7,
+      29.5
+    ]
+  },
+  "workloads": [
+    {
+      "name": "vfs.small-create.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 21.961333999999624,
+            "p95": 101.87530799999948,
+            "min": 13.456167000003916,
+            "max": 121.06320799999958,
+            "mean": 39.29925020000083
+          },
+          "samples": [
+            25.124,
+            13.456,
+            21.961,
+            121.063,
+            14.892
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 5.663875,
+            "p95": 6.454117,
+            "min": 4.929042,
+            "max": 6.535792,
+            "mean": 5.7599252000000005
+          },
+          "samples": [
+            6.127,
+            4.929,
+            5.664,
+            6.536,
+            5.544
+          ]
+        }
+      },
+      "totalMs": 387.16104100000666,
+      "loadAvg": 38.36
+    },
+    {
+      "name": "vfs.small-stat.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 20.53962500000489,
+            "p95": 23.37939179999812,
+            "min": 17.66795799999818,
+            "max": 24.04437499999767,
+            "mean": 20.642983400000958
+          },
+          "samples": [
+            20.719,
+            20.54,
+            20.244,
+            24.044,
+            17.668
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1.114292,
+            "p95": 1.1498328,
+            "min": 0.997625,
+            "max": 1.153666,
+            "mean": 1.0800416
+          },
+          "samples": [
+            1.114,
+            1.135,
+            0.998,
+            1.154,
+            1
+          ]
+        }
+      },
+      "totalMs": 124.18941700000141,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.small-read.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 42.72270799999387,
+            "p95": 54.94758360000123,
+            "min": 36.997457999998005,
+            "max": 56.3260420000006,
+            "mean": 45.31264159999846
+          },
+          "samples": [
+            56.326,
+            41.083,
+            42.723,
+            49.434,
+            36.997
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 4.739167,
+            "p95": 4.8918082,
+            "min": 4.048875,
+            "max": 4.911833,
+            "mean": 4.557233599999999
+          },
+          "samples": [
+            4.739,
+            4.049,
+            4.912,
+            4.812,
+            4.275
+          ]
+        }
+      },
+      "totalMs": 257.1626669999969,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.readdir-large.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 19.948582999997598,
+            "p95": 23.69102539999876,
+            "min": 18.5054999999993,
+            "max": 24.01508399999875,
+            "mean": 20.889049799997885
+          },
+          "samples": [
+            19.581,
+            18.505,
+            24.015,
+            22.395,
+            19.949
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 0.899042,
+            "p95": 0.9094828,
+            "min": 0.790417,
+            "max": 0.910166,
+            "mean": 0.8745
+          },
+          "samples": [
+            0.91,
+            0.907,
+            0.79,
+            0.899,
+            0.866
+          ]
+        }
+      },
+      "totalMs": 125.15604199999507,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.tree-find.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 50.64437500000349,
+            "p95": 65.98960019999649,
+            "min": 41.46812499999942,
+            "max": 69.65529199999582,
+            "mean": 52.37229999999981
+          },
+          "samples": [
+            41.468,
+            51.327,
+            69.655,
+            50.644,
+            48.767
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 8.036542,
+            "p95": 14.631225599999999,
+            "min": 5.927708,
+            "max": 15.234084,
+            "mean": 9.8639002
+          },
+          "samples": [
+            7.901,
+            15.234,
+            5.928,
+            12.22,
+            8.037
+          ]
+        }
+      },
+      "totalMs": 383.56487500000367,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.tree-ls-lR.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 50.63129099999787,
+            "p95": 152.46066660000213,
+            "min": 39.51662500000384,
+            "max": 176.8510000000024,
+            "mean": 73.81051640000223
+          },
+          "samples": [
+            39.517,
+            50.631,
+            54.899,
+            47.154,
+            176.851
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 9.870042,
+            "p95": 11.1625248,
+            "min": 8.640167,
+            "max": 11.284333,
+            "mean": 10.049241799999999
+          },
+          "samples": [
+            8.64,
+            9.776,
+            10.675,
+            9.87,
+            11.284
+          ]
+        }
+      },
+      "totalMs": 451.03433300000324,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.untar.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "files": 2000,
+        "tarBytes": 17614336,
+        "command": "tar -xf /tmp/src.tar"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 64.74612499999785,
+            "p95": 70.20060840000224,
+            "min": 61.54450000000361,
+            "max": 70.22925000000396,
+            "mean": 65.77037500000006
+          },
+          "samples": [
+            70.086,
+            70.229,
+            61.545,
+            64.746,
+            62.246
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 44.838708,
+            "p95": 49.301516400000004,
+            "min": 44.043,
+            "max": 50.199333,
+            "mean": 45.8492166
+          },
+          "samples": [
+            50.199,
+            44.839,
+            44.043,
+            45.71,
+            44.455
+          ]
+        }
+      },
+      "totalMs": 735.9338330000028,
+      "loadAvg": 35.92
+    },
+    {
+      "name": "vfs.large-write.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M conv=fsync"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 58.68062500000087,
+            "p95": 63.08503779999664,
+            "min": 54.72024999999849,
+            "max": 63.574416999996174,
+            "mean": 58.99176399999851
+          },
+          "samples": [
+            63.574,
+            58.681,
+            54.72
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 36.799833,
+            "p95": 45.628946400000004,
+            "min": 34.718917,
+            "max": 46.609959,
+            "mean": 39.37623633333333
+          },
+          "samples": [
+            46.61,
+            36.8,
+            34.719
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 6956.5533082718075,
+            "p95": 7331.807028761768,
+            "min": 5492.388439989831,
+            "max": 7373.5018865939865,
+            "mean": 6607.481211618541
+          },
+          "samples": [
+            5492.388,
+            6956.553,
+            7373.502
+          ]
+        }
+      },
+      "totalMs": 375.70875000000524,
+      "loadAvg": 35.92,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 7.809,
+          "rssPeakMB": 106.52734375
+        },
+        {
+          "role": "gondolind",
+          "pid": 78685,
+          "cpuMs": 0,
+          "rssPeakMB": 12.4375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 78755,
+          "cpuMs": 300,
+          "rssPeakMB": 689.3125
+        },
+        {
+          "role": "gondolind",
+          "pid": 78756,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.large-read.guest-tmpfs",
+      "params": {
+        "mount": "guest tmpfs (reference, no host vfs)",
+        "guestPath": "/tmp/tmpfs-ref/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 52.99920900000143,
+            "p95": 62.74643310000029,
+            "min": 51.17804199999955,
+            "max": 63.82945800000016,
+            "mean": 56.00223633333371
+          },
+          "samples": [
+            51.178,
+            63.829,
+            52.999
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 14.492334,
+            "p95": 14.6571078,
+            "min": 13.496208,
+            "max": 14.675416,
+            "mean": 14.221319333333334
+          },
+          "samples": [
+            14.492,
+            14.675,
+            13.496
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 17664.511458264762,
+            "p95": 18837.912996444073,
+            "min": 17444.139232577803,
+            "max": 18968.290945130662,
+            "mean": 18025.647211991076
+          },
+          "samples": [
+            17664.511,
+            17444.139,
+            18968.291
+          ]
+        }
+      },
+      "totalMs": 352.64879199999996,
+      "loadAvg": 35.92,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 7.483,
+          "rssPeakMB": 106.54296875
+        },
+        {
+          "role": "gondolind",
+          "pid": 78685,
+          "cpuMs": 10,
+          "rssPeakMB": 12.4375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 78755,
+          "cpuMs": 290,
+          "rssPeakMB": 703.578125
+        },
+        {
+          "role": "gondolind",
+          "pid": 78756,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.small-create.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1898.244624999992,
+            "p95": 2197.361291399994,
+            "min": 1683.5064160000184,
+            "max": 2248.0270829999936,
+            "mean": 1920.5099497999995
+          },
+          "samples": [
+            1994.698,
+            1683.506,
+            1898.245,
+            1778.073,
+            2248.027
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1890.821542,
+            "p95": 2189.2804257999996,
+            "min": 1673.650043,
+            "max": 2240.049459,
+            "mean": 1912.1455757999997
+          },
+          "samples": [
+            1986.204,
+            1673.65,
+            1890.822,
+            1770.003,
+            2240.049
+          ]
+        }
+      },
+      "totalMs": 20766.72774999996,
+      "loadAvg": 52.37
+    },
+    {
+      "name": "vfs.small-stat.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 517.1927920000162,
+            "p95": 542.8506078000064,
+            "min": 461.41674999997485,
+            "max": 545.2637910000049,
+            "mean": 514.2493166
+          },
+          "samples": [
+            514.175,
+            533.198,
+            545.264,
+            517.193,
+            461.417
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 497.266583,
+            "p95": 523.7353752,
+            "min": 443.212041,
+            "max": 526.212292,
+            "mean": 494.33371640000007
+          },
+          "samples": [
+            491.15,
+            513.828,
+            526.212,
+            497.267,
+            443.212
+          ]
+        }
+      },
+      "totalMs": 3086.231124999991,
+      "loadAvg": 41.64
+    },
+    {
+      "name": "vfs.small-read.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1335.3851250000298,
+            "p95": 1419.6749247999978,
+            "min": 1242.4727500000154,
+            "max": 1422.4177079999936,
+            "mean": 1340.4915584000178
+          },
+          "samples": [
+            1335.385,
+            1408.704,
+            1422.418,
+            1293.478,
+            1242.473
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1321.392876,
+            "p95": 1406.4985762,
+            "min": 1229.856917,
+            "max": 1409.324543,
+            "mean": 1327.1387591999999
+          },
+          "samples": [
+            1321.393,
+            1395.195,
+            1409.325,
+            1279.925,
+            1229.857
+          ]
+        }
+      },
+      "totalMs": 8110.922959000047,
+      "loadAvg": 39.27
+    },
+    {
+      "name": "vfs.readdir-large.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 154.477332999988,
+            "p95": 167.22488359998678,
+            "min": 148.3707080000313,
+            "max": 167.94504199997755,
+            "mean": 157.851708400005
+          },
+          "samples": [
+            154.477,
+            148.371,
+            154.121,
+            164.344,
+            167.945
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 141.55725,
+            "p95": 154.5588582,
+            "min": 135.882042,
+            "max": 155.139875,
+            "mean": 145.2671916
+          },
+          "samples": [
+            141.522,
+            135.882,
+            141.557,
+            152.235,
+            155.14
+          ]
+        }
+      },
+      "totalMs": 944.4124170000432,
+      "loadAvg": 37.16
+    },
+    {
+      "name": "vfs.tree-find.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1659.5878749999683,
+            "p95": 2154.4250171999797,
+            "min": 1592.6456250000047,
+            "max": 2256.508083999972,
+            "mean": 1782.2937583999824
+          },
+          "samples": [
+            1659.588,
+            1592.646,
+            1656.634,
+            1746.093,
+            2256.508
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1635.885251,
+            "p95": 2126.2890169999996,
+            "min": 1568.365584,
+            "max": 2227.380417,
+            "mean": 1757.334109
+          },
+          "samples": [
+            1635.885,
+            1568.366,
+            1633.116,
+            1721.923,
+            2227.38
+          ]
+        }
+      },
+      "totalMs": 10648.868458000012,
+      "loadAvg": 34.91
+    },
+    {
+      "name": "vfs.tree-ls-lR.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2129.726000000024,
+            "p95": 4881.957608200028,
+            "min": 2054.574125000043,
+            "max": 5550.790458000032,
+            "mean": 2805.711258400022
+          },
+          "samples": [
+            2054.574,
+            2206.626,
+            2129.726,
+            2086.84,
+            5550.79
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2100.543084,
+            "p95": 4782.1142026,
+            "min": 2021.262834,
+            "max": 5432.346128,
+            "mean": 2758.7673096
+          },
+          "samples": [
+            2021.263,
+            2181.187,
+            2100.543,
+            2058.498,
+            5432.346
+          ]
+        }
+      },
+      "totalMs": 16631.71104199998,
+      "loadAvg": 30.76
+    },
+    {
+      "name": "vfs.untar.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "files": 2000,
+        "tarBytes": 17614336,
+        "command": "tar -xf /tmp/src.tar"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 12744.57495899999,
+            "p95": 18903.81370880005,
+            "min": 12354.837874999968,
+            "max": 20329.996584000066,
+            "mean": 14217.8935084
+          },
+          "samples": [
+            20329.997,
+            13199.082,
+            12354.838,
+            12744.575,
+            12460.976
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 12729.565715,
+            "p95": 18887.9867178,
+            "min": 12339.258423,
+            "max": 20313.989927,
+            "mean": 14202.528248600001
+          },
+          "samples": [
+            20313.99,
+            13183.974,
+            12339.258,
+            12729.566,
+            12445.853
+          ]
+        }
+      },
+      "totalMs": 117021.57916600007,
+      "loadAvg": 31.7
+    },
+    {
+      "name": "vfs.large-write.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "bytes": 67108864,
+        "command": "dd bs=1M conv=fsync"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 642.0460830000229,
+            "p95": 671.1432332999772,
+            "min": 629.047750000027,
+            "max": 674.3762499999721,
+            "mean": 648.490027666674
+          },
+          "samples": [
+            629.048,
+            674.376,
+            642.046
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 627.303292,
+            "p95": 656.1071539000001,
+            "min": 613.720334,
+            "max": 659.307583,
+            "mean": 633.4437363333334
+          },
+          "samples": [
+            613.72,
+            659.308,
+            627.303
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 102.02401424668436,
+            "p95": 104.05622507848922,
+            "min": 97.07153633632635,
+            "max": 104.2820262820231,
+            "mean": 101.12585895501127
+          },
+          "samples": [
+            104.282,
+            97.072,
+            102.024
+          ]
+        }
+      },
+      "totalMs": 2670.8541249999544,
+      "loadAvg": 16.97,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 1054.847,
+          "rssPeakMB": 381.7251434326172
+        },
+        {
+          "role": "gondolind",
+          "pid": 89905,
+          "cpuMs": 660,
+          "rssPeakMB": 13.328125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 89975,
+          "cpuMs": 3490,
+          "rssPeakMB": 439.09375
+        },
+        {
+          "role": "gondolind",
+          "pid": 89976,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.large-read.memory",
+      "params": {
+        "mount": "MemoryProvider",
+        "guestPath": "/mnt/memory/bench",
+        "bytes": 67108864,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 795.6447080000071,
+            "p95": 815.4763583000283,
+            "min": 775.4647499999264,
+            "max": 817.6798750000307,
+            "mean": 796.263110999988
+          },
+          "samples": [
+            775.465,
+            795.645,
+            817.68
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 773.008959,
+            "p95": 791.8773087,
+            "min": 753.265667,
+            "max": 793.973792,
+            "mean": 773.4161393333334
+          },
+          "samples": [
+            753.266,
+            773.009,
+            793.974
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 82.79334832392286,
+            "p95": 84.74638028980858,
+            "min": 80.60719465158367,
+            "max": 84.96338384157366,
+            "mean": 82.7879756056934
+          },
+          "samples": [
+            84.963,
+            82.793,
+            80.607
+          ]
+        }
+      },
+      "totalMs": 3187.164625000092,
+      "loadAvg": 16.09,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 1436.36,
+          "rssPeakMB": 405.7407684326172
+        },
+        {
+          "role": "gondolind",
+          "pid": 89905,
+          "cpuMs": 960,
+          "rssPeakMB": 13.328125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 89975,
+          "cpuMs": 4250,
+          "rssPeakMB": 455.3125
+        },
+        {
+          "role": "gondolind",
+          "pid": 89976,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.small-create.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2309.69308300002,
+            "p95": 2323.851874600002,
+            "min": 2260.2086660000496,
+            "max": 2327.2284579999978,
+            "mean": 2295.319699600013
+          },
+          "samples": [
+            2269.123,
+            2327.228,
+            2309.693,
+            2310.346,
+            2260.209
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2301.907334,
+            "p95": 2314.7685512,
+            "min": 2252.045084,
+            "max": 2317.924043,
+            "mean": 2286.9912508
+          },
+          "samples": [
+            2260.933,
+            2317.924,
+            2301.907,
+            2302.147,
+            2252.045
+          ]
+        }
+      },
+      "totalMs": 24102.29791600001,
+      "loadAvg": 9.73
+    },
+    {
+      "name": "vfs.small-stat.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 445.924083000049,
+            "p95": 515.5721663999605,
+            "min": 418.4543750000885,
+            "max": 532.5683329999447,
+            "mean": 457.7828748000087
+          },
+          "samples": [
+            444.38,
+            532.568,
+            418.454,
+            445.924,
+            447.588
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 429.817833,
+            "p95": 499.09772539999994,
+            "min": 403.693459,
+            "max": 516.135542,
+            "mean": 441.890992
+          },
+          "samples": [
+            429.818,
+            516.136,
+            403.693,
+            430.946,
+            428.862
+          ]
+        }
+      },
+      "totalMs": 2705.4745410000905,
+      "loadAvg": 9.3
+    },
+    {
+      "name": "vfs.small-read.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1670.704582999926,
+            "p95": 1708.3619749999139,
+            "min": 1643.1691249998985,
+            "max": 1709.53199999989,
+            "mean": 1674.268666599947
+          },
+          "samples": [
+            1643.169,
+            1670.705,
+            1703.682,
+            1709.532,
+            1644.256
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1656.892084,
+            "p95": 1693.650592,
+            "min": 1628.796542,
+            "max": 1694.53675,
+            "mean": 1660.2658758000002
+          },
+          "samples": [
+            1628.797,
+            1656.892,
+            1690.106,
+            1694.537,
+            1630.998
+          ]
+        }
+      },
+      "totalMs": 10100.593125000014,
+      "loadAvg": 9.44
+    },
+    {
+      "name": "vfs.readdir-large.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 172.81508299999405,
+            "p95": 175.7426083999686,
+            "min": 164.27016700000968,
+            "max": 175.77674999996088,
+            "mean": 172.08199179999065
+          },
+          "samples": [
+            171.942,
+            172.815,
+            164.27,
+            175.606,
+            175.777
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 159.193166,
+            "p95": 161.29639939999998,
+            "min": 150.739834,
+            "max": 161.529916,
+            "mean": 158.15774140000002
+          },
+          "samples": [
+            159.193,
+            158.963,
+            150.74,
+            161.53,
+            160.362
+          ]
+        }
+      },
+      "totalMs": 1033.6652500000782,
+      "loadAvg": 9.58
+    },
+    {
+      "name": "vfs.tree-find.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1978.8008339999942,
+            "p95": 2127.1741745999548,
+            "min": 1848.844541999977,
+            "max": 2150.2579579999438,
+            "mean": 1991.229874999984
+          },
+          "samples": [
+            2034.839,
+            2150.258,
+            1848.845,
+            1943.407,
+            1978.801
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1952.757585,
+            "p95": 2100.6331928,
+            "min": 1824.186626,
+            "max": 2123.432751,
+            "mean": 1965.6087846000003
+          },
+          "samples": [
+            2009.435,
+            2123.433,
+            1824.187,
+            1918.232,
+            1952.758
+          ]
+        }
+      },
+      "totalMs": 11980.1580409999,
+      "loadAvg": 9.58
+    },
+    {
+      "name": "vfs.tree-ls-lR.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2016.7767919999314,
+            "p95": 2024.5402579999995,
+            "min": 1892.1798750000307,
+            "max": 2026.3535830000183,
+            "mean": 1991.21282499996
+          },
+          "samples": [
+            2017.287,
+            1892.18,
+            2016.777,
+            2003.467,
+            2026.354
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1989.952334,
+            "p95": 1999.3461846,
+            "min": 1865.642418,
+            "max": 2001.279043,
+            "mean": 1965.3355928
+          },
+          "samples": [
+            1991.615,
+            1865.642,
+            1989.952,
+            1978.189,
+            2001.279
+          ]
+        }
+      },
+      "totalMs": 11901.444958999986,
+      "loadAvg": 9.41
+    },
+    {
+      "name": "vfs.untar.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "files": 2000,
+        "tarBytes": 17614336,
+        "command": "tar -xf /tmp/src.tar"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 14381.871374999988,
+            "p95": 16545.36476639991,
+            "min": 10477.280291999923,
+            "max": 16886.561582999886,
+            "mean": 13660.241208199946
+          },
+          "samples": [
+            16886.562,
+            15180.578,
+            14381.871,
+            10477.28,
+            11374.915
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 14367.111132,
+            "p95": 16528.326232800002,
+            "min": 10461.457339,
+            "max": 16869.185258,
+            "mean": 13644.70869
+          },
+          "samples": [
+            16869.185,
+            15164.89,
+            14367.111,
+            10461.457,
+            11360.9
+          ]
+        }
+      },
+      "totalMs": 113559.83579200006,
+      "loadAvg": 9.47
+    },
+    {
+      "name": "vfs.large-write.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M conv=fsync"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 2580.4997910000384,
+            "p95": 2927.610478800046,
+            "min": 2484.0420419999864,
+            "max": 2966.178333000047,
+            "mean": 2676.906722000024
+          },
+          "samples": [
+            2580.5,
+            2484.042,
+            2966.178
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 2563.417585,
+            "p95": 2910.3652594,
+            "min": 2468.120834,
+            "max": 2948.915001,
+            "mean": 2660.15114
+          },
+          "samples": [
+            2563.418,
+            2468.121,
+            2948.915
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 99.86667856926634,
+            "p95": 103.33704066934624,
+            "min": 86.81158999604547,
+            "max": 103.722636458244,
+            "mean": 96.80030167451861
+          },
+          "samples": [
+            99.867,
+            103.723,
+            86.812
+          ]
+        }
+      },
+      "totalMs": 11655.307541999966,
+      "loadAvg": 10.07,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 3609.634,
+          "rssPeakMB": 142.44670867919922
+        },
+        {
+          "role": "gondolind",
+          "pid": 48165,
+          "cpuMs": 2390,
+          "rssPeakMB": 13.515625
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 48235,
+          "cpuMs": 14230,
+          "rssPeakMB": 596.484375
+        },
+        {
+          "role": "gondolind",
+          "pid": 48236,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.large-read.realfs",
+      "params": {
+        "mount": "RealFSProvider (host tmp dir)",
+        "guestPath": "/mnt/realfs/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 3480.410709000076,
+            "p95": 3674.225107799878,
+            "min": 3328.1556249998976,
+            "max": 3695.760040999856,
+            "mean": 3501.442124999943
+          },
+          "samples": [
+            3480.411,
+            3328.156,
+            3695.76
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 3454.672793,
+            "p95": 3650.0394308,
+            "min": 3301.976377,
+            "max": 3671.746835,
+            "mean": 3476.132001666667
+          },
+          "samples": [
+            3454.673,
+            3301.976,
+            3671.747
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 74.10253165472507,
+            "p95": 77.18664575412245,
+            "min": 69.72158253388949,
+            "max": 77.52932509849994,
+            "mean": 73.7844797623715
+          },
+          "samples": [
+            74.103,
+            77.529,
+            69.722
+          ]
+        }
+      },
+      "totalMs": 14117.489834000007,
+      "loadAvg": 19.02,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 5646.734,
+          "rssPeakMB": 133.86856079101562
+        },
+        {
+          "role": "gondolind",
+          "pid": 48165,
+          "cpuMs": 4059.9999999999854,
+          "rssPeakMB": 13.53125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 48235,
+          "cpuMs": 18420,
+          "rssPeakMB": 609.09375
+        },
+        {
+          "role": "gondolind",
+          "pid": 48236,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.small-create.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1521.2872919999063,
+            "p95": 2002.8299250001553,
+            "min": 1332.4284579998348,
+            "max": 2068.9486250001937,
+            "mean": 1613.5842333999929
+          },
+          "samples": [
+            1406.902,
+            1738.355,
+            2068.949,
+            1332.428,
+            1521.287
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1514.005084,
+            "p95": 1995.967243,
+            "min": 1326.437334,
+            "max": 2062.154168,
+            "mean": 1606.8736592
+          },
+          "samples": [
+            1400.552,
+            1731.22,
+            2062.154,
+            1326.437,
+            1514.005
+          ]
+        }
+      },
+      "totalMs": 16821.688749999972,
+      "loadAvg": 8.91
+    },
+    {
+      "name": "vfs.small-stat.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 261.3503330000676,
+            "p95": 268.1395254001487,
+            "min": 245.77329099993221,
+            "max": 268.9906670001801,
+            "mean": 259.19270820003004
+          },
+          "samples": [
+            268.991,
+            261.35,
+            245.773,
+            255.114,
+            264.735
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 251.237458,
+            "p95": 254.89409220000002,
+            "min": 235.78725,
+            "max": 254.953334,
+            "mean": 248.3313
+          },
+          "samples": [
+            254.657,
+            251.237,
+            235.787,
+            245.021,
+            254.953
+          ]
+        }
+      },
+      "totalMs": 1565.0553749999963,
+      "loadAvg": 8.57
+    },
+    {
+      "name": "vfs.small-read.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2717.518374999985,
+            "p95": 3847.6351244001185,
+            "min": 2287.7208749998827,
+            "max": 3871.2774160001427,
+            "mean": 3020.5740666000174
+          },
+          "samples": [
+            3871.277,
+            3753.066,
+            2287.721,
+            2473.288,
+            2717.518
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 2697.803584,
+            "p95": 3826.2337936000004,
+            "min": 2266.670251,
+            "max": 3858.999877,
+            "mean": 2995.3234180000004
+          },
+          "samples": [
+            3859,
+            3695.169,
+            2266.67,
+            2457.974,
+            2697.804
+          ]
+        }
+      },
+      "totalMs": 16056.707832999993,
+      "loadAvg": 8.12
+    },
+    {
+      "name": "vfs.readdir-large.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 221.99604200012982,
+            "p95": 226.67634180011228,
+            "min": 204.98495800001547,
+            "max": 227.2593750001397,
+            "mean": 217.34005840006284
+          },
+          "samples": [
+            221.996,
+            224.344,
+            204.985,
+            227.259,
+            208.116
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 204.5485,
+            "p95": 210.0183916,
+            "min": 188.299125,
+            "max": 210.4675,
+            "mean": 200.7605418
+          },
+          "samples": [
+            204.549,
+            208.222,
+            188.299,
+            210.468,
+            192.266
+          ]
+        }
+      },
+      "totalMs": 1332.9787920000963,
+      "loadAvg": 14.28
+    },
+    {
+      "name": "vfs.tree-find.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 3700.6437080001924,
+            "p95": 6977.984225200163,
+            "min": 3127.6313750001136,
+            "max": 7526.555917000165,
+            "mean": 4472.062658400088
+          },
+          "samples": [
+            7526.556,
+            3700.644,
+            4783.697,
+            3221.785,
+            3127.631
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 3665.634376,
+            "p95": 6923.2383534,
+            "min": 3101.047918,
+            "max": 7464.370837,
+            "mean": 4436.268868599999
+          },
+          "samples": [
+            7464.371,
+            3665.634,
+            4758.708,
+            3191.583,
+            3101.048
+          ]
+        }
+      },
+      "totalMs": 28264.989916999824,
+      "loadAvg": 14.28
+    },
+    {
+      "name": "vfs.tree-ls-lR.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 3227.9083749998827,
+            "p95": 3442.5441586000843,
+            "min": 2947.275999999838,
+            "max": 3478.014667000156,
+            "mean": 3219.0620999999346
+          },
+          "samples": [
+            3478.015,
+            3141.449,
+            2947.276,
+            3227.908,
+            3300.662
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 3192.864084,
+            "p95": 3418.9043435999997,
+            "min": 2920.267001,
+            "max": 3455.049252,
+            "mean": 3191.7016095999998
+          },
+          "samples": [
+            3455.049,
+            3116.003,
+            2920.267,
+            3192.864,
+            3274.325
+          ]
+        }
+      },
+      "totalMs": 18791.278124999953,
+      "loadAvg": 30.83
+    },
+    {
+      "name": "vfs.untar.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "files": 2000,
+        "tarBytes": 17614336,
+        "command": "tar -xf /tmp/src.tar"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 44871.45608399995,
+            "p95": 79844.45288369994,
+            "min": 40565.7099169998,
+            "max": 83730.34141699993,
+            "mean": 56389.16913933322
+          },
+          "samples": [
+            83730.341,
+            44871.456,
+            40565.71
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 44849.06273,
+            "p95": 79821.5124593,
+            "min": 40548.318728,
+            "max": 83707.340207,
+            "mean": 56368.240555
+          },
+          "samples": [
+            83707.34,
+            44849.063,
+            40548.319
+          ]
+        }
+      },
+      "totalMs": 300000.39358299994,
+      "loadAvg": 28.74,
+      "error": "timed out after 300000 ms"
+    },
+    {
+      "name": "vfs.large-write.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M conv=fsync"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 11267.470958000049,
+            "p95": 12735.99248360002,
+            "min": 10262.139790999936,
+            "max": 12899.161542000016,
+            "mean": 11476.257430333333
+          },
+          "samples": [
+            12899.162,
+            10262.14,
+            11267.471
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 11244.151756,
+            "p95": 12712.8684682,
+            "min": 10238.781713,
+            "max": 12876.059214,
+            "mean": 11452.997561000002
+          },
+          "samples": [
+            12876.059,
+            10238.782,
+            11244.152
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 22.76739104516227,
+            "p95": 24.779416323180357,
+            "min": 19.88185948396804,
+            "max": 25.00297468740459,
+            "mean": 22.550741738844966
+          },
+          "samples": [
+            19.882,
+            25.003,
+            22.767
+          ]
+        }
+      },
+      "totalMs": 45928.5475000001,
+      "loadAvg": 40.13,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 10708.164,
+          "rssPeakMB": 131.08930206298828
+        },
+        {
+          "role": "gondolind",
+          "pid": 59258,
+          "cpuMs": 6520,
+          "rssPeakMB": 13.734375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 59328,
+          "cpuMs": 44340,
+          "rssPeakMB": 643.6875
+        },
+        {
+          "role": "gondolind",
+          "pid": 59329,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.large-read.shadow",
+      "params": {
+        "mount": "ShadowProvider(RealFSProvider) shadowing /.env,/secrets,/node_modules/.cache, tmpfs write mode",
+        "guestPath": "/mnt/shadow/bench",
+        "bytes": 268435456,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 10259.92595799989,
+            "p95": 10592.633983599953,
+            "min": 9279.222874999978,
+            "max": 10629.60154199996,
+            "mean": 10056.250124999942
+          },
+          "samples": [
+            10629.602,
+            9279.223,
+            10259.926
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 10196.77588,
+            "p95": 10541.8858669,
+            "min": 9225.81663,
+            "max": 10580.231421,
+            "mean": 10000.941310333334
+          },
+          "samples": [
+            10580.231,
+            9225.817,
+            10196.776
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 25.105974968236726,
+            "p95": 27.483996518304117,
+            "min": 24.196068102242315,
+            "max": 27.748221134978273,
+            "mean": 25.683421401819107
+          },
+          "samples": [
+            24.196,
+            27.748,
+            25.106
+          ]
+        }
+      },
+      "totalMs": 38853.512250000145,
+      "loadAvg": 28.4,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 7269.526,
+          "rssPeakMB": 131.0892791748047
+        },
+        {
+          "role": "gondolind",
+          "pid": 59258,
+          "cpuMs": 5960,
+          "rssPeakMB": 13.734375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 59328,
+          "cpuMs": 35450,
+          "rssPeakMB": 657.953125
+        },
+        {
+          "role": "gondolind",
+          "pid": 59329,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.small-stat.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 782.6433749999851,
+            "p95": 830.4949165998493,
+            "min": 656.6753340000287,
+            "max": 842.072874999838,
+            "mean": 747.1077583999838
+          },
+          "samples": [
+            669.964,
+            656.675,
+            782.643,
+            842.073,
+            784.183
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 654.962292,
+            "p95": 755.0139336,
+            "min": 630.094917,
+            "max": 763.536917,
+            "mean": 681.7985584
+          },
+          "samples": [
+            639.477,
+            630.095,
+            654.962,
+            720.922,
+            763.537
+          ]
+        }
+      },
+      "totalMs": 4609.327374999877,
+      "loadAvg": 24.49
+    },
+    {
+      "name": "vfs.small-read.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 920.6992079999764,
+            "p95": 2401.6907416000963,
+            "min": 909.1317910000216,
+            "max": 2461.195250000106,
+            "mean": 1473.52462480003
+          },
+          "samples": [
+            2163.673,
+            2461.195,
+            909.132,
+            912.924,
+            920.699
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 910.88175,
+            "p95": 2386.8114928,
+            "min": 896.988459,
+            "max": 2446.547543,
+            "mean": 1461.0375503999999
+          },
+          "samples": [
+            2147.867,
+            2446.548,
+            896.988,
+            902.903,
+            910.882
+          ]
+        }
+      },
+      "totalMs": 9635.702458000043,
+      "loadAvg": 23.81
+    },
+    {
+      "name": "vfs.readdir-large.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 119.63812500005588,
+            "p95": 125.85539999986068,
+            "min": 111.67012500017881,
+            "max": 126.04012499982491,
+            "mean": 119.61598339998163
+          },
+          "samples": [
+            126.04,
+            119.638,
+            115.615,
+            125.117,
+            111.67
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 109.722666,
+            "p95": 115.7198332,
+            "min": 98.784916,
+            "max": 115.861333,
+            "mean": 108.9813666
+          },
+          "samples": [
+            115.861,
+            109.723,
+            105.384,
+            115.154,
+            98.785
+          ]
+        }
+      },
+      "totalMs": 732.9951669999864,
+      "loadAvg": 22.07
+    },
+    {
+      "name": "vfs.tree-find.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1166.3079999999609,
+            "p95": 1190.731358399801,
+            "min": 1130.7687500000466,
+            "max": 1191.053999999771,
+            "mean": 1163.1905667999758
+          },
+          "samples": [
+            1138.381,
+            1130.769,
+            1166.308,
+            1191.054,
+            1189.441
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1148.392584,
+            "p95": 1173.0836096,
+            "min": 1112.655501,
+            "max": 1173.412793,
+            "mean": 1145.4612425999999
+          },
+          "samples": [
+            1121.078,
+            1112.656,
+            1148.393,
+            1173.413,
+            1171.767
+          ]
+        }
+      },
+      "totalMs": 6952.524625000078,
+      "loadAvg": 22.07
+    },
+    {
+      "name": "vfs.tree-ls-lR.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1207.2485829999205,
+            "p95": 1861.9524243999738,
+            "min": 1160.8148339998443,
+            "max": 1926.7946659999434,
+            "mean": 1417.3239499999677
+          },
+          "samples": [
+            1160.815,
+            1189.178,
+            1207.249,
+            1602.583,
+            1926.795
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1189.371876,
+            "p95": 1838.178668,
+            "min": 1140.450125,
+            "max": 1901.649543,
+            "mean": 1397.3605592
+          },
+          "samples": [
+            1140.45,
+            1171.036,
+            1189.372,
+            1584.295,
+            1901.65
+          ]
+        }
+      },
+      "totalMs": 8358.615959000075,
+      "loadAvg": 21.42
+    },
+    {
+      "name": "vfs.large-read.readonly",
+      "params": {
+        "mount": "ReadonlyProvider(RealFSProvider), host-populated",
+        "guestPath": "/mnt/readonly",
+        "bytes": 268435456,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 2516.9671249999665,
+            "p95": 2733.70996249998,
+            "min": 2338.3275000001304,
+            "max": 2757.7924999999814,
+            "mean": 2537.6957083333596
+          },
+          "samples": [
+            2757.792,
+            2338.328,
+            2516.967
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 2498.893085,
+            "p95": 2709.6861341,
+            "min": 2320.049752,
+            "max": 2733.107584,
+            "mean": 2517.3501403333335
+          },
+          "samples": [
+            2733.108,
+            2320.05,
+            2498.893
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 102.44535932196554,
+            "p95": 109.55275111223033,
+            "min": 93.66627259704681,
+            "max": 110.34246131114864,
+            "mean": 102.15136441005366
+          },
+          "samples": [
+            93.666,
+            110.342,
+            102.445
+          ]
+        }
+      },
+      "totalMs": 12373.842083999887,
+      "loadAvg": 19.44,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 4140.4,
+          "rssPeakMB": 126.04256439208984
+        },
+        {
+          "role": "gondolind",
+          "pid": 44179,
+          "cpuMs": 3020,
+          "rssPeakMB": 12.34375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 44252,
+          "cpuMs": 13660,
+          "rssPeakMB": 623.25
+        },
+        {
+          "role": "gondolind",
+          "pid": 44253,
+          "cpuMs": 0,
+          "rssPeakMB": 5.953125
+        }
+      ]
+    },
+    {
+      "name": "vfs.small-create.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1392.9109170001466,
+            "p95": 1716.8914917998945,
+            "min": 1224.8513340000063,
+            "max": 1796.7859999998473,
+            "mean": 1417.4942586000077
+          },
+          "samples": [
+            1392.911,
+            1224.851,
+            1397.313,
+            1796.786,
+            1275.61
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1385.021084,
+            "p95": 1708.8388838,
+            "min": 1217.673334,
+            "max": 1788.549042,
+            "mean": 1409.9535424
+          },
+          "samples": [
+            1385.021,
+            1217.673,
+            1389.998,
+            1788.549,
+            1268.526
+          ]
+        }
+      },
+      "totalMs": 15839.771333000157,
+      "loadAvg": 9.6
+    },
+    {
+      "name": "vfs.small-stat.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "files": 1000,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 235.51437500002794,
+            "p95": 239.93625799994916,
+            "min": 234.53700000001118,
+            "max": 240.51008299994282,
+            "mean": 236.73627479998396
+          },
+          "samples": [
+            234.537,
+            235.514,
+            240.51,
+            235.479,
+            237.641
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 224.115251,
+            "p95": 227.23805860000002,
+            "min": 221.739583,
+            "max": 227.715292,
+            "mean": 224.4777086
+          },
+          "samples": [
+            221.74,
+            223.489,
+            227.715,
+            224.115,
+            225.329
+          ]
+        }
+      },
+      "totalMs": 1458.838749999879,
+      "loadAvg": 9.15
+    },
+    {
+      "name": "vfs.small-read.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "files": 1000,
+        "fileBytes": 4096,
+        "timing": "python3 in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1338.3690840001218,
+            "p95": 1568.2191330000758,
+            "min": 1121.9547920001205,
+            "max": 1608.7638330000918,
+            "mean": 1345.2337418001146
+          },
+          "samples": [
+            1121.955,
+            1338.369,
+            1608.764,
+            1251.041,
+            1406.04
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1325.558292,
+            "p95": 1552.1465174,
+            "min": 1109.0135,
+            "max": 1591.856834,
+            "mean": 1331.3247838
+          },
+          "samples": [
+            1109.014,
+            1325.558,
+            1591.857,
+            1236.89,
+            1393.305
+          ]
+        }
+      },
+      "totalMs": 7800.265541000059,
+      "loadAvg": 8.82
+    },
+    {
+      "name": "vfs.readdir-large.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "entries": 5000,
+        "timing": "python3 os.scandir in guest, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 164.18299999996088,
+            "p95": 173.86600800002924,
+            "min": 152.3990839999169,
+            "max": 175.31870800000615,
+            "mean": 163.45770000000485
+          },
+          "samples": [
+            175.319,
+            168.055,
+            164.183,
+            157.333,
+            152.399
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 151.531458,
+            "p95": 160.6421506,
+            "min": 139.447083,
+            "max": 162.012334,
+            "mean": 150.50143359999998
+          },
+          "samples": [
+            162.012,
+            155.161,
+            151.531,
+            144.355,
+            139.447
+          ]
+        }
+      },
+      "totalMs": 1062.6049170000479,
+      "loadAvg": 8.91
+    },
+    {
+      "name": "vfs.tree-find.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "command": "find tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1548.8248750001658,
+            "p95": 1598.9058165999595,
+            "min": 1216.5378750001546,
+            "max": 1599.6147499999497,
+            "mean": 1484.94815840004
+          },
+          "samples": [
+            1596.07,
+            1599.615,
+            1548.825,
+            1463.693,
+            1216.538
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1525.883168,
+            "p95": 1576.0584342,
+            "min": 1194.800209,
+            "max": 1576.971001,
+            "mean": 1461.1698757999998
+          },
+          "samples": [
+            1572.408,
+            1576.971,
+            1525.883,
+            1435.787,
+            1194.8
+          ]
+        }
+      },
+      "totalMs": 9110.541958000045,
+      "loadAvg": 9.08
+    },
+    {
+      "name": "vfs.tree-ls-lR.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "command": "ls -lR tree",
+        "files": 2000
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1748.8783750000875,
+            "p95": 3444.5734917998775,
+            "min": 1569.3768749998417,
+            "max": 3844.3088749998715,
+            "mean": 2133.715958399931
+          },
+          "samples": [
+            3844.309,
+            1748.878,
+            1845.632,
+            1660.384,
+            1569.377
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 1716.636585,
+            "p95": 3420.1775511999995,
+            "min": 1543.466125,
+            "max": 3821.439418,
+            "mean": 2106.8636342
+          },
+          "samples": [
+            3821.439,
+            1716.637,
+            1815.13,
+            1637.646,
+            1543.466
+          ]
+        }
+      },
+      "totalMs": 11923.472959000152,
+      "loadAvg": 8.99
+    },
+    {
+      "name": "vfs.untar.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "files": 2000,
+        "tarBytes": 17614336,
+        "command": "tar -xf /tmp/src.tar"
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 19723.166042000055,
+            "p95": 24599.15491659986,
+            "min": 13039.533208000008,
+            "max": 24770.890749999788,
+            "mean": 18960.44464999996
+          },
+          "samples": [
+            13039.533,
+            13356.422,
+            19723.166,
+            24770.891,
+            23912.212
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 19704.508884,
+            "p95": 24576.167078,
+            "min": 13023.74784,
+            "max": 24747.375678,
+            "mean": 18940.8196172
+          },
+          "samples": [
+            13023.748,
+            13337.133,
+            19704.509,
+            24747.376,
+            23891.333
+          ]
+        }
+      },
+      "totalMs": 143361.44258399983,
+      "loadAvg": 12.51
+    },
+    {
+      "name": "vfs.large-write.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "bytes": 67108864,
+        "command": "dd bs=1M conv=fsync"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 1081.1228339998052,
+            "p95": 1093.0030580997932,
+            "min": 1074.3853750000708,
+            "max": 1094.323082999792,
+            "mean": 1083.2770973332226
+          },
+          "samples": [
+            1074.385,
+            1094.323,
+            1081.123
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 1061.594083,
+            "p95": 1073.7819217,
+            "min": 1055.602292,
+            "max": 1075.136126,
+            "mean": 1064.1108336666666
+          },
+          "samples": [
+            1055.602,
+            1075.136,
+            1061.594
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 60.28669622869404,
+            "p95": 60.59467467659848,
+            "min": 59.527345842344054,
+            "max": 60.62889450414342,
+            "mean": 60.14764552506051
+          },
+          "samples": [
+            60.629,
+            59.527,
+            60.287
+          ]
+        }
+      },
+      "totalMs": 4390.345124999993,
+      "loadAvg": 15.52,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 1261.945,
+          "rssPeakMB": 362.02954864501953
+        },
+        {
+          "role": "gondolind",
+          "pid": 49400,
+          "cpuMs": 940,
+          "rssPeakMB": 13.78125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 49471,
+          "cpuMs": 5360,
+          "rssPeakMB": 438.328125
+        },
+        {
+          "role": "gondolind",
+          "pid": 49472,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    },
+    {
+      "name": "vfs.large-read.object",
+      "params": {
+        "mount": "JS delegating provider over MemoryProvider (object tier stand-in)",
+        "guestPath": "/mnt/object/bench",
+        "bytes": 67108864,
+        "command": "dd bs=1M, caches dropped"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 1264.852374999784,
+            "p95": 1287.8188746999017,
+            "min": 1260.263416999951,
+            "max": 1290.3707079999149,
+            "mean": 1271.8288333332166
+          },
+          "samples": [
+            1264.852,
+            1290.371,
+            1260.263
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 1232.149208,
+            "p95": 1252.814297,
+            "min": 1228.287626,
+            "max": 1255.110418,
+            "mean": 1238.5157506666667
+          },
+          "samples": [
+            1232.149,
+            1255.11,
+            1228.288
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 3,
+            "median": 51.94176126110856,
+            "p95": 52.08872979639264,
+            "min": 50.99152957552776,
+            "max": 52.10505963364643,
+            "mean": 51.679450156760915
+          },
+          "samples": [
+            51.942,
+            50.992,
+            52.105
+          ]
+        }
+      },
+      "totalMs": 5099.25858299993,
+      "loadAvg": 15.59,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 77700,
+          "cpuMs": 1788.033,
+          "rssPeakMB": 360.43566131591797
+        },
+        {
+          "role": "gondolind",
+          "pid": 49400,
+          "cpuMs": 1290,
+          "rssPeakMB": 13.78125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 49471,
+          "cpuMs": 6250,
+          "rssPeakMB": 461.34375
+        },
+        {
+          "role": "gondolind",
+          "pid": 49472,
+          "cpuMs": 0,
+          "rssPeakMB": 5.96875
+        }
+      ]
+    }
+  ]
+}

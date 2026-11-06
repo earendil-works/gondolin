@@ -20,6 +20,8 @@ import { EventEmitter } from "node:events";
 import { TypeEncoderMap, decode, encode } from "cbor2";
 
 import { normalize } from "../sandbox/virtio-protocol.ts";
+import { nativeDaemonCommand } from "./binary.ts";
+import { fastDecode, fastEncode } from "./cbor.ts";
 
 /** Maximum frame payload in `bytes` (same as the guest protocols) */
 export const NATIVE_MAX_FRAME = 4 * 1024 * 1024;
@@ -118,15 +120,25 @@ export function stripUndefined(value: unknown): unknown {
 
 /** Encodes one framed message */
 export function encodeNativeFrame(message: NativeEnvelope): Buffer {
-  const payload = Buffer.from(
-    encode(stripUndefined(message), { types: cborEncoderTypes }),
-  );
-  if (payload.length > NATIVE_MAX_FRAME) {
-    throw new Error(`native frame too large: ${payload.length} bytes`);
+  let frame = fastEncode(message, 4);
+  if (!frame) {
+    const payload = encode(stripUndefined(message), {
+      types: cborEncoderTypes,
+    });
+    frame = Buffer.allocUnsafe(4 + payload.length);
+    frame.set(payload, 4);
   }
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-  return Buffer.concat([header, payload]);
+  const length = frame.length - 4;
+  if (length > NATIVE_MAX_FRAME) {
+    throw new Error(`native frame too large: ${length} bytes`);
+  }
+  frame.writeUInt32BE(length, 0);
+  return frame;
+}
+
+/** Decodes one frame payload */
+export function decodeNativeFrame(frame: Buffer): unknown {
+  return fastDecode(frame) ?? normalize(decode(frame));
 }
 
 /** Incremental frame decoder without quadratic buffer copies */
@@ -290,7 +302,8 @@ export class NativeTransport extends EventEmitter {
   private asyncDrainWaiters: Array<() => void> = [];
 
   /**
-   * @param target a local binary path (spawned with `args`) or a connection
+   * @param target a local binary path (`gondolin` is started as `gondolin
+   *   daemon`, a `gondolind` as is; then `args` follow) or a connection
    */
   constructor(target: string | NativeConnection, args: string[] = []) {
     super();
@@ -302,7 +315,7 @@ export class NativeTransport extends EventEmitter {
 
     this.connection =
       typeof target === "string"
-        ? spawnNativeConnection([target, ...args])
+        ? spawnNativeConnection([...nativeDaemonCommand(target), ...args])
         : target;
     const exited = this.connection.exited.then(
       (r) => r,
@@ -515,7 +528,7 @@ export class NativeTransport extends EventEmitter {
   private handleFrame(frame: Buffer) {
     let message: NativeEnvelope;
     try {
-      message = normalize(decode(frame)) as NativeEnvelope;
+      message = decodeNativeFrame(frame) as NativeEnvelope;
     } catch (err) {
       this.emit("protocol-error", err);
       return;

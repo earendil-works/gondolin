@@ -159,6 +159,8 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 sandboxfs_mount="/data"
 sandboxfs_binds=""
+# virtio-fs tag offered by the host (empty: sandboxfs over virtio-serial)
+sandboxfs_virtiofs=""
 # scratch tmpfs mounts: "/path[:opt=value...][,/path...]" or "none"
 gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
 
@@ -170,6 +172,9 @@ if [ -r /proc/cmdline ]; then
         ;;
       sandboxfs.bind=*)
         sandboxfs_binds="\${arg#sandboxfs.bind=}"
+        ;;
+      sandboxfs.virtiofs=*)
+        sandboxfs_virtiofs="\${arg#sandboxfs.virtiofs=}"
         ;;
       gondolin.tmpfs=*)
         gondolin_tmpfs="\${arg#gondolin.tmpfs=}"
@@ -274,6 +279,9 @@ wait_for_sandboxfs() {
     if grep -q " \${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
       return 0
     fi
+    if grep -q " \${sandboxfs_mount} virtiofs " /proc/mounts; then
+      return 0
+    fi
     sleep 0.1
   done
   return 1
@@ -296,7 +304,16 @@ if [ -x /usr/bin/sandboxfs ]; then
   log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
   sandboxfs_binds_file="/run/sandboxfs.binds"
   rm -f "\${sandboxfs_binds_file}"
-  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" --binds-file "\${sandboxfs_binds_file}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  sandboxfs_extra=""
+  if [ -n "\${sandboxfs_virtiofs}" ]; then
+    # sandboxfs fetches the bind list, mounts the virtio-fs tag and exits
+    # (falling back to FUSE over virtio-serial if the mount fails)
+    if modprobe virtiofs > /dev/null 2>&1; then
+      log "[init] loaded virtiofs"
+    fi
+    sandboxfs_extra="--virtiofs \${sandboxfs_virtiofs}"
+  fi
+  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" --binds-file "\${sandboxfs_binds_file}" \${sandboxfs_extra} > "\${SANDBOXFS_LOG}" 2>&1 &
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1

@@ -9,6 +9,9 @@
 //!
 //! Any destination IP works. Ports: `7` echo, `9000` sink (reports MB/s),
 //! `9001` HTTP response with a 512 MiB body, everything else: closed.
+//!
+//! Experiment knobs (environment): `NET_TCP_RX`, `NET_TCP_TX`, `NET_TX_SOFT`
+//! (`bytes`) and `NET_MTU`; `linux-guest/run.sh` passes `GUEST_MTU` to the guest.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -100,7 +103,23 @@ async fn main() -> std::io::Result<()> {
     let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/gondolin-net.sock".into());
     let _ = std::fs::remove_file(&path);
     let listener = tokio::net::UnixListener::bind(&path)?;
-    let stack = NetStack::new(NetConfig::default(), Arc::new(Demo)).expect("netstack");
+    let mut config = NetConfig::default();
+    // Overrides for experiments (`bytes`).
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    if let Some(v) = env("NET_TCP_RX") {
+        config.limits.tcp_rx_buffer_bytes = v;
+    }
+    if let Some(v) = env("NET_TCP_TX") {
+        config.limits.tcp_tx_buffer_bytes = v;
+    }
+    if let Some(v) = env("NET_MTU") {
+        config.mtu = v as u16;
+    }
+    if let Some(v) = env("NET_TX_SOFT") {
+        config.limits.tx_queue_soft_bytes = v;
+    }
+    eprintln!("limits: {:?} mtu {}", config.limits, config.mtu);
+    let stack = NetStack::new(config, Arc::new(Demo)).expect("netstack");
     eprintln!("listening on {path}");
     loop {
         let (conn, _) = listener.accept().await?;

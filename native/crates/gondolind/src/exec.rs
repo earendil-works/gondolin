@@ -37,6 +37,18 @@ pub(crate) struct QueuedExec {
     pub request: ExecRequest,
 }
 
+/// Upper bound of one coalesced `exec_output` frame in `bytes`.
+pub(crate) const OUTPUT_COALESCE_BYTES: usize = 64 * 1024;
+
+/// Guest output waiting to be sent as one `exec_output`.
+#[derive(Debug)]
+pub(crate) struct PendingOutput {
+    client: ClientId,
+    id: u32,
+    stream: Stream,
+    data: Vec<u8>,
+}
+
 /// Exec bookkeeping (field names follow `SandboxServer`).
 #[derive(Debug, Default)]
 pub(crate) struct ExecState {
@@ -62,6 +74,8 @@ pub(crate) struct ExecState {
     pub pending_windows: IndexMap<u32, (u64, u64)>,
     pub window_flush_scheduled: bool,
     pub io_flush_scheduled: bool,
+    /// coalesced guest output not yet sent
+    pub pending_output: Option<PendingOutput>,
 }
 
 impl ExecState {
@@ -140,6 +154,9 @@ impl Session {
             self.client_error(client, None, "invalid_request", "exec requires uint32 id and cmd");
             return;
         };
+        if cmd == "gondolind-test-panic" {
+            crate::panics::test_panic(crate::panics::TestPanic::Session);
+        }
         if self.x.inflight.contains_key(&id) || self.x.started_execs.contains(&id) {
             self.client_error(client, Some(id), "duplicate_id", "request id already in use");
             return;
@@ -630,16 +647,42 @@ impl Session {
 
     // ---- guest messages ----------------------------------------------------
 
+    /// Guest output is coalesced per exec and stream while frames arrive
+    /// back to back (sandboxd sends at most 8 KiB per frame); the batch is
+    /// sent at the end of the event round or before anything else is sent.
     pub(crate) fn guest_exec_output(&mut self, id: u32, p: &Fields<'_>) {
         let Some(&client) = self.x.inflight.get(&id) else { return };
         let Some(data) = p.bytes("data") else { return };
         let stream =
             if p.text("stream") == Some("stdout") { Stream::Stdout } else { Stream::Stderr };
-        let out = px::ExecOutput { client, id, stream, data: data.to_vec() };
+        if let Some(pending) = &mut self.x.pending_output
+            && pending.client == client
+            && pending.id == id
+            && pending.stream == stream
+            && pending.data.len() + data.len() <= OUTPUT_COALESCE_BYTES
+        {
+            pending.data.extend_from_slice(data);
+            return;
+        }
+        self.flush_output();
+        let mut buf = Vec::with_capacity(OUTPUT_COALESCE_BYTES.min(data.len().max(64 * 1024)));
+        buf.extend_from_slice(data);
+        self.x.pending_output = Some(PendingOutput { client, id, stream, data: buf });
+    }
+
+    /// Sends coalesced guest output.
+    pub(crate) fn flush_output(&mut self) {
+        let Some(pending) = self.x.pending_output.take() else { return };
+        let out = px::ExecOutputRef {
+            client: pending.client,
+            id: pending.id,
+            stream: pending.stream,
+            data: &pending.data,
+        };
         if !self.ctl.send(px::EXEC_OUTPUT, 0, &out) {
-            self.x.inflight.shift_remove(&id);
-            self.x.stdin_allowed.remove(&id);
-            self.x.stdin_credits.remove(&id);
+            self.x.inflight.shift_remove(&pending.id);
+            self.x.stdin_allowed.remove(&pending.id);
+            self.x.stdin_credits.remove(&pending.id);
         }
     }
 

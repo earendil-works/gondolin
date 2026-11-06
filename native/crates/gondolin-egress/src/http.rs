@@ -360,6 +360,24 @@ pub(crate) async fn ensure_ip_allowed(
     shared.engine.resolve_allowed(host, protocol, port).await
 }
 
+/// [`ensure_ip_allowed`] with an earlier lookup result.
+async fn ensure_ip_allowed_with(
+    shared: &Shared,
+    url: &Url,
+    ips: Option<Result<Vec<std::net::IpAddr>, Blocked>>,
+) -> Result<std::net::IpAddr, PipelineError> {
+    let Some(ips) = ips else {
+        return ensure_ip_allowed(shared, url).await;
+    };
+    let protocol = url_protocol(url).ok_or_else(|| Blocked::bad_request("unsupported protocol"))?;
+    let port = url
+        .port_or_known_default()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| Blocked::bad_request("invalid port"))?;
+    let host = url.host_str().ok_or_else(|| Blocked::bad_request("invalid url"))?;
+    shared.engine.resolve_allowed_from(host, protocol, port, ips).await
+}
+
 fn hook_error(err: HookError) -> PipelineError {
     match err {
         HookError::Blocked(b) => PipelineError::Blocked(b),
@@ -587,6 +605,18 @@ async fn fetch_and_respond(
         let first = redirect_count == 0;
         let regs = shared.engine.registrations();
         let policy = shared.engine.policy();
+        // resolve the host while the request hook round trip runs (the
+        // result is only used if the hook keeps the host)
+        let prefetched = (regs.on_request.is_some() && !(first && prepared.prechecked))
+            .then(|| Url::parse(&pending.url).ok())
+            .flatten()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .filter(|host| shared.engine.may_prefetch_lookup(host))
+            .map(|host| {
+                let engine = shared.engine.clone();
+                let lookup_host = host.clone();
+                (host, tokio::spawn(async move { engine.lookup(&lookup_host).await }))
+            });
         let outcome = apply_request_hooks(shared, &regs, &policy, pending.clone(), body).await?;
         let (head, hop_body, original) = match outcome {
             RequestHookOutcome::ShortCircuit { head, body } => {
@@ -607,7 +637,21 @@ async fn fetch_and_respond(
         let skip = first && prepared.prechecked && !pending.policy_relevant_change(&head);
         if !skip {
             shared.engine.ensure_request_allowed(&head).await?;
-            ensure_ip_allowed(shared, &url).await?;
+            match prefetched {
+                Some((host, lookup)) if url.host_str() == Some(host.as_str()) => {
+                    let ips =
+                        lookup.await.unwrap_or_else(|e| Err(Blocked::bad_gateway(e.to_string())));
+                    ensure_ip_allowed_with(shared, &url, Some(ips)).await?;
+                }
+                other => {
+                    if let Some((_, lookup)) = other {
+                        lookup.abort();
+                    }
+                    ensure_ip_allowed(shared, &url).await?;
+                }
+            }
+        } else if let Some((_, lookup)) = prefetched {
+            lookup.abort();
         }
 
         let had_body = !hop_body.is_empty();

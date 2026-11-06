@@ -2,6 +2,7 @@ import { createErrnoError } from "./errors.ts";
 import type { VirtualProvider, VfsStatfs } from "./node/index.ts";
 import { delegateStatfsOrEnosys } from "./statfs.ts";
 import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils.ts";
+import { kProviderInternals } from "./native-marks.ts";
 
 /**
  * Wraps a VirtualProvider and makes it read-only by blocking all write operations.
@@ -20,6 +21,11 @@ export class ReadonlyProvider
 
   get readonly() {
     return true;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return { kind: "readonly" as const, backend: this.backend };
   }
 
   get supportsSymlinks() {

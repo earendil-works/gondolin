@@ -25,6 +25,7 @@ use russh::keys::PrivateKey;
 
 pub mod git;
 pub mod known_hosts;
+mod pump;
 mod server;
 pub mod targets;
 mod upstream;

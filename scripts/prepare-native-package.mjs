@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// Stages gondolind into one of the packages/gondolin-native-* packages.
+// Stages the multi-call `gondolin` (the static CLI; `gondolin daemon` or a
+// `gondolind` symlink is the daemon) into one of the packages/gondolin-native-*
+// packages.
 //
 // usage: node scripts/prepare-native-package.mjs --package <dir> [--binary <path>]
 //
 // Without --binary the binary comes from `make native-release`
-// (native/target/dist/<rust-target>/gondolind). The binary must match the
+// (native/target/dist/<rust-target>/gondolin). It must match the
 // package's `os`/`cpu` (checked from its ELF / Mach-O header); Linux binaries
 // must be fully static.
 import fs from "node:fs";
@@ -72,37 +74,39 @@ function main() {
   const rustTarget = RUST_TARGETS[key];
   if (!rustTarget) throw new Error(`unsupported package platform ${key}`);
 
-  const source = path.resolve(
-    binaryPath ??
-      path.join("native", "target", "dist", rustTarget, "gondolind"),
-  );
-  if (!fs.existsSync(source)) {
-    throw new Error(
-      `gondolind not found: ${source} (run 'make native-release TARGETS=${rustTarget}')`,
-    );
-  }
-  const header = Buffer.alloc(64 * 1024);
-  const fd = fs.openSync(source, "r");
-  const n = fs.readSync(fd, header, 0, header.length, 0);
-  fs.closeSync(fd);
-  const info = describeExecutable(header.subarray(0, n));
-  if (!info || info.platform !== platform || info.arch !== arch) {
-    throw new Error(
-      `${source} is not a ${key} executable (${JSON.stringify(info)})`,
-    );
-  }
-  if (platform === "linux" && !info.staticLinux) {
-    throw new Error(`${source} is not statically linked`);
-  }
-
   const binDir = path.join(packageDir, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   for (const entry of fs.readdirSync(binDir)) {
     fs.rmSync(path.join(binDir, entry), { recursive: true, force: true });
   }
-  const target = path.join(binDir, "gondolind");
-  fs.copyFileSync(source, target);
-  fs.chmodSync(target, 0o755);
+  const staged = [];
+  for (const [name, explicit] of [["gondolin", binaryPath]]) {
+    const source = path.resolve(
+      explicit ?? path.join("native", "target", "dist", rustTarget, name),
+    );
+    if (!fs.existsSync(source)) {
+      throw new Error(
+        `${name} not found: ${source} (run 'make native-release TARGETS=${rustTarget}')`,
+      );
+    }
+    const header = Buffer.alloc(64 * 1024);
+    const fd = fs.openSync(source, "r");
+    const n = fs.readSync(fd, header, 0, header.length, 0);
+    fs.closeSync(fd);
+    const info = describeExecutable(header.subarray(0, n));
+    if (!info || info.platform !== platform || info.arch !== arch) {
+      throw new Error(
+        `${source} is not a ${key} executable (${JSON.stringify(info)})`,
+      );
+    }
+    if (platform === "linux" && !info.staticLinux) {
+      throw new Error(`${source} is not statically linked`);
+    }
+    const target = path.join(binDir, name);
+    fs.copyFileSync(source, target);
+    fs.chmodSync(target, 0o755);
+    staged.push(target);
+  }
 
   const license = path.resolve("LICENSE");
   if (!fs.existsSync(license))
@@ -110,9 +114,11 @@ function main() {
   fs.copyFileSync(license, path.join(packageDir, "LICENSE"));
 
   console.log(`Prepared ${packageDir}`);
-  console.log(
-    `  gondolind: ${target} (${fs.statSync(target).size} bytes, ${key})`,
-  );
+  for (const target of staged) {
+    console.log(
+      `  ${path.basename(target)}: ${target} (${fs.statSync(target).size} bytes, ${key})`,
+    );
+  }
 }
 
 main();

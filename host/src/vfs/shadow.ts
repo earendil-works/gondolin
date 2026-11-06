@@ -16,6 +16,7 @@ import {
   VirtualProviderClass,
 } from "./utils.ts";
 import { MemoryProvider } from "./node/index.ts";
+import { kProviderInternals, kShadowPaths } from "./native-marks.ts";
 
 export type ShadowWriteMode =
   /** reject any write/mutation against shadowed paths */
@@ -82,7 +83,7 @@ export function createShadowPathPredicate(
     ),
   ).sort((a, b) => b.length - a.length);
 
-  return ({ path }) => {
+  const predicate: ShadowPredicate = ({ path }) => {
     const p = normalizeVfsPath(path);
     for (const shadow of normalized) {
       if (p === shadow) return true;
@@ -90,6 +91,8 @@ export function createShadowPathPredicate(
     }
     return false;
   };
+  Object.defineProperty(predicate, kShadowPaths, { value: [...normalized] });
+  return predicate;
 }
 
 /**
@@ -110,6 +113,7 @@ export class ShadowProvider
   private readonly denySymlinkBypass: boolean;
   private readonly denyWriteErrno: number;
   private readonly backend: VirtualProvider;
+  private readonly customTmpfs: boolean;
 
   constructor(backend: VirtualProvider, options: ShadowProviderOptions) {
     super();
@@ -120,8 +124,22 @@ export class ShadowProvider
     this.shouldShadow = options.shouldShadow;
     this.writeMode = options.writeMode ?? "deny";
     this.tmpfs = options.tmpfs ?? new MemoryProvider();
+    this.customTmpfs = options.tmpfs !== undefined;
     this.denySymlinkBypass = options.denySymlinkBypass ?? true;
     this.denyWriteErrno = options.denyWriteErrno ?? ERRNO.EACCES;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return {
+      kind: "shadow" as const,
+      backend: this.backend,
+      shouldShadow: this.shouldShadow,
+      writeMode: this.writeMode,
+      customTmpfs: this.customTmpfs,
+      denySymlinkBypass: this.denySymlinkBypass,
+      denyWriteErrno: this.denyWriteErrno,
+    };
   }
 
   get readonly() {

@@ -12,6 +12,7 @@
 
 mod body;
 mod classify;
+pub mod cli_policy;
 mod error;
 mod headers;
 mod hooks;
@@ -51,7 +52,7 @@ pub use crate::http::MAX_HTTP_HEADER_BYTES;
 pub use crate::ip::{is_internal_ip, is_internal_ip_str};
 pub use crate::mitm::{MitmAuthority, MitmError};
 pub use crate::patterns::{match_hostname, matches_any_host, normalize_pattern, unique_hosts};
-pub use crate::policy::{Resolver, SystemResolver};
+pub use crate::policy::{CachingResolver, Resolver, SystemResolver};
 pub use crate::remote::{ControllerLink, RemoteHooks};
 pub use crate::secrets::apply_secrets;
 
@@ -99,7 +100,7 @@ impl std::fmt::Debug for Egress {
 impl Egress {
     /// Builds the egress side from `configure.net` with the system resolver.
     pub fn new(config: NetConfig, hooks: Arc<dyn HookBackend>) -> Result<Self, EgressError> {
-        Self::with_resolver(config, hooks, Arc::new(SystemResolver))
+        Self::with_resolver(config, hooks, Arc::new(CachingResolver::new(SystemResolver)))
     }
 
     /// Like [`Egress::new`] with a custom host resolver (tests).

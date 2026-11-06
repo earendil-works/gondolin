@@ -38,11 +38,15 @@ struct Upstream {
     log: Arc<Mutex<UpstreamLog>>,
     /// currently open connections
     open: Arc<AtomicUsize>,
+    /// bytes `flood` commands have handed to their channel so far
+    flooded: Arc<AtomicUsize>,
 }
 
 struct UpstreamConn {
     up: Upstream,
     cat: HashMap<ChannelId, ()>,
+    /// channels whose stdin is consumed slowly (`slow-flood`)
+    slow: HashMap<ChannelId, ()>,
 }
 
 impl Drop for UpstreamConn {
@@ -118,6 +122,30 @@ impl server::Handler for UpstreamConn {
             "cat" => {
                 self.cat.insert(channel, ());
             }
+            "flood" | "slow-flood" => {
+                // `flood N`: N bytes of output (stdin is read and dropped);
+                // `slow-flood N` also takes stdin slowly (see `data`).
+                if verb == "slow-flood" {
+                    self.slow.insert(channel, ());
+                }
+                let total: usize = arg.parse().unwrap();
+                let flooded = self.up.flooded.clone();
+                tokio::spawn(async move {
+                    let chunk = vec![b'f'; 32 * 1024];
+                    let mut sent = 0;
+                    while sent < total {
+                        let n = chunk.len().min(total - sent);
+                        if handle.data(channel, chunk[..n].to_vec()).await.is_err() {
+                            return;
+                        }
+                        sent += n;
+                        flooded.fetch_add(n, Ordering::SeqCst);
+                    }
+                    let _ = handle.exit_status_request(channel, 0).await;
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
+                });
+            }
             "drop" => {
                 tokio::spawn(async move {
                     let _ = handle
@@ -138,6 +166,10 @@ impl server::Handler for UpstreamConn {
     ) -> Result<(), Self::Error> {
         if self.cat.contains_key(&channel) {
             session.data(channel, data.to_vec())?;
+        }
+        if self.slow.contains_key(&channel) {
+            // A slow reader: this stops the whole upstream session loop.
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
         Ok(())
     }
@@ -165,7 +197,8 @@ async fn start_upstream(authorized: PublicKey) -> (u16, PrivateKey, Upstream) {
         auth_rejection_time_initial: Some(Duration::ZERO),
         ..Default::default()
     });
-    let up = Upstream { authorized, log: Arc::default(), open: Arc::default() };
+    let up =
+        Upstream { authorized, log: Arc::default(), open: Arc::default(), flooded: Arc::default() };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server_up = up.clone();
@@ -174,7 +207,8 @@ async fn start_upstream(authorized: PublicKey) -> (u16, PrivateKey, Upstream) {
             let (sock, _) = listener.accept().await.unwrap();
             server_up.log.lock().unwrap().connections += 1;
             server_up.open.fetch_add(1, Ordering::SeqCst);
-            let conn = UpstreamConn { up: server_up.clone(), cat: HashMap::new() };
+            let conn =
+                UpstreamConn { up: server_up.clone(), cat: HashMap::new(), slow: HashMap::new() };
             let config = config.clone();
             tokio::spawn(async move {
                 if let Ok(session) = server::run_stream(config, sock, conn).await {
@@ -215,10 +249,20 @@ struct Guest {
 }
 
 async fn guest_connect(proxy: &SshProxy, hostname: &str, port: u16, user: &str) -> Guest {
-    // russh's session loop stops reading while it flushes writes, so two russh
-    // peers writing bulk data at each other over a small pipe can stall each
-    // other (a real guest's OpenSSH client keeps reading); use a roomy pipe.
-    let (guest_end, proxy_end) = tokio::io::duplex(16 << 20);
+    guest_connect_with(proxy, hostname, port, user, 64 * 1024).await
+}
+
+/// Connects a guest over an in-memory pipe of `pipe` bytes. The guest is a
+/// russh client, which stops reading while it writes: the proxy must keep
+/// reading regardless (write pump), or bulk data both ways deadlocks.
+async fn guest_connect_with(
+    proxy: &SshProxy,
+    hostname: &str,
+    port: u16,
+    user: &str,
+    pipe: usize,
+) -> Guest {
+    let (guest_end, proxy_end) = tokio::io::duplex(pipe);
     let meta = FlowMeta {
         id: 1,
         src: "192.168.127.3:50006".parse().unwrap(),
@@ -353,13 +397,11 @@ async fn exec_is_proxied_with_credential() {
     assert!(!guest.aborted.0.load(Ordering::SeqCst));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdin_is_streamed_both_ways() {
-    let s = setup().await;
-    let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
+/// Runs `cat` upstream with `size` bytes written and read concurrently.
+async fn cat_both_ways(guest: &Guest, size: usize, seed: u32, timeout: Duration) {
     let channel = guest.handle.channel_open_session().await.unwrap();
     channel.exec(true, "cat").await.unwrap();
-    let payload: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<u8> = (0..size as u32).map(|i| (i.wrapping_add(seed) % 251) as u8).collect();
     let (rd, wr) = channel.split();
     let sent = payload.clone();
     let writer = tokio::spawn(async move {
@@ -367,11 +409,125 @@ async fn stdin_is_streamed_both_ways() {
         wr.eof().await.unwrap();
         wr
     });
-    let r = tokio::time::timeout(Duration::from_secs(30), collect_half(rd)).await.unwrap();
+    let r = tokio::time::timeout(timeout, collect_half(rd))
+        .await
+        .unwrap_or_else(|_| panic!("cat of {size} bytes both ways stalled"));
     let _wr = writer.await.unwrap();
     assert_eq!(r.exit_status, Some(0));
     assert_eq!(r.stdout.len(), payload.len());
     assert!(r.stdout == payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdin_is_streamed_both_ways() {
+    let s = setup().await;
+    let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
+    cat_both_ways(&guest, 3_000_000, 0, Duration::from_secs(30)).await;
+}
+
+/// The bidirectional transfer 50 times: 5 guests at once, 10 rounds each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stdin_is_streamed_both_ways_repeatedly() {
+    let s = setup().await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for g in 0..5u32 {
+        let proxy = s.proxy.clone();
+        let port = s.port;
+        tasks.spawn(async move {
+            let guest = guest_connect(&proxy, "127.0.0.1", port, "git").await;
+            for round in 0..10u32 {
+                cat_both_ways(&guest, 3_000_000, g * 100 + round, Duration::from_secs(60)).await;
+            }
+        });
+    }
+    while let Some(r) = tasks.join_next().await {
+        r.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_payload_is_streamed_both_ways() {
+    let s = setup().await;
+    let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
+    cat_both_ways(&guest, 48 << 20, 7, Duration::from_secs(120)).await;
+}
+
+/// A 4 KiB guest pipe: the guest stops reading while it writes, so the proxy
+/// must never wait for its own writes to the guest before reading again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tiny_guest_pipe_is_streamed_both_ways() {
+    let s = setup().await;
+    let guest = guest_connect_with(&s.proxy, "127.0.0.1", s.port, "git", 4096).await;
+    for round in 0..5 {
+        cat_both_ways(&guest, 4 << 20, round, Duration::from_secs(60)).await;
+    }
+}
+
+/// Upstream floods output while the guest saturates stdin and reads the output
+/// slowly: the transfer completes, and while the guest pauses, the upstream is
+/// held back by SSH windows instead of the proxy buffering its output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_guest_reader_backpressures_upstream() {
+    const TOTAL: usize = 64 << 20;
+    // windows (upstream→proxy, proxy→guest, 2 MiB each) plus the guest's own
+    // russh buffer (~3 MiB); ~7 MiB measured. Granting window on receipt, the
+    // proxy's channel buffers added 8 MiB more (~15 MiB).
+    const IN_FLIGHT: usize = 10 << 20;
+    let s = setup().await;
+    let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
+    let channel = guest.handle.channel_open_session().await.unwrap();
+    channel.exec(true, format!("flood {TOTAL}")).await.unwrap();
+    let (mut rd, wr) = channel.split();
+    // stdin at full speed the whole time (dropped upstream)
+    let writer = tokio::spawn(async move {
+        let chunk = vec![b's'; 256 * 1024];
+        for _ in 0..(TOTAL / chunk.len()) {
+            if wr.data_bytes(chunk.clone()).await.is_err() {
+                break;
+            }
+        }
+        let _ = wr.eof().await;
+        wr
+    });
+    let flooded = s.up.flooded.clone();
+    let read = async {
+        let mut received = 0usize;
+        let mut paused = 0;
+        let mut exit = None;
+        while let Some(msg) = rd.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => {
+                    received += data.len();
+                    // a slow reader: long pauses every 8 MiB
+                    if received / (8 << 20) > paused {
+                        paused += 1;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let ahead = flooded.load(Ordering::SeqCst).saturating_sub(received);
+                        assert!(ahead <= IN_FLIGHT, "upstream {ahead} bytes ahead of the guest");
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        (received, exit)
+    };
+    let (received, exit) =
+        tokio::time::timeout(Duration::from_secs(120), read).await.expect("flood stalled");
+    assert_eq!(received, TOTAL);
+    assert_eq!(exit, Some(0));
+    // The upstream closed the channel with stdin still flowing; russh's writer
+    // waits for window that never comes, so stop it.
+    writer.abort();
+    // The proxy released the upstream connection.
+    for _ in 0..100 {
+        if s.proxy.upstream_connections() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("upstream connection still open");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -760,4 +916,53 @@ async fn openssh_client_against_proxy() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("interactive shells are not supported"));
     assert_eq!(out.status.code(), Some(1));
+}
+
+/// Both directions saturated with a slow consumer on each far end: the guest
+/// writes stdin at full speed into an upstream that reads it slowly, while the
+/// upstream floods output that the guest reads with pauses. With SSH window
+/// granted on receipt, the proxy's guest connection stopped being read once
+/// the stdin buffer filled, so the guest's window adjusts for the output never
+/// arrived and both directions stalled for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_directions_saturated_with_slow_consumers() {
+    const TOTAL: usize = 24 << 20;
+    let s = setup().await;
+    let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
+    let channel = guest.handle.channel_open_session().await.unwrap();
+    channel.exec(true, format!("slow-flood {TOTAL}")).await.unwrap();
+    let (mut rd, wr) = channel.split();
+    let writer = tokio::spawn(async move {
+        let chunk = vec![b's'; 256 * 1024];
+        loop {
+            if wr.data_bytes(chunk.clone()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let read = async {
+        let mut received = 0usize;
+        let mut paused = 0;
+        let mut exit = None;
+        while let Some(msg) = rd.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => {
+                    received += data.len();
+                    if received / (4 << 20) > paused {
+                        paused += 1;
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        (received, exit)
+    };
+    let (received, exit) =
+        tokio::time::timeout(Duration::from_secs(60), read).await.expect("transfer stalled");
+    assert_eq!(received, TOTAL);
+    assert_eq!(exit, Some(0));
+    writer.abort();
 }

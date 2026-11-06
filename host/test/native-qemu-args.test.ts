@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import { __test, type SandboxConfig } from "../src/sandbox/controller.ts";
+import { nativeDaemonArgs } from "../src/native/binary.ts";
 import { resolveNativeBinary } from "../src/native/transport.ts";
 
 function findBinary(): string | null {
@@ -85,10 +86,14 @@ function nativeArgs(config: SandboxConfig): string[] {
     net_socket: config.netSocketPath,
     qmp_socket: config.qmpSocketPath,
   };
-  const out = execFileSync(binary!, ["--qemu-args"], {
-    input: JSON.stringify(input),
-    encoding: "utf8",
-  });
+  const out = execFileSync(
+    binary!,
+    [...nativeDaemonArgs(binary!), "--qemu-args"],
+    {
+      input: JSON.stringify(input),
+      encoding: "utf8",
+    },
+  );
   return JSON.parse(out) as string[];
 }
 

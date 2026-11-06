@@ -13,8 +13,13 @@ import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
 import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
 import { VM } from "../src/vm/core.ts";
+import {
+  nativeDaemonCommand,
+  resolveNativeBinary,
+} from "../src/native/binary.ts";
 import type { VirtualProvider } from "../src/vfs/node/index.ts";
-import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
+import { RealFSProvider } from "../src/vfs/node/index.ts";
+import { nativeMounts } from "../src/native/vfs.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
 import type { HttpHooks } from "../src/qemu/contracts.ts";
@@ -232,9 +237,12 @@ function usage() {
   console.log("  image        Manage local image refs and objects");
   console.log("  tools        Inspect/download managed helper tools");
   console.log("  help         Show this help");
+  console.log(
+    "  version      Print the package version and the gondolind it would use (also --version)",
+  );
   console.log("\nEngine options (before the command):");
   console.log(
-    "  --engine node|native|auto  Host engine (default: $GONDOLIN_ENGINE, else node; auto = native when gondolind is available)",
+    "  --engine node|native|auto  Host engine (default: $GONDOLIN_ENGINE, else auto = native when a working gondolind is available, else node; node is deprecated)",
   );
   console.log(
     "  --native-command CMD     Start gondolind with CMD (e.g. 'ssh host gondolind'); implies native",
@@ -330,6 +338,9 @@ function bashUsage() {
   );
   console.log(
     "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+  );
+  console.log(
+    "  --print-configure               Print the native engine's session configuration (JSON) and exit",
   );
   console.log();
   console.log("Ingress:");
@@ -478,6 +489,9 @@ function execUsage() {
   console.log(
     "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
   );
+  console.log(
+    "  --print-configure               Print the native engine's session configuration (JSON) and exit",
+  );
 }
 
 type MountSpec = {
@@ -541,6 +555,9 @@ type CommonOptions = {
 
   /** ssh credentials for host-side proxy auth */
   sshCredentials: SshCredentialSpec[];
+
+  /** print the native engine's configure payload instead of starting a VM */
+  printConfigure?: boolean;
 
   /** enable ssh (bash command only) */
   ssh?: boolean;
@@ -971,7 +988,8 @@ function buildVmOptions(common: CommonOptions) {
 
   // Add memory mounts
   for (const path of common.memoryMounts) {
-    mounts[path] = new MemoryProvider();
+    // a daemon-side memory filesystem on the native engine
+    mounts[path] = nativeMounts.memory();
   }
 
   // Build HTTP hooks if we have network options
@@ -1207,6 +1225,10 @@ function parseExecArgs(argv: string[]): ExecArgs {
         args.common.rootfsSize = parseRootfsSizeOption(optionArgs[++i], fail);
         return i;
       }
+      case "--print-configure": {
+        args.common.printConfigure = true;
+        return i;
+      }
       case "--allow-host": {
         const host = optionArgs[++i];
         if (!host) fail("--allow-host requires a host argument");
@@ -1414,8 +1436,68 @@ function buildCommandPayload(command: Command) {
   return payload;
 }
 
+/**
+ * Print the native engine's `configure` payload and default guest env for
+ * the given VM options without starting a VM (`--print-configure`; the
+ * static native CLI prints the same, see `test/cli-configure-parity.test.ts`).
+ * Byte strings are printed as `{ "$base64": "..." }`; the MITM CA key and
+ * secret values as `"<redacted>"`.
+ */
+async function printNativeConfigure(
+  vmOptions: Record<string, unknown>,
+  resume?: string,
+) {
+  let vm: VM | null = null;
+  try {
+    if (resume) {
+      const checkpoint = VmCheckpoint.load(resolveResumeCheckpoint(resume));
+      vm = (await checkpoint.resume({
+        ...vmOptions,
+        engine: "native",
+        autoStart: false,
+      } as any)) as VM;
+    } else {
+      vm = await VM.create({ ...vmOptions, engine: "native" });
+    }
+    const described = await vm.describeNativeConfigure();
+    const text = `${JSON.stringify(
+      described,
+      function (this: any, key: string, value: unknown) {
+        const raw = this[key];
+        // secrets: the MITM CA key and secret values
+        if (
+          (key === "key_pem" || key === "value" || key === "revoked_values") &&
+          raw !== undefined
+        ) {
+          return "<redacted>";
+        }
+        if (raw instanceof Uint8Array) {
+          return { $base64: Buffer.from(raw).toString("base64") };
+        }
+        return value;
+      },
+      2,
+    )}\n`;
+    // flushed before the caller exits (pipes are asynchronous)
+    await new Promise<void>((resolve) =>
+      process.stdout.write(text, () => resolve()),
+    );
+  } finally {
+    await vm?.close();
+  }
+}
+
 async function runExecVm(args: ExecArgs) {
   const vmOptions = buildVmOptions(args.common);
+  if (args.common.printConfigure) {
+    try {
+      await printNativeConfigure(vmOptions);
+    } catch (err) {
+      renderCliError(err);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   let vm: VM | null = null;
   let exitCode = 0;
 
@@ -1575,7 +1657,7 @@ async function resolveExecSocketPath(value: string): Promise<string> {
 async function runExec(argv: string[] = process.argv.slice(2)) {
   const args = parseExecArgs(argv);
 
-  if (args.commands.length === 0) {
+  if (args.commands.length === 0 && !args.common.printConfigure) {
     execUsage();
     process.exit(1);
   }
@@ -1705,6 +1787,10 @@ function parseBashArgs(argv: string[]): BashArgs {
       }
       case "--rootfs-size": {
         args.rootfsSize = parseRootfsSizeOption(argv[++i], fail);
+        break;
+      }
+      case "--print-configure": {
+        args.printConfigure = true;
         break;
       }
       case "--allow-host": {
@@ -1915,6 +2001,15 @@ async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
   args.secrets = await resolveSecretHosts(args.secrets);
   const vmOptions = buildVmOptions(args);
+  if (args.printConfigure) {
+    try {
+      await printNativeConfigure(vmOptions, args.resume);
+    } catch (err) {
+      renderCliError(err);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   let vm: VM | null = null;
   let ingressAccess: { url: string; close(): Promise<void> } | null = null;
   let exitCode = 1;
@@ -3459,6 +3554,34 @@ function applyGlobalEngineFlags(argv: string[]): string[] {
   return rest;
 }
 
+/** `gondolin --version`: package version plus the gondolind it resolves. */
+function runVersion() {
+  let version = "unknown";
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 6; i++) {
+    const pkgPath = path.join(dir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      if (pkg.name === "@earendil-works/gondolin" && pkg.version) {
+        version = pkg.version;
+        break;
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  console.log(`gondolin ${version}`);
+  let native: string;
+  try {
+    native = nativeDaemonCommand(resolveNativeBinary()).join(" ");
+  } catch (err) {
+    native = `not available (${err instanceof Error ? err.message : String(err)})`;
+  }
+  console.log(`gondolind: ${native}`);
+}
+
 async function main() {
   const [command, ...args] = applyGlobalEngineFlags(process.argv.slice(2));
 
@@ -3473,6 +3596,11 @@ async function main() {
   }
 
   switch (command) {
+    case "version":
+    case "--version":
+    case "-V":
+      runVersion();
+      return;
     case "exec":
       await runExec(args);
       return;

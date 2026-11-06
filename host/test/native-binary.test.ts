@@ -11,6 +11,8 @@ import {
   describeNativeExecutable,
   ensureNativeBinary,
   getNativeBinaryPath,
+  nativeDaemonArgs,
+  nativeDaemonCommand,
   nativePackageName,
   nativeRustTarget,
   resolveNativeBinary,
@@ -101,14 +103,22 @@ test("native binary: executable headers", () => {
 test("native binary: remote targets come from the checkout's dist dir", () => {
   const linuxX64: NativeBinaryTarget = { platform: "linux", arch: "x64" };
   const root = fakeCheckout({
+    "dist/x86_64-unknown-linux-musl/gondolin": fakeBinary(linuxX64),
     "dist/x86_64-unknown-linux-musl/gondolind": fakeBinary(linuxX64),
     // wrong architecture under the right name is ignored
-    "dist/aarch64-unknown-linux-musl/gondolind": fakeBinary(linuxX64),
+    "dist/aarch64-unknown-linux-musl/gondolin": fakeBinary(linuxX64),
   });
   const start = path.join(root, "host", "src");
-  assert.equal(
+  // the multi-call binary is preferred and started as `gondolin daemon`
+  assert.deepEqual(
     getNativeBinaryPath(linuxX64, { start, version: "0.0.0-test" }),
-    path.join(root, "native/target/dist/x86_64-unknown-linux-musl/gondolind"),
+    {
+      path: path.join(
+        root,
+        "native/target/dist/x86_64-unknown-linux-musl/gondolin",
+      ),
+      args: ["daemon"],
+    },
   );
   assert.equal(
     getNativeBinaryPath(
@@ -117,6 +127,33 @@ test("native binary: remote targets come from the checkout's dist dir", () => {
     ),
     null,
   );
+  // a daemon-only dist (older checkouts) still works, without arguments
+  const old = fakeCheckout({
+    "dist/x86_64-unknown-linux-musl/gondolind": fakeBinary(linuxX64),
+  });
+  assert.deepEqual(
+    getNativeBinaryPath(linuxX64, {
+      start: path.join(old, "host", "src"),
+      version: "0.0.0-test",
+    }),
+    {
+      path: path.join(
+        old,
+        "native/target/dist/x86_64-unknown-linux-musl/gondolind",
+      ),
+      args: [],
+    },
+  );
+});
+
+test("native binary: daemon arguments follow the binary name", () => {
+  assert.deepEqual(nativeDaemonArgs("/x/gondolin"), ["daemon"]);
+  assert.deepEqual(nativeDaemonArgs("/x/gondolind"), []);
+  assert.deepEqual(nativeDaemonCommand("/x/gondolin"), [
+    "/x/gondolin",
+    "daemon",
+  ]);
+  assert.deepEqual(nativeDaemonCommand("/x/gondolind"), ["/x/gondolind"]);
 });
 
 test("native binary: newest local build wins for this machine", {
@@ -125,26 +162,31 @@ test("native binary: newest local build wins for this machine", {
   const root = fakeCheckout({
     "release/gondolind": fakeBinary(host!),
     "debug/gondolind": fakeBinary(host!),
+    "debug/gondolin": fakeBinary(host!),
   });
   const release = path.join(root, "native/target/release/gondolind");
   const debug = path.join(root, "native/target/debug/gondolind");
+  const debugCli = path.join(root, "native/target/debug/gondolin");
   const start = path.join(root, "host", "src");
   const now = Date.now() / 1000;
   fs.utimesSync(release, now - 100, now - 100);
+  fs.utimesSync(debugCli, now - 50, now - 50);
   fs.utimesSync(debug, now, now);
   assert.equal(resolveNativeBinary({}, start), debug);
   fs.utimesSync(release, now + 10, now + 10);
   assert.equal(resolveNativeBinary({}, start), release);
+  fs.utimesSync(debugCli, now + 20, now + 20);
+  assert.equal(resolveNativeBinary({}, start), debugCli);
   assert.equal(
     resolveNativeBinary({ GONDOLIN_NATIVE_BIN: "/explicit/gondolind" }, start),
     "/explicit/gondolind",
   );
 });
 
-/** A one-file npm package tarball (`package/bin/gondolind`). */
+/** A one-file npm package tarball (`package/bin/gondolin`). */
 function packageTarball(content: Buffer): Buffer {
   const header = Buffer.alloc(512);
-  header.write("package/bin/gondolind", 0);
+  header.write("package/bin/gondolin", 0);
   header.write("0000755\0", 100);
   header.write("0000000\0", 108);
   header.write("0000000\0", 116);
@@ -185,23 +227,24 @@ test("native binary: ensureNativeBinary fetches and caches the package", async (
     }) as typeof fetch;
 
     const start = tmpdir(); // no checkout
-    const file = await ensureNativeBinary(target, {
+    const binary = await ensureNativeBinary(target, {
       start,
       version: "9.9.9",
       registry: "https://registry.test/",
       fetch: fakeFetch,
     });
-    assert.equal(
-      file,
-      path.join(
+    const file = binary.path;
+    assert.deepEqual(binary, {
+      path: path.join(
         cache,
         "gondolin",
         "native",
         "9.9.9",
         "linux-arm64",
-        "gondolind",
+        "gondolin",
       ),
-    );
+      args: ["daemon"],
+    });
     assert.deepEqual(describeNativeExecutable(file), target);
     assert.equal(fs.statSync(file).mode & 0o777, 0o755);
     assert.deepEqual(requests, [
@@ -209,18 +252,18 @@ test("native binary: ensureNativeBinary fetches and caches the package", async (
       "https://registry.test/pkg.tgz",
     ]);
     // Second call: served from the cache.
-    assert.equal(
+    assert.deepEqual(
       await ensureNativeBinary(target, {
         start,
         version: "9.9.9",
         fetch: fakeFetch,
       }),
-      file,
+      binary,
     );
     assert.equal(requests.length, 2);
-    assert.equal(
+    assert.deepEqual(
       getNativeBinaryPath(target, { start, version: "9.9.9" }),
-      file,
+      binary,
     );
 
     // Tampered tarball: integrity check fails, nothing cached.

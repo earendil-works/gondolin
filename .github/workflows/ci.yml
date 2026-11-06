@@ -46,6 +46,47 @@ jobs:
       - name: Verify packaged CLI runtime
         run: node host/dist/bin/gondolin.js --help >/dev/null
 
+  native:
+    name: Native engine (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Check (rustfmt + clippy -D warnings)
+        run: make -C native check
+
+      - name: Test workspace
+        working-directory: native
+        run: cargo test --workspace --locked
+
+      - name: Build release binaries (gondolind + static gondolin CLI)
+        working-directory: native
+        run: cargo build --release --locked -p gondolind -p gondolin-cli
+
+      - name: Verify binaries
+        run: |
+          native/target/release/gondolind --version
+          native/target/release/gondolin --version
+
+      - name: Upload native binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: gondolin-native-linux-x64
+          path: |
+            native/target/release/gondolind
+            native/target/release/gondolin
+          retention-days: 7
+
   build-guest:
     name: Build Guest (${{ matrix.arch }})
     runs-on: ubuntu-latest
@@ -81,7 +122,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.qemu }} lz4
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           pnpm install
 
       - name: Build guest binaries (cross-compile)
@@ -299,7 +340,7 @@ jobs:
             libclang-dev llvm-dev libcap-ng-dev
 
       - name: Enable KVM
-        run: sudo chown $(id -u) /dev/kvm
+        run: sudo chown "$(id -u)" /dev/kvm
 
       - name: Install dependencies
         run: pnpm install
@@ -326,7 +367,7 @@ jobs:
           GONDOLIN_REQUIRE_KRUN: "0"
 
   test:
-    name: Test
+    name: Test (node engine, deprecated)
     needs: [check, build-guest]
     runs-on: ubuntu-latest
     steps:
@@ -363,10 +404,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 lz4
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Enable KVM
-        run: sudo chown $(id -u) /dev/kvm
+        run: sudo chown "$(id -u)" /dev/kvm
 
       - name: Install dependencies
         run: pnpm install
@@ -387,6 +428,88 @@ jobs:
           WS_TIMEOUT: "120000"
           # Enable VM/QEMU logs to help diagnose boot/hang issues in CI.
           GONDOLIN_DEBUG: "net"
+          # Keep covering the deprecated node engine while it exists.
+          GONDOLIN_ENGINE: node
+
+  test-native:
+    name: Test (native engine)
+    needs: [check, build-guest, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/setup@v3
+        with:
+          install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Download guest assets
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolin-guest-x64
+          path: .
+
+      - name: Extract guest assets
+        run: |
+          mkdir -p guest/image/out
+          tar -xzvf gondolin-guest-x64.tar.gz -C guest/image/out
+          touch guest/image/out/*
+
+      - name: Download native binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolin-native-linux-x64
+          path: native-bin
+
+      - name: Install native binaries
+        run: |
+          chmod +x native-bin/gondolind native-bin/gondolin
+          echo "GONDOLIN_NATIVE_BIN=$PWD/native-bin/gondolind" >> "$GITHUB_ENV"
+          echo "GONDOLIN_CLI_BIN=$PWD/native-bin/gondolin" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        # Ubuntu's QEMU has vhost-user-fs and memory-backend-memfd, so the
+        # guest filesystem runs over virtio-fs here.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 lz4
+
+      - name: Enable KVM
+        run: sudo chown "$(id -u)" /dev/kvm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Check the guest mounts the VFS over virtio-fs
+        timeout-minutes: 5
+        working-directory: host
+        run: node scripts/check-virtiofs.ts
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          GONDOLIN_VIRTIOFS: "1"
+
+      - name: Run host tests (native engine, virtio-fs)
+        timeout-minutes: 25
+        run: make -C host test NODE="$(node -p 'process.execPath')"
+        env:
+          GONDOLIN_ENGINE: native
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          WS_TIMEOUT: "120000"
+
+      - name: Run native VFS tests over sandboxfs
+        # the fallback transport (krun, QEMU without vhost-user)
+        timeout-minutes: 10
+        working-directory: host
+        run: node --test test/vfs.test.ts test/native-vfs.test.ts test/vfs-many-mounts.test.ts
+        env:
+          GONDOLIN_ENGINE: native
+          GONDOLIN_VIRTIOFS: "0"
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          WS_TIMEOUT: "120000"
 
   # Optional: Publish preview package for PRs (uses trusted publishing)
   # Uncomment to enable publishing test versions from PRs

@@ -383,7 +383,19 @@ async fn flow_limit_rejects_extra_connections() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_concurrent_echo_flows() {
-    let mut h = start(NetConfig::default(), Arc::new(EchoHandler));
+    concurrent_echo_flows(NetConfig::default()).await;
+}
+
+/// Same with a tiny QEMU queue: most polls happen over the soft cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_concurrent_echo_flows_tight_queue() {
+    let mut config = NetConfig::default();
+    config.limits.tx_queue_soft_bytes = 8 * 1024;
+    concurrent_echo_flows(config).await;
+}
+
+async fn concurrent_echo_flows(config: NetConfig) {
+    let mut h = start(config, Arc::new(EchoHandler));
     let mut guest = Guest::new(&mut h);
     let n = 40;
     let size = 256 * 1024;

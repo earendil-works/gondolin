@@ -14,6 +14,7 @@ GONDOLIN_ENGINE=native node bench/run.ts   # same against gondolind
 node bench/run.ts --engine native --suite boot,exec
 node bench/run.ts --quick                  # smoke run: fewer iterations, smaller payloads
 node bench/run.ts --suite vfs --filter large-read
+node bench/run.ts --interleave node,native # alternate engines per workload group
 node bench/run.ts --summary-only           # regenerate results/SUMMARY.md
 ```
 
@@ -22,11 +23,13 @@ Options:
 | flag | meaning |
 |---|---|
 | `--engine node\|native` | engine (default: `GONDOLIN_ENGINE`, else `node`) |
+| `--interleave node,native` | run both engines, alternating per workload group |
 | `--suite a,b` | suites to run: `boot`, `exec`, `vfs`, `net` (default: all) |
 | `--quick` | at most 1 warmup and 3 iterations, smaller payloads |
 | `--iterations N` | override measured iterations of every workload |
-| `--filter text` | only workloads whose name contains `text` (suite setup still runs) |
+| `--filter regex` | only workloads whose name matches (setup of unmatched groups is skipped) |
 | `--out dir` | results directory (default: `bench/results`) |
+| `--note text` | caveat stored with the run and shown in SUMMARY.md (with `--interleave`: native runs only) |
 | `--no-save` | print only, write nothing |
 
 A full run takes roughly 10 minutes on an M-series Mac. Requires the same
@@ -72,8 +75,8 @@ before trusting a small difference.
   plus `close()` time.
 - `exec`: one VM. Sequential `exec("true")` (login shell) and `["/bin/true"]`
   round trips, 16 concurrent execs, stdout throughput (`dd` of 256 MiB to a
-  consumed `stdout: "pipe"` stream), stdin throughput (6 MiB into `wc -c`; the
-  node engine has no stdin backpressure and caps queued stdin at 8 MiB).
+  consumed `stdout: "pipe"` stream), stdin throughput (256 MiB from an async
+  iterable into `wc -c`).
 - `vfs`: one VM with every mount kind: guest tmpfs (reference),
   `MemoryProvider`, `RealFSProvider`, `ShadowProvider(RealFSProvider)`,
   `ReadonlyProvider(RealFSProvider)` and a JS delegating provider standing in
@@ -81,12 +84,11 @@ before trusting a small difference.
   them, `scandir` of a 5000 entry directory, `find`/`ls -lR` of a 2000 file
   source-like tree, untar of that tree, large sequential write (`dd
   conv=fsync`) and read. Guest caches are dropped before read workloads. Large
-  files are 256 MiB, 64 MiB on memory-backed mounts (`MemoryProvider` writes
-  are quadratic in file size on the node engine).
+  files are 256 MiB, 64 MiB on memory-backed mounts.
 - `net`: local HTTP and HTTPS upstreams in this process on `localhost`
   (127.0.0.1 and ::1); the guest connects to an arbitrary external address and
   sends `Host`/SNI `localhost`, which the host resolves and allows through
-  `allowedInternalHosts`. The upstream certificate is self-signed and added to
+  `allowedInternalHosts`. The upstream certificate is issued by a throwaway CA added to
   this process' default CA store. One VM per hook variant: `policy`
   (`createHttpHooks({ allowedHosts, allowedInternalHosts })`, full workload
   set), `ip-allow` (`{ isIpAllowed: () => true }`), `policy-noop-hooks` and
@@ -94,15 +96,18 @@ before trusting a small difference.
   sequential small GETs with a new connection each and with keep-alive,
   8-way concurrent GETs, 32 MiB download/upload, 256 MiB download.
 
-## Native engine requirements
+## Engine processes and checks
 
-For `--engine native` the harness needs:
+`--engine native` passes `engine: "native"` to `VM.create` (never for `node`)
+and refuses to run unless the VM reports `engine === "native"` and its daemon
+pid is a `gondolind` process (bypass with `GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1`).
+Set `GONDOLIN_NATIVE_BIN` to the binary under test and `GONDOLIN_GUEST_DIR` so
+both engines boot the same image (both are recorded in the results).
 
-- `VMOptions.engine` (the harness passes `engine` only when it is not `node`).
-- `VM.getHostPid()` returning the `gondolind` pid (QEMU is found as a child),
-  or `vm.getEnginePids()`.
-- `vm.fs.writeFile` (guest helper scripts are copied to `/tmp/bench/`).
-- `sandbox.console: "none"`, `maxHttpBodyBytes`, `httpHooks` with
-  `isIpAllowed`/`onRequest`/`onResponse`, `vfs.mounts` with the providers above.
-- A way to trust the self-signed upstream certificate for HTTPS: the node
-  engine uses this process' default CA store (`tls.setDefaultCACertificates`).
+Cost accounting covers the daemon (`getDaemonPid()` on the native server) and
+`VM.getHostPid()` (QEMU on both engines), each with its descendants.
+
+`--interleave node,native` runs each suite slice by slice (per workload group,
+see `SLICES` in `run.ts`), alternating engines, so both see the same machine
+load; each workload records the 1-minute load average when it started, shown in
+`SUMMARY.md`. Prefer it whenever comparing engines.

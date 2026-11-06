@@ -88,6 +88,159 @@ pub struct QemuArgs<'a> {
     /// QMP monitor socket (idle pause)
     pub qmp_socket: Option<&'a str>,
     pub host: &'a HostInfo,
+    /// vhost-user-fs device (guest RAM moves to a shared memory backend)
+    pub virtiofs: Option<VirtioFsArgs<'a>>,
+}
+
+/// The virtio-fs device of a VM.
+#[derive(Debug, Clone, Copy)]
+pub struct VirtioFsArgs<'a> {
+    /// vhost-user socket served by gondolind
+    pub socket: &'a str,
+    /// request queues (the device adds one high-priority queue)
+    pub queues: usize,
+    /// shared RAM backend (`memory-backend-memfd` or `memory-backend-shm`)
+    pub memory_backend: &'static str,
+}
+
+/// virtio-fs mount tag the guest uses (`mount -t virtiofs gondolin ...`).
+pub const VIRTIOFS_TAG: &str = "gondolin";
+
+/// What a QEMU binary offers for virtio-fs (`-device help`, `-object help`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VirtioFsSupport {
+    /// `vhost-user-fs-pci` (PCI machines) is available
+    pub pci: bool,
+    /// `vhost-user-fs-device` (MMIO, microvm) is available
+    pub mmio: bool,
+    /// a shareable RAM backend usable on this host
+    pub memory_backend: Option<&'static str>,
+}
+
+impl VirtioFsSupport {
+    /// Whether a machine of type `machine` can get the device.
+    pub fn usable(&self, machine: &str) -> bool {
+        self.memory_backend.is_some() && if machine == "microvm" { self.mmio } else { self.pci }
+    }
+}
+
+fn run_help(qemu: &str, args: &[&str]) -> String {
+    use std::process::{Command, Stdio};
+    let child = Command::new(qemu)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else { return String::new() };
+    // bounded: a broken binary must not hang the daemon
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return String::new();
+            }
+        }
+    }
+    let out = child.wait_with_output().map(|o| {
+        let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+        s.push_str(&String::from_utf8_lossy(&o.stderr));
+        s
+    });
+    out.unwrap_or_default()
+}
+
+/// Parses `-device help` / `-object help` output.
+pub fn parse_virtiofs_support(devices: &str, objects: &str, host: &HostInfo) -> VirtioFsSupport {
+    let has = |text: &str, name: &str| text.contains(&format!("\"{name}\""));
+    let object = |name: &str| objects.lines().any(|l| l.trim() == name);
+    let memory_backend = if host.is_linux() && object("memory-backend-memfd") {
+        Some("memory-backend-memfd")
+    } else if object("memory-backend-shm") {
+        Some("memory-backend-shm")
+    } else {
+        None
+    };
+    VirtioFsSupport {
+        pci: has(devices, "vhost-user-fs-pci"),
+        mmio: has(devices, "vhost-user-fs-device"),
+        memory_backend,
+    }
+}
+
+/// Probes (once per binary, keyed by path, size and mtime, cached in memory
+/// and in `<cache>/gondolin/qemu-virtiofs.json`) what `qemu` offers for
+/// virtio-fs. Blocking.
+pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, VirtioFsSupport>>> = OnceLock::new();
+    let resolved = which(qemu).unwrap_or_else(|| std::path::PathBuf::from(qemu));
+    let key = match std::fs::metadata(&resolved) {
+        Ok(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}|{}|{}", resolved.display(), m.len(), mtime)
+        }
+        Err(_) => return VirtioFsSupport::default(),
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(s) = cache.lock().unwrap().get(&key) {
+        return *s;
+    }
+    let disk = gondolin_assets::store::gondolin_cache_dir().join("qemu-virtiofs.json");
+    let mut on_disk: HashMap<String, (bool, bool, Option<String>)> =
+        std::fs::read(&disk).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let support = if let Some((pci, mmio, backend)) = on_disk.get(&key) {
+        VirtioFsSupport {
+            pci: *pci,
+            mmio: *mmio,
+            memory_backend: match backend.as_deref() {
+                Some("memory-backend-memfd") => Some("memory-backend-memfd"),
+                Some("memory-backend-shm") => Some("memory-backend-shm"),
+                _ => None,
+            },
+        }
+    } else {
+        let qemu_path = resolved.display().to_string();
+        let devices = run_help(&qemu_path, &["-machine", "none", "-device", "help"]);
+        let objects = run_help(&qemu_path, &["-machine", "none", "-object", "help"]);
+        let support = parse_virtiofs_support(&devices, &objects, host);
+        on_disk.insert(
+            key.clone(),
+            (support.pci, support.mmio, support.memory_backend.map(str::to_string)),
+        );
+        if let Some(parent) = disk.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_vec(&on_disk) {
+            let tmp = disk.with_extension(format!("json.{}", std::process::id()));
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &disk);
+            }
+        }
+        support
+    };
+    cache.lock().unwrap().insert(key, support);
+    support
+}
+
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        return Some(std::path::PathBuf::from(program));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
 /// `detectTargetArch`: guest architecture from the qemu binary name.
@@ -197,10 +350,24 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
         args.push(format!("{blk},drive=drive0"));
     }
     args.push("-machine".into());
+    let memory_backend = cfg.virtiofs.map(|_| ",memory-backend=mem").unwrap_or("");
     if microvm {
-        args.push("microvm,isa-serial=on,auto-kernel-cmdline=on".into());
+        args.push(format!("microvm,isa-serial=on,auto-kernel-cmdline=on{memory_backend}"));
     } else {
-        args.push(machine_type.clone());
+        args.push(format!("{machine_type}{memory_backend}"));
+    }
+    if let Some(fs) = cfg.virtiofs {
+        // vhost-user devices need guest RAM in shared memory
+        args.push("-object".into());
+        args.push(format!("{},id=mem,size={},share=on", fs.memory_backend, vm.memory));
+        args.push("-chardev".into());
+        args.push(format!("socket,id=vhostfs0,path={}", fs.socket));
+        let dev = if microvm { "vhost-user-fs-device" } else { "vhost-user-fs-pci" };
+        args.push("-device".into());
+        args.push(format!(
+            "{dev},chardev=vhostfs0,tag={VIRTIOFS_TAG},queue-size=1024,num-request-queues={}",
+            fs.queues.max(1)
+        ));
     }
 
     if let Some(a) = accel.as_deref().filter(|a| !a.is_empty()) {
@@ -616,6 +783,7 @@ mod tests {
             chardevs: &c,
             net_socket: Some("/s/net.sock"),
             qmp_socket: None,
+            virtiofs: None,
             host: &host,
         });
         let joined = args.join(" ");
@@ -628,6 +796,65 @@ mod tests {
             "-netdev stream,id=net0,server=off,addr.type=unix,addr.path=/s/net.sock -device virtio-net-pci,netdev=net0,mac=02:00:00:00:00:01"
         ));
         assert!(!joined.contains("-qmp"));
+    }
+
+    #[test]
+    fn virtiofs_device_and_shared_memory() {
+        let vm = vm();
+        let c = chardevs();
+        let fs =
+            VirtioFsArgs { socket: "/s/vfs.sock", queues: 2, memory_backend: "memory-backend-shm" };
+        let args = build_qemu_args(&QemuArgs {
+            vm: &vm,
+            append: "x",
+            chardevs: &c,
+            net_socket: None,
+            qmp_socket: None,
+            virtiofs: Some(fs),
+            host: &mac_arm(),
+        });
+        let joined = args.join(" ");
+        assert!(joined.contains("-machine virt,memory-backend=mem"));
+        assert!(joined.contains("-object memory-backend-shm,id=mem,size=1G,share=on"));
+        assert!(joined.contains("-chardev socket,id=vhostfs0,path=/s/vfs.sock"));
+        assert!(joined.contains(
+            "-device vhost-user-fs-pci,chardev=vhostfs0,tag=gondolin,queue-size=1024,num-request-queues=2"
+        ));
+        // microvm: the MMIO device and memfd on Linux
+        let mut vm = vm.clone();
+        vm.qemu_path = "qemu-system-x86_64".into();
+        let host = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
+        let fs = VirtioFsArgs { memory_backend: "memory-backend-memfd", ..fs };
+        let args = build_qemu_args(&QemuArgs {
+            vm: &vm,
+            append: "x",
+            chardevs: &c,
+            net_socket: None,
+            qmp_socket: None,
+            virtiofs: Some(fs),
+            host: &host,
+        });
+        let joined = args.join(" ");
+        assert!(joined.contains("microvm,isa-serial=on,auto-kernel-cmdline=on,memory-backend=mem"));
+        assert!(joined.contains("-object memory-backend-memfd,id=mem,size=1G,share=on"));
+        assert!(joined.contains("-device vhost-user-fs-device,chardev=vhostfs0"));
+    }
+
+    #[test]
+    fn virtiofs_support_parsing() {
+        let devices = "name \"virtio-blk-pci\", bus PCI\nname \"vhost-user-fs-device\", bus virtio-bus\nname \"vhost-user-fs-pci\", bus PCI\n";
+        let objects = "List of user creatable objects:\n  memory-backend-file\n  memory-backend-memfd\n  memory-backend-shm\n";
+        let linux = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
+        let s = parse_virtiofs_support(devices, objects, &linux);
+        assert_eq!(s.memory_backend, Some("memory-backend-memfd"));
+        assert!(s.usable("q35") && s.usable("microvm"));
+        let s = parse_virtiofs_support(devices, objects, &mac_arm());
+        assert_eq!(s.memory_backend, Some("memory-backend-shm"));
+        // Homebrew QEMU: no vhost-user devices
+        let s = parse_virtiofs_support("name \"virtio-blk-pci\", bus PCI\n", objects, &mac_arm());
+        assert!(!s.usable("virt"));
+        let s = parse_virtiofs_support(devices, "  memory-backend-file\n", &mac_arm());
+        assert!(!s.usable("virt"));
     }
 
     #[test]
@@ -645,6 +872,7 @@ mod tests {
             chardevs: &c,
             net_socket: None,
             qmp_socket: Some("/s/qmp.sock"),
+            virtiofs: None,
             host: &host,
         });
         let joined = args.join(" ");
@@ -663,6 +891,7 @@ mod tests {
             chardevs: &c,
             net_socket: None,
             qmp_socket: None,
+            virtiofs: None,
             host: &host,
         });
         assert!(args.join(" ").contains("-machine q35 -accel tcg -cpu max"));
@@ -679,6 +908,7 @@ mod tests {
             chardevs: &c,
             net_socket: None,
             qmp_socket: None,
+            virtiofs: None,
             host: &mac_arm(),
         });
         assert!(args.join(" ").contains("-machine q35 -accel tcg -cpu max"));

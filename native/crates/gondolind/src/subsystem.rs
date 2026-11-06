@@ -63,6 +63,25 @@ pub trait VfsBackend: Send + Sync + 'static {
     async fn handle(&self, op: &str, req: Value) -> FsReply;
     /// Releases resources at session shutdown.
     async fn close(&self) {}
+
+    /// The same filesystem over virtio-fs (vhost-user-fs), when the backend
+    /// offers it; the session decides whether the VMM can use it.
+    fn virtio_fs(&self) -> Option<Arc<dyn VirtioFsService>> {
+        None
+    }
+}
+
+/// A vhost-user-fs device backend.
+pub trait VirtioFsService: Send + Sync + 'static {
+    /// Serves one vhost-user connection until the frontend disconnects
+    /// (blocking; runs on its own thread).
+    fn serve(&self, conn: std::os::unix::net::UnixStream);
+    /// Number of request queues (the device also has a high-priority queue).
+    fn request_queues(&self) -> usize;
+    /// Whether the controller insists on virtio-fs (warn when unavailable).
+    fn required(&self) -> bool {
+        false
+    }
 }
 
 /// Host side of the guest network.
@@ -110,6 +129,8 @@ impl SubsystemContext {
 ///   engine with `vfs: null`)
 /// - `{ mode: "controller" }`: interim proxy, every request is forwarded to the
 ///   controller as `vfs_rpc` and served by the node VFS implementation
+/// - `{ mode: "native", fuse_mount, binds, mounts, hooks }`: the mount table of
+///   `gondolin-vfs` ([`gondolin_proto::vfs::VfsConfig`], `crate::vfs`)
 pub fn build_vfs(
     config: Option<&Value>,
     ctx: &SubsystemContext,
@@ -121,6 +142,7 @@ pub fn build_vfs(
         Some("controller") => {
             Ok(Some(Arc::new(crate::vfs_proxy::ControllerVfs::new(ctx.ctl.clone()))))
         }
+        Some("native") => crate::vfs::build(config, ctx).map(Some),
         Some(other) => Err(format!("unsupported vfs mode: {other}")),
         None => Err("vfs configuration requires a mode".into()),
     }

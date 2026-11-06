@@ -870,7 +870,7 @@ export class SandboxServerOps {
         message.type === "exec"
           ? ` id=${message.id} cmd=${message.cmd}`
           : message.type === "stdin"
-            ? ` id=${message.id} bytes=${message.data ? Math.floor((message.data.length * 3) / 4) : 0}${message.eof ? " eof" : ""}`
+            ? ` id=${message.id} bytes=${typeof message.data === "string" ? Math.floor((message.data.length * 3) / 4) : (message.data?.length ?? 0)}${message.eof ? " eof" : ""}`
             : message.type === "pty_resize"
               ? ` id=${message.id} rows=${message.rows} cols=${message.cols}`
               : message.type === "boot"
@@ -1176,7 +1176,10 @@ export class SandboxServerOps {
 
   handleStdin(client: SandboxClient, message: StdinCommandMessage) {
     if (this.hasDebug("exec")) {
-      const bytes = message.data ? estimateBase64Bytes(message.data) : 0;
+      const bytes =
+        typeof message.data === "string"
+          ? estimateBase64Bytes(message.data)
+          : (message.data?.length ?? 0);
       this.emitDebug(
         "exec",
         `stdin id=${message.id} bytes=${bytes}${message.eof ? " eof" : ""}`,
@@ -1211,7 +1214,8 @@ export class SandboxServerOps {
       return;
     }
 
-    const base64 = message.data ?? "";
+    const raw = message.data ?? "";
+    const base64 = typeof raw === "string" ? raw : "";
     if (base64 && estimateBase64Bytes(base64) > this.options.maxStdinBytes) {
       sendError(client, {
         type: "error",
@@ -1222,7 +1226,11 @@ export class SandboxServerOps {
       return;
     }
 
-    const data = base64 ? Buffer.from(base64, "base64") : Buffer.alloc(0);
+    const data = Buffer.isBuffer(raw)
+      ? raw
+      : base64
+        ? Buffer.from(base64, "base64")
+        : Buffer.alloc(0);
     if (data.length > this.options.maxStdinBytes) {
       sendError(client, {
         type: "error",

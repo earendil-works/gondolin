@@ -78,6 +78,15 @@ Requirements:
 | ------------------------ | --------------------------------------------- |
 | `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
 
+By default the VM is run by the [native engine](docs/native.md) when its
+`gondolind` binary (a static Rust daemon, shipped as an optional platform
+package) is available, and by the in-process node engine otherwise
+(`GONDOLIN_ENGINE=node` / `--engine node` forces the node engine, which is
+deprecated). It can run on another machine (`--native-command "ssh host gondolind"
+--remote`): that machine only needs QEMU and the `gondolind` binary, no
+Node.js; policy, hooks, credentials and file providers stay with your local
+Node.js process.
+
 Optional experimental libkrun backend setup:
 
 ```bash
@@ -127,6 +136,7 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
   - optional guest -> upstream allowlisted SSH egress (proxied, exec-oriented)
 - **Disk checkpoints (snapshots)** with resume support
 - **Custom image builds** (Alpine-based build pipeline, optional OCI rootfs source)
+- **Native engine** (default when available): a static Rust daemon (`gondolind`) runs the VM, also on remote machines without Node.js
 - **Configurable DNS behavior** (`synthetic`, `trusted`, `open`), rootfs modes (`readonly`, `memory`, `cow`), and runtime rootfs sizing
 
 ## Documentation
@@ -139,6 +149,7 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
 - [Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
 - [Architecture Overview](https://earendil-works.github.io/gondolin/architecture/)
 - [VM Backends (QEMU vs krun)](docs/backends.md)
+- [Native Engine](https://earendil-works.github.io/gondolin/native/)
 - [Security Design](https://earendil-works.github.io/gondolin/security/)
 - [Limitations](https://earendil-works.github.io/gondolin/limitations/)
 

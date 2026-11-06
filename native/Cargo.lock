@@ -914,6 +914,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gondolin-cli"
+version = "0.14.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "gondolin-assets",
+ "gondolin-egress",
+ "gondolin-proto",
+ "gondolin-wire",
+ "gondolind",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "gondolin-egress"
 version = "0.14.0"
 dependencies = [
@@ -997,8 +1019,14 @@ version = "0.14.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "gondolin-proto",
+ "gondolin-virtiofs",
  "gondolin-wire",
+ "libc",
+ "rustix",
  "serde",
+ "serde_bytes",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -1030,12 +1058,14 @@ version = "0.14.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "ciborium",
  "gondolin-assets",
  "gondolin-egress",
  "gondolin-netstack",
  "gondolin-proto",
  "gondolin-sshproxy",
  "gondolin-vfs",
+ "gondolin-virtiofs",
  "gondolin-wire",
  "indexmap",
  "libc",
@@ -2097,8 +2127,6 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.65.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94be3d86c71b9ed220a675c405e35c7a02565a009bf8da2e9cc13a700320a5c5"
 dependencies = [
  "aes",
  "bitflags 2.13.2",

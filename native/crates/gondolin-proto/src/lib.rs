@@ -17,6 +17,7 @@ pub mod exec;
 pub mod files;
 pub mod net;
 pub mod session;
+pub mod vfs;
 
 use serde::{Deserialize, Serialize};
 

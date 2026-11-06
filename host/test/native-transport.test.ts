@@ -11,6 +11,7 @@ import {
   spawnNativeConnection,
   stripUndefined,
 } from "../src/native/transport.ts";
+import { nativeDaemonCommand } from "../src/native/binary.ts";
 import { resolveSandboxEngine } from "../src/native/config.ts";
 import { shouldSkipVmTests } from "./helpers/vm-fixture.ts";
 
@@ -56,7 +57,13 @@ test("stripUndefined drops undefined keys but keeps buffers", () => {
 });
 
 test("resolveSandboxEngine honours option and env", () => {
-  assert.equal(resolveSandboxEngine(undefined, {}), "node");
+  assert.equal(
+    resolveSandboxEngine(undefined, {
+      GONDOLIN_NATIVE_BIN: "/nonexistent/gondolind",
+    }),
+    "node",
+  );
+  assert.equal(resolveSandboxEngine("node", {}), "node");
   assert.equal(
     resolveSandboxEngine(undefined, { GONDOLIN_ENGINE: "native" }),
     "native",
@@ -69,10 +76,21 @@ test("resolveSandboxEngine honours option and env", () => {
     () => resolveSandboxEngine("rust", {}),
     /invalid sandbox engine/,
   );
+  // a binary that is present but not a working gondolind falls back to node
   assert.equal(
     resolveSandboxEngine("auto", { GONDOLIN_NATIVE_BIN: "/bin/sh" }),
-    "native",
+    "node",
   );
+  if (binary) {
+    assert.equal(
+      resolveSandboxEngine("auto", { GONDOLIN_NATIVE_BIN: binary }),
+      "native",
+    );
+    assert.equal(
+      resolveSandboxEngine(undefined, { GONDOLIN_NATIVE_BIN: binary }),
+      "native",
+    );
+  }
 });
 
 test("gondolind handshake, validation and shutdown", {
@@ -186,7 +204,7 @@ test("transport works over a pi-env style connection (async writes)", {
   skip: binary ? false : "gondolind binary not built",
   timeout: 30_000,
 }, async () => {
-  const inner = spawnNativeConnection([binary!]);
+  const inner = spawnNativeConnection(nativeDaemonCommand(binary!));
   let writes = 0;
   // openProcess-like: promise-returning write, stdout/stderr callbacks, no kill
   const connection: NativeConnection = {

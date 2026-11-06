@@ -1,4 +1,7 @@
 [workspace]
+# cargo-fuzz targets (nightly), see fuzz/README.md; vendored crates (patched
+# dependencies, not linted as ours)
+exclude = ["fuzz", "vendor/russh"]
 resolver = "3"
 members = [
     "crates/gondolin-wire",
@@ -10,6 +13,7 @@ members = [
     "crates/gondolin-assets",
     "crates/gondolin-virtiofs",
     "crates/gondolind",
+    "crates/gondolin-cli",
 ]
 
 [workspace.package]
@@ -36,7 +40,16 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 [profile.release]
-lto = "thin"
+# fat LTO: the multi-call `gondolin` is 12% smaller than with thin LTO at the
+# same throughput (opt-level "s" saves another 25% but costs ~20% HTTPS
+# throughput, measured on the exec/net benchmarks)
+lto = "fat"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
+# panics in per-flow/per-request work are contained (gondolind/src/panics.rs);
+# the session task fails closed
+panic = "unwind"
+
+# Vendored, patched dependencies (see vendor/*/GONDOLIN-PATCHES.md).
+[patch.crates-io]
+russh = { path = "vendor/russh" }

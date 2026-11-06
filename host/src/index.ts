@@ -58,6 +58,16 @@ export {
 export { ReadonlyProvider } from "./vfs/readonly.ts";
 export { ReadonlyVirtualProvider } from "./vfs/readonly-virtual.ts";
 export {
+  createObjectMount,
+  ObjectVirtualProvider,
+  type ObjectProvider,
+  type ObjectMountOptions,
+  type ObjectStat,
+  type ObjectDirEntry,
+  type ObjectEntryKind,
+} from "./vfs/object.ts";
+export { nativeMounts, type NativeHostMountOptions } from "./native/vfs.ts";
+export {
   ShadowProvider,
   createShadowPathPredicate,
   type ShadowProviderOptions,
@@ -201,14 +211,24 @@ export {
   type ResolvedImage,
 } from "./images.ts";
 
-// Native engine binaries (gondolind) for this and remote platforms
+// Native engine (gondolind): engine selection, connections to local or remote daemons
+export type { NativeEngineOptions, SandboxEngine } from "./native/config.ts";
+export {
+  type NativeConnection,
+  spawnNativeConnection,
+} from "./native/transport.ts";
+
+// Native engine binaries (the multi-call `gondolin`) for this and remote platforms
 export {
   ensureNativeBinary,
   getNativeBinaryPath,
+  nativeDaemonArgs,
+  nativeDaemonCommand,
   nativePackageName,
   nativeRustTarget,
   type EnsureNativeBinaryOptions,
   type NativeArch,
+  type NativeBinary,
   type NativeBinaryLookupOptions,
   type NativeBinaryTarget,
   type NativePlatform,

@@ -1,8 +1,14 @@
 # @earendil-works/gondolin-native-darwin-x64
 
-Prebuilt `gondolind`, Gondolin's native host engine, for macOS x64.
+Prebuilt `gondolin` for macOS x64: one multi-call binary that is both the static
+Gondolin CLI (`bash`, `exec`, `list`, `attach`, `snapshot`, `image`; no Node.js
+needed, see [the CLI docs](https://github.com/earendil-works/gondolin/blob/main/docs/cli.md#static-cli-no-nodejs))
+and `gondolind`, the native engine daemon (`gondolin daemon`, or the binary
+invoked under the name `gondolind`: the package's npm `bin` links it as
+`gondolind`).
 
 This package is consumed by `@earendil-works/gondolin` as an optional
-platform-specific dependency (`engine: "native"`). Remote setups that need
+platform-specific dependency (the native engine). Remote setups that need
 the binary of another platform use `ensureNativeBinary({ platform, arch })`
-from `@earendil-works/gondolin`, which fetches this package on demand.
+from `@earendil-works/gondolin`, which fetches this package on demand and
+returns the binary with the arguments that start the daemon.

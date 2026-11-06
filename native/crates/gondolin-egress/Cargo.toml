@@ -30,6 +30,7 @@ ring = "0.17"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
+serde_json = "1"
 rustls-pki-types = { version = "1", features = ["std"] }
 time = "0.3"
 tower-service = "0.3"

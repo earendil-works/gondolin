@@ -208,9 +208,17 @@ async fn serve_connection(stream: UnixStream, outbox: Arc<Outbox>, handler: Arc<
         loop {
             match read_guest_frame(&mut read).await {
                 Ok(Some(frame)) => {
-                    if let Err(err) = handler.frame(frame).await {
-                        handler.error(err);
-                        return;
+                    // a panicking handler costs this connection, not the daemon
+                    match crate::panics::CatchUnwind::new(handler.frame(frame)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            handler.error(err);
+                            return;
+                        }
+                        Err(panic) => {
+                            handler.error(format!("internal error: {panic}"));
+                            return;
+                        }
                     }
                 }
                 Ok(None) => return,

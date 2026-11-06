@@ -3,6 +3,14 @@ import { createVm, enginePids } from "../lib/engine.ts";
 import { type Bench, MiB, mbps } from "../lib/harness.ts";
 
 export async function execSuite(bench: Bench) {
+  const names = [
+    "rtt-sh",
+    "rtt-argv",
+    "concurrent",
+    "stdout-throughput",
+    "stdin-throughput",
+  ];
+  if (!names.some((n) => bench.matches(`exec.${n}`))) return;
   let vm: VM;
   try {
     vm = await createVm();
@@ -89,20 +97,16 @@ export async function execSuite(bench: Bench) {
       },
     });
 
-    // The node engine does not apply backpressure to exec stdin: everything
-    // the caller writes is queued host-side and capped at 8 MiB per exec
-    // (`maxQueuedStdinBytes`), so the payload stays below that cap.
-    const stdinBytes = 6 * MiB;
+    const stdinBytes = bench.q(256, 32) * MiB;
     const chunk = Buffer.alloc(256 * 1024, 0x61);
     await bench.run({
       name: "exec.stdin-throughput",
-      iterations: bench.q(10, 2),
+      iterations: bench.q(5, 2),
       params: {
         command: "wc -c",
         bytes: stdinBytes,
         chunkBytes: chunk.length,
         stdin: "async iterable",
-        note: "below the 8 MiB queued stdin cap (no stdin backpressure)",
       },
       warmup: 1,
       cost: true,

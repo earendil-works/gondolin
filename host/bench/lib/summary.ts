@@ -12,6 +12,10 @@ export type RunFile = {
   quick: boolean;
   /** workload name filter of the run (`--filter`), if any */
   filter?: string | null;
+  /** engines alternated slice by slice in the same process (`--interleave`) */
+  interleaved?: string[] | null;
+  /** free-form caveat shown next to the run in the summary (`--note`) */
+  note?: string | null;
   /** iteration override of the run (`--iterations`), if any */
   iterations?: number | null;
   startedAt: string;
@@ -55,7 +59,7 @@ function costCell(w: WorkloadResult | undefined): string {
 
 function machineLine(run: RunFile): string {
   const m = run.machine;
-  return `${run.engine}: ${run.startedAt}${run.quick ? " (quick)" : ""}${run.filter ? ` (filter ${run.filter})` : ""}, ${m.cpuModel} x${m.cpuCount}, ${m.platform} ${m.productVersion ?? m.osRelease}, node ${m.node}, ${m.qemu ?? "qemu ?"}, commit ${m.gitCommit}${m.gitDirty ? "+dirty" : ""}`;
+  return `${run.engine}${run.note ? " (see note)" : ""}: ${run.startedAt}${run.quick ? " (quick)" : ""}${run.filter ? ` (filter ${run.filter})` : ""}${run.interleaved ? ` (interleaved ${run.interleaved.join("/")})` : ""}, ${m.cpuModel} x${m.cpuCount}, ${m.platform} ${m.productVersion ?? m.osRelease}, node ${m.node}, ${m.qemu ?? "qemu ?"}, load ${Array.isArray(m.loadAvg) ? m.loadAvg[0] : "?"}${Array.isArray(m.loadAvgEnd) ? `→${m.loadAvgEnd[0]}` : ""}, image ${m.image}, commit ${m.gitCommit}${m.gitDirty ? "+dirty" : ""}`;
 }
 
 export function loadRuns(dir: string): RunFile[] {
@@ -105,8 +109,8 @@ export function renderSummary(runs: RunFile[]): string {
       if (run) lines.push(`- ${machineLine(run)}`);
     lines.push(
       "",
-      "| workload | metric | unit | node | native | ratio |",
-      "|---|---|---|---|---|---|",
+      "| workload | metric | unit | node | native | ratio | load node / native |",
+      "|---|---|---|---|---|---|---|",
     );
     const names: string[] = [];
     for (const run of Object.values(byEngine))
@@ -122,11 +126,16 @@ export function renderSummary(runs: RunFile[]): string {
           ...(native ? shownMetrics(native) : []),
         ].map(([k]) => k),
       );
+      let first = true;
       for (const metric of metricNames) {
         const a = node?.metrics[metric];
         const b = native?.metrics[metric];
+        const load = first
+          ? `${node?.loadAvg ?? "-"} / ${native?.loadAvg ?? "-"}`
+          : "";
+        first = false;
         lines.push(
-          `| ${name} | ${metric} | ${(a ?? b)?.unit ?? ""} | ${cell(a)} | ${cell(b)} | ${ratio(a, b)} |`,
+          `| ${name} | ${metric} | ${(a ?? b)?.unit ?? ""} | ${cell(a)} | ${cell(b)} | ${ratio(a, b)} | ${load} |`,
         );
       }
       const errors = [
@@ -135,7 +144,7 @@ export function renderSummary(runs: RunFile[]): string {
       ].filter(Boolean);
       if (errors.length > 0)
         lines.push(
-          `| ${name} | error | | ${errors.join("; ").replace(/\|/g, "/")} | | |`,
+          `| ${name} | error | | ${errors.join("; ").replace(/\|/g, "/")} | | | |`,
         );
       if (node?.cost || native?.cost)
         costRows.push(`| ${name} | ${costCell(node)} | ${costCell(native)} |`);

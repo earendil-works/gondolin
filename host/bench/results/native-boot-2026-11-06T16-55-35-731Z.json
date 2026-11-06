@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "engine": "native",
+  "suite": "boot",
+  "quick": false,
+  "filter": null,
+  "note": null,
+  "iterations": null,
+  "startedAt": "2026-11-06T16:55:35.731Z",
+  "finishedAt": "2026-11-06T16:55:40.801Z",
+  "machine": {
+    "hostname": "saratoga",
+    "platform": "darwin",
+    "osRelease": "25.6.0",
+    "osVersion": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050",
+    "productVersion": "26.6.2",
+    "arch": "arm64",
+    "cpuModel": "Apple M5 Max",
+    "cpuCount": 18,
+    "loadAvg": [
+      7.83,
+      18.33,
+      17.42
+    ],
+    "totalMemGB": 128,
+    "node": "v26.10.0",
+    "qemu": "QEMU emulator version 10.2.1",
+    "gitCommit": "15a11b3",
+    "gitDirty": true,
+    "image": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe)",
+    "nativeBin": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../native/target/release/gondolind"
+  },
+  "workloads": [
+    {
+      "name": "boot.create-to-first-exec",
+      "params": {
+        "command": "true",
+        "options": "defaults, console none"
+      },
+      "warmup": 1,
+      "iterations": 10,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 437.5621255000003,
+            "p95": 571.1325534999993,
+            "min": 319.07800000000043,
+            "max": 586.9569159999992,
+            "mean": 451.4275834
+          },
+          "samples": [
+            421.863,
+            452.659,
+            435.865,
+            427.828,
+            414.427,
+            464.548,
+            551.792,
+            439.259,
+            319.078,
+            586.957
+          ]
+        },
+        "createMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 19.215583499999866,
+            "p95": 24.3102725500001,
+            "min": 18.237957999999708,
+            "max": 25.404915999999957,
+            "mean": 20.098329
+          },
+          "samples": [
+            18.855,
+            19.353,
+            18.97,
+            18.498,
+            19.267,
+            22.972,
+            25.405,
+            20.261,
+            19.164,
+            18.238
+          ]
+        },
+        "firstExecMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 417.9470624999998,
+            "p95": 549.6696876499997,
+            "min": 299.9145830000007,
+            "max": 568.7191249999996,
+            "mean": 431.32954600000005
+          },
+          "samples": [
+            403.008,
+            433.307,
+            416.895,
+            409.33,
+            395.16,
+            441.576,
+            526.387,
+            418.999,
+            299.915,
+            568.719
+          ]
+        },
+        "closeMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 5.6877084999998715,
+            "p95": 10.544052599999796,
+            "min": 5.176124999999956,
+            "max": 14.100083999999697,
+            "mean": 6.530133399999931
+          },
+          "samples": [
+            6.179,
+            5.446,
+            5.176,
+            5.287,
+            5.523,
+            14.1,
+            6.084,
+            5.853,
+            5.456,
+            6.198
+          ]
+        }
+      },
+      "totalMs": 5069.673250000001
+    }
+  ]
+}

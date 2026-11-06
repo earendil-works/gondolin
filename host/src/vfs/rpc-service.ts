@@ -76,6 +76,10 @@ type HandleEntry = {
 type ReaddirCacheEntry = {
   entries: Array<string | Dirent>;
   expiresAt: number;
+  /** a mutation happened since the snapshot; new listings refetch */
+  stale?: boolean;
+  /** names removed since the snapshot, skipped by continuations */
+  removed?: Set<string>;
 };
 
 export class FsRpcService {
@@ -278,18 +282,25 @@ export class FsRpcService {
         requireUint(req.max_entries ?? 1024, "readdir", "max_entries"),
       ),
     );
-    const entries = await this.readCachedDirEntries(entryPath);
+    const { entries, removed } = await this.readCachedDirEntries(
+      entryPath,
+      offset,
+    );
     const start = Math.min(offset, entries.length);
 
     const responseEntries: Array<Record<string, unknown>> = [];
+    let index = start;
     for (
-      let index = start;
+      ;
       index < entries.length && responseEntries.length < maxEntries;
       index += 1
     ) {
       const entry = entries[index];
       const name = typeof entry === "string" ? entry : entry.name;
       if (!name || name.includes("/") || name.includes("\0")) {
+        continue;
+      }
+      if (removed?.has(name)) {
         continue;
       }
       const childPath = normalizePath(path.posix.join(entryPath, name));
@@ -303,10 +314,7 @@ export class FsRpcService {
       });
     }
 
-    const nextOffset =
-      start + responseEntries.length >= entries.length
-        ? 0
-        : start + responseEntries.length;
+    const nextOffset = index >= entries.length ? 0 : index;
 
     return {
       entries: responseEntries,
@@ -476,6 +484,7 @@ export class FsRpcService {
     await this.provider.unlink(entryPath);
     this.removeMapping(entryPath);
     this.invalidateReaddirCacheEntries([parentPath]);
+    this.noteReaddirRemoval(parentPath, name);
     return {};
   }
 
@@ -489,6 +498,7 @@ export class FsRpcService {
     await this.provider.rmdir(entryPath);
     this.removeMapping(entryPath);
     this.invalidateReaddirCacheEntries([parentPath, entryPath], true);
+    this.noteReaddirRemoval(parentPath, name);
     return {};
   }
 
@@ -520,6 +530,8 @@ export class FsRpcService {
     this.renameMapping(oldPath, newPath);
     this.invalidateReaddirCacheEntries([oldParentPath, newParentPath]);
     this.invalidateReaddirCacheEntries([oldPath, newPath], true);
+    this.noteReaddirRemoval(oldParentPath, oldName);
+    this.noteReaddirRemoval(newParentPath, newName);
     return {};
   }
 
@@ -771,18 +783,28 @@ export class FsRpcService {
     }
   }
 
-  private async readCachedDirEntries(entryPath: string) {
+  /**
+   * Directory listing snapshot for `readdir`. Offsets are indices into the
+   * snapshot: a listing from offset 0 uses a fresh snapshot, continuations keep
+   * the one they started from (skipping names removed since). Re-listing after
+   * a mutation would shift the indices and make the guest skip live entries,
+   * e.g. `rm -rf` leaving "Directory not empty" behind.
+   */
+  private async readCachedDirEntries(
+    entryPath: string,
+    offset = 0,
+  ): Promise<{ entries: Array<string | Dirent>; removed?: Set<string> }> {
     const normalized = normalizePath(entryPath);
     const now = Date.now();
     const cached = this.readdirCache.get(normalized);
-    if (cached && cached.expiresAt > now) {
+    if (cached && (offset > 0 || (!cached.stale && cached.expiresAt > now))) {
       // Sliding TTL: keep active pagination streams warm.
-      this.setReaddirCacheEntry(
-        normalized,
-        cached.entries,
-        now + READDIR_CACHE_TTL_MS,
-      );
-      return cached.entries;
+      this.readdirCache.delete(normalized);
+      this.readdirCache.set(normalized, {
+        ...cached,
+        expiresAt: now + READDIR_CACHE_TTL_MS,
+      });
+      return { entries: cached.entries, removed: cached.removed };
     }
 
     if (cached) {
@@ -791,7 +813,7 @@ export class FsRpcService {
 
     const inFlight = this.readdirInFlight.get(normalized);
     if (inFlight) {
-      return inFlight;
+      return { entries: await inFlight };
     }
 
     const startVersion = this.readdirCacheVersion;
@@ -814,7 +836,7 @@ export class FsRpcService {
 
     this.readdirInFlight.set(normalized, load);
     try {
-      return await load;
+      return { entries: await load };
     } finally {
       if (this.readdirInFlight.get(normalized) === load) {
         this.readdirInFlight.delete(normalized);
@@ -857,8 +879,11 @@ export class FsRpcService {
 
     this.readdirCacheVersion += 1;
 
-    for (const cachePath of this.readdirCache.keys()) {
-      if (matchesAnyTarget(cachePath, targets, includeDescendants)) {
+    for (const [cachePath, cached] of this.readdirCache) {
+      if (targets.has(cachePath)) {
+        // keep the snapshot for listings already in progress
+        cached.stale = true;
+      } else if (matchesAnyTarget(cachePath, targets, includeDescendants)) {
         this.readdirCache.delete(cachePath);
       }
     }
@@ -868,6 +893,14 @@ export class FsRpcService {
         this.readdirInFlight.delete(cachePath);
       }
     }
+  }
+
+  /** Entry `name` left directory `parentPath` */
+  private noteReaddirRemoval(parentPath: string, name: string) {
+    const cached = this.readdirCache.get(normalizePath(parentPath));
+    if (!cached) return;
+    cached.stale = true;
+    cached.removed = new Set(cached.removed ?? []).add(name);
   }
 
   private ensureIno(entryPath: string, preferredIno?: number) {

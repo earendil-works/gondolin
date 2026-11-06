@@ -132,6 +132,57 @@ struct PullState {
     released: bool,
 }
 
+/// How long a non-waiting [`BodyHandle::prefetch`] waits for more of a body
+/// that already started arriving
+const PREFETCH_GRACE: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Reads the next data frame of the source into `retained`. Returns `false` at
+/// end of body. Marks the body complete as soon as the source reports its end.
+async fn read_next(state: &mut PullState) -> Result<bool, PullError> {
+    loop {
+        if state.eof {
+            return Ok(false);
+        }
+        let Some(source) = state.source.as_mut() else {
+            state.eof = true;
+            return Ok(false);
+        };
+        match source.frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                let len = data.len() as u64;
+                if state.retained_bytes + len > state.limit {
+                    return Err(PullError::Limit(state.limit_error.clone()));
+                }
+                state.retained_bytes += len;
+                state.retained.push(data);
+                state.pulled = true;
+                if state.source.as_ref().is_some_and(|s| s.is_end_stream()) {
+                    state.eof = true;
+                    state.source = None;
+                }
+                return Ok(true);
+            }
+            Some(Err(e)) => {
+                if let Some(blocked) = find_blocked(e.as_ref()) {
+                    return Err(PullError::Limit(blocked));
+                }
+                return Err(PullError::Read(e.to_string()));
+            }
+            None => {
+                state.eof = true;
+                state.source = None;
+                return Ok(false);
+            }
+        }
+    }
+}
+
 /// Lazily pulled body offered to a hook. Pulled chunks are retained so the
 /// pipeline can replay them when the decision keeps the original body.
 #[derive(Clone)]
@@ -170,38 +221,8 @@ impl BodyHandle {
                 }
                 continue;
             }
-            if state.eof {
+            if !read_next(&mut state).await? {
                 return Ok(None);
-            }
-            let Some(source) = state.source.as_mut() else {
-                state.eof = true;
-                return Ok(None);
-            };
-            match source.frame().await {
-                Some(Ok(frame)) => {
-                    let Ok(data) = frame.into_data() else {
-                        continue;
-                    };
-                    if data.is_empty() {
-                        continue;
-                    }
-                    let len = data.len() as u64;
-                    if state.retained_bytes + len > state.limit {
-                        return Err(PullError::Limit(state.limit_error.clone()));
-                    }
-                    state.retained_bytes += len;
-                    state.retained.push(data);
-                }
-                Some(Err(e)) => {
-                    if let Some(blocked) = find_blocked(e.as_ref()) {
-                        return Err(PullError::Limit(blocked));
-                    }
-                    return Err(PullError::Read(e.to_string()));
-                }
-                None => {
-                    state.eof = true;
-                    state.source = None;
-                }
             }
         }
     }
@@ -232,40 +253,56 @@ impl BodyHandle {
             if offset > state.retained_bytes {
                 return Err(PullError::Read(format!("offset {offset} beyond body position")));
             }
-            if state.eof {
+            if !read_next(&mut state).await? {
                 return Ok(None);
             }
-            let Some(source) = state.source.as_mut() else {
-                state.eof = true;
-                return Ok(None);
-            };
-            match source.frame().await {
-                Some(Ok(frame)) => {
-                    let Ok(data) = frame.into_data() else {
-                        continue;
-                    };
-                    if data.is_empty() {
-                        continue;
-                    }
-                    let len = data.len() as u64;
-                    if state.retained_bytes + len > state.limit {
-                        return Err(PullError::Limit(state.limit_error.clone()));
-                    }
-                    state.retained_bytes += len;
-                    state.retained.push(data);
+        }
+    }
+
+    /// Whether everything from `offset` on has been read (the body ends there).
+    pub async fn complete_at(&self, offset: u64) -> bool {
+        let state = self.state.lock().await;
+        state.eof && offset >= state.retained_bytes
+    }
+
+    /// Reads ahead up to `max` bytes so they can be sent inline with a hook
+    /// call: with `wait`, until `max` or the end of the body; otherwise only
+    /// data that is already available. Returns the bytes read so far and
+    /// whether that is the whole body.
+    pub async fn prefetch(&self, max: usize, wait: bool) -> Result<(Bytes, bool), PullError> {
+        use futures_util::FutureExt;
+        let mut state = self.state.lock().await;
+        if state.released {
+            return Err(PullError::Released);
+        }
+        while (state.retained_bytes as usize) < max && !state.eof {
+            if wait {
+                if !read_next(&mut state).await? {
+                    break;
                 }
-                Some(Err(e)) => {
-                    if let Some(blocked) = find_blocked(e.as_ref()) {
-                        return Err(PullError::Limit(blocked));
-                    }
-                    return Err(PullError::Read(e.to_string()));
+            } else if state.retained_bytes == 0 {
+                match read_next(&mut state).now_or_never() {
+                    Some(Ok(true)) => {}
+                    Some(Ok(false)) => break,
+                    Some(Err(e)) => return Err(e),
+                    None => break,
                 }
-                None => {
-                    state.eof = true;
-                    state.source = None;
+            } else {
+                // data arrived: give the connection a moment to deliver the
+                // end of a small body (chunked terminator) before the call
+                match tokio::time::timeout(PREFETCH_GRACE, read_next(&mut state)).await {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => break,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => break,
                 }
             }
         }
+        let mut out = bytes::BytesMut::with_capacity(state.retained_bytes as usize);
+        for chunk in &state.retained {
+            out.extend_from_slice(chunk);
+        }
+        Ok((out.freeze(), state.eof))
     }
 
     /// Reads the whole remaining body (up to the limit).

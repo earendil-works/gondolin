@@ -11,10 +11,12 @@ gondolin-wire.workspace = true
 gondolin-proto.workspace = true
 gondolin-assets.workspace = true
 gondolin-vfs.workspace = true
+gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 gondolin-netstack.workspace = true
 gondolin-egress.workspace = true
 gondolin-sshproxy.workspace = true
 async-trait.workspace = true
+ciborium.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

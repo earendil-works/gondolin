@@ -5,19 +5,31 @@
 //! `serve` runs three futures: the reader (frames from QEMU → state), the
 //! writer (queued frames → QEMU) and the ticker (smoltcp timers and polls
 //! requested by flow streams). Flow streams lock the state to move bytes in and
-//! out of their smoltcp socket buffers and wake the ticker.
+//! out of their smoltcp socket buffers, mark their entry dirty and wake the ticker.
+//!
+//! Each TCP socket sits alone in its own smoltcp `SocketSet`: smoltcp finds the
+//! socket of a packet and the sockets with something to send by scanning the
+//! whole set, so with one shared set every packet cost O(open connections).
+//! Guest packets are routed by their 4-tuple instead, and a poll only touches
+//! the entries that got packets, were used by their stream, or have a timer due.
 
+use std::cmp::Reverse;
 use std::collections::hash_map::RandomState;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
+use smoltcp::iface::{
+    Config as IfaceConfig, Interface, PollIngressSingleResult, SocketHandle, SocketSet,
+};
 use smoltcp::phy::{self, DeviceCapabilities, Medium};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
@@ -65,6 +77,8 @@ pub struct NetStats {
     pub tx_dropped_frames: u64,
     /// smoltcp polls so far (diagnostics: detects busy loops)
     pub polls: u64,
+    /// stream reads released by [`READ_HOLD`] expiring instead of a PSH
+    pub read_hold_timeouts: u64,
 }
 
 /// Userspace network stack serving one QEMU stream netdev at a time.
@@ -125,6 +139,7 @@ impl NetStack {
         let shared = Arc::new(Shared {
             state: Mutex::new(state),
             poll_notify: Notify::new(),
+            read_hold_bytes: (config.limits.tcp_rx_buffer_bytes / 4).min(64 * 1024),
             tx_notify: Notify::new(),
             tx_drained: Notify::new(),
             handler,
@@ -161,7 +176,7 @@ impl NetStack {
     pub fn stats(&self) -> NetStats {
         let st = self.shared.lock();
         NetStats {
-            tcp_sockets: st.sockets.iter().count(),
+            tcp_sockets: st.entries.len(),
             tcp_flows: st
                 .entries
                 .values()
@@ -171,6 +186,7 @@ impl NetStack {
             tx_queued_bytes: st.device.tx.len() + st.device.tx_inflight,
             tx_dropped_frames: st.tx_dropped,
             polls: st.polls,
+            read_hold_timeouts: st.read_hold_timeouts,
         }
     }
 
@@ -226,18 +242,65 @@ pub(crate) enum Phase {
     Orphan { deadline: Instant },
 }
 
+/// Key of a TCP socket entry (unique within a [`State`]).
+pub(crate) type FlowKey = u64;
+
 pub(crate) struct Entry {
     pub(crate) phase: Phase,
     /// guest address, destination address
     tuple: (SocketAddrV4, SocketAddrV4),
     /// set by [`crate::FlowControl::abort`]
     pub(crate) aborted: bool,
+    /// the connection's socket, alone in its set (see the module docs)
+    set: SocketSet<'static>,
+    handle: SocketHandle,
+    /// guest packets for the next poll
+    rx: VecDeque<Bytes>,
+    /// queued in `State::dirty`
+    dirty: bool,
+    /// queued in `State::blocked`
+    blocked: bool,
+    /// when the entry needs its next poll (smoltcp timer, phase or read deadline)
+    wake_at: Option<Instant>,
+    /// a packet with PSH, FIN or RST is queued in `rx`
+    rx_push: bool,
+    /// the receive buffer holds data up to a PSH (or FIN/RST): hand it out
+    pub(crate) push: bool,
+    /// stream waiting for a push or more data (see [`READ_HOLD`])
+    pub(crate) read_waker: Option<Waker>,
+    /// when a held read is released anyway
+    pub(crate) read_deadline: Option<Instant>,
 }
+
+impl Entry {
+    pub(crate) fn socket(&mut self) -> &mut tcp::Socket<'static> {
+        self.set.get_mut::<tcp::Socket>(self.handle)
+    }
+
+    pub(crate) fn wake_reader(&mut self) {
+        self.read_deadline = None;
+        if let Some(waker) = self.read_waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// Longest a stream read is held back waiting for a PSH.
+///
+/// Guest data is handed to the flow when a segment with PSH (the end of a
+/// guest write; Linux also pushes every half window), FIN or RST arrived, or
+/// [`Shared::read_hold_bytes`] are buffered. Without this the flow task ran per
+/// QEMU read (a few segments), and so did everything downstream (an upstream
+/// write syscall per ~6 KiB of upload). A guest that never pushes still gets
+/// its data after this delay.
+pub const READ_HOLD: Duration = Duration::from_millis(1);
 
 pub(crate) struct Shared {
     state: Mutex<State>,
     /// asks the ticker to poll smoltcp (data written/read by a flow, queue drained)
     pub(crate) poll_notify: Notify,
+    /// buffered guest data in `bytes` that releases a held read (see [`READ_HOLD`])
+    pub(crate) read_hold_bytes: usize,
     /// tells the writer frames are queued
     tx_notify: Notify,
     /// tells the reader the writer finished a write
@@ -275,9 +338,8 @@ pub(crate) struct Device {
     tx: BytesMut,
     /// bytes the writer took and has not finished writing
     tx_inflight: usize,
+    /// queued bytes above which entries are not polled for egress
     tx_soft: usize,
-    /// smoltcp wanted to transmit but the queue was over the soft cap
-    tx_blocked: bool,
     mtu: usize,
     /// skip verifying guest TCP checksums (checksum offload)
     checksum_offload: bool,
@@ -288,6 +350,10 @@ pub(crate) struct Device {
 impl Device {
     fn queued(&self) -> usize {
         self.tx.len() + self.tx_inflight
+    }
+
+    fn over_soft_cap(&self) -> bool {
+        self.queued() >= self.tx_soft
     }
 }
 
@@ -321,8 +387,6 @@ impl phy::Device for Device {
 
     fn receive(&mut self, _ts: SmolInstant) -> Option<(RxTok, TxTok<'_>)> {
         let packet = self.rx.pop_front()?;
-        // Replies to received packets (RST, ACK) are bounded by what we read, so
-        // they bypass the soft cap.
         Some((
             RxTok(packet),
             TxTok { tx: &mut self.tx, dst: self.guest_mac, src: self.gateway_mac },
@@ -330,10 +394,9 @@ impl phy::Device for Device {
     }
 
     fn transmit(&mut self, _ts: SmolInstant) -> Option<TxTok<'_>> {
-        if self.queued() >= self.tx_soft {
-            self.tx_blocked = true;
-            return None;
-        }
+        // Never refused: smoltcp loses a pending fast retransmit when emitting
+        // it fails (the retransmit timer is cleared first). The soft cap is
+        // applied per poll instead (`State::poll_entry`).
         Some(TxTok { tx: &mut self.tx, dst: self.guest_mac, src: self.gateway_mac })
     }
 
@@ -371,13 +434,20 @@ pub(crate) struct State {
     pub(crate) session: u64,
     pub(crate) running: bool,
     iface: Interface,
-    pub(crate) sockets: SocketSet<'static>,
     device: Device,
-    /// listeners created for SYNs of the batch being processed
-    listeners: Vec<SocketHandle>,
-    pending_syns: HashSet<Tuple>,
-    pub(crate) entries: HashMap<SocketHandle, Entry>,
-    tuples: HashMap<Tuple, SocketHandle>,
+    pub(crate) entries: HashMap<FlowKey, Entry>,
+    tuples: HashMap<Tuple, FlowKey>,
+    next_key: FlowKey,
+    /// entries to poll (packets, stream activity, due timers)
+    dirty: Vec<FlowKey>,
+    /// entries that could not transmit because the QEMU queue was full
+    blocked: Vec<FlowKey>,
+    /// entry wake-ups; stale items (not the entry's `wake_at`) are skipped
+    timers: BinaryHeap<Reverse<(Instant, FlowKey)>>,
+    /// TCP packets of no entry; smoltcp answers them with RST
+    stray: VecDeque<Bytes>,
+    /// the socket set strays are polled with
+    no_sockets: SocketSet<'static>,
     udp: HashMap<Tuple, UdpSession>,
     udp_generation: u64,
     trusted_index: usize,
@@ -388,6 +458,7 @@ pub(crate) struct State {
     armed: Option<Instant>,
     tx_dropped: u64,
     polls: u64,
+    read_hold_timeouts: u64,
 }
 
 impl State {
@@ -397,7 +468,6 @@ impl State {
             tx: BytesMut::new(),
             tx_inflight: 0,
             tx_soft: config.limits.tx_queue_soft_bytes.max(4096),
-            tx_blocked: false,
             mtu: usize::from(config.mtu),
             checksum_offload: config.checksum_offload,
             gateway_mac: config.gateway_mac,
@@ -418,12 +488,15 @@ impl State {
             session,
             running: false,
             iface,
-            sockets: SocketSet::new(Vec::new()),
             device,
-            listeners: Vec::new(),
-            pending_syns: HashSet::new(),
             entries: HashMap::new(),
             tuples: HashMap::new(),
+            next_key: 1,
+            dirty: Vec::new(),
+            blocked: Vec::new(),
+            timers: BinaryHeap::new(),
+            stray: VecDeque::new(),
+            no_sockets: SocketSet::new(Vec::new()),
             udp: HashMap::new(),
             udp_generation: 0,
             trusted_index: 0,
@@ -432,15 +505,22 @@ impl State {
             armed: None,
             tx_dropped: 0,
             polls: 0,
+            read_hold_timeouts: 0,
         }
     }
 
     fn shutdown(&mut self) {
         self.running = false;
-        for (handle, _) in self.entries.drain() {
+        for (_, mut entry) in self.entries.drain() {
             // abort() wakes any task blocked on the socket.
-            self.sockets.get_mut::<tcp::Socket>(handle).abort();
+            entry.socket().abort();
+            entry.wake_reader();
         }
+        self.tuples.clear();
+        self.dirty.clear();
+        self.blocked.clear();
+        self.timers.clear();
+        self.stray.clear();
         self.udp.clear();
         self.device.rx.clear();
         self.device.tx.clear();
@@ -730,8 +810,14 @@ impl State {
         }
     }
 
-    fn tcp_socket_count(&self) -> usize {
-        self.entries.len() + self.listeners.len()
+    /// Queues `key` for the next poll.
+    pub(crate) fn mark_dirty(&mut self, key: FlowKey) {
+        if let Some(entry) = self.entries.get_mut(&key)
+            && !entry.dirty
+        {
+            entry.dirty = true;
+            self.dirty.push(key);
+        }
     }
 
     fn handle_tcp(&mut self, shared: &Shared, ip: &Ipv4<'_>, packet: Bytes) {
@@ -743,168 +829,294 @@ impl State {
         }
         let tuple =
             (SocketAddrV4::new(ip.src, hdr.src_port), SocketAddrV4::new(ip.dst, hdr.dst_port));
+        let mut key = self.tuples.get(&tuple).copied();
         let is_syn = hdr.flags & (wire::TCP_SYN | wire::TCP_ACK | wire::TCP_RST) == wire::TCP_SYN;
-        if is_syn && hdr.dst_port != 0 && !self.pending_syns.contains(&tuple) {
-            let existing = self
-                .tuples
-                .get(&tuple)
-                .copied()
-                .filter(|h| self.sockets.get::<tcp::Socket>(*h).state() != tcp::State::Closed);
-            if existing.is_none() {
-                if self.tcp_socket_count() >= shared.config.limits.max_tcp_flows {
-                    tracing::debug!(guest = %tuple.0, dst = %tuple.1, "tcp flow limit reached");
-                } else {
-                    self.tuples.remove(&tuple);
-                    let limits = &shared.config.limits;
-                    let mut socket = tcp::Socket::new(
-                        tcp::SocketBuffer::new(vec![0u8; limits.tcp_rx_buffer_bytes]),
-                        tcp::SocketBuffer::new(vec![0u8; limits.tcp_tx_buffer_bytes]),
-                    );
-                    socket.set_nagle_enabled(false);
-                    socket.set_ack_delay(None);
-                    let endpoint = IpListenEndpoint {
-                        addr: Some(IpAddress::Ipv4(ip.dst)),
-                        port: hdr.dst_port,
-                    };
-                    if socket.listen(endpoint).is_ok() {
-                        let handle = self.sockets.add(socket);
-                        self.listeners.push(handle);
-                        self.pending_syns.insert(tuple);
-                    }
-                }
+        if is_syn && hdr.dst_port != 0 {
+            // A SYN reuses the tuple's socket unless that one is closed (a dying
+            // orphan, removed once it is done).
+            let live = key.filter(|k| {
+                self.entries.get_mut(k).is_some_and(|e| e.socket().state() != tcp::State::Closed)
+            });
+            if live.is_none() {
+                key = self.listen(shared, tuple);
             }
         }
-        self.device.rx.push_back(packet);
+        match key.and_then(|k| self.entries.get_mut(&k).map(|e| (k, e))) {
+            Some((k, entry)) => {
+                entry.rx_push |= hdr.flags & (wire::TCP_PSH | wire::TCP_FIN | wire::TCP_RST) != 0;
+                entry.rx.push_back(packet);
+                self.mark_dirty(k);
+            }
+            None => self.stray.push_back(packet),
+        }
     }
 
-    /// Runs smoltcp and the per-socket bookkeeping; returns flows to spawn.
+    /// A listening socket for a guest SYN, as a new handshake entry.
+    fn listen(&mut self, shared: &Shared, tuple: Tuple) -> Option<FlowKey> {
+        let limits = &shared.config.limits;
+        if self.entries.len() >= limits.max_tcp_flows {
+            tracing::debug!(guest = %tuple.0, dst = %tuple.1, "tcp flow limit reached");
+            return None;
+        }
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; limits.tcp_rx_buffer_bytes]),
+            tcp::SocketBuffer::new(vec![0u8; limits.tcp_tx_buffer_bytes]),
+        );
+        socket.set_nagle_enabled(false);
+        socket.set_ack_delay(None);
+        let endpoint =
+            IpListenEndpoint { addr: Some(IpAddress::Ipv4(*tuple.1.ip())), port: tuple.1.port() };
+        socket.listen(endpoint).ok()?;
+        let mut set = SocketSet::new(Vec::with_capacity(1));
+        let handle = set.add(socket);
+        let key = self.next_key;
+        self.next_key += 1;
+        let deadline = Instant::now() + Duration::from_millis(limits.tcp_handshake_timeout_ms);
+        self.entries.insert(
+            key,
+            Entry {
+                phase: Phase::Handshake { deadline },
+                tuple,
+                aborted: false,
+                set,
+                handle,
+                rx: VecDeque::new(),
+                dirty: false,
+                blocked: false,
+                wake_at: None,
+                rx_push: false,
+                push: false,
+                read_waker: None,
+                read_deadline: None,
+            },
+        );
+        // An older socket of the tuple (closed, not yet removed) keeps its entry.
+        self.tuples.insert(tuple, key);
+        Some(key)
+    }
+
+    /// Runs smoltcp for the entries that need it and the per-socket
+    /// bookkeeping; returns flows to spawn.
     fn poll(&mut self, shared: &Arc<Shared>) -> Vec<TcpFlow> {
         let now = Instant::now();
         let ts = shared.smol_now(now);
         let mut spawn = Vec::new();
         self.polls += 1;
-        self.iface.poll(ts, &mut self.device, &mut self.sockets);
-        if self.maintain(shared, now, &mut spawn) {
-            self.iface.poll(ts, &mut self.device, &mut self.sockets);
+
+        if !self.stray.is_empty() {
+            self.device.rx = std::mem::take(&mut self.stray);
+            self.iface.poll(ts, &mut self.device, &mut self.no_sockets);
+            self.device.rx.clear();
+        }
+        while let Some(&Reverse((at, key))) = self.timers.peek() {
+            if at > now {
+                break;
+            }
+            self.timers.pop();
+            if self.entries.get(&key).is_some_and(|e| e.wake_at == Some(at)) {
+                self.entries.get_mut(&key).expect("entry").wake_at = None;
+                self.mark_dirty(key);
+            }
+        }
+        let mut dirty = std::mem::take(&mut self.dirty);
+        for key in dirty.drain(..) {
+            self.poll_entry(shared, key, now, ts, &mut spawn);
+        }
+        // keep the allocation
+        if self.dirty.is_empty() {
+            self.dirty = dirty;
         }
 
-        let mut next = None;
-        if !self.device.tx_blocked {
-            // While blocked, the writer's progress triggers the next poll.
-            next = self
-                .iface
-                .poll_delay(ts, &self.sockets)
-                .map(|d| now + Duration::from_micros(d.total_micros()));
+        self.next_poll = loop {
+            match self.timers.peek() {
+                Some(&Reverse((at, key))) => {
+                    if self.entries.get(&key).is_some_and(|e| e.wake_at == Some(at)) {
+                        break Some(at);
+                    }
+                    self.timers.pop();
+                }
+                None => break None,
+            }
+        };
+        if !self.dirty.is_empty() {
+            // marked while polling (a re-poll was needed)
+            self.next_poll = Some(now);
         }
-        for entry in self.entries.values() {
-            let deadline = match entry.phase {
-                Phase::Handshake { deadline } | Phase::Orphan { deadline } => deadline,
-                Phase::Open { .. } => continue,
-            };
-            next = Some(next.map_or(deadline, |n: Instant| n.min(deadline)));
-        }
-        self.next_poll = next;
         spawn
     }
 
-    /// Resolves new listeners, completes handshakes and garbage-collects closed
-    /// sockets. Returns whether a socket was aborted (needs another poll).
-    fn maintain(&mut self, shared: &Arc<Shared>, now: Instant, spawn: &mut Vec<TcpFlow>) -> bool {
-        let limits = &shared.config.limits;
-        for handle in std::mem::take(&mut self.listeners) {
-            let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-            let endpoints = match socket.state() {
-                tcp::State::Listen | tcp::State::Closed => None,
-                _ => socket.remote_endpoint().zip(socket.local_endpoint()),
-            };
-            let tuple = endpoints.and_then(|(remote, local)| Some((v4(remote)?, v4(local)?)));
-            match tuple {
-                Some(tuple) => {
-                    self.tuples.insert(tuple, handle);
-                    self.entries.insert(
-                        handle,
-                        Entry {
-                            phase: Phase::Handshake {
-                                deadline: now
-                                    + Duration::from_millis(limits.tcp_handshake_timeout_ms),
-                            },
-                            tuple,
-                            aborted: false,
-                        },
-                    );
-                }
-                None => {
-                    self.sockets.remove(handle);
-                }
-            }
+    /// Polls one entry and advances its phase.
+    fn poll_entry(
+        &mut self,
+        shared: &Arc<Shared>,
+        key: FlowKey,
+        now: Instant,
+        ts: SmolInstant,
+        spawn: &mut Vec<TcpFlow>,
+    ) {
+        let Some(entry) = self.entries.get_mut(&key) else {
+            return;
+        };
+        entry.dirty = false;
+        debug_assert!(self.device.rx.is_empty());
+        std::mem::swap(&mut self.device.rx, &mut entry.rx);
+        // Over the soft cap the entry only takes its packets in (replies such as
+        // RST still go out) and sends once the writer drained the queue.
+        let blocked = self.device.over_soft_cap();
+        if blocked {
+            while self.iface.poll_ingress_single(ts, &mut self.device, &mut entry.set)
+                != PollIngressSingleResult::None
+            {}
+        } else {
+            self.iface.poll(ts, &mut self.device, &mut entry.set);
         }
-        self.pending_syns.clear();
+        std::mem::swap(&mut self.device.rx, &mut entry.rx);
+        entry.rx.clear();
+        // The pushed data is in the receive buffer now.
+        entry.push |= std::mem::take(&mut entry.rx_push);
 
-        let mut aborted_any = false;
-        let mut remove = Vec::new();
-        for (&handle, entry) in self.entries.iter_mut() {
-            let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-            let state = socket.state();
-            match entry.phase {
-                Phase::Handshake { deadline } => match state {
-                    tcp::State::SynReceived => {
-                        if now >= deadline {
-                            socket.abort();
-                            aborted_any = true;
-                            entry.phase = Phase::Orphan { deadline: now };
-                        }
+        let mut remove = false;
+        let mut repoll = false;
+        let state = entry.socket().state();
+        match entry.phase {
+            Phase::Handshake { deadline } => match state {
+                tcp::State::SynReceived => {
+                    if now >= deadline {
+                        entry.socket().abort();
+                        repoll = true;
+                        entry.phase = Phase::Orphan { deadline: now };
                     }
-                    tcp::State::Listen | tcp::State::Closed => remove.push(handle),
-                    _ => {
-                        let id = self.next_flow_id;
-                        self.next_flow_id += 1;
-                        entry.phase = Phase::Open { id };
-                        let (guest, dst) = entry.tuple;
-                        let synthetic_hostname = match shared.config.dns.synthetic_host_mapping {
-                            SyntheticHostMapping::PerHost => shared.hosts.lookup(*dst.ip()),
-                            SyntheticHostMapping::Single => None,
-                        };
-                        let meta = FlowMeta {
-                            id,
-                            src: SocketAddr::V4(guest),
-                            dst: SocketAddr::V4(dst),
-                            synthetic_hostname,
-                        };
-                        tracing::debug!(id, %guest, %dst, "tcp flow established");
-                        spawn.push(flow::new_flow(shared.clone(), self.session, handle, meta));
-                    }
-                },
-                Phase::Open { .. } => {}
-                Phase::Orphan { deadline } => {
-                    let done = match state {
-                        tcp::State::TimeWait | tcp::State::Listen => true,
-                        tcp::State::Closed => socket.local_endpoint().is_none(),
-                        _ => false,
+                }
+                tcp::State::Listen | tcp::State::Closed => remove = true,
+                _ => {
+                    let id = self.next_flow_id;
+                    self.next_flow_id += 1;
+                    entry.phase = Phase::Open { id };
+                    let (guest, dst) = entry.tuple;
+                    let synthetic_hostname = match shared.config.dns.synthetic_host_mapping {
+                        SyntheticHostMapping::PerHost => shared.hosts.lookup(*dst.ip()),
+                        SyntheticHostMapping::Single => None,
                     };
-                    if done {
-                        remove.push(handle);
-                    } else if state != tcp::State::Closed && (socket.can_recv() || now >= deadline)
-                    {
-                        // Data after close, or the guest never finished the close.
-                        socket.abort();
-                        aborted_any = true;
-                    }
+                    let meta = FlowMeta {
+                        id,
+                        src: SocketAddr::V4(guest),
+                        dst: SocketAddr::V4(dst),
+                        synthetic_hostname,
+                    };
+                    tracing::debug!(id, %guest, %dst, "tcp flow established");
+                    spawn.push(flow::new_flow(shared.clone(), self.session, key, meta));
+                }
+            },
+            Phase::Open { .. } => {}
+            Phase::Orphan { deadline } => {
+                let socket = entry.socket();
+                let done = match state {
+                    tcp::State::TimeWait | tcp::State::Listen => true,
+                    tcp::State::Closed => socket.local_endpoint().is_none(),
+                    _ => false,
+                };
+                if done {
+                    remove = true;
+                } else if state != tcp::State::Closed && (socket.can_recv() || now >= deadline) {
+                    // Data after close, or the guest never finished the close.
+                    socket.abort();
+                    repoll = true;
                 }
             }
         }
-        for handle in remove {
-            self.remove_socket(handle);
+        if repoll {
+            // emit the RST
+            self.iface.poll(ts, &mut self.device, &mut entry.set);
         }
-        aborted_any
+        if remove {
+            entry.wake_reader();
+            self.remove_entry(key);
+            return;
+        }
+        if entry.read_waker.is_some() {
+            let read_hold_bytes = shared.read_hold_bytes;
+            let expired = entry.read_deadline.is_some_and(|d| now >= d);
+            let socket = entry.socket();
+            if socket.recv_queue() >= read_hold_bytes || !socket.may_recv() {
+                entry.push = true;
+            } else if expired && !entry.push {
+                entry.push = true;
+                self.read_hold_timeouts += 1;
+                tracing::debug!(key, "tcp read released without push");
+            }
+            if entry.push {
+                entry.wake_reader();
+            }
+        }
+        if blocked && !entry.blocked {
+            entry.blocked = true;
+            self.blocked.push(key);
+        }
+        // While blocked, the writer's progress triggers the next poll.
+        let timer = if blocked {
+            None
+        } else {
+            self.iface.poll_at(ts, &entry.set).map(|at| epoch_at(shared, at))
+        };
+        let deadline = match entry.phase {
+            Phase::Handshake { deadline } | Phase::Orphan { deadline } => Some(deadline),
+            Phase::Open { .. } => entry.read_deadline,
+        };
+        let wake_at = match (timer, deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if wake_at != entry.wake_at {
+            entry.wake_at = wake_at;
+            if let Some(at) = wake_at {
+                self.timers.push(Reverse((at, key)));
+            }
+        }
     }
 
-    fn remove_socket(&mut self, handle: SocketHandle) {
-        if let Some(entry) = self.entries.remove(&handle)
-            && self.tuples.get(&entry.tuple) == Some(&handle)
+    /// Makes sure `key` is polled at `at` (see `poll_entry` for the timers).
+    pub(crate) fn schedule(&mut self, key: FlowKey, at: Instant) {
+        let Some(entry) = self.entries.get_mut(&key) else {
+            return;
+        };
+        if entry.wake_at.is_some_and(|w| w <= at) {
+            return;
+        }
+        entry.wake_at = Some(at);
+        self.timers.push(Reverse((at, key)));
+        if self.next_poll.is_none_or(|n| at < n) {
+            self.next_poll = Some(at);
+        }
+    }
+
+    /// Whether the ticker sleeps past `next_poll` and must be woken.
+    pub(crate) fn ticker_late(&self) -> bool {
+        match (self.next_poll, self.armed) {
+            (Some(next), Some(armed)) => next < armed,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
+    fn remove_entry(&mut self, key: FlowKey) {
+        if let Some(entry) = self.entries.remove(&key)
+            && self.tuples.get(&entry.tuple) == Some(&key)
         {
             self.tuples.remove(&entry.tuple);
         }
-        self.sockets.remove(handle);
+    }
+
+    /// Re-polls the entries that were blocked on the QEMU queue (it drained).
+    fn unblock(&mut self) -> bool {
+        let blocked = std::mem::take(&mut self.blocked);
+        let any = !blocked.is_empty();
+        for key in blocked {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.blocked = false;
+            }
+            self.mark_dirty(key);
+        }
+        any
     }
 
     /// Updates `next_poll`-dependent wakeups and the writer after a state change.
@@ -912,7 +1124,9 @@ impl State {
         if !self.device.tx.is_empty() {
             shared.tx_notify.notify_one();
         }
-        if let Some(next) = self.next_poll
+        if !self.dirty.is_empty() {
+            shared.poll_notify.notify_one();
+        } else if let Some(next) = self.next_poll
             && self.armed.is_none_or(|armed| next < armed)
         {
             shared.poll_notify.notify_one();
@@ -920,12 +1134,9 @@ impl State {
     }
 }
 
-fn v4(endpoint: smoltcp::wire::IpEndpoint) -> Option<SocketAddrV4> {
-    match endpoint.addr {
-        IpAddress::Ipv4(ip) => Some(SocketAddrV4::new(ip, endpoint.port)),
-        #[allow(unreachable_patterns)]
-        _ => None,
-    }
+/// Converts a smoltcp timestamp back to an `Instant`.
+fn epoch_at(shared: &Shared, at: SmolInstant) -> Instant {
+    shared.epoch + Duration::from_micros(at.total_micros().max(0) as u64)
 }
 
 fn is_unicast_destination(ip: Ipv4Addr, config: &NetConfig) -> bool {
@@ -990,7 +1201,36 @@ async fn udp_receiver(
 fn spawn_flows(shared: &Arc<Shared>, flows: Vec<TcpFlow>) {
     for flow in flows {
         let handler = shared.handler.clone();
-        tokio::spawn(async move { handler.handle_tcp(flow).await });
+        let control = flow.control.clone();
+        let id = flow.meta.id;
+        tokio::spawn(async move {
+            // A panicking handler is contained: reset the guest connection
+            // before the flow (and its socket) is dropped, so the guest sees
+            // RST instead of a clean close and the socket is released as
+            // aborted.
+            let handled = CatchUnwind(Box::pin(handler.handle_tcp(flow))).await;
+            if handled.is_err() {
+                tracing::error!(target: "gondolin::netstack", flow = id, "flow handler panicked; connection reset");
+                control.abort();
+            }
+        });
+    }
+}
+
+/// Polls a future inside `catch_unwind`; resolves to `Err` when it panicked.
+/// The future is dropped only after the caller saw the panic.
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = Result<F::Output, ()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fut = self.0.as_mut();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(out)) => Poll::Ready(Ok(out)),
+            Err(_) => Poll::Ready(Err(())),
+        }
     }
 }
 
@@ -1071,7 +1311,7 @@ async fn writer<W: AsyncWrite>(shared: &Arc<Shared>, wr: W) -> io::Result<()> {
         wr.flush().await?;
         let mut st = shared.lock();
         st.device.tx_inflight = 0;
-        if std::mem::take(&mut st.device.tx_blocked) {
+        if st.unblock() {
             shared.poll_notify.notify_one();
         }
         drop(st);

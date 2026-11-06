@@ -96,7 +96,7 @@ pub fn resolve_async(
     events: mpsc::UnboundedSender<Event>,
 ) {
     tokio::spawn(async move {
-        let result = async {
+        let result = crate::panics::CatchUnwind::new(async {
             let arch = guest_arch(&cfg.vm, &host)?;
             let selector = cfg.vm.image.clone().unwrap_or_default();
             let assets = Assets::from_env();
@@ -128,8 +128,9 @@ pub fn resolve_async(
             apply_image(&mut cfg.vm, &image)?;
             let described = gondolin_wire::to_value(&image).map_err(|e| e.to_string())?;
             Ok::<(Configure, Value), String>((cfg, described))
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|panic| Err(format!("internal error: {panic}")));
         let _ = events.send(Event::ImageResolved { id, result: Box::new(result) });
     });
 }

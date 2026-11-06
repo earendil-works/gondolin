@@ -16,10 +16,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use gondolin_proto::{ErrorEvent, PROTOCOL_VERSION, RESULT_SUFFIX, ResultError, Value};
-use gondolin_wire::{Envelope, FrameReader, RawEnvelope, WireError};
+#[cfg(test)]
+use gondolin_wire::Envelope;
+use gondolin_wire::{FrameReader, RawEnvelope, WireError};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc, oneshot};
+
+use crate::panics::CatchUnwind;
 
 /// Soft limit of queued outgoing bytes before producers are throttled.
 pub const OUTGOING_SOFT_LIMIT: usize = 8 * 1024 * 1024;
@@ -77,6 +81,22 @@ impl Controller {
             }
         };
         self.send_frame(frame)
+    }
+
+    /// Queues a `log` message without blocking (panic hook: the panicking
+    /// thread may hold the queue lock already).
+    pub fn try_send_log(&self, component: &str, message: &str) {
+        let log =
+            gondolin_proto::session::Log { component: component.into(), message: message.into() };
+        let Ok(frame) = encode_frame(gondolin_proto::session::LOG, 0, &log) else { return };
+        let Ok(mut out) = self.out.try_lock() else { return };
+        if out.closed {
+            return;
+        }
+        out.bytes += frame.len();
+        out.queue.push_back(frame);
+        drop(out);
+        self.writer_wake.notify_one();
     }
 
     /// Queues an already framed message.
@@ -139,6 +159,27 @@ impl Controller {
         }
     }
 
+    /// Takes the next queued frame (in-process controllers, instead of
+    /// [`Controller::run_writer`]); `None` once the connection is closed.
+    pub async fn next_frame(&self) -> Option<Vec<u8>> {
+        loop {
+            let notified = self.writer_wake.notified();
+            {
+                let mut out = self.out.lock().unwrap();
+                if let Some(frame) = out.queue.pop_front() {
+                    out.bytes = out.bytes.saturating_sub(frame.len());
+                    drop(out);
+                    self.capacity.notify_waiters();
+                    return Some(frame);
+                }
+                if out.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
     /// Bytes queued but not yet written.
     pub fn queued_bytes(&self) -> usize {
         self.out.lock().unwrap().bytes
@@ -191,26 +232,41 @@ impl Controller {
     /// Writes queued frames to `w` until the connection is closed and drained
     /// or a write fails.
     pub async fn run_writer<W: AsyncWrite + Unpin>(self: Arc<Self>, mut w: W) {
+        // queued frames are written together (one write per batch, not per
+        // frame): exec output arrives as many frames
+        let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH);
         loop {
             let notified = self.writer_wake.notified();
-            let frame = {
+            batch.clear();
+            let mut single: Option<Vec<u8>> = None;
+            let closed = {
                 let mut out = self.out.lock().unwrap();
-                match out.queue.pop_front() {
-                    Some(f) => Some(f),
-                    None if out.closed => return,
-                    None => None,
+                while let Some(front) = out.queue.front() {
+                    if !batch.is_empty() && batch.len() + front.len() > WRITE_BATCH {
+                        break;
+                    }
+                    let frame = out.queue.pop_front().unwrap();
+                    if batch.is_empty() && frame.len() >= WRITE_BATCH {
+                        single = Some(frame);
+                        break;
+                    }
+                    batch.extend_from_slice(&frame);
                 }
+                out.closed
             };
-            let Some(frame) = frame else {
+            if batch.is_empty() && single.is_none() {
+                if closed {
+                    return;
+                }
                 notified.await;
                 continue;
-            };
-            let len = frame.len();
-            let res = w.write_all(&frame).await;
-            let res = match res {
-                Ok(()) if self.out.lock().unwrap().queue.is_empty() => w.flush().await,
-                other => other,
-            };
+            }
+            let data: &[u8] = single.as_deref().unwrap_or(&batch);
+            let len = data.len();
+            let mut res = w.write_all(data).await;
+            if res.is_ok() {
+                res = w.flush().await;
+            }
             {
                 let mut out = self.out.lock().unwrap();
                 out.bytes = out.bytes.saturating_sub(len);
@@ -224,15 +280,32 @@ impl Controller {
     }
 }
 
+/// Bytes of queued frames written to the controller in one write.
+const WRITE_BATCH: usize = 256 * 1024;
+
 fn result_name(t: &str) -> String {
     gondolin_proto::result_type(t)
 }
 
-/// Encodes one framed envelope.
+/// Encodes one framed envelope (length prefix and CBOR in one buffer).
 pub fn encode_frame<P: Serialize + ?Sized>(t: &str, id: u64, p: &P) -> Result<Vec<u8>, WireError> {
-    let payload =
-        gondolin_wire::encode(&Envelope { v: PROTOCOL_VERSION, t: t.to_string(), id, p })?;
-    gondolin_wire::frame(&payload)
+    #[derive(Serialize)]
+    struct Env<'a, P: ?Sized> {
+        v: u32,
+        t: &'a str,
+        id: u64,
+        p: &'a P,
+    }
+    let mut out = Vec::with_capacity(256);
+    out.extend_from_slice(&[0u8; 4]);
+    ciborium::into_writer(&Env { v: PROTOCOL_VERSION, t, id, p }, &mut out)
+        .map_err(|e| WireError::Encode(e.to_string()))?;
+    let len = out.len() - 4;
+    if len > gondolin_wire::MAX_FRAME {
+        return Err(WireError::FrameTooLarge(len));
+    }
+    out[..4].copy_from_slice(&(len as u32).to_be_bytes());
+    Ok(out)
 }
 
 /// Looks up a text key in a CBOR map value.
@@ -289,20 +362,42 @@ impl Dispatcher {
                     continue;
                 }
             };
-            if msg.t.ends_with(RESULT_SUFFIX) && msg.id != 0 {
-                if !ctl.complete(msg.id, msg.p.clone()) {
-                    ctl.error_event("unknown_id", "response for an unknown request", Some(&msg.t));
-                }
-                continue;
-            }
-            if let Some(handler) = self.handler(&msg.t) {
-                handler.handle(msg, &ctl).await;
-                continue;
-            }
-            if session.send(msg).await.is_err() {
+            if !self.dispatch(msg, &ctl, &session).await {
                 return Ok(());
             }
         }
+    }
+
+    /// Routes one controller message: answers to daemon requests, registered
+    /// handlers, everything else to the session. Returns `false` once the
+    /// session is gone.
+    pub async fn dispatch(
+        &self,
+        msg: RawEnvelope,
+        ctl: &Arc<Controller>,
+        session: &mpsc::Sender<RawEnvelope>,
+    ) -> bool {
+        if msg.t.ends_with(RESULT_SUFFIX) && msg.id != 0 {
+            if !ctl.complete(msg.id, msg.p.clone()) {
+                ctl.error_event("unknown_id", "response for an unknown request", Some(&msg.t));
+            }
+            return true;
+        }
+        if let Some(handler) = self.handler(&msg.t) {
+            let (t, id) = (msg.t.clone(), msg.id);
+            // a panicking handler answers its request with an error
+            // instead of leaving the controller waiting
+            if let Err(panic) = CatchUnwind::new(handler.handle(msg, ctl)).await {
+                let text = format!("internal error handling {t}: {panic}");
+                if id != 0 {
+                    ctl.reply_err(&t, id, "internal_error", &text);
+                } else {
+                    ctl.error_event("internal_error", &text, Some(&t));
+                }
+            }
+            return true;
+        }
+        session.send(msg).await.is_ok()
     }
 }
 
@@ -312,6 +407,15 @@ mod tests {
     use gondolin_wire::FrameWriter;
 
     struct Echo;
+
+    struct Panics;
+
+    #[async_trait]
+    impl ControllerHandler for Panics {
+        async fn handle(&self, _msg: RawEnvelope, _ctl: &Arc<Controller>) {
+            panic!("handler bug");
+        }
+    }
 
     #[async_trait]
     impl ControllerHandler for Echo {
@@ -328,6 +432,7 @@ mod tests {
             let ctl = Controller::new();
             let dispatcher = Dispatcher::default();
             dispatcher.register("echo", Arc::new(Echo));
+            dispatcher.register("boom", Arc::new(Panics));
             let (tx, mut rx) = mpsc::channel(4);
             let writer = tokio::spawn(ctl.clone().run_writer(d_write));
             let reader = {
@@ -367,6 +472,13 @@ mod tests {
             assert_eq!(msg.t, "echo_result");
             assert_eq!(msg.id, 9);
             assert_eq!(map_get(&msg.p, "echo"), Some(&Value::Integer(5.into())));
+
+            // a panicking handler answers with an error and the reader keeps going
+            cw.write_message(&Envelope::new("boom", 11, Value::Map(vec![]))).await.unwrap();
+            let msg = cr.read_envelope().await.unwrap().unwrap();
+            assert_eq!(msg.t, "boom_result");
+            assert_eq!(msg.id, 11);
+            assert_eq!(map_get(&msg.p, "code").and_then(Value::as_text), Some("internal_error"));
 
             // everything else goes to the session
             cw.write_message(&Envelope::new("start", 3, Value::Map(vec![]))).await.unwrap();

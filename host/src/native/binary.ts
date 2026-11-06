@@ -1,13 +1,19 @@
 /**
- * Locating `gondolind` binaries: for this machine (`resolveNativeBinary`) and
- * for other platforms, e.g. a remote Linux host that pi-env bootstraps
+ * Locating the native engine binary: for this machine (`resolveNativeBinary`)
+ * and for other platforms, e.g. a remote Linux host that pi-env bootstraps
  * (`getNativeBinaryPath`, `ensureNativeBinary`).
  *
+ * The platform packages ship one multi-call binary, `gondolin`: started as
+ * `gondolin daemon` it is the daemon (`gondolind`); a binary (or symlink)
+ * named `gondolind` is the daemon without arguments. {@link nativeDaemonArgs}
+ * gives the arguments for a path.
+ *
  * Binaries come from (in order):
- * 1. `GONDOLIN_NATIVE_BIN` (this machine only);
- * 2. a source checkout containing this package: for this machine the newer
- *    of `native/target/{release,debug}/gondolind`, for other platforms
- *    `native/target/dist/<rust-target>/gondolind` (`make native-release`);
+ * 1. `GONDOLIN_NATIVE_BIN` (this machine only; `gondolin` or `gondolind`);
+ * 2. a source checkout containing this package: for this machine the newest
+ *    of `native/target/{release,debug}/{gondolin,gondolind}`, for other
+ *    platforms `native/target/dist/<rust-target>/gondolin` (or `gondolind`)
+ *    from `make native-release`;
  * 3. the installed platform package `@earendil-works/gondolin-native-<platform>-<arch>`;
  * 4. (`ensureNativeBinary` only) that package fetched from the npm registry
  *    into `~/.cache/gondolin/native/<version>/<platform>-<arch>/`. Package
@@ -36,6 +42,35 @@ export type NativeBinaryTarget = {
   /** target cpu architecture */
   arch: NativeArch;
 };
+
+/** A native engine binary and the arguments that start the daemon */
+export type NativeBinary = {
+  /** path of the executable */
+  path: string;
+  /** arguments that run it as the daemon (`["daemon"]` for the multi-call `gondolin`) */
+  args: string[];
+};
+
+/** Executable names in order of preference (multi-call first) */
+const BINARY_NAMES = ["gondolin", "gondolind"] as const;
+
+/**
+ * Arguments that start the daemon from `binary`: none for a `gondolind`
+ * (the daemon itself, or the multi-call binary under that name), `daemon`
+ * for the multi-call `gondolin`.
+ */
+export function nativeDaemonArgs(binary: string): string[] {
+  return path.basename(binary).startsWith("gondolind") ? [] : ["daemon"];
+}
+
+/** The daemon command line for `binary` */
+export function nativeDaemonCommand(binary: string): string[] {
+  return [binary, ...nativeDaemonArgs(binary)];
+}
+
+function binaryOf(file: string): NativeBinary {
+  return { path: file, args: nativeDaemonArgs(file) };
+}
 
 const RUST_TARGETS: Record<string, string> = {
   "darwin-arm64": "aarch64-apple-darwin",
@@ -142,10 +177,11 @@ function newest(files: string[]): string | null {
 }
 
 /**
- * The checkout's build for `target`: for this machine the newer of
- * `native/target/{release,debug}/gondolind` (so a stale release build does not
- * shadow a fresh debug build or vice versa), for other platforms the static
- * build from `make native-release` in `native/target/dist/<rust-target>/`.
+ * The checkout's build for `target`: for this machine the newest of
+ * `native/target/{release,debug}/{gondolin,gondolind}` (so a stale release
+ * build does not shadow a fresh debug build or vice versa), for other
+ * platforms the static build from `make native-release` in
+ * `native/target/dist/<rust-target>/` (`gondolin`, else `gondolind`).
  */
 function checkoutBinary(
   target: NativeBinaryTarget,
@@ -159,25 +195,31 @@ function checkoutBinary(
     host !== null &&
     host.platform === target.platform &&
     host.arch === target.arch;
-  const candidates = isHost
-    ? [
-        path.join(native, "release", "gondolind"),
-        path.join(native, "debug", "gondolind"),
-      ]
-    : [path.join(native, "dist", nativeRustTarget(target), "gondolind")];
-  return newest(candidates.filter((f) => matches(f, target)));
+  if (isHost) {
+    const candidates = ["release", "debug"].flatMap((profile) =>
+      BINARY_NAMES.map((name) => path.join(native, profile, name)),
+    );
+    return newest(candidates.filter((f) => matches(f, target)));
+  }
+  const dist = path.join(native, "dist", nativeRustTarget(target));
+  for (const name of BINARY_NAMES) {
+    const file = path.join(dist, name);
+    if (matches(file, target)) return file;
+  }
+  return null;
 }
 
 function packagedBinary(target: NativeBinaryTarget): string | null {
+  let dir: string;
   try {
-    const pkgJson = require.resolve(
-      `${nativePackageName(target)}/package.json`,
+    dir = path.dirname(
+      require.resolve(`${nativePackageName(target)}/package.json`),
     );
-    const file = path.join(path.dirname(pkgJson), "bin", "gondolind");
-    return matches(file, target) ? file : null;
   } catch {
     return null;
   }
+  const file = path.join(dir, "bin", "gondolin");
+  return matches(file, target) ? file : null;
 }
 
 function cachedBinaryPath(target: NativeBinaryTarget, version: string): string {
@@ -185,7 +227,7 @@ function cachedBinaryPath(target: NativeBinaryTarget, version: string): string {
     "native",
     version.replace(/^v/, ""),
     targetKey(target),
-    "gondolind",
+    "gondolin",
   );
 }
 
@@ -201,21 +243,22 @@ export type NativeBinaryLookupOptions = {
 };
 
 /**
- * Path of a `gondolind` for `target` available without downloading, or `null`
- * (see the module docs for the search order; `GONDOLIN_NATIVE_BIN` is not
- * consulted since it names a binary for this machine).
+ * The native engine binary for `target` available without downloading, with
+ * the arguments that start the daemon, or `null` (see the module docs for the
+ * search order; `GONDOLIN_NATIVE_BIN` is not consulted since it names a
+ * binary for this machine).
  */
 export function getNativeBinaryPath(
   target: NativeBinaryTarget,
   options: NativeBinaryLookupOptions = {},
-): string | null {
+): NativeBinary | null {
   const start = options.start ?? import.meta.dirname;
   const cached = cachedBinaryPath(target, options.version ?? packageVersion());
-  return (
+  const found =
     checkoutBinary(target, start) ??
     packagedBinary(target) ??
-    (matches(cached, target) ? cached : null)
-  );
+    (matches(cached, target) ? cached : null);
+  return found ? binaryOf(found) : null;
 }
 
 export type EnsureNativeBinaryOptions = NativeBinaryLookupOptions & {
@@ -254,12 +297,12 @@ function verifyIntegrity(
 /**
  * Like {@link getNativeBinaryPath}, but fetches the platform package from the
  * npm registry (integrity-checked) into the cache when nothing local exists.
- * Resolves to the binary path.
+ * The cached file is always the multi-call `gondolin` (one file to deploy).
  */
 export async function ensureNativeBinary(
   target: NativeBinaryTarget,
   options: EnsureNativeBinaryOptions = {},
-): Promise<string> {
+): Promise<NativeBinary> {
   const local = getNativeBinaryPath(target, options);
   if (local) return local;
 
@@ -296,10 +339,10 @@ export async function ensureNativeBinary(
   verifyIntegrity(tgz, meta.dist?.integrity, meta.dist?.shasum);
 
   const entry = parseTar(gunzipSync(tgz)).find(
-    (e) => e.name === "package/bin/gondolind" && e.content,
+    (e) => e.name === "package/bin/gondolin" && e.content,
   );
   if (!entry?.content)
-    throw new Error(`${name}@${version} contains no bin/gondolind`);
+    throw new Error(`${name}@${version} contains no bin/gondolin`);
 
   const dest = cachedBinaryPath(target, version);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -308,16 +351,18 @@ export async function ensureNativeBinary(
   if (!matches(tmp, target)) {
     fs.rmSync(tmp, { force: true });
     throw new Error(
-      `${name}@${version} does not contain a ${targetKey(target)} gondolind`,
+      `${name}@${version} does not contain a ${targetKey(target)} binary`,
     );
   }
   fs.renameSync(tmp, dest);
-  return dest;
+  return binaryOf(dest);
 }
 
 /**
- * Locate `gondolind` for this machine: `GONDOLIN_NATIVE_BIN`, else the newest
- * checkout build, else the installed platform package.
+ * Locate the native engine binary for this machine: `GONDOLIN_NATIVE_BIN`,
+ * else the newest checkout build, else the installed platform package. Start
+ * the daemon with {@link nativeDaemonCommand} (the multi-call `gondolin`
+ * needs a `daemon` argument).
  */
 export function resolveNativeBinary(
   env: NodeJS.ProcessEnv = process.env,
@@ -334,7 +379,7 @@ export function resolveNativeBinary(
 
   throw new Error(
     host
-      ? `gondolind binary not found (install ${nativePackageName(host)}, build it with \`make native\`, or set GONDOLIN_NATIVE_BIN)`
-      : `gondolind is not available for ${process.platform}-${process.arch} (set GONDOLIN_NATIVE_BIN)`,
+      ? `native engine binary not found (install ${nativePackageName(host)}, build it with \`make native\`, or set GONDOLIN_NATIVE_BIN)`
+      : `the native engine is not available for ${process.platform}-${process.arch} (set GONDOLIN_NATIVE_BIN)`,
   );
 }

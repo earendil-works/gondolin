@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner native native-check native-test native-release native-test-linux
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner native native-check native-test native-release native-test-linux native-test-docker native-fuzz
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -65,6 +65,8 @@ help:
 	@echo "  make native-test - Run native/ tests on this machine"
 	@echo "  make native-release - Static release binaries for linux-musl + darwin (native/target/dist)"
 	@echo "  make native-test-linux - Run native/ tests cross-compiled for Linux inside a VM"
+	@echo "  make native-test-docker - Linux tests in Docker (cargo arm64/amd64, native engine VMs under TCG, host tests)"
+	@echo "  make native-fuzz - Run the native/ cargo-fuzz targets (nightly; FUZZ_TIME, FUZZ_TARGETS)"
 
 build:
 	@$(RUN_PARALLEL) -j 3 \
@@ -250,3 +252,9 @@ native-release:
 
 native-test-linux:
 	@$(MAKE) -C native test-linux
+
+native-test-docker:
+	@$(MAKE) -C native test-docker
+
+native-fuzz:
+	@$(MAKE) -C native fuzz

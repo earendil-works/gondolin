@@ -55,6 +55,9 @@ impl FsPortHandler {
     }
 
     async fn serve(&self, op: &str, req: Value) -> FsReply {
+        if op == "lookup" && Fields::of(&req).text("name") == Some("gondolind-test-panic") {
+            crate::panics::test_panic(crate::panics::TestPanic::Vfs);
+        }
         if op == "mounts" {
             // boot configuration, served here rather than by the VFS backend
             return self.mounts_reply();
@@ -104,7 +107,11 @@ impl PortHandler for FsPortHandler {
         let (tx, rx) = oneshot::channel();
         let _ = self.events.send(Event::VfsBegin(tx));
         let reply = match rx.await {
-            Ok(Ok(())) => self.serve(&op, req).await,
+            // a panicking request fails with EIO; sandboxfs keeps serving
+            Ok(Ok(())) => match crate::panics::CatchUnwind::new(self.serve(&op, req)).await {
+                Ok(reply) => reply,
+                Err(panic) => FsReply::error(errno::EIO, format!("internal error: {panic}")),
+            },
             Ok(Err(err)) => FsReply::error(errno::EIO, err),
             Err(_) => FsReply::error(errno::EIO, "session closed"),
         };

@@ -1,7 +1,7 @@
 {
   "name": "@earendil-works/gondolin-native-linux-x64",
   "version": "0.14.0",
-  "description": "Prebuilt gondolind (Gondolin native engine) for Linux x64 (static, musl)",
+  "description": "Prebuilt gondolin (Gondolin's static CLI and native engine daemon) for Linux x64 (static, musl)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -15,7 +15,7 @@
     "x64"
   ],
   "bin": {
-    "gondolind": "bin/gondolind"
+    "gondolind": "bin/gondolin"
   },
   "files": [
     "bin/",

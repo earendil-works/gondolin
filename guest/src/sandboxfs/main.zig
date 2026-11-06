@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var mount_point: []const u8 = "/data";
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
     var binds_file: ?[]const u8 = null;
+    var virtiofs_tag: ?[]const u8 = null;
     const args = init.args.vector;
     var i: usize = 1;
     while (i + 1 < args.len) : (i += 1) {
@@ -60,6 +61,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             rpc_path = value;
         } else if (std.mem.eql(u8, arg, "--binds-file")) {
             binds_file = value;
+        } else if (std.mem.eql(u8, arg, "--virtiofs")) {
+            virtiofs_tag = value;
         } else continue;
         i += 1;
     }
@@ -85,6 +88,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
     }
 
+    // The host serves the tree over virtio-fs: mount that and exit (the
+    // kernel talks to the host directly). Fall back to FUSE over the RPC
+    // port if the mount fails (no device, no virtiofs module).
+    if (virtiofs_tag) |tag| {
+        if (mountVirtiofs(tag, mount_point)) {
+            log.info("mounted virtio-fs {s} at {s}", .{ tag, mount_point });
+            return;
+        } else |err| {
+            log.warn("virtio-fs mount of {s} failed ({t}); using sandboxfs", .{ tag, err });
+        }
+    }
+
     try mountFuse(fuse_fd, mount_point);
     log.info("mounted sandboxfs at {s}", .{mount_point});
     try fs.run();
@@ -98,6 +113,15 @@ fn openRpcPort(path: []const u8) ?sys.fd_t {
         sys.sleepMs(100);
     }
     return null;
+}
+
+fn mountVirtiofs(tag: []const u8, mount_point: []const u8) !void {
+    var tag_buf: [sys.path_max]u8 = undefined;
+    const source = try sys.toPathZ(&tag_buf, tag);
+    var path_buf: [sys.path_max]u8 = undefined;
+    const target = try sys.toPathZ(&path_buf, mount_point);
+    const err = sys.mount(source, target, "virtiofs", linux.MS.NOSUID | linux.MS.NODEV, "");
+    if (err != .SUCCESS) return error.MountFailed;
 }
 
 fn mountFuse(fuse_fd: sys.fd_t, mount_point: []const u8) !void {

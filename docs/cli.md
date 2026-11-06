@@ -28,7 +28,29 @@ gondolin bash
 ### Requirements
 
 - QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
-- Node.js >= 22.19.0
+- Node.js >= 22.19.0 (not for the [static CLI](#static-cli-no-nodejs))
+
+With the [native engine](./native.md) and a remote daemon, QEMU is needed on
+the machine `gondolind` runs on, and Node.js only where the CLI runs.
+
+### Engine Options
+
+These go before the command and apply to every VM the command starts:
+
+```bash
+gondolin [--engine node|native|auto] [--native-command CMD] [--remote] <command> ...
+```
+
+- `--engine node|native|auto` -- host engine (default: `$GONDOLIN_ENGINE`, else
+  `auto`, which picks `native` when a working `gondolind` binary is available
+  and `node` otherwise; `--engine node` / `GONDOLIN_ENGINE=node` selects the
+  node engine, which is deprecated and prints a warning)
+- `--native-command CMD` -- start `gondolind` with `CMD`, e.g.
+  `"ssh build-box gondolind"` (implies `native`)
+- `--remote` -- the daemon runs on another machine; images, disks and the MITM
+  CA are handled on its side (implies `native`)
+
+See [Native Engine](./native.md) for details.
 
 Guest assets (kernel/initramfs/rootfs, ~200MB) are resolved automatically on
 first use from local overrides/store first, then via `builtin-image-registry.json`,
@@ -40,6 +62,59 @@ When you do not pass `--image`, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
 CLI processes can discover and attach to them.
+
+## Static CLI (no Node.js)
+
+`gondolin` is also available as a single static executable that needs no
+Node.js: the commands `bash`, `exec`, `list`, `attach`, `snapshot` and `image`
+with the same options and output as the Node CLI. It runs the
+[native engine](./native.md) in-process (a Rust controller on top of the
+`gondolind` session library: no daemon process, no pipe), so QEMU (or the krun
+runner) is the only runtime dependency.
+
+Getting it:
+
+- the `gondolin-native-*` platform packages ship it as `bin/gondolin` (their
+  npm `bin` links it as `gondolind`, the daemon; the main package's `gondolin`
+  is the Node CLI);
+- `make native-release` builds it for all four platforms
+  (`native/target/dist/<target>/gondolin`; the Linux builds are fully static);
+- `cargo build -p gondolin-cli` in `native/` for a development build.
+
+The binary is multi-call: invoked as `gondolind` (for example through a
+symlink), or as `gondolin daemon`, it is the native engine daemon speaking the
+controller protocol on stdio; the SDK starts it that way. One file covers the
+CLI, the SDK's native engine and remote daemons.
+
+What is shared with the Node CLI:
+
+- the session registry (`~/.cache/gondolin/sessions/<uuid>.json` + `.sock`) and
+  its IPC protocol: either CLI can `list`, `attach`, `exec --sock` and
+  `snapshot` sessions started by the other;
+- checkpoints (`.qcow2` with the same metadata trailer): `bash --resume` works
+  across both CLIs;
+- the image store, the builtin image registry and the MITM CA cache;
+- the session configuration: both CLIs print the `configure` payload they
+  would send to the native engine with `--print-configure` (`bash` and `exec`
+  VM mode), and a parity test compares them for a matrix of options.
+
+Differences:
+
+- `build`, `build cache` and `tools` need the Node CLI
+  (`npx @earendil-works/gondolin build`); `image build` says so;
+- `--host-secret NAME` without `@HOST` (host suggestions via trufflehog) is not
+  supported: list the hosts (`--host-secret NAME@HOST[,HOST...]`);
+- there is only the native engine: `--engine native|auto` is accepted,
+  `--engine node`, `--native-command` and `--remote` are not;
+- upstream TLS for mediated HTTPS trusts the system and webpki root stores
+  (the Node CLI uses Node's CA store), and DNS resolvers are read from
+  `/etc/resolv.conf` by the network stack;
+- `gondolin exec` (VM mode) streams output as it arrives instead of printing it
+  when each command finished.
+
+`--print-configure` is a diagnostic option of both CLIs: it prints the session
+configuration as JSON (byte strings as `{ "$base64": ... }`, the MITM CA key
+and secret values redacted) and exits without starting a VM.
 
 ## Common Options (VFS + Network)
 
@@ -561,6 +636,10 @@ gondolin tools trufflehog --json
 
 - `GONDOLIN_DEBUG`
     - Enable debug logging (see [Debug Logging](./debug.md))
+
+The static CLI also reads `GONDOLIN_KRUN_RUNNER` (krun runner binary),
+`GONDOLIN_MITM_CERT_DIR` (MITM CA directory) and `GONDOLIN_VIRTIOFS=0|1`
+(guest filesystem transport, see [Native Engine](./native.md)).
 
 
 ## Help

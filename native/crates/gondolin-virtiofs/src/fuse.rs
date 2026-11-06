@@ -110,6 +110,29 @@ pub trait FileSystem: Send + Sync + 'static {
     fn create(&self, parent: u64, name: &OsStr, mode: u32, flags: u32) -> Result<(Entry, u64)>;
     /// Reads into `buf`, returning the byte count.
     fn read(&self, node: u64, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize>;
+    /// Reads straight into scattered (guest) buffers, returning the byte
+    /// count; the default reads into a temporary buffer and copies.
+    fn read_vectored(
+        &self,
+        node: u64,
+        fh: u64,
+        offset: u64,
+        bufs: &mut [&mut [u8]],
+    ) -> Result<usize> {
+        let total = bufs.iter().map(|b| b.len()).sum();
+        let mut tmp = vec![0u8; total];
+        let n = self.read(node, fh, offset, &mut tmp)?;
+        let mut done = 0;
+        for b in bufs.iter_mut() {
+            if done >= n {
+                break;
+            }
+            let k = b.len().min(n - done);
+            b[..k].copy_from_slice(&tmp[done..done + k]);
+            done += k;
+        }
+        Ok(n)
+    }
     fn write(&self, node: u64, fh: u64, offset: u64, data: &[u8]) -> Result<usize>;
     fn flush(&self, _node: u64, _fh: u64) -> Result<()> {
         Ok(())
@@ -180,6 +203,13 @@ pub struct CachePolicy {
     pub attr_secs: u64,
 }
 
+/// Reply payload of a request.
+enum Payload {
+    Bytes(Vec<u8>),
+    /// `n` bytes already placed after the header (zero-copy reads)
+    Direct(usize),
+}
+
 /// FUSE dispatcher; implements [`crate::vhost_user::QueueHandler`].
 pub struct FuseServer<F: FileSystem> {
     fs: F,
@@ -190,6 +220,9 @@ pub struct FuseServer<F: FileSystem> {
     /// guest page cache buffers writes (`FUSE_WRITEBACK_CACHE`); the
     /// filesystem must allow reads on write-only handles and ignore O_APPEND
     pub writeback: bool,
+    /// forward FLUSH (every `close()`) to [`FileSystem::flush`] so its error
+    /// reaches the guest; otherwise answer ENOSYS once and never see it again
+    pub flush: bool,
     /// requests and time spent per opcode (diagnostics)
     stats: Vec<(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>,
 }
@@ -229,6 +262,7 @@ impl<F: FileSystem> FuseServer<F> {
             max_pages: 256,
             negative_cache: false,
             writeback: false,
+            flush: false,
             stats: (0..64).map(|_| Default::default()).collect(),
         }
     }
@@ -275,9 +309,10 @@ impl<F: FileSystem> FuseServer<F> {
         body: Rd<'_>,
         reply: &mut Writer<'_>,
         unique: u64,
-    ) -> Option<Result<Vec<u8>>> {
+    ) -> Option<Result<Payload>> {
         let fs = &self.fs;
         let mut out = Vec::new();
+        let mut direct: Option<usize> = None;
         let r: Result<()> = (|| {
             match opcode {
                 op::INIT => {
@@ -388,12 +423,11 @@ impl<F: FileSystem> FuseServer<F> {
                 }
                 op::READ => {
                     let (fh, offset, size) = (body.u64(0), body.u64(8), body.u32(16) as usize);
-                    // Zero copy: read straight into the guest's buffers after the header.
+                    // Zero copy: read straight into the guest's buffers after
+                    // the header, which is written once the length is known.
                     let size = size.min(reply.capacity().saturating_sub(OUT_HEADER));
-                    let mut buf = vec![0u8; size];
-                    let n = fs.read(nodeid, fh, offset, &mut buf)?;
-                    buf.truncate(n);
-                    out = buf;
+                    let mut bufs = reply.reserve(OUT_HEADER, size);
+                    direct = Some(fs.read_vectored(nodeid, fh, offset, &mut bufs)?);
                 }
                 op::WRITE => {
                     let (fh, offset, size) = (body.u64(0), body.u64(8), body.u32(16) as usize);
@@ -414,7 +448,8 @@ impl<F: FileSystem> FuseServer<F> {
                 }
                 op::RELEASE => fs.release(nodeid, body.u64(0)),
                 // ENOSYS makes the kernel stop sending FLUSH (one round trip per close).
-                op::FLUSH => return Err(errno::ENOSYS),
+                op::FLUSH if !self.flush => return Err(errno::ENOSYS),
+                op::FLUSH => fs.flush(nodeid, body.u64(0))?,
                 op::FSYNC => fs.fsync(nodeid, body.u64(0), body.u32(8) & 1 != 0)?,
                 op::FSYNCDIR => {}
                 op::OPENDIR => {
@@ -466,7 +501,10 @@ impl<F: FileSystem> FuseServer<F> {
             Ok(())
         })();
         let _ = unique;
-        Some(r.map(|()| out))
+        Some(r.map(|()| match direct {
+            Some(n) => Payload::Direct(n),
+            None => Payload::Bytes(out),
+        }))
     }
 }
 
@@ -494,23 +532,38 @@ impl<F: FileSystem> crate::vhost_user::QueueHandler for FuseServer<F> {
             _ => {}
         }
         let started = std::time::Instant::now();
-        let result =
-            self.dispatch(opcode, nodeid, body, reply, unique).unwrap_or(Err(errno::ENOSYS));
+        // A panicking request answers EIO; the queue keeps serving.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.dispatch(opcode, nodeid, body, reply, unique)
+        }))
+        .unwrap_or(Some(Err(errno::EIO)))
+        .unwrap_or(Err(errno::ENOSYS));
         if let Some(s) = self.stats.get(opcode as usize) {
             use std::sync::atomic::Ordering::Relaxed;
             s.0.fetch_add(1, Relaxed);
             s.1.fetch_add(started.elapsed().as_micros() as u64, Relaxed);
         }
-        let (error, payload) = match result {
-            Ok(p) => (0i32, p),
-            Err(e) => (-e, Vec::new()),
+        let header = |len: usize, error: i32| {
+            let mut header = Vec::with_capacity(OUT_HEADER);
+            header.extend_from_slice(&((OUT_HEADER + len) as u32).to_le_bytes());
+            header.extend_from_slice(&error.to_le_bytes());
+            header.extend_from_slice(&unique.to_le_bytes());
+            header
         };
-        let mut header = Vec::with_capacity(OUT_HEADER);
-        header.extend_from_slice(&((OUT_HEADER + payload.len()) as u32).to_le_bytes());
-        header.extend_from_slice(&error.to_le_bytes());
-        header.extend_from_slice(&unique.to_le_bytes());
-        reply.write(&header);
-        reply.write(&payload);
+        match result {
+            Ok(Payload::Bytes(payload)) => {
+                reply.write(&header(payload.len(), 0));
+                reply.write(&payload);
+            }
+            Ok(Payload::Direct(n)) => {
+                let start = reply.written();
+                reply.advance(OUT_HEADER + n);
+                reply.patch(start, &header(n, 0));
+            }
+            Err(e) => {
+                reply.write(&header(0, -e));
+            }
+        }
         reply.written()
     }
 }

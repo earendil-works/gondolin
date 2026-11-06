@@ -1,4 +1,4 @@
-.PHONY: build release dist check lint fmt-check clippy test test-linux format clean
+.PHONY: build release dist check lint fmt-check clippy test test-linux test-docker format clean fuzz
 
 CARGO ?= cargo
 
@@ -33,8 +33,25 @@ test:
 test-linux:
 	@./scripts/test-linux.sh $(ARGS)
 
+# Linux tests in Docker: cargo test (arm64), x86_64 musl tests (emulated amd64),
+# native engine VMs under QEMU TCG and host tests (PHASES="cargo amd64 vm host-tests")
+test-docker:
+	@./scripts/test-linux-docker.sh $(PHASES)
+
 format:
 	@$(CARGO) fmt --all
 
 clean:
 	@$(CARGO) clean
+
+# cargo-fuzz targets for the guest-facing parsers (needs nightly + cargo-fuzz)
+# FUZZ_TARGETS="a b" to restrict, FUZZ_TIME seconds per target
+FUZZ_TARGETS ?= netstack_parse netstack_stack egress_flow egress_policy tls_client_hello wire_guest sshproxy_flow sshproxy_parse
+FUZZ_TIME ?= 120
+fuzz:
+	@cd fuzz && for t in $(FUZZ_TARGETS); do \
+		echo "=== fuzz $$t ($(FUZZ_TIME)s)"; \
+		mkdir -p corpus/$$t; \
+		cargo +nightly fuzz run $$t corpus/$$t $$( [ -d seeds/$$t ] && echo seeds/$$t ) -- \
+			-max_total_time=$(FUZZ_TIME) -rss_limit_mb=4096 -timeout=30 || exit 1; \
+	done

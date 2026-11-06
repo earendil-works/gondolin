@@ -135,6 +135,9 @@ impl FlowHandler for ActivityFlows {
             activity.set("net", true);
         }
         let _guard = FlowGuard(self);
+        if flow.meta.dst.port() == 9 {
+            crate::panics::test_panic(crate::panics::TestPanic::Flow);
+        }
         self.inner.handle_tcp(flow).await;
     }
 }
@@ -262,8 +265,14 @@ impl ControllerRequests for Controller {
 #[async_trait]
 impl NetBackend for Net {
     async fn serve(&self, stream: UnixStream) {
-        if let Err(err) = self.stack.serve(stream).await {
-            tracing::debug!(target: "gondolin::net", "netdev connection ended: {err}");
+        match crate::panics::CatchUnwind::new(self.stack.serve(stream)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::debug!(target: "gondolin::net", "netdev connection ended: {err}");
+            }
+            // the stack driver owns the flow table and the smoltcp state
+            // (flow handlers are contained separately): fail closed
+            Err(panic) => crate::panics::fail_closed(&format!("network stack panicked: {panic}")),
         }
     }
 }
@@ -281,7 +290,23 @@ impl ControllerHandler for NetMessages {
         let net = self.0.clone();
         let ctl = ctl.clone();
         tokio::spawn(async move {
-            match net.handle_request(&msg.t, msg.p).await {
+            let t = msg.t.clone();
+            let handled = crate::panics::CatchUnwind::new(net.handle_request(&t, msg.p)).await;
+            let handled = match handled {
+                Ok(handled) => handled,
+                Err(panic) => {
+                    if msg.id != 0 {
+                        ctl.reply_err(
+                            &msg.t,
+                            msg.id,
+                            "internal_error",
+                            &format!("internal error: {panic}"),
+                        );
+                    }
+                    return;
+                }
+            };
+            match handled {
                 Some(Ok(value)) => {
                     let fields = match value {
                         Value::Map(entries) => entries,

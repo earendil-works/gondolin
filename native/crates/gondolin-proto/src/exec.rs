@@ -180,6 +180,16 @@ pub struct ExecOutput {
     pub data: Vec<u8>,
 }
 
+/// [`ExecOutput`] borrowing its data (encoding without a copy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExecOutputRef<'a> {
+    pub client: ClientId,
+    pub id: u32,
+    pub stream: Stream,
+    #[serde(with = "serde_bytes")]
+    pub data: &'a [u8],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecResponse {
     pub client: ClientId,

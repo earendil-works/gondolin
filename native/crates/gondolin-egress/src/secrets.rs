@@ -400,10 +400,8 @@ fn replace_in_url_parameters(
 
 /// Splits `Basic <token>` (`/^(Basic)(\s+)(\S+)(\s*)$/i`).
 fn split_basic(value: &str) -> Option<(&str, &str, &str, &str)> {
-    if value.len() < 5 || !value[..5].eq_ignore_ascii_case("basic") {
-        return None;
-    }
-    let scheme = &value[..5];
+    // `get`: header strings may hold multi-byte chars (latin1 bytes >= 0x80)
+    let scheme = value.get(..5).filter(|s| s.eq_ignore_ascii_case("basic"))?;
     let rest = &value[5..];
     let ws_len = rest.len() - rest.trim_start().len();
     if ws_len == 0 {
@@ -746,6 +744,15 @@ mod tests {
             run(&r, head("https://example.org/", &[("authorization", "Bearer secret-value")]))
                 .unwrap_err();
         assert_eq!(err.message, "secret API_KEY not allowed for host: example.org");
+    }
+
+    #[test]
+    fn basic_auth_with_non_ascii_prefix() {
+        // fuzz finding: slicing a header value inside a multi-byte char
+        let r = rules(vec![secret("API_KEY", "secret-value", &["example.com"])]);
+        for value in ["\u{fe}\u{ff}\u{ff}", "Basi\u{e9}", "\u{ff}asic abc"] {
+            let _ = run(&r, head("https://example.com/", &[("authorization", value)]));
+        }
     }
 
     #[test]

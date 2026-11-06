@@ -6,12 +6,15 @@ import tls from "node:tls";
 
 import { type HttpHooks, type VM, createHttpHooks } from "../../src/index.ts";
 import {
+  authorityKeyIdentifierExtension,
+  basicConstraintsExtension,
   computeKeyIdentifier,
   createCertificate,
   encodeCommonNameName,
+  extKeyUsageExtension,
+  keyUsageExtension,
   subjectAltNameExtension,
   subjectKeyIdentifierExtension,
-  basicConstraintsExtension,
 } from "../../src/x509.ts";
 import { createVm, enginePids, installGuestTools, sh } from "../lib/engine.ts";
 import { type Bench, MiB, mbps } from "../lib/harness.ts";
@@ -53,30 +56,62 @@ function handler(req: http.IncomingMessage, res: http.ServerResponse) {
   res.end("ok\n".repeat(20));
 }
 
-/** Self-signed `localhost` certificate, trusted for this process' default TLS store */
+const pem = (der: Buffer) =>
+  `-----BEGIN CERTIFICATE-----\n${der
+    .toString("base64")
+    .match(/.{1,64}/g)!
+    .join("\n")}\n-----END CERTIFICATE-----\n`;
+
+/**
+ * A `localhost` certificate issued by a throwaway CA; the CA goes into this
+ * process' default TLS store. (A CA used directly as the server certificate
+ * works for OpenSSL but rustls/webpki rejects it, `CaUsedAsEndEntity`.)
+ */
 function makeCert() {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-  });
-  const name = encodeCommonNameName(UPSTREAM_HOST);
-  const der = createCertificate({
-    publicKey,
-    signingKey: privateKey,
+  const ca = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const leaf = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const caName = encodeCommonNameName("gondolin bench CA");
+  const caId = computeKeyIdentifier(ca.publicKey);
+  const notBefore = new Date(Date.now() - 3600_000);
+  const notAfter = new Date(Date.now() + 86400_000);
+  const caDer = createCertificate({
+    publicKey: ca.publicKey,
+    signingKey: ca.privateKey,
     serialNumber: crypto.randomBytes(8).fill(0x7f, 0, 1),
-    notBefore: new Date(Date.now() - 3600_000),
-    notAfter: new Date(Date.now() + 86400_000),
-    subject: name,
-    issuer: name,
+    notBefore,
+    notAfter,
+    subject: caName,
+    issuer: caName,
     extensions: [
-      basicConstraintsExtension({ ca: true }),
-      subjectAltNameExtension(UPSTREAM_HOST),
-      subjectKeyIdentifierExtension(computeKeyIdentifier(publicKey)),
+      basicConstraintsExtension({ ca: true, critical: true }),
+      keyUsageExtension({ keyCertSign: true, cRLSign: true }, true),
+      subjectKeyIdentifierExtension(caId),
     ],
   });
-  const certPem = `-----BEGIN CERTIFICATE-----\n${der.toString("base64").replace(/.{64}/g, "$&\n")}\n-----END CERTIFICATE-----\n`;
+  const leafDer = createCertificate({
+    publicKey: leaf.publicKey,
+    signingKey: ca.privateKey,
+    serialNumber: crypto.randomBytes(8).fill(0x7f, 0, 1),
+    notBefore,
+    notAfter,
+    subject: encodeCommonNameName(UPSTREAM_HOST),
+    issuer: caName,
+    extensions: [
+      basicConstraintsExtension({ ca: false }),
+      keyUsageExtension(
+        { digitalSignature: true, keyEncipherment: true },
+        true,
+      ),
+      extKeyUsageExtension(["1.3.6.1.5.5.7.3.1"]),
+      subjectAltNameExtension(UPSTREAM_HOST),
+      subjectKeyIdentifierExtension(computeKeyIdentifier(leaf.publicKey)),
+      authorityKeyIdentifierExtension(caId),
+    ],
+  });
   return {
-    certPem,
-    keyPem: privateKey.export({ type: "pkcs8", format: "pem" }) as string,
+    caPem: pem(caDer),
+    certPem: pem(leafDer),
+    keyPem: leaf.privateKey.export({ type: "pkcs8", format: "pem" }) as string,
   };
 }
 
@@ -146,8 +181,8 @@ export async function netSuite(bench: Bench) {
   const servers: net.Server[] = [];
   const previousCa = tls.getCACertificates("default");
   try {
-    const { certPem, keyPem } = makeCert();
-    tls.setDefaultCACertificates([...previousCa, certPem]);
+    const { caPem, certPem, keyPem } = makeCert();
+    tls.setDefaultCACertificates([...previousCa, caPem]);
     const httpUp = await listenLoopback(() => http.createServer(handler));
     const httpsUp = await listenLoopback(() =>
       https.createServer({ cert: certPem, key: keyPem }, handler),
@@ -159,7 +194,23 @@ export async function netSuite(bench: Bench) {
     const smallBytes = bench.q(32, 8) * MiB;
     const largeBytes = bench.q(256, 32) * MiB;
 
+    const workloads = [
+      "http-seq",
+      "https-seq",
+      "http-keepalive",
+      "https-keepalive",
+      "http-concurrent",
+      "http-download",
+      "http-upload",
+      "https-download",
+      "https-upload",
+      "http-download-large",
+      "https-download-large",
+    ];
     for (const variant of variants()) {
+      if (!workloads.some((w) => bench.matches(`net.${w}.${variant.name}`))) {
+        continue;
+      }
       let vm: VM | null = null;
       try {
         vm = await createVm({
@@ -320,4 +371,25 @@ export async function netSuite(bench: Bench) {
     for (const server of servers) server.close();
     tls.setDefaultCACertificates(previousCa);
   }
+}
+
+/** The suite's upstreams on their own (for `bench/netprobe.ts`) */
+export async function startUpstreams(): Promise<{
+  ports: { http: number; https: number };
+  close: () => void;
+}> {
+  const previousCa = tls.getCACertificates("default");
+  const { caPem, certPem, keyPem } = makeCert();
+  tls.setDefaultCACertificates([...previousCa, caPem]);
+  const httpUp = await listenLoopback(() => http.createServer(handler));
+  const httpsUp = await listenLoopback(() =>
+    https.createServer({ cert: certPem, key: keyPem }, handler),
+  );
+  return {
+    ports: { http: httpUp.port, https: httpsUp.port },
+    close: () => {
+      for (const s of [...httpUp.servers, ...httpsUp.servers]) s.close();
+      tls.setDefaultCACertificates(previousCa);
+    },
+  };
 }

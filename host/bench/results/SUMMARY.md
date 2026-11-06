@@ -6,175 +6,205 @@ Cost is cpu time per iteration summed over the host process and engine processes
 
 ## boot
 
-- node: 2026-11-06T13:04:35.095Z, Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, commit d02eecc+dirty
+- node: 2026-11-06T18:03:43.761Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 14.31→13.66, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
+- native: 2026-11-06T18:03:43.761Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 14.31→13.66, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
 
-| workload | metric | unit | node | native | ratio |
-|---|---|---|---|---|---|
-| boot.create-to-first-exec | wallMs | ms | 466 (572) | - | - |
-| boot.create-to-first-exec | createMs | ms | 23.0 (27.6) | - | - |
-| boot.create-to-first-exec | firstExecMs | ms | 445 (547) | - | - |
-| boot.create-to-first-exec | closeMs | ms | 5.24 (6.13) | - | - |
+| workload | metric | unit | node | native | ratio | load node / native |
+|---|---|---|---|---|---|---|
+| boot.create-to-first-exec | wallMs | ms | 516 (601) | 537 (627) | 1.04x | 14.31 / 14.6 |
+| boot.create-to-first-exec | createMs | ms | 24.0 (25.0) | 23.9 (25.4) | 1.00x |  |
+| boot.create-to-first-exec | firstExecMs | ms | 494 (577) | 513 (603) | 1.04x |  |
+| boot.create-to-first-exec | closeMs | ms | 5.47 (6.08) | 7.10 (7.43) | 1.30x |  |
 
 ## exec
 
-- node: 2026-11-06T13:04:40.421Z, Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, commit d02eecc+dirty
+- node: 2026-11-06T18:03:55.415Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 13.66→29.85, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
+- native: 2026-11-06T18:03:55.415Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 13.66→29.85, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
 
-| workload | metric | unit | node | native | ratio |
-|---|---|---|---|---|---|
-| exec.rtt-sh | wallMs | ms | 2.04 (4.02) | - | - |
-| exec.rtt-argv | wallMs | ms | 1.96 (3.03) | - | - |
-| exec.concurrent | wallMs | ms | 104 (111) | - | - |
-| exec.concurrent | execsPerSec | ops/s | 154 (1624) | - | - |
-| exec.stdout-throughput | wallMs | ms | 3002 (3012) | - | - |
-| exec.stdout-throughput | MBps | MB/s | 85.3 (94.1) | - | - |
-| exec.stdin-throughput | wallMs | ms | 74.0 (183) | - | - |
-| exec.stdin-throughput | MBps | MB/s | 81.0 (90.6) | - | - |
+| workload | metric | unit | node | native | ratio | load node / native |
+|---|---|---|---|---|---|---|
+| exec.rtt-sh | wallMs | ms | 2.00 (3.99) | 2.06 (4.08) | 1.03x | 13.66 / 13.66 |
+| exec.rtt-argv | wallMs | ms | 1.99 (4.02) | 1.99 (3.58) | 1.00x | 13.66 / 13.37 |
+| exec.concurrent | wallMs | ms | 106 (114) | 111 (114) | 1.04x | 13.37 / 13.37 |
+| exec.concurrent | execsPerSec | ops/s | 151 (1507) | 144 (1146) | 0.96x |  |
+| exec.stdout-throughput | wallMs | ms | 3678 (5008) | 6720 (9400) | 1.83x | 13.26 / 12.75 |
+| exec.stdout-throughput | MBps | MB/s | 69.6 (73.7) | 38.1 (64.5) | 0.55x |  |
+| exec.stdin-throughput | wallMs | ms | 3874 (4323) | 6512 (10643) | 1.68x | 21.16 / 17.57 |
+| exec.stdin-throughput | MBps | MB/s | 66.1 (68.9) | 39.3 (58.6) | 0.59x |  |
 
 Host cost per iteration:
 
 | workload | node | native |
 |---|---|---|
-| exec.stdout-throughput | 7342 ms (host 1656ms/151MB, qemu-system-aarch64 5686ms/340MB) | - |
-| exec.stdin-throughput | 185 ms (host 38.0ms/175MB, qemu-system-aarch64 147ms/341MB) | - |
+| exec.stdout-throughput | 9526 ms (host 2594ms/169MB, qemu-system-aarch64 6932ms/359MB) | 14536 ms (host 2696ms/163MB, gondolind 3336ms/11.5MB, qemu-system-aarch64 8504ms/320MB, gondolind 0.00ms/5.97MB) |
+| exec.stdin-throughput | 8832 ms (host 1912ms/154MB, qemu-system-aarch64 6920ms/352MB) | 13088 ms (host 2390ms/151MB, gondolind 1896ms/26.5MB, qemu-system-aarch64 8802ms/354MB, gondolind 0.00ms/5.97MB) |
 
 ## net
 
-- node: 2026-11-06T13:16:54.584Z, Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, commit d02eecc+dirty
+- node: 2026-11-06T18:06:20.462Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 29.85→37.5, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
+- native: 2026-11-06T18:06:20.462Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 29.85→37.5, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit ee286a2
 
-| workload | metric | unit | node | native | ratio |
-|---|---|---|---|---|---|
-| net.http-seq.policy | requestMs | ms | 0.70 (1.09) | - | - |
-| net.https-seq.policy | requestMs | ms | 2.14 (3.91) | - | - |
-| net.http-keepalive.policy | requestMs | ms | 0.76 (1.16) | - | - |
-| net.https-keepalive.policy | requestMs | ms | 3.53 (13.0) | - | - |
-| net.http-concurrent.policy | requestMs | ms | 2.33 (4.90) | - | - |
-| net.http-concurrent.policy | requestsPerSec | ops/s | 2537 (2630) | - | - |
-| net.http-download.policy | guestMs | ms | 203 (250) | - | - |
-| net.http-download.policy | MBps | MB/s | 158 (178) | - | - |
-| net.http-upload.policy | guestMs | ms | 359 (365) | - | - |
-| net.http-upload.policy | MBps | MB/s | 89.2 (94.8) | - | - |
-| net.https-download.policy | guestMs | ms | 171 (177) | - | - |
-| net.https-download.policy | MBps | MB/s | 187 (200) | - | - |
-| net.https-upload.policy | guestMs | ms | 243 (254) | - | - |
-| net.https-upload.policy | MBps | MB/s | 132 (135) | - | - |
-| net.http-download-large.policy | guestMs | ms | 1182 (1224) | - | - |
-| net.http-download-large.policy | MBps | MB/s | 217 (221) | - | - |
-| net.https-download-large.policy | guestMs | ms | 1396 (1517) | - | - |
-| net.https-download-large.policy | MBps | MB/s | 183 (190) | - | - |
-| net.http-seq.ip-allow | requestMs | ms | 0.63 (1.22) | - | - |
-| net.http-download.ip-allow | guestMs | ms | 170 (172) | - | - |
-| net.http-download.ip-allow | MBps | MB/s | 188 (215) | - | - |
-| net.http-upload.ip-allow | guestMs | ms | 344 (368) | - | - |
-| net.http-upload.ip-allow | MBps | MB/s | 93.1 (94.6) | - | - |
-| net.http-seq.policy-noop-hooks | requestMs | ms | 0.67 (1.61) | - | - |
-| net.http-download.policy-noop-hooks | guestMs | ms | 150 (197) | - | - |
-| net.http-download.policy-noop-hooks | MBps | MB/s | 214 (227) | - | - |
-| net.http-upload.policy-noop-hooks | guestMs | ms | 354 (360) | - | - |
-| net.http-upload.policy-noop-hooks | MBps | MB/s | 90.4 (93.2) | - | - |
-| net.http-seq.policy-body-hooks | requestMs | ms | 0.65 (0.89) | - | - |
-| net.http-download.policy-body-hooks | guestMs | ms | 149 (161) | - | - |
-| net.http-download.policy-body-hooks | MBps | MB/s | 214 (228) | - | - |
-| net.http-upload.policy-body-hooks | guestMs | ms | 705 (879) | - | - |
-| net.http-upload.policy-body-hooks | MBps | MB/s | 45.4 (46.6) | - | - |
+| workload | metric | unit | node | native | ratio | load node / native |
+|---|---|---|---|---|---|---|
+| net.http-seq.policy | requestMs | ms | 2.29 (7.18) | 1.12 (2.03) | 0.49x | 29.85 / 84.17 |
+| net.https-seq.policy | requestMs | ms | 5.16 (8.04) | 2.56 (4.87) | 0.49x | 29.85 / 78.96 |
+| net.http-keepalive.policy | requestMs | ms | 1.94 (5.55) | 1.32 (3.35) | 0.68x | 29.22 / 78.96 |
+| net.https-keepalive.policy | requestMs | ms | 4.76 (10.3) | 2.18 (3.88) | 0.46x | 29.22 / 78.96 |
+| net.http-concurrent.policy | requestMs | ms | 6.23 (34.2) | 2.89 (6.12) | 0.46x | 29.22 / 78.96 |
+| net.http-concurrent.policy | requestsPerSec | ops/s | 676 (1035) | 2151 (2362) | 3.18x |  |
+| net.http-download.policy | guestMs | ms | 1240 (1564) | 217 (223) | 0.17x | 29.22 / 78.96 |
+| net.http-download.policy | MBps | MB/s | 25.8 (34.3) | 148 (152) | 5.72x |  |
+| net.http-upload.policy | guestMs | ms | 808 (1044) | 202 (224) | 0.25x | 41.34 / 74.23 |
+| net.http-upload.policy | MBps | MB/s | 39.6 (51.7) | 158 (169) | 4.00x |  |
+| net.https-download.policy | guestMs | ms | 493 (826) | 246 (316) | 0.50x | 42.35 / 74.23 |
+| net.https-download.policy | MBps | MB/s | 64.9 (75.5) | 130 (148) | 2.01x |  |
+| net.https-upload.policy | guestMs | ms | 491 (529) | 207 (211) | 0.42x | 42 / 74.23 |
+| net.https-upload.policy | MBps | MB/s | 65.1 (69.6) | 155 (169) | 2.38x |  |
+| net.http-download-large.policy | guestMs | ms | 2999 (4110) | 2696 (2920) | 0.90x | 42 / 70.21 |
+| net.http-download-large.policy | MBps | MB/s | 85.4 (90.8) | 94.9 (109) | 1.11x |  |
+| net.https-download-large.policy | guestMs | ms | 6584 (11375) | 2621 (3077) | 0.40x | 38.08 / 60.16 |
+| net.https-download-large.policy | MBps | MB/s | 38.9 (50.8) | 97.7 (105) | 2.51x |  |
+| net.http-seq.ip-allow | requestMs | ms | 2.09 (6.22) | 1.56 (4.43) | 0.74x | 53.31 / 48.59 |
+| net.http-download.ip-allow | guestMs | ms | 541 (617) | 402 (456) | 0.74x | 53.04 / 48.59 |
+| net.http-download.ip-allow | MBps | MB/s | 59.2 (61.1) | 79.7 (80.9) | 1.35x |  |
+| net.http-upload.ip-allow | guestMs | ms | 886 (936) | 306 (340) | 0.35x | 53.04 / 45.82 |
+| net.http-upload.ip-allow | MBps | MB/s | 36.1 (37.2) | 104 (115) | 2.89x |  |
+| net.http-seq.policy-noop-hooks | requestMs | ms | 2.22 (6.04) | 1.91 (3.32) | 0.86x | 45.82 / 44.19 |
+| net.http-download.policy-noop-hooks | guestMs | ms | 583 (742) | 358 (598) | 0.61x | 45.82 / 44.19 |
+| net.http-download.policy-noop-hooks | MBps | MB/s | 54.9 (62.6) | 89.4 (146) | 1.63x |  |
+| net.http-upload.policy-noop-hooks | guestMs | ms | 833 (961) | 227 (236) | 0.27x | 46.87 / 44.19 |
+| net.http-upload.policy-noop-hooks | MBps | MB/s | 38.4 (40.1) | 141 (173) | 3.67x |  |
+| net.http-seq.policy-body-hooks | requestMs | ms | 2.03 (5.26) | 4.12 (15.1) | 2.03x | 41.77 / 39.28 |
+| net.http-download.policy-body-hooks | guestMs | ms | 452 (627) | 402 (448) | 0.89x | 41.77 / 38.94 |
+| net.http-download.policy-body-hooks | MBps | MB/s | 70.8 (72.7) | 79.6 (92.9) | 1.12x |  |
+| net.http-upload.policy-body-hooks | guestMs | ms | 925 (1089) | 203 (312) | 0.22x | 40.27 / 38.94 |
+| net.http-upload.policy-body-hooks | MBps | MB/s | 34.6 (38.2) | 158 (160) | 4.56x |  |
 
 Host cost per iteration:
 
 | workload | node | native |
 |---|---|---|
-| net.http-download.policy | 953 ms (host 347ms/183MB, qemu-system-aarch64 606ms/342MB) | - |
-| net.http-upload.policy | 1390 ms (host 426ms/234MB, qemu-system-aarch64 964ms/352MB) | - |
-| net.https-download.policy | 841 ms (host 309ms/241MB, qemu-system-aarch64 532ms/354MB) | - |
-| net.https-upload.policy | 939 ms (host 413ms/296MB, qemu-system-aarch64 526ms/358MB) | - |
-| net.http-download-large.policy | 3841 ms (host 1935ms/316MB, qemu-system-aarch64 1906ms/361MB) | - |
-| net.https-download-large.policy | 4690 ms (host 2330ms/316MB, qemu-system-aarch64 2360ms/361MB) | - |
-| net.http-download.ip-allow | 812 ms (host 296ms/260MB, qemu-system-aarch64 516ms/348MB) | - |
-| net.http-upload.ip-allow | 1404 ms (host 422ms/271MB, qemu-system-aarch64 982ms/349MB) | - |
-| net.http-download.policy-noop-hooks | 748 ms (host 182ms/293MB, qemu-system-aarch64 566ms/335MB) | - |
-| net.http-upload.policy-noop-hooks | 1381 ms (host 425ms/299MB, qemu-system-aarch64 956ms/391MB) | - |
-| net.http-download.policy-body-hooks | 622 ms (host 174ms/396MB, qemu-system-aarch64 448ms/332MB) | - |
-| net.http-upload.policy-body-hooks | 3180 ms (host 1482ms/1487MB, qemu-system-aarch64 1698ms/334MB) | - |
+| net.http-download.policy | 1376 ms (host 574ms/173MB, qemu-system-aarch64 802ms/334MB) | 428 ms (host 14.1ms/132MB, gondolind 54.0ms/21.5MB, qemu-system-aarch64 360ms/343MB, gondolind 0.00ms/5.97MB) |
+| net.http-upload.policy | 1483 ms (host 731ms/266MB, qemu-system-aarch64 752ms/378MB) | 545 ms (host 88.9ms/151MB, gondolind 152ms/22.9MB, qemu-system-aarch64 304ms/453MB, gondolind 0.00ms/5.97MB) |
+| net.https-download.policy | 1240 ms (host 604ms/218MB, qemu-system-aarch64 636ms/395MB) | 497 ms (host 19.0ms/151MB, gondolind 74.0ms/24.9MB, qemu-system-aarch64 404ms/454MB, gondolind 0.00ms/5.97MB) |
+| net.https-upload.policy | 1236 ms (host 632ms/174MB, qemu-system-aarch64 604ms/469MB) | 553 ms (host 73.1ms/178MB, gondolind 154ms/26.0MB, qemu-system-aarch64 326ms/473MB, gondolind 0.00ms/5.97MB) |
+| net.http-download-large.policy | 7806 ms (host 3696ms/178MB, qemu-system-aarch64 4110ms/475MB) | 3777 ms (host 99.2ms/178MB, gondolind 492ms/27.7MB, qemu-system-aarch64 3186ms/474MB, gondolind 0.00ms/5.97MB) |
+| net.https-download-large.policy | 10489 ms (host 4669ms/149MB, qemu-system-aarch64 5820ms/475MB) | 4200 ms (host 164ms/167MB, gondolind 646ms/27.8MB, qemu-system-aarch64 3390ms/479MB, gondolind 0.00ms/5.97MB) |
+| net.http-download.ip-allow | 1555 ms (host 597ms/134MB, qemu-system-aarch64 958ms/333MB) | 906 ms (host 25.9ms/162MB, gondolind 62.0ms/20.5MB, qemu-system-aarch64 818ms/325MB, gondolind 0.00ms/5.97MB) |
+| net.http-upload.ip-allow | 1673 ms (host 837ms/161MB, qemu-system-aarch64 836ms/390MB) | 630 ms (host 90.5ms/175MB, gondolind 168ms/21.8MB, qemu-system-aarch64 372ms/437MB, gondolind 0.00ms/5.97MB) |
+| net.http-download.policy-noop-hooks | 1346 ms (host 400ms/388MB, qemu-system-aarch64 946ms/326MB) | 890 ms (host 18.4ms/347MB, gondolind 64.0ms/19.3MB, qemu-system-aarch64 808ms/317MB, gondolind 0.00ms/5.97MB) |
+| net.http-upload.policy-noop-hooks | 1712 ms (host 856ms/383MB, qemu-system-aarch64 856ms/402MB) | 613 ms (host 98.6ms/348MB, gondolind 178ms/21.1MB, qemu-system-aarch64 336ms/375MB, gondolind 0.00ms/5.97MB) |
+| net.http-download.policy-body-hooks | 1359 ms (host 377ms/493MB, qemu-system-aarch64 982ms/335MB) | 878 ms (host 172ms/446MB, gondolind 100ms/65.6MB, qemu-system-aarch64 606ms/332MB, gondolind 0.00ms/5.97MB) |
+| net.http-upload.policy-body-hooks | 1683 ms (host 921ms/558MB, qemu-system-aarch64 762ms/422MB) | 848 ms (host 330ms/448MB, gondolind 198ms/78.8MB, qemu-system-aarch64 320ms/427MB, gondolind 0.00ms/5.97MB) |
 
 ## vfs
 
-- node: 2026-11-06T13:05:02.638Z, Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, commit d02eecc+dirty
+- node: 2026-11-06T19:00:36.990Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 150.68→8.35, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit 3ef462a
+- native: 2026-11-06T19:00:36.990Z (interleaved node/native), Apple M5 Max x18, darwin 26.6.2, node v26.10.0, QEMU emulator version 10.2.1, load 150.68→8.35, image /Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 83bc8db0-0c89-5283-a84b-7533ccfa4bfe), commit 3ef462a
 
-| workload | metric | unit | node | native | ratio |
-|---|---|---|---|---|---|
-| vfs.small-create.guest-tmpfs | guestMs | ms | 7.68 (8.72) | - | - |
-| vfs.small-stat.guest-tmpfs | guestMs | ms | 0.92 (1.94) | - | - |
-| vfs.small-read.guest-tmpfs | guestMs | ms | 5.84 (6.03) | - | - |
-| vfs.readdir-large.guest-tmpfs | guestMs | ms | 0.65 (1.66) | - | - |
-| vfs.tree-find.guest-tmpfs | guestMs | ms | 5.59 (6.66) | - | - |
-| vfs.tree-ls-lR.guest-tmpfs | guestMs | ms | 8.91 (9.09) | - | - |
-| vfs.untar.guest-tmpfs | guestMs | ms | 48.8 (52.2) | - | - |
-| vfs.large-write.guest-tmpfs | guestMs | ms | 44.9 (76.5) | - | - |
-| vfs.large-write.guest-tmpfs | MBps | MB/s | 5696 (6163) | - | - |
-| vfs.large-read.guest-tmpfs | guestMs | ms | 16.0 (22.8) | - | - |
-| vfs.large-read.guest-tmpfs | MBps | MB/s | 15972 (16303) | - | - |
-| vfs.small-create.memory | guestMs | ms | 791 (834) | - | - |
-| vfs.small-stat.memory | guestMs | ms | 151 (154) | - | - |
-| vfs.small-read.memory | guestMs | ms | 554 (604) | - | - |
-| vfs.readdir-large.memory | guestMs | ms | 73.3 (77.5) | - | - |
-| vfs.tree-find.memory | guestMs | ms | 698 (714) | - | - |
-| vfs.tree-ls-lR.memory | guestMs | ms | 692 (779) | - | - |
-| vfs.untar.memory | guestMs | ms | 5437 (5524) | - | - |
-| vfs.large-write.memory | guestMs | ms | 4432 (4481) | - | - |
-| vfs.large-write.memory | MBps | MB/s | 14.4 (14.5) | - | - |
-| vfs.large-read.memory | guestMs | ms | 410 (420) | - | - |
-| vfs.large-read.memory | MBps | MB/s | 156 (158) | - | - |
-| vfs.small-create.realfs | guestMs | ms | 946 (1095) | - | - |
-| vfs.small-stat.realfs | guestMs | ms | 158 (161) | - | - |
-| vfs.small-read.realfs | guestMs | ms | 650 (810) | - | - |
-| vfs.readdir-large.realfs | guestMs | ms | 111 (264) | - | - |
-| vfs.tree-find.realfs | guestMs | ms | 930 (1473) | - | - |
-| vfs.tree-ls-lR.realfs | guestMs | ms | 773 (920) | - | - |
-| vfs.untar.realfs | guestMs | ms | 6075 (7376) | - | - |
-| vfs.large-write.realfs | guestMs | ms | 1676 (1735) | - | - |
-| vfs.large-write.realfs | MBps | MB/s | 153 (153) | - | - |
-| vfs.large-read.realfs | guestMs | ms | 1788 (1811) | - | - |
-| vfs.large-read.realfs | MBps | MB/s | 143 (144) | - | - |
-| vfs.small-create.shadow | guestMs | ms | 1975 (2345) | - | - |
-| vfs.small-stat.shadow | guestMs | ms | 364 (440) | - | - |
-| vfs.small-read.shadow | guestMs | ms | 1175 (1479) | - | - |
-| vfs.readdir-large.shadow | guestMs | ms | 106 (118) | - | - |
-| vfs.tree-find.shadow | guestMs | ms | 2003 (2050) | - | - |
-| vfs.tree-ls-lR.shadow | guestMs | ms | 1594 (1878) | - | - |
-| vfs.untar.shadow | guestMs | ms | 18329 (22168) | - | - |
-| vfs.large-write.shadow | guestMs | ms | 2696 (2965) | - | - |
-| vfs.large-write.shadow | MBps | MB/s | 95.0 (99.6) | - | - |
-| vfs.large-read.shadow | guestMs | ms | 2746 (2980) | - | - |
-| vfs.large-read.shadow | MBps | MB/s | 93.2 (94.5) | - | - |
-| vfs.small-stat.readonly | guestMs | ms | 250 (280) | - | - |
-| vfs.small-read.readonly | guestMs | ms | 1151 (1275) | - | - |
-| vfs.readdir-large.readonly | guestMs | ms | 119 (126) | - | - |
-| vfs.tree-find.readonly | guestMs | ms | 1248 (1328) | - | - |
-| vfs.tree-ls-lR.readonly | guestMs | ms | 1315 (1369) | - | - |
-| vfs.large-read.readonly | guestMs | ms | 3372 (3651) | - | - |
-| vfs.large-read.readonly | MBps | MB/s | 75.9 (88.8) | - | - |
-| vfs.small-create.object | guestMs | ms | 773 (794) | - | - |
-| vfs.small-stat.object | guestMs | ms | 149 (152) | - | - |
-| vfs.small-read.object | guestMs | ms | 591 (682) | - | - |
-| vfs.readdir-large.object | guestMs | ms | 88.8 (89.5) | - | - |
-| vfs.tree-find.object | guestMs | ms | 842 (911) | - | - |
-| vfs.tree-ls-lR.object | guestMs | ms | 702 (839) | - | - |
-| vfs.untar.object | guestMs | ms | 5645 (7571) | - | - |
-| vfs.large-write.object | guestMs | ms | 4811 (5202) | - | - |
-| vfs.large-write.object | MBps | MB/s | 13.3 (13.7) | - | - |
-| vfs.large-read.object | guestMs | ms | 521 (534) | - | - |
-| vfs.large-read.object | MBps | MB/s | 123 (130) | - | - |
+| workload | metric | unit | node | native | ratio | load node / native |
+|---|---|---|---|---|---|---|
+| vfs.small-create.guest-tmpfs | guestMs | ms | 7.03 (7.67) | 6.57 (16.3) | 0.93x | 173.23 / 161.1 |
+| vfs.small-stat.guest-tmpfs | guestMs | ms | 1.37 (1.51) | 1.19 (1.83) | 0.87x | 173.23 / 161.1 |
+| vfs.small-read.guest-tmpfs | guestMs | ms | 5.45 (8.53) | 4.99 (8.87) | 0.92x | 173.23 / 161.1 |
+| vfs.readdir-large.guest-tmpfs | guestMs | ms | 1.16 (1.23) | 1.05 (1.08) | 0.90x | 173.23 / 161.1 |
+| vfs.tree-find.guest-tmpfs | guestMs | ms | 7.89 (12.1) | 5.91 (6.25) | 0.75x | 173.23 / 161.1 |
+| vfs.tree-ls-lR.guest-tmpfs | guestMs | ms | 10.6 (22.0) | 19.0 (32.7) | 1.79x | 171.21 / 161.1 |
+| vfs.untar.guest-tmpfs | guestMs | ms | 51.1 (55.5) | 58.7 (63.3) | 1.15x | 171.21 / 152.28 |
+| vfs.large-write.guest-tmpfs | guestMs | ms | 43.7 (51.7) | 48.6 (57.6) | 1.11x | 171.21 / 152.28 |
+| vfs.large-write.guest-tmpfs | MBps | MB/s | 5853 (6490) | 5269 (6110) | 0.90x |  |
+| vfs.large-read.guest-tmpfs | guestMs | ms | 38.7 (56.3) | 22.8 (23.4) | 0.59x | 171.21 / 152.28 |
+| vfs.large-read.guest-tmpfs | MBps | MB/s | 6617 (9879) | 11225 (11732) | 1.70x |  |
+| vfs.small-create.memory | guestMs | ms | 6081 (6569) | 2284 (2824) | 0.38x | 126.07 / 15.37 |
+| vfs.small-stat.memory | guestMs | ms | 1025 (2018) | 164 (277) | 0.16x | 124.87 / 14.88 |
+| vfs.small-read.memory | guestMs | ms | 6174 (10143) | 1742 (1754) | 0.28x | 125.72 / 14.88 |
+| vfs.readdir-large.memory | guestMs | ms | 732 (872) | 47.7 (51.6) | 0.07x | 125.17 / 13.97 |
+| vfs.tree-find.memory | guestMs | ms | 6444 (8879) | 1893 (1995) | 0.29x | 120.27 / 13.97 |
+| vfs.tree-ls-lR.memory | guestMs | ms | 5272 (8769) | 1932 (2021) | 0.37x | 123.47 / 13.64 |
+| vfs.untar.memory | guestMs | ms | 28720 (37415) | 10770 (15312) | 0.38x | 147.76 / 13.39 |
+| vfs.large-write.memory | guestMs | ms | 794 (1384) | 581 (597) | 0.73x | 34.38 / 9.48 |
+| vfs.large-write.memory | MBps | MB/s | 80.6 (90.4) | 110 (112) | 1.37x |  |
+| vfs.large-read.memory | guestMs | ms | 679 (726) | 1287 (1319) | 1.90x | 30.84 / 9.12 |
+| vfs.large-read.memory | MBps | MB/s | 94.3 (97.3) | 49.7 (70.1) | 0.53x |  |
+| vfs.small-create.native-memory | guestMs | ms | 1762 (1871) | 1065 (1166) | 0.60x | 26.82 / 14.41 |
+| vfs.small-stat.native-memory | guestMs | ms | 329 (336) | 203 (208) | 0.62x | 23.18 / 13.74 |
+| vfs.small-read.native-memory | guestMs | ms | 1208 (1227) | 963 (1226) | 0.80x | 23.18 / 13.44 |
+| vfs.readdir-large.native-memory | guestMs | ms | 140 (155) | 90.8 (98.6) | 0.65x | 22.2 / 13.32 |
+| vfs.tree-find.native-memory | guestMs | ms | 1291 (1343) | 880 (1114) | 0.68x | 21.31 / 13.32 |
+| vfs.tree-ls-lR.native-memory | guestMs | ms | 885 (969) | 1070 (1396) | 1.21x | 20.32 / 12.9 |
+| vfs.untar.native-memory | guestMs | ms | 11713 (12571) | 9115 (12590) | 0.78x | 19.09 / 14.97 |
+| vfs.large-write.native-memory | guestMs | ms | 774 (779) | 1250 (1648) | 1.61x | 17.16 / 35.76 |
+| vfs.large-write.native-memory | MBps | MB/s | 82.6 (89.3) | 51.2 (54.8) | 0.62x |  |
+| vfs.large-read.native-memory | guestMs | ms | 773 (792) | 724 (778) | 0.94x | 17.16 / 36.98 |
+| vfs.large-read.native-memory | MBps | MB/s | 82.8 (84.7) | 88.4 (90.5) | 1.07x |  |
+| vfs.small-create.realfs | guestMs | ms | 2055 (3080) | 1717 (1780) | 0.84x | 27.22 / 13.45 |
+| vfs.small-stat.realfs | guestMs | ms | 242 (247) | 302 (319) | 1.25x | 29.21 / 13.53 |
+| vfs.small-read.realfs | guestMs | ms | 1294 (1499) | 1161 (1189) | 0.90x | 28.55 / 13.17 |
+| vfs.readdir-large.realfs | guestMs | ms | 151 (152) | 68.6 (69.8) | 0.46x | 27.15 / 13.07 |
+| vfs.tree-find.realfs | guestMs | ms | 1666 (1714) | 1437 (1441) | 0.86x | 26.33 / 13.07 |
+| vfs.tree-ls-lR.realfs | guestMs | ms | 1531 (1545) | 1407 (1428) | 0.92x | 24.84 / 12.68 |
+| vfs.untar.realfs | guestMs | ms | 13048 (13121) | 8558 (10665) | 0.66x | 23.57 / 12.2 |
+| vfs.large-write.realfs | guestMs | ms | 3120 (3153) | 1671 (1703) | 0.54x | 13.74 / 10.46 |
+| vfs.large-write.realfs | MBps | MB/s | 82.0 (83.5) | 153 (157) | 1.87x |  |
+| vfs.large-read.realfs | guestMs | ms | 3097 (3184) | 1386 (1529) | 0.45x | 13.84 / 9.55 |
+| vfs.large-read.realfs | MBps | MB/s | 82.7 (85.8) | 185 (185) | 2.23x |  |
+| vfs.small-create.shadow | guestMs | ms | 1259 (1298) | 3502 (3864) | 2.78x | 8.3 / 32.01 |
+| vfs.small-stat.shadow | guestMs | ms | 267 (284) | 713 (1063) | 2.67x | 8 / 27.26 |
+| vfs.small-read.shadow | guestMs | ms | 847 (888) | 3467 (3603) | 4.09x | 8 / 29.48 |
+| vfs.readdir-large.shadow | guestMs | ms | 80.8 (83.9) | 108 (199) | 1.34x | 7.92 / 28.47 |
+| vfs.tree-find.shadow | guestMs | ms | 1286 (1534) | 5910 (11395) | 4.60x | 7.53 / 28.47 |
+| vfs.tree-ls-lR.shadow | guestMs | ms | 1093 (1384) | 3577 (4293) | 3.27x | 7.81 / 45.14 |
+| vfs.untar.shadow | guestMs | ms | 13671 (29588) | 38338 (48493) | 2.80x | 7.83 / 40.49 |
+| vfs.large-write.shadow | guestMs | ms | 5987 (6390) | 5312 (5479) | 0.89x | 46.86 / 40.46 |
+| vfs.large-write.shadow | MBps | MB/s | 42.8 (55.9) | 48.2 (53.1) | 1.13x |  |
+| vfs.large-read.shadow | guestMs | ms | 7389 (12345) | 4465 (4931) | 0.60x | 35.16 / 38.03 |
+| vfs.large-read.shadow | MBps | MB/s | 34.6 (44.6) | 57.3 (71.8) | 1.65x |  |
+| vfs.small-stat.readonly | guestMs | ms | 440 (501) | 1013 (1085) | 2.30x | 37.83 / 36.97 |
+| vfs.small-read.readonly | guestMs | ms | 2224 (14991) | 1568 (1837) | 0.70x | 36.4 / 46.18 |
+| vfs.readdir-large.readonly | guestMs | ms | 114 (124) | 95.4 (96.0) | 0.84x | 50.68 / 42.18 |
+| vfs.tree-find.readonly | guestMs | ms | 1284 (1505) | 1783 (1875) | 1.39x | 47.34 / 42.18 |
+| vfs.tree-ls-lR.readonly | guestMs | ms | 1195 (1237) | 1620 (1882) | 1.36x | 44.35 / 36.16 |
+| vfs.large-read.readonly | guestMs | ms | 2527 (2551) | 3461 (3526) | 1.37x | 38.46 / 32.83 |
+| vfs.large-read.readonly | MBps | MB/s | 101 (104) | 74.0 (74.1) | 0.73x |  |
+| vfs.small-create.js-wrapper | guestMs | ms | 1714 (2013) | 1308 (2077) | 0.76x | 25.24 / 17.53 |
+| vfs.small-stat.js-wrapper | guestMs | ms | 318 (326) | 226 (330) | 0.71x | 23.11 / 16.1 |
+| vfs.small-read.js-wrapper | guestMs | ms | 1285 (1343) | 1655 (1727) | 1.29x | 23.5 / 16.02 |
+| vfs.readdir-large.js-wrapper | guestMs | ms | 154 (157) | 59.6 (66.8) | 0.39x | 23.22 / 15.32 |
+| vfs.tree-find.js-wrapper | guestMs | ms | 1469 (1755) | 1420 (1483) | 0.97x | 23.2 / 15.32 |
+| vfs.tree-ls-lR.js-wrapper | guestMs | ms | 1829 (1875) | 1374 (1421) | 0.75x | 22.21 / 15.06 |
+| vfs.untar.js-wrapper | guestMs | ms | 12210 (13129) | 10326 (11534) | 0.85x | 22.67 / 14.29 |
+| vfs.large-write.js-wrapper | guestMs | ms | 814 (845) | 687 (700) | 0.84x | 17.92 / 12.27 |
+| vfs.large-write.js-wrapper | MBps | MB/s | 78.7 (78.7) | 93.1 (93.7) | 1.18x |  |
+| vfs.large-read.js-wrapper | guestMs | ms | 789 (796) | 950 (994) | 1.20x | 17.77 / 12.17 |
+| vfs.large-read.js-wrapper | MBps | MB/s | 81.1 (81.2) | 67.4 (68.9) | 0.83x |  |
+| vfs.small-create.object-mount | guestMs | ms | 1893 (1990) | 1039 (1221) | 0.55x | 18.01 / 10.3 |
+| vfs.small-stat.object-mount | guestMs | ms | 192 (206) | 101 (106) | 0.53x | 16.81 / 9.86 |
+| vfs.small-read.object-mount | guestMs | ms | 761 (785) | 1169 (1185) | 1.54x | 16.81 / 9.86 |
+| vfs.readdir-large.object-mount | guestMs | ms | 90.2 (94.5) | 39.1 (43.5) | 0.43x | 16.1 / 9.63 |
+| vfs.tree-find.object-mount | guestMs | ms | 907 (1222) | 556 (898) | 0.61x | 16.1 / 9.63 |
+| vfs.tree-ls-lR.object-mount | guestMs | ms | 880 (888) | 662 (863) | 0.75x | 15.29 / 9.74 |
+| vfs.untar.object-mount | guestMs | ms | 7590 (8033) | 6144 (6232) | 0.81x | 14.95 / 9.68 |
+| vfs.large-write.object-mount | guestMs | ms | 5329 (5354) | 351 (352) | 0.07x | 11.74 / 8.59 |
+| vfs.large-write.object-mount | MBps | MB/s | 12.0 (12.0) | 182 (193) | 15.19x |  |
+| vfs.large-read.object-mount | guestMs | ms | 433 (445) | 741 (820) | 1.71x | 11.34 / 8.59 |
+| vfs.large-read.object-mount | MBps | MB/s | 148 (148) | 86.4 (88.2) | 0.58x |  |
 
 Host cost per iteration:
 
 | workload | node | native |
 |---|---|---|
-| vfs.large-write.guest-tmpfs | 171 ms (host 1.42ms/133MB, qemu-system-aarch64 170ms/693MB) | - |
-| vfs.large-read.guest-tmpfs | 125 ms (host 5.41ms/133MB, qemu-system-aarch64 120ms/711MB) | - |
-| vfs.large-write.memory | 14125 ms (host 8355ms/4419MB, qemu-system-aarch64 5770ms/749MB) | - |
-| vfs.large-read.memory | 1121 ms (host 361ms/4210MB, qemu-system-aarch64 760ms/753MB) | - |
-| vfs.large-write.realfs | 4509 ms (host 1396ms/135MB, qemu-system-aarch64 3113ms/760MB) | - |
-| vfs.large-read.realfs | 4646 ms (host 1339ms/139MB, qemu-system-aarch64 3307ms/784MB) | - |
-| vfs.large-write.shadow | 6559 ms (host 1872ms/159MB, qemu-system-aarch64 4687ms/793MB) | - |
-| vfs.large-read.shadow | 6679 ms (host 1889ms/164MB, qemu-system-aarch64 4790ms/802MB) | - |
-| vfs.large-read.readonly | 7482 ms (host 1962ms/166MB, qemu-system-aarch64 5520ms/828MB) | - |
-| vfs.large-write.object | 15740 ms (host 9614ms/4350MB, qemu-system-aarch64 6127ms/841MB) | - |
-| vfs.large-read.object | 1391 ms (host 404ms/4241MB, qemu-system-aarch64 987ms/843MB) | - |
+| vfs.large-write.guest-tmpfs | 106 ms (host 2.84ms/83.4MB, qemu-system-aarch64 103ms/649MB) | 119 ms (host 5.77ms/91.0MB, gondolind 0.00ms/14.1MB, qemu-system-aarch64 113ms/696MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.guest-tmpfs | 153 ms (host 2.77ms/83.4MB, qemu-system-aarch64 150ms/657MB) | 120 ms (host 3.33ms/91.0MB, gondolind 0.00ms/14.1MB, qemu-system-aarch64 117ms/703MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-write.memory | 2198 ms (host 728ms/431MB, qemu-system-aarch64 1470ms/428MB) | 1600 ms (host 337ms/393MB, gondolind 183ms/153MB, qemu-system-aarch64 1080ms/433MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.memory | 1787 ms (host 560ms/443MB, qemu-system-aarch64 1227ms/449MB) | 2866 ms (host 29.8ms/393MB, gondolind 743ms/153MB, qemu-system-aarch64 2093ms/451MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-write.native-memory | 1962 ms (host 665ms/387MB, qemu-system-aarch64 1297ms/459MB) | 1863 ms (host 46.6ms/69.2MB, gondolind 167ms/440MB, qemu-system-aarch64 1650ms/457MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.native-memory | 1899 ms (host 549ms/388MB, qemu-system-aarch64 1350ms/490MB) | 1474 ms (host 20.3ms/70.2MB, gondolind 170ms/504MB, qemu-system-aarch64 1283ms/474MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-write.realfs | 7798 ms (host 2378ms/133MB, qemu-system-aarch64 5420ms/586MB) | 3541 ms (host 30.8ms/69.5MB, gondolind 443ms/19.9MB, qemu-system-aarch64 3067ms/619MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.realfs | 7429 ms (host 2066ms/128MB, qemu-system-aarch64 5363ms/609MB) | 3047 ms (host 23.9ms/66.9MB, gondolind 450ms/19.9MB, qemu-system-aarch64 2573ms/648MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-write.shadow | 10537 ms (host 2977ms/302MB, qemu-system-aarch64 7560ms/426MB) | 8328 ms (host 134ms/72.1MB, gondolind 913ms/19.9MB, qemu-system-aarch64 7280ms/584MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.shadow | 11709 ms (host 2909ms/314MB, qemu-system-aarch64 8800ms/443MB) | 7278 ms (host 101ms/73.7MB, gondolind 943ms/19.9MB, qemu-system-aarch64 6233ms/600MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.readonly | 6228 ms (host 1775ms/145MB, qemu-system-aarch64 4453ms/627MB) | 7256 ms (host 102ms/131MB, gondolind 1090ms/16.0MB, qemu-system-aarch64 6063ms/632MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-write.js-wrapper | 2069 ms (host 642ms/391MB, qemu-system-aarch64 1427ms/402MB) | 1776 ms (host 303ms/381MB, gondolind 230ms/160MB, qemu-system-aarch64 1243ms/462MB, gondolind 0.00ms/6.02MB) |
+| vfs.large-read.js-wrapper | 1971 ms (host 561ms/388MB, qemu-system-aarch64 1410ms/412MB) | 2353 ms (host 19.2ms/381MB, gondolind 593ms/160MB, qemu-system-aarch64 1740ms/480MB, gondolind 0.00ms/6.02MB) |
+| vfs.large-write.object-mount | 21749 ms (host 15466ms/4298MB, qemu-system-aarch64 6283ms/434MB) | 893 ms (host 89.9ms/446MB, gondolind 86.7ms/157MB, qemu-system-aarch64 717ms/445MB, gondolind 0.00ms/6.03MB) |
+| vfs.large-read.object-mount | 1156 ms (host 346ms/4285MB, qemu-system-aarch64 810ms/447MB) | 1984 ms (host 60.4ms/467MB, gondolind 487ms/185MB, qemu-system-aarch64 1437ms/473MB, gondolind 0.00ms/6.03MB) |

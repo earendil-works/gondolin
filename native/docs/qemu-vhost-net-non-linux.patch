@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gondolin maintainers <FILL-IN-SENDER>
+Subject: [PATCH] vhost_net: build without linux-headers on non-Linux hosts
+
+hw/net/vhost_net.c includes "linux-headers/linux/vhost.h", whose own
+system includes (<linux/types.h>, <linux/vhost_types.h>, ...) only resolve
+on Linux hosts: meson adds linux-headers/ to the include path only there.
+vhost-user is a portable feature, though (it can be enabled with
+--enable-vhost-user on macOS and the BSDs, and memory-backend-shm provides
+the shared guest RAM), and enabling it also enables vhost-net for
+vhost-user-net, so the build fails in hw/net/vhost_net.c:
+
+  linux-headers/linux/vhost.h:...: fatal error: 'linux/vhost_types.h' file not found
+
+The only definition vhost_net.c needs from that header is
+VHOST_FILE_UNBIND, used with the vhost-kernel (tap) backend, which is
+Linux-only.  Include the header on Linux only and provide the constant
+elsewhere.
+
+With this, "./configure --enable-vhost-user" builds on macOS (tested with
+10.2.1 on macOS 26 / arm64 with HVF; the patch also applies to master,
+11.1.50) and vhost-user-fs-pci works against a vhost-user-fs backend with
+-object memory-backend-shm,share=on.  Previously --disable-vhost-net
+(and --disable-vhost-crypto) were needed as a workaround.
+
+Signed-off-by: FILL-IN-SENDER
+---
+ hw/net/vhost_net.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/hw/net/vhost_net.c b/hw/net/vhost_net.c
+--- a/hw/net/vhost_net.c
++++ b/hw/net/vhost_net.c
+@@ -33,7 +33,16 @@
+ #include "standard-headers/linux/virtio_ring.h"
+ #include "hw/virtio/vhost.h"
+ #include "hw/virtio/virtio-bus.h"
++#ifdef CONFIG_LINUX
+ #include "linux-headers/linux/vhost.h"
++#else
++/*
++ * linux-headers/ is only on the include path on Linux hosts; vhost-user
++ * (e.g. vhost-user-net) also builds elsewhere. The value matches
++ * linux/vhost.h and is only used with the vhost-kernel (tap) backend.
++ */
++#define VHOST_FILE_UNBIND -1
++#endif
+ 
+ void vhost_net_get_features_ex(struct vhost_net *net, uint64_t *features)
+ {
+-- 
+2.x

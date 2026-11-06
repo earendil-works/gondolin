@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +42,8 @@ export type WorkloadResult = {
   error?: string;
   /** total wall time spent on the workload including warmups in `ms` */
   totalMs: number;
+  /** host 1-minute load average when the workload started */
+  loadAvg?: number;
 };
 
 export function computeStats(samples: number[]): Stats {
@@ -95,7 +98,7 @@ export type RunOptions = {
   quick: boolean;
   /** iteration override (`--iterations`) */
   iterations?: number;
-  /** substring filter on workload names */
+  /** regex filter on workload names */
   filter?: string;
   log: (line: string) => void;
 };
@@ -107,6 +110,11 @@ export class Bench {
   readonly options: RunOptions;
   constructor(options: RunOptions) {
     this.options = options;
+  }
+
+  /** Whether a workload name passes `--filter` (suites use it to skip setup) */
+  matches(name: string): boolean {
+    return !this.options.filter || new RegExp(this.options.filter).test(name);
   }
 
   /** Scale a full-run value down for `--quick` */
@@ -130,8 +138,8 @@ export class Bench {
   }
 
   async run(spec: WorkloadSpec): Promise<WorkloadResult | null> {
-    const { filter, log } = this.options;
-    if (filter && !spec.name.includes(filter)) return null;
+    const { log } = this.options;
+    if (!this.matches(spec.name)) return null;
     const warmup = this.options.quick
       ? Math.min(spec.warmup ?? 1, 1)
       : (spec.warmup ?? 1);
@@ -147,6 +155,7 @@ export class Bench {
       iterations,
       metrics: {},
       totalMs: 0,
+      loadAvg: Math.round(os.loadavg()[0] * 100) / 100,
     };
     const samples: Record<string, number[]> = {};
     const controller = new AbortController();

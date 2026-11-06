@@ -49,20 +49,27 @@ file operations) out of JavaScript.
 
 - `VMOptions.engine?: "node" | "native"`; default from `GONDOLIN_ENGINE`, else
   `"node"`.
-- Binary resolution (`host/src/native/binary.ts`): `GONDOLIN_NATIVE_BIN`, else in a
-  dev checkout the newer of `native/target/{release,debug}/gondolind` (by mtime,
-  so a stale release build never shadows a fresh debug build), else the
-  optional dependency `@earendil-works/gondolin-native-<platform>-<arch>`
-  (darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static
+- Binary resolution (`host/src/native/binary.ts`): the packages ship one
+  multi-call binary, `gondolin` (static CLI; `gondolin daemon` or argv[0]
+  `gondolind*` is the daemon); `nativeDaemonArgs(path)` gives the arguments
+  for a path (`["daemon"]` unless it is named `gondolind`). Order:
+  `GONDOLIN_NATIVE_BIN` (either name), else in a dev checkout the newest of
+  `native/target/{release,debug}/{gondolin,gondolind}` (by mtime, so a stale
+  build never shadows a fresh one), else the optional dependency
+  `@earendil-works/gondolin-native-<platform>-<arch>` (`bin/gondolin`;
+  darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static
   musl). Packages are built by `make native-release` and staged with
-  `scripts/prepare-native-package.mjs`.
+  `scripts/prepare-native-package.mjs`; release builds use fat LTO (12%
+  smaller than thin at the same throughput; `opt-level = "s"` would save
+  another 25% but costs ~20% HTTPS throughput).
 - Remote hosts (pi-env): `getNativeBinaryPath({ platform, arch })` finds a
   binary for another platform without network (checkout
   `native/target/dist/<rust-target>/`, installed package, download cache);
   `ensureNativeBinary({ platform, arch })` additionally fetches the platform
   package from the npm registry (integrity-checked) into
   `~/.cache/gondolin/native/<version>/<platform>-<arch>/`, since package
-  managers only install the host's optional dependency.
+  managers only install the host's optional dependency. Both return
+  `{ path, args }` (the daemon command), so a remote machine needs one file.
 - `host/src/native/` contains the native engine client:
   - `server.ts`: `NativeSandboxServer`, implementing the surface `VM` uses from
     `SandboxServer` (`start`, `close`, `connect`, `getState`, `openTcpStream`,
@@ -141,7 +148,11 @@ CLI against real VMs on whichever engine is selected (part of
 ### Flipping the default engine
 
 The default is `DEFAULT_SANDBOX_ENGINE` in `host/src/native/config.ts`
-(`GONDOLIN_ENGINE`/`VMOptions.engine` override it). `pnpm test:both`
+(`GONDOLIN_ENGINE`/`VMOptions.engine` override it). It is now `"auto"`:
+native when `resolveNativeBinary()` finds a binary and `gondolind --version`
+runs, else node (a broken binary falls back with a `GONDOLIN_DEBUG` log line);
+`GONDOLIN_ENGINE=node` restores the old default. The notes below were written
+before the flip. `pnpm test:both`
 (`scripts/test-both.sh`) runs the whole host suite on both engines; at the
 time of writing both pass 701/712 with the same 11 skips. What still differs
 or needs a decision before the flip:
@@ -256,17 +267,52 @@ Interim modes (until the native subsystems land; local sessions only):
   Fallback only (`GONDOLIN_NATIVE_NET=external`, or a custom `fetch` option):
   the default is `net: { mode: "native", ... }` (see "Network").
 
+### Panics
+
+Release builds unwind (`panic = "unwind"`); `gondolind/src/panics.rs` decides
+what a panic costs:
+
+- **contained, per flow:** a panicking guest TCP flow handler (egress, SSH
+  proxy, mapped TCP) resets that connection (`NetTcpStream`'s drop aborts the
+  socket while unwinding, `spawn_flows` also aborts via `FlowControl`); the
+  flow table entry and the activity counters are released by the normal drop
+  path, other flows are unaffected;
+- **contained, per request, with an error reply:** guest channel frame
+  handlers (the channel is reset), sandboxfs requests (`EIO`), controller
+  message handlers (`<t>_result` with `internal_error`), body pulls, forwarder
+  streams (`fwd_close`), image resolution, checkpoint export;
+- **fail closed:** the session task (single owner of exec/file/VM state) and
+  the network stack driver: kill the VMM, send `exit { error }` and an
+  `error`, exit the daemon (status 70).
+
+The panic hook logs every panic to stderr and as `log { component: "error" }`.
+Debug builds with `GONDOLIND_TEST_PANICS=1` inject panics for tests (a guest
+flow to port 9, a sandboxfs lookup of `gondolind-test-panic`, an exec of
+`gondolind-test-panic`; `hello.features` then lists `test_panics`). Unwinding
+costs about 1.6 MB of binary size (7.5 → 9.1 MB on aarch64-apple-darwin).
+
 ### Seams between crates
 
 These traits are the integration points; they live in each crate's `lib.rs`.
 Changing them requires updating every implementor (coordinate through PLAN.md).
 
 - `gondolin-vfs`:
-  - `VfsService::new(mounts: MountTable, backend: Arc<dyn ObjectBackend>, events: EventSink)`
-    and `VfsService::serve(stream)` serving the guest's `virtio-fs` port.
-  - `ObjectBackend`: async whole-file operations implemented by `gondolind` by
-    forwarding to the controller (`vfs_call`).
-  - `VfsService::controller_call(op)`: the controller fs API on native mounts.
+  - `VfsService::new(config: &VfsConfig, backend: Arc<dyn ObjectBackend>, events: EventSink)`
+    builds the mount table of `configure.vfs`; `VfsService::request(op, req)`
+    answers one sandboxfs request (gondolind's `VfsBackend` seam: core owns the
+    port, framing and the `mounts` op); `VfsService::serve(stream)` serves a
+    whole stream (tests, embedders).
+  - `ObjectBackend { call(VfsCall) -> VfsCallResult; before_hook(HookContext) }`:
+    object-tier operations and blocking `before` hooks, implemented by
+    `gondolind` by forwarding to the controller (`vfs_call`, `vfs_hook`).
+  - `EventSink`: bounded, non-blocking `vfs_event` queue (full → dropped and
+    counted).
+  - `VfsService::controller_call(FsCall)` (`fs_call`) and
+    `VfsService::invalidate(mount_id, path)` (`vfs_invalidate`).
+  - Internally every mount is a path-based `Provider` (`provider.rs`) routed by
+    `MountRouter`; the RPC layer (`rpc.rs`) owns inodes and handles. That
+    split is also what a virtio-fs backend (`gondolin-virtiofs`'s inode-level
+    `FileSystem` trait) would sit on.
 - `gondolin-netstack`:
   - `NetStack::new(config: NetConfig, flows: Arc<dyn FlowHandler>) -> Result`
     (fails fast in `trusted` DNS mode without IPv4 resolvers) and
@@ -298,6 +344,16 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
     `execPolicy` / `hostVerifier`, only for hooks the config declares
     (`exec_policy_hook`, `host_verifier_hook`); gondolind forwards them as
     `ssh_hook_call` → `ssh_hook_call_result`.
+  - Flow control: each exec bridges a guest-facing russh server channel to an
+    upstream russh client channel. Both sessions advertise SSH window only as
+    the bridge consumes data (`window_on_consume`, a patch in our vendored
+    russh, `vendor/russh/GONDOLIN-PATCHES.md`), so a direction blocked on its
+    far end stops its sender through the SSH window while both connections
+    keep being read; stock russh grants window on receipt and backpressures by
+    no longer reading the connection, which deadlocked a channel saturated in
+    both directions. Under each session a write pump (`pump.rs`) keeps the
+    session loop reading while its writes drain, since russh stops reading
+    while it writes and two russh peers otherwise block each other in `write`.
 
 ## Guest images (`gondolin-assets`)
 
@@ -365,8 +421,11 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
   backpressure). Porting it would mean building a real TCP anyway to get
   bounded memory plus throughput. smoltcp is a mature, allocation-controlled,
   sans-IO TCP with the features we need, and the same approach is used by other
-  VM sandboxes. Costs: per poll it walks all sockets (fine for the hundreds of
-  flows a sandbox has), and we don't get SACK-based recovery (irrelevant on a
+  VM sandboxes. smoltcp walks all sockets of a `SocketSet` per packet and per
+  poll, so each connection sits alone in its own set: guest packets are routed
+  by 4-tuple and a poll only touches connections with packets, stream activity
+  or a due timer (with 900 idle connections the shared-set version spent half
+  its CPU scanning sockets). We don't get SACK-based recovery (irrelevant on a
   lossless virtual link). Measured with a smoltcp guest over an in-memory pipe
   (release, one flow, both stacks in one process): ~1.4 GB/s guest→host,
   ~1 GB/s host→guest (`cargo test --release -p gondolin-netstack --test tcp --
@@ -376,11 +435,18 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
   (curl), 0 guest retransmissions, ~10 MiB RSS; the same harness on the node
   engine's `NetworkStack` gave 169 MB/s upload, 349 MB/s download. Both are
   QEMU-bound at that point; the native stack uses a fraction of a core.
+- **Read coalescing**: guest data reaches the flow's stream at a PSH (Linux sets
+  it at the end of every write and every half window), FIN or RST, or once 64
+  KiB are buffered; without any, after `READ_HOLD` (1 ms). This turns the
+  per-QEMU-read (a few segments) wakeups and upstream writes of an upload into
+  per-write ones; request/response traffic is pushed and never waits.
 - **Backpressure**: guest→host data waits in the flow's receive buffer until the
   `FlowHandler` reads it; a full buffer closes the advertised window, so the
   guest stops. Host→guest writes return `Pending` while the flow's send buffer
   is full (drained as the guest ACKs). Frames to QEMU go through one queue: TCP
-  stops emitting segments above `limits.tx_queue_soft_bytes`, other frames are
+  connections are not polled for sending above `limits.tx_queue_soft_bytes`
+  (the device never refuses a frame: smoltcp forgets a fast retransmit whose
+  emission fails), other frames are
   dropped above `limits.tx_queue_max_bytes`, and the stack stops reading from
   QEMU while the queue is above the hard cap (a guest that floods without
   receiving throttles itself). There is no separate "pause QEMU rx" knob for the
@@ -408,7 +474,11 @@ that connection are aborted); accept again if QEMU reconnects.
 Transport: the daemon's stdin/stdout (or later a unix socket in daemon mode).
 stderr is free-form diagnostics. Frames are `u32` big-endian length followed by
 one CBOR map, the same framing as the guest protocols (`guest/ARCHITECTURE.md`
-§3.2). Maximum frame: 4 MiB; larger payloads are chunked.
+§3.2). Maximum frame: 4 MiB; larger payloads are chunked. When stdin/stdout
+are sockets or pipes (always, when spawned by the SDK or over SSH) the daemon
+drives them non-blocking on its reactor rather than through tokio's blocking
+stdio threads, and the writer sends queued frames in batches of up to 256 KiB
+per write.
 
 Envelope: `{ v: 1, t: <type>, id?: <u64>, p: <payload map> }`.
 - Requests carry `id`; the response uses the same `id` and type `<type>_result`
@@ -481,7 +551,11 @@ their ids until they finish). Daemon → controller: `client_status { client,
 state }`, `client_error { client, id?, code, message }`, `client_closed {
 client }`, `exec_output { client, id, stream, data }`, `exec_response { client,
 id, exit_code, signal? }`; global `status` is broadcast to all clients by the
-SDK.
+SDK. Guest output frames (at most 8 KiB each) that arrive back to back for the
+same exec and stream are coalesced into one `exec_output` of up to 64 KiB; the
+batch is sent at the end of the event round or before any other message is
+handled, so ordering against `exec_response`, errors and window updates is
+unchanged.
 
 ### MITM CA
 
@@ -522,35 +596,80 @@ While the guest channel is full, the daemon stops reading controller messages
 
 ### VFS
 
-Mount table (`configure.vfs.mounts`): list of
-`{ path, kind, readonly, ... }` with kinds:
-- `host { root, hide: [glob], deny_symlink_escape: true }`: passthrough to a
-  directory on the daemon's machine. Hardened: no resolution outside `root`
-  (Linux `openat2(RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS)`, elsewhere a
-  component-wise `O_NOFOLLOW` walk), setuid/setgid dropped on chmod, hidden paths
-  behave as `ENOENT` (`ShadowProvider` semantics, `writeMode` deny or
-  `tmpfs` upper layer).
-- `memory { }`: in-daemon memory filesystem.
-- `static { files: { path: bytes } }`: read-only synthetic files (MITM CA etc.).
-- `object { mount_id, enumerable, writable, cache: { ttl_ms, max_bytes } }`:
-  whole-file provider in the controller.
+Schema: `gondolin-proto/src/vfs.rs`. `configure.vfs` is dispatched on `mode`:
+`controller` (interim: every sandboxfs request is forwarded as `vfs_rpc` to the
+node engine's `FsRpcService`; `GONDOLIN_NATIVE_VFS=controller` selects it) or
+`native` (`VfsConfig`, the default for the native engine):
+`{ mode: "native", fuse_mount, binds, mounts: [...], hooks: { before?, events? } }`.
 
-Object tier (d→c requests): `vfs_call { mount_id, op, path, ... }` with ops
-`stat`, `readdir`, `read_file`, `write_file { data }`, `unlink`, `rename`,
-`mkdir`, `rmdir`, `truncate`; results carry stats/entries/bytes or an errno
-name. The daemon serves all per-op FUSE semantics (inodes, handles, offsets,
-partial I/O, attribute cache) from its cache, fetches a file on first open,
-commits the whole file on `flush`/`fsync`/`release` of a dirty handle and
-returns a commit failure as the error of the guest's `close()`/`fsync()`.
-Controller pushes `vfs_invalidate { mount_id, path? }`. Large files are
-streamed as several `read_file` chunks (`offset`, `length`).
+Mounts are `{ path, kind, ..., layers?, readonly? }` routed by longest prefix
+(paths above mount points are synthetic read-only directories, cross-mount
+rename/link is `EXDEV`). Kinds:
+- `host { root }`: passthrough to a directory on the daemon's machine.
+  Hardened: every path is resolved from a directory fd of the root, never
+  outside it (Linux `openat2(RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS)` for the
+  parent, falling back to the walk; elsewhere a component-wise walk opening each
+  directory `O_NOFOLLOW` and resolving symlinks itself, mapping absolute targets
+  inside the root back into it); the final component is operated on with `*at`
+  calls relative to the parent fd. Directory fds of symlink-free paths are
+  cached (1 s TTL, 256 per mount, LRU, dropped on rename/rmdir through the
+  provider), so most operations start below the root. Symlink policy of
+  `RealFSProvider`
+  (follow-style ops fail `ENOENT` for escaping or dangling links;
+  lstat/readlink/unlink/rmdir/rename act on the link); setuid/setgid dropped
+  on chmod.
+- `memory {}`: in-daemon memory filesystem (`MemoryProvider` semantics).
+- `static { files: { path: bytes } }`: read-only synthetic files (MITM CA).
+- `object { mount_id, writable, enumeration: list|materialized|none,
+  commit: close|write, cache: { ttl_ms, max_bytes }, max_file_bytes? }`:
+  provider in the controller.
 
-Events: `vfs_event { op, path, result }` (d→c, async, only when the controller
-asked for them) replace blocking before/after hooks.
+`layers` wrap the source, innermost first: `{ kind: "readonly" }` and
+`{ kind: "hide", paths, write_mode: deny|tmpfs, deny_write_errno?,
+deny_symlink_bypass }` (`ShadowProvider` with `createShadowPathPredicate`
+semantics: a path hides itself and everything below; reads `ENOENT`, listings
+omit, writes denied or kept in a memory upper layer). `readonly: true` adds an
+outermost read-only layer.
 
-Controller fs API (c→d): `fs_call { op, path, ... }` against the daemon's mount
-table, so the controller can read and write native mounts (memory, host) without
-going through the guest.
+Object tier (d→c requests): `vfs_call { mount_id, op, ... }` with ops `stat`,
+`readdir`, `read_file { offset, length }`, `write_file { data, offset, last,
+mode? }` (whole file in ≤ 1 MiB chunks, committed by the chunk with `last`),
+`write { offset, data }`, `truncate`, `unlink`, `rename`, `mkdir`, `rmdir`,
+`chmod`, `symlink`, `readlink`, `link`; results `{ ok: true, stat?, entries?,
+data?, target? }` or `{ ok: false, code: <errno name>, message }`. The daemon
+serves all per-op FUSE semantics (inodes, handles, offsets, partial I/O,
+attributes) from its cache: stats, negative lookups and listings live for
+`ttl_ms` (0 = revalidate on every lookup/open), contents are fetched lazily in
+1 MiB `read_file` chunks and kept while open (clean contents of closed files up
+to `max_bytes`). `commit: write` forwards every write/truncate before the guest
+gets its reply; `commit: close` keeps writes local and commits the whole file
+when a dirty handle is released (also on `fs_call` close and at shutdown).
+**Limitation (sandboxfs only):** sandboxfs does not forward `FLUSH`/`FSYNC`
+and the kernel does not wait for `RELEASE`, so a commit failure cannot reach
+the guest's `close()`/`fsync()`; it is the result of the release (logged,
+emitted as the `release` event's error) and the data stays dirty for the next
+writer's release. Over virtio-fs FLUSH and FSYNC commit and return the error. Controller
+pushes `vfs_invalidate { mount_id, path? }` (answered by
+`vfs_invalidate_result`).
+
+Hooks: when `hooks.before` is set the daemon sends a blocking
+`vfs_hook { op, path?, old_path?, new_path?, flags?, mode?, offset?, length?,
+size? }` before each hooked operation (the ops and contexts of the node
+engine's `SandboxVfsProvider`; `flags` as node strings) and fails the operation
+with the returned errno. With `hooks.events` it sends `vfs_event` (same fields
+plus `error?`, `bytes?`) after it, asynchronously through a bounded queue.
+Neither is sent when the controller registered no hooks.
+
+Readdir offsets are indices into a listing snapshot; continuations keep their
+snapshot across mutations and skip removed names, so `rm -rf` works while
+deleting (the node engine had the same bug and the same fix).
+
+Controller fs API (c→d): `fs_call { op, ... }` (`stat { follow }`, `readdir`,
+`access`, `mkdir`, `rmdir`, `unlink`, `rename`, `chmod`, `truncate`,
+`readlink`, `symlink`, `realpath`, `open { flags }` → `fh`, `read`, `write`,
+`close`) against the daemon's mount table, with the same hooks; `vm.fs` uses it
+for mounts only the daemon has (native memory, remote host paths, object
+providers with a cache) and the JS providers directly otherwise.
 
 ### Network
 
@@ -622,7 +741,13 @@ Bodies are pulled lazily in both directions with `body_pull { stream, max,
 offset? }` → `body_pull_result { stream, data, eof }`; `body_release { stream }`
 ends a stream early (for daemon streams only a hint: they live until the hook
 call returns). Daemon streams accept `offset`, so `clone()`d WHATWG objects on
-the controller read independently instead of teeing (no second buffered copy). The daemon retains the chunks a hook pulled (bounded by the body
+the controller read independently instead of teeing (no second buffered copy).
+To save round trips, `hook_call` heads carry up to 64 KiB of the body inline
+(`body_prefix`, `body_complete`: read ahead when Content-Length says it fits,
+otherwise what already arrived), `body_pull_result` reports `eof` with the last
+chunk, and the controller sends no `body_release` for daemon streams. While the
+`on_request` round trip runs, the daemon already resolves the request host if
+the declarative allowlist admits it (used only if the hook keeps the host). The daemon retains the chunks a hook pulled (bounded by the body
 limit), so a decision that keeps the `original` body replays them and forwards
 the rest natively; a body that is never pulled is never buffered or sent.
 
@@ -639,6 +764,36 @@ Rust seam: `Egress::new(NetConfig, Arc<dyn HookBackend>)` (or `with_resolver`
 for tests) implements `FlowHandler`; `Egress::update_policy(NetPolicy)`.
 `HookBackend` methods take plain heads and `BodyHandle`s and return
 `RequestDecision`/`ResponseDecision`; `registrations()` is read per request.
+
+## Static CLI (`gondolin-cli`)
+
+`crates/gondolin-cli` builds `gondolin`, the CLI without Node.js (user docs:
+`docs/cli.md`, "Static CLI"). It is an in-process controller:
+`gondolind::embed::Embedded` runs the session task in the CLI's runtime;
+controller messages are `RawEnvelope`s handed to `Dispatcher::dispatch` and
+daemon messages are taken with `Controller::next_frame` (no process, no pipe,
+the same protocol as the TypeScript controller). Modules:
+
+- `args`: the flag parsers of `host/bin/gondolin.ts` (same errors).
+- `configure`: the `configure` payload for the CLI options, the counterpart
+  of `VM.create()` + `NativeSandboxServer.buildConfigure()` (image resolution
+  with `gondolin-assets`, root disk via `rootdisk::prepare`, mount table
+  incl. the MITM CA `static` mount and the `/etc/gondolin` object mount,
+  network via `gondolin_egress::cli_policy`). Both CLIs print it with
+  `--print-configure`; `host/test/cli-configure-parity.test.ts` compares them.
+- `engine`: request correlation, client/exec event routing, `fwd_*` streams,
+  daemon→controller requests (`vfs_call` for `/etc/gondolin`, served by
+  `etc_mount` from memory).
+- `vm`, `session`: boot and readiness (`ensureRunning`, rootfs resize, mount
+  checks), clients and execs with output windows and stdin acks, checkpoints
+  (`checkpoint`, node's qcow2 + trailer format), registry entry and IPC
+  socket (`registry`, the `SessionIpcServer` protocol with id remapping).
+- `ssh`, `ingress`, `fwd`: `--ssh` and `--listen` over the `ssh`/`ingress`
+  forwarder channels (hyper for the gateway, WebSocket upgrades tunneled).
+- `commands`: `bash`, `exec`, `list`, `attach`, `snapshot`, `image`.
+
+The binary is multi-call: as `gondolind*`, `gondolin daemon` or
+`gondolin --vmm-watchdog` it runs `gondolind::main_with_args`.
 
 ## Hook tiers
 
@@ -657,22 +812,41 @@ for tests) implements `FlowHandler`; `Egress::update_policy(NetPolicy)`.
 2. **Object**: whole-file providers in the controller with a native cache.
 
 Translation of existing providers (`host/src/native/vfs.ts`):
-- `RealFSProvider(dir)` → `host`; `ReadonlyProvider(x)` → `x` + readonly;
+- `RealFSProvider(dir)` → `host` (object tier when the daemon is remote);
+  `ReadonlyProvider(x)` → `x` + readonly layer;
   `ShadowProvider(x, { shouldShadow: createShadowPathPredicate(paths) })` →
-  `x` + hide rules (the predicate carries its paths via a hidden symbol);
-  internal default `MemoryProvider`s that the user never sees → `memory`.
+  `x` + hide layer (the predicate carries its paths via a hidden symbol; custom
+  predicates or a custom `tmpfs` make the whole provider an object mount);
+  the MITM CA provider → `static` (remote: the daemon's CA via `mitm_ca`).
 - User-visible `MemoryProvider` instances and every other provider → `object`
-  through an adapter that maps whole-file ops onto `VirtualProvider`, so the JS
-  object stays the source of truth (elwing's host-side tools read the same
-  provider instances).
-- New exports: `ObjectProvider` (the whole-file interface; elwing's
-  `nativeProvider.ts` ops shape) and native mount descriptors
-  (`nativeMounts.memory()`, `nativeMounts.host(dir, { readonly, hide })`) for
-  callers that want native speed and use `vm.fs`/`fs_call` for host access.
+  (`commit: write`, `ttl_ms: 0`) through an adapter onto the `VirtualProvider`,
+  so the JS object stays the source of truth with node-engine consistency.
+  `/etc/gondolin` is an object mount with a 64 KiB file limit that reloads the
+  ingress listeners when `/listeners` changes.
+- New exports: `ObjectProvider` (whole-file interface; elwing's
+  `nativeProvider.ts` shape) with `createObjectMount(provider, options)` /
+  `nativeMounts.object(...)` (`ObjectVirtualProvider` serves it on the node
+  engine), `nativeMounts.memory()` and `nativeMounts.host(dir, { readonly,
+  hide })` (a daemon-side path, also for remote daemons).
 
-The guest transport is the existing sandboxfs RPC first. virtio-fs
-(vhost-user-fs backend in `gondolind`) is a later milestone, decided by the
-benchmarks (on macOS it depends on QEMU's vhost-user support there).
+Guest transports (`configure.vfs.transport`: `auto`, `sandboxfs`, `virtiofs`;
+`GONDOLIN_VIRTIOFS=0|1` on the controller):
+- **virtio-fs** (QEMU only, chosen when the binary offers `vhost-user-fs-pci`
+  / `vhost-user-fs-device` and a shared RAM backend; probed once per binary
+  with `-device help`/`-object help`, cached in memory and in
+  `<cache>/gondolin/qemu-virtiofs.json`): guest RAM moves to
+  `memory-backend-memfd` (Linux) or `memory-backend-shm` (macOS),
+  `gondolind` serves the vhost-user socket (`gondolin-virtiofs`: vhost-user,
+  split virtqueues, FUSE dispatch; one thread per queue, one high-priority and
+  up to four request queues) with `gondolin-vfs`'s `FsCore` behind the
+  `FileSystem` trait (`virtiofs.rs`; operations are driven on the tokio
+  runtime with `block_on`, host reads go straight into guest memory with
+  `preadv`). The kernel command line gets `sandboxfs.virtiofs=gondolin`; the
+  guest's `sandboxfs --virtiofs` fetches the bind list over the RPC port, mounts
+  the tag and exits. FLUSH and FSYNC reach the backend, so object-tier commit
+  errors become the guest's `close()`/`fsync()` errors. Directory handles
+  keep a listing snapshot; FORGET drops inodes.
+- **sandboxfs RPC** (fallback, krun, old images): unchanged.
 
 ## Benchmarks
 

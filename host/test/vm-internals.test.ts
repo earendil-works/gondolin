@@ -511,6 +511,9 @@ test("vm internals: startup timeout cleanup tears down without closing the vm", 
   let closeInternalCalls = 0;
   const originalCloseInternal = (vm as any).closeInternal.bind(vm);
 
+  // keep the 10 ms budget about the stubbed readiness wait (the native
+  // engine spawns its daemon in server.start(), which is slow under load)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
@@ -868,7 +871,7 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
     assert.deepEqual(sent[1], {
       type: "stdin",
       id: 1,
-      data: Buffer.from("hi").toString("base64"),
+      data: Buffer.from("hi"),
     });
     assert.deepEqual(sent[2], { type: "stdin", id: 1, eof: true });
   } finally {

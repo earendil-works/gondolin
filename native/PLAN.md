@@ -29,22 +29,30 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Host suite on the native engine: 696/698 (same as node) after M4 work; was 672/684, failures are SSH/ingress
       (M4); interim VFS = controller `FsRpcService` over `vfs_rpc`, interim
       network = node `QemuNetworkBackend` on an external socket
-- [ ] Benchmarks: boot, exec latency/throughput, both engines
+- [x] Benchmarks: boot and exec latency on par with node
+- [x] Exec throughput: non-blocking stdio, batched writes, 64 KiB output
+      coalescing, fast-path CBOR in TS, raw-byte stdin (both engines); native
+      on par with node, daemon CPU ÷3 (stdout) / ÷2 (stdin); stdin 65 → 105 MB/s
 
-## M2: VFS — vfs: crate in progress, then native mode replacing the interim `vfs_rpc` proxy
+## M2: VFS — done (merged)
 
-- [ ] `gondolin-vfs`: sandboxfs RPC host side (spec §6), mount routing, binds
-- [ ] Native providers: `host` (hardened passthrough, hide rules, readonly,
-      tmpfs upper), `memory`, `static`
-- [ ] Object tier: cache, fetch on open, commit on flush/fsync/release, errors at
-      close, invalidation, chunked large files
-- [ ] `vfs_event` stream, controller `fs_call` API, `vm.fs` on native mounts
-- [ ] TS: provider translation, `ObjectProvider` + adapter for `VirtualProvider`,
-      native mount descriptors
-- [ ] VFS host tests pass with the native engine
-- [ ] Benchmarks: metadata ops, small files, large files per mount kind
+- [x] `gondolin-vfs`: sandboxfs RPC host side, mount routing, binds
+- [x] Native providers: hardened `host` (openat2 on Linux, fd walk elsewhere),
+      hide/readonly layers incl. tmpfs upper, `memory`, `static`
+- [x] Object tier: cache with TTL/revalidation, chunked reads/writes, commit on
+      close/write; adapter keeps JS providers the source of truth
+- [x] Blocking `before` hooks only when registered, async bounded events,
+      `fs_call` handle API, `vfs_invalidate`
+- [x] TS translation (RealFS/Readonly/Shadow → native, others → object; remote
+      → object for controller-local providers), `ObjectProvider`,
+      `createObjectMount`, `nativeMounts`
+- [x] Full host suite on both engines: 748 tests, 0 failures
+- [ ] Commit errors cannot surface at `close()`/`fsync()` over sandboxfs (no
+      FLUSH/FSYNC forwarded); fixed by virtio-fs (M7)
+- [ ] Benchmarks on a quiet machine (object tier vs node for user-visible
+      `MemoryProvider` is expected to be slower on small-file metadata)
 
-## M3: network — done (merged); throughput tuning in progress (netstack)
+## M3: network — done (merged)
 
 - [x] `gondolin-netstack` (smoltcp TCP, ~1.5/1.0 GB/s in-process): Ethernet/ARP/DHCP/IPv4/ICMP echo, TCP (flows as
       streams with backpressure), UDP-DNS (synthetic/trusted/open, per-host
@@ -59,8 +67,14 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       reconstruction; `createHttpHooks()` compiles to policy
 - [x] Network host tests pass with the native engine (723/723 both engines;
       remote: native net default, daemon CA, known_hosts as content)
-- [ ] Benchmarks: HTTP/HTTPS latency + throughput, hook round trip (first
-      look: native ~100 MB/s vs node 217/183 MB/s download — being fixed)
+- [x] Perf: per-flow smoltcp socket sets, PSH/64 KiB coalescing, 2 s DNS
+      cache; interleaved same-minute runs: native ahead on every net workload
+      (e.g. HTTP 64 MiB down/up 243–260/264–273 vs node 132–176/91 MB/s)
+- [x] Hook latency: small bodies inline with `hook_call`, DNS overlapped with
+      onRequest; body-reading hook 1.9–2.0 ms vs node 2.1–2.3 ms (loaded
+      machine; confirm on the quiet A/B)
+- [x] sshproxy deadlocks: write pump per transport; vendored russh 0.65.1 with
+      opt-in window-on-consume patch (`native/vendor/russh/GONDOLIN-PATCHES.md`)
 
 ## M4: remaining parity
 
@@ -74,7 +88,8 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] CLI on the native engine (`--engine`, `--native-command`, `--remote`),
       VM-level CLI tests on both engines
 - [x] `pnpm test:both`; `engine: "auto"`; `DEFAULT_SANDBOX_ENGINE` constant
-- [ ] Flip the default to `auto` (after native VFS + egress land and benchmarks)
+- [x] Default engine is `auto` (native when a working gondolind is found,
+      else node); `GONDOLIN_ENGINE=node` restores the old behaviour
 
 ## M5: remote and packaging
 
@@ -90,8 +105,25 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Platform npm packages `@earendil-works/gondolin-native-*` + release jobs
       (unpublished; confirm `macos-15-intel` runner label, npm scope setup)
 - [x] `getNativeBinaryPath` / `ensureNativeBinary` for remote platforms
-- [ ] pi-env integration: deploy `gondolind` with the daemon, start via
-      `openProcess`, SDK over that connection
+- [ ] pi-env integration — deferred by the owner
+- [x] Static `gondolin` CLI without Node (bash/exec/list/attach/snapshot/
+      image, `--listen`, `--ssh`) on an in-process Rust controller; session
+      registry and checkpoints compatible with the node CLI both ways;
+      `--print-configure` parity test (15 vectors); multi-call (`gondolin daemon`)
+- [x] One binary per platform package (multi-call `gondolin`, SDK starts
+      `gondolin daemon`); fat LTO: 10–12 MB static binaries, 5 MB tarballs
+- [ ] Dependency diet (251 runtime crates today; owner wants < 30) — awaiting
+      owner decision on scope (see conversation)
+- [x] Release readiness without releasing: actionlint-clean workflows,
+      retired `macos-14` replaced, image release uses source-built helpers
+      (virtio-fs), `scripts/release-dry-run.sh`, `RELEASING.md`
+- [x] macOS QEMU: upstream patch ready (`native/docs/qemu-vhost-net-non-linux.patch`)
+      + Homebrew formula change recommended (not sent)
+- [x] Linux tests in Docker (`make native-test-docker`): cargo arm64 + amd64,
+      TCG VMs through the native engine incl. virtio-fs/memfd/openat2/pdeathsig,
+      102/103 host test files on native
+- [ ] Linux with KVM (needs a nested-virt VM: Parallels 27 doesn't expose EL2
+      on arm64; Lima/vz with nestedVirtualization would)
 
 ## M6: djs hooks (tier 2)
 
@@ -104,15 +136,43 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       builtins B1–B3
 - [x] Profile byte passing and hook cost (ASCII/UTF-8 fast path found)
 
-## M7: faster guest filesystem transport
+## M7: faster guest filesystem transport — done (merged)
 
-- [x] Feasibility study (`native/docs/virtio-fs.md`): feasible; prototype
-      `gondolin-virtiofs` is 3–5× faster on metadata, 14–20× on large I/O
-      (macOS, needs a QEMU built with `--enable-vhost-user`)
-- [ ] Put `gondolin-vfs` behind the virtio-fs `FileSystem` trait; multi-queue,
-      zero-copy, handle-based inode table; QEMU + guest mount wiring with
-      sandboxfs fallback (probe `-device help`)
-- [ ] macOS: Homebrew/QEMU build fix or a shipped QEMU
+- [x] Feasibility study and prototype (`native/docs/virtio-fs.md`)
+- [x] `FsCore` inode layer shared by sandboxfs and virtio-fs; 4 request queues;
+      zero-copy reads into guest memory
+- [x] QEMU probe (cached), shm/memfd guest RAM, `vhost-user-fs` device; guest
+      `sandboxfs --virtiofs` with sandboxfs fallback; old images keep working
+- [x] FLUSH/FSYNC commit object-tier writes → errors at `close()`/`fsync()`
+- [x] Measured (loaded machine): metadata 1.8–4.4×, large I/O 10–14× vs sandboxfs
+- [x] Directory fd cache for host mounts (hardened, 1 s TTL, LRU 256);
+      FLUSH no longer fsyncs (creates 5.4 s → 0.66 s); one-copy writes;
+      object reads 3 MiB ranges + opt-in `inlineMaxBytes`
+- [ ] Released sandbox helpers with `--virtiofs` (needs a helper release)
+- [ ] macOS: a QEMU with vhost-user (Homebrew lacks it; build fix upstream)
+- [ ] virtio-fs on krun (libkrun has no pluggable backend)
+
+## Node engine retirement
+
+- [x] Step 1: `engine: "node"` deprecated (one-time warning), `fetch` narrowed
+      (no longer switches native egress to JS), interim fallbacks internal
+- [x] CI: `native` job (check, tests, release build) and `test-native` job
+      (full host suite on native + virtio-fs check + sandboxfs fallback run on
+      stock Ubuntu QEMU/KVM); node-engine job kept, marked deprecated
+- [ ] First CI run (not pushed yet): x86_64 `microvm` + virtio-fs never booted
+- [ ] Step 2 (after a release in the field): delete the node engine and the
+      fallback modes; `auto` = native or a clear error; drop test-both
+
+## Hardening
+
+- [x] cargo-fuzz targets for every guest-facing parser (`make native-fuzz`);
+      found and fixed a guest-triggerable panic (Basic auth slicing)
+- [x] Security review (`native/docs/security-review.md`); fixed decompression
+      bomb in controller-side hook decoding and `__proto__` in CBOR→JS
+- [x] Panic containment: unwind in release, flows reset, requests answer
+      errors, session/netstack-driver panics fail closed (+1.6 MB binary)
+- [x] IPv6 transition formats (NAT64, 6to4, Teredo, mapped) checked for
+      embedded internal IPv4 in both engines
 
 ## Node-engine issues found along the way (fixed)
 

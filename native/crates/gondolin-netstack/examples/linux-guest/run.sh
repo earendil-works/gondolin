@@ -27,7 +27,7 @@ case "$(uname -s)" in
 esac
 qemu-system-aarch64 -M virt,accel=$ACCEL -cpu host -m 1024 -smp 2 -nographic -no-reboot \
   -kernel "$IMG/vmlinuz-virt" -initrd "$WORK/initrd.cpio" \
-  -append "console=ttyAMA0 rdinit=/netinit quiet" \
+  -append "console=ttyAMA0 rdinit=/netinit quiet${GUEST_MTU:+ GUEST_MTU=$GUEST_MTU}" \
   -drive "file=$IMG/rootfs.ext4,format=raw,if=none,id=drive0,snapshot=on" \
   -device virtio-blk-pci,drive=drive0 \
   -netdev "stream,id=net0,server=off,addr.type=unix,addr.path=$WORK/net.sock" \

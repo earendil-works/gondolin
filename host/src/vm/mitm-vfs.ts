@@ -3,6 +3,7 @@ import type { VmVfsOptions } from "./types.ts";
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "../mitm.ts";
 import { listMountPaths } from "../vfs/mounts.ts";
 import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
+import { markNativeMount } from "../vfs/native-marks.ts";
 import { ReadonlyProvider } from "../vfs/readonly.ts";
 
 /** Hidden setter replacing the certificate of a {@link createMitmCaProvider} mount */
@@ -70,5 +71,15 @@ export function createMitmCaProvider(mitmCertDir?: string): VirtualProvider {
     value: write,
     enumerable: false,
   });
-  return provider;
+  // native engine: a static mount with the current certificate
+  return markNativeMount(provider, {
+    kind: "static",
+    get files() {
+      return {
+        [`/${MITM_CA_FILENAME}`]: Buffer.from(
+          memory.readFileSync!(`/${MITM_CA_FILENAME}`) as Buffer,
+        ),
+      };
+    },
+  });
 }

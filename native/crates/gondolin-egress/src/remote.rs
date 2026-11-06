@@ -33,6 +33,10 @@ use crate::hooks::{
 const CONTROLLER_PULL_BYTES: u64 = 256 * 1024;
 /// Max chunk served to one controller `body_pull` in `bytes`
 const MAX_SERVED_CHUNK: u64 = 1024 * 1024;
+/// Bodies up to this size in `bytes` are sent inline with `hook_call` (read
+/// ahead when their Content-Length says they fit, otherwise whatever already
+/// arrived), so a body-reading hook needs no `body_pull` round trip
+const INLINE_BODY_BYTES: usize = 64 * 1024;
 
 /// Requests to the controller (implemented by gondolind's transport).
 #[async_trait]
@@ -85,7 +89,12 @@ impl RemoteHooks {
         // the stream stays registered until the hook call ends (other readers)
         match result {
             Ok(Some(data)) => {
-                Ok(BodyChunk { stream: pull.stream, data: data.to_vec(), eof: false })
+                // report the end with the last chunk (saves a round trip)
+                let eof = match pull.offset {
+                    Some(offset) => handle.complete_at(offset + data.len() as u64).await,
+                    None => false,
+                };
+                Ok(BodyChunk { stream: pull.stream, data: data.to_vec(), eof })
             }
             Ok(None) => Ok(BodyChunk { stream: pull.stream, data: Vec::new(), eof: true }),
             Err(PullError::Limit(b)) => Err(b.message),
@@ -138,6 +147,21 @@ fn wire_request(head: &RequestHead, body: Option<u64>) -> WireRequestHead {
         url: head.url.clone(),
         headers: head.headers.clone(),
         body,
+        body_prefix: None,
+        body_complete: false,
+    }
+}
+
+/// Reads the start of `body` for inline transfer (see [`INLINE_BODY_BYTES`]).
+async fn inline_prefix(body: &BodyHandle, headers: &[(String, String)]) -> (Option<Vec<u8>>, bool) {
+    let small = crate::hooks::header_get(headers, "content-length")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|len| len <= INLINE_BODY_BYTES as u64);
+    match body.prefetch(INLINE_BODY_BYTES, small).await {
+        Ok((prefix, complete)) if !prefix.is_empty() || complete => {
+            (Some(prefix.to_vec()), complete)
+        }
+        _ => (None, false),
     }
 }
 
@@ -198,13 +222,16 @@ impl HookBackend for RemoteHooks {
         request: RequestHead,
         body: Option<BodyHandle>,
     ) -> Result<RequestDecision, HookError> {
-        let stream = body.map(|b| self.register_stream(b));
-        let call = HookCall {
-            phase: HookPhase::OnRequest,
-            request: Some(wire_request(&request, stream)),
-            response: None,
-            ip: None,
+        let (body_prefix, body_complete) = match &body {
+            Some(b) => inline_prefix(b, &request.headers).await,
+            None => (None, false),
         };
+        let stream = body.map(|b| self.register_stream(b));
+        let mut wire = wire_request(&request, stream);
+        wire.body_prefix = body_prefix;
+        wire.body_complete = body_complete;
+        let call =
+            HookCall { phase: HookPhase::OnRequest, request: Some(wire), response: None, ip: None };
         let result = self.call(call).await;
         self.drop_stream(stream);
         match result? {
@@ -226,6 +253,10 @@ impl HookBackend for RemoteHooks {
         body: Option<BodyHandle>,
         request: RequestHead,
     ) -> Result<ResponseDecision, HookError> {
+        let (body_prefix, body_complete) = match &body {
+            Some(b) => inline_prefix(b, &response.headers).await,
+            None => (None, false),
+        };
         let stream = body.map(|b| self.register_stream(b));
         let call = HookCall {
             phase: HookPhase::OnResponse,
@@ -235,6 +266,8 @@ impl HookBackend for RemoteHooks {
                 status_text: response.status_text.clone(),
                 headers: response.headers.clone(),
                 body: stream,
+                body_prefix,
+                body_complete,
             }),
             ip: None,
         };
@@ -368,7 +401,7 @@ mod tests {
                 method: "PUT".into(),
                 url: "http://a.test/x".into(),
                 headers: vec![],
-                body: None,
+                ..Default::default()
             },
             body: WireBody::Stream { stream: 9 },
         });
@@ -396,7 +429,11 @@ mod tests {
         impl ControllerLink for PullingLink {
             async fn hook_call(&self, call: HookCall) -> Result<HookDecision, String> {
                 let hooks = self.hooks.lock().unwrap().clone().unwrap();
-                let stream = call.request.unwrap().body.unwrap();
+                let request = call.request.unwrap();
+                // small bodies arrive inline and complete
+                assert_eq!(request.body_prefix.as_deref(), Some(&b"hello"[..]));
+                assert!(request.body_complete);
+                let stream = request.body.unwrap();
                 let mut data = Vec::new();
                 loop {
                     let chunk =

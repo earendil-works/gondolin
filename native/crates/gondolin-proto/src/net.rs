@@ -372,6 +372,12 @@ pub struct WireRequestHead {
     /// daemon body stream id (pull with `body_pull`); absent: no body
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<u64>,
+    /// first bytes of the body, sent inline (pull the rest from offset `len`)
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_bytes")]
+    pub body_prefix: Option<Vec<u8>>,
+    /// whether `body_prefix` is the whole body (no `body_pull` needed)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_complete: bool,
 }
 
 /// Response head as plain data.
@@ -384,6 +390,28 @@ pub struct WireResponseHead {
     /// daemon body stream id; absent: no body
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<u64>,
+    /// first bytes of the body, sent inline (pull the rest from offset `len`)
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_bytes")]
+    pub body_prefix: Option<Vec<u8>>,
+    /// whether `body_prefix` is the whole body (no `body_pull` needed)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_complete: bool,
+}
+
+/// `Option<Vec<u8>>` as an optional CBOR byte string.
+mod opt_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(bytes) => serde_bytes::serialize(bytes, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        Ok(Option::<serde_bytes::ByteBuf>::deserialize(d)?.map(serde_bytes::ByteBuf::into_vec))
+    }
 }
 
 /// Destination ip check info (`HttpIpAllowInfo`).
@@ -498,7 +526,9 @@ mod tests {
                 method: "GET".into(),
                 url: "https://example.com/".into(),
                 headers: vec![("a".into(), "b".into())],
-                body: None,
+                body: Some(3),
+                body_prefix: Some(b"pre".to_vec()),
+                body_complete: true,
             },
             body: WireBody::Bytes { data: b"hi".to_vec() },
         };

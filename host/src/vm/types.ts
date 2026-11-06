@@ -30,15 +30,15 @@ export type VmRootfsOptions = {
 export type VMOptions = {
   /** how to reach gondolind (native engine): local binary, a command, a connection, remote mode */
   native?: NativeEngineOptions;
-  /** host engine: in-process TypeScript (`node`) or the `gondolind` daemon (`native`); default `GONDOLIN_ENGINE`, else `node` */
-  engine?: "node" | "native";
+  /** host engine: the `gondolind` daemon (`native`), in-process TypeScript (`node`, deprecated) or `auto` (native when a working gondolind is available, else node); default `GONDOLIN_ENGINE`, else `auto` */
+  engine?: "node" | "native" | "auto";
   /** sandbox controller options */
   sandbox?: SandboxServerOptions;
   /** rootfs mode override */
   rootfs?: VmRootfsOptions;
   /** whether to boot the vm immediately (default: true) */
   autoStart?: boolean;
-  /** http fetch implementation for asset downloads */
+  /** http fetch implementation for asset downloads (the deprecated node engine also uses it for guest HTTP egress; the native engine does not) */
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;

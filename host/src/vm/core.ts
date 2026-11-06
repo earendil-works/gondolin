@@ -37,6 +37,7 @@ import {
 } from "../sandbox/control-protocol.ts";
 import { SandboxServer } from "../sandbox/server.ts";
 import { NativeSandboxServer } from "../native/server.ts";
+import { NativeFsClient, type NativeVfsSpec } from "../native/vfs.ts";
 import {
   type SandboxEngine,
   resolveNativeEngineOptions,
@@ -121,6 +122,8 @@ import { errorMessage } from "../utils/error.ts";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
+/** upper bound of one stdin message in `bytes` */
+const MAX_STDIN_CHUNK = 256 * 1024;
 const DEFAULT_VM_START_TIMEOUT_MS = 120000;
 const VM_START_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_START_TIMEOUT_MS",
@@ -473,6 +476,21 @@ export class VM {
     this.shortcutBindMounts = this.fuseBinds
       .filter((mountPath) => mountPath !== this.fuseMount)
       .sort((a, b) => b.length - a.length);
+    const nativeVfs: NativeVfsSpec | undefined =
+      this.engine === "native" && this.vfs
+        ? {
+            mounts: fuseMounts,
+            hooks: sandboxOptions.vfsProvider ? undefined : options.vfs?.hooks,
+            fuseMount: this.fuseMount,
+            fuseBinds: this.fuseBinds,
+            gondolinEtc: this.gondolinEtc
+              ? {
+                  provider: this.gondolinEtc.provider,
+                  listeners: this.gondolinEtc.listeners,
+                }
+              : undefined,
+          }
+        : undefined;
 
     if (options.fetch && sandboxOptions.fetch === undefined) {
       sandboxOptions.fetch = options.fetch;
@@ -596,6 +614,7 @@ export class VM {
         ? ("snapshot" as const)
         : undefined,
       native,
+      nativeVfs,
       setMitmCaCert: (certPem: string) => {
         for (const set of caSetters) set(certPem);
       },
@@ -632,7 +651,7 @@ export class VM {
       start: () => this.start(),
       exec: (command, fsOptions = {}) => this.exec(command, fsOptions),
       getServer: () => this.server,
-      vfs: this.vfs,
+      vfs: this.nativeFsView(),
       fuseMount: this.fuseMount,
       shortcutBindMounts: this.shortcutBindMounts,
     });
@@ -667,6 +686,20 @@ export class VM {
    *
    * If VFS is configured, this also waits for the VFS mount(s) to be ready.
    */
+  /** `vm.fs` provider: daemon-owned native mounts go through `fs_call` */
+  private nativeFsView(): SandboxVfsProvider | null {
+    const server = this.server;
+    const nativeVfs =
+      server instanceof NativeSandboxServer ? server.getNativeVfs() : null;
+    if (!nativeVfs || !this.vfs) return this.vfs;
+    return NativeFsClient.forVm(
+      nativeVfs,
+      this.vfs,
+      (p) => server!.fsCall(p) as Promise<any>,
+      () => this.start(),
+    ) as unknown as SandboxVfsProvider;
+  }
+
   async start() {
     return this.startSingleflight.run(() => this.startInternal());
   }
@@ -677,6 +710,26 @@ export class VM {
   async close() {
     this.closed = true;
     return this.closeSingleflight.run(() => this.closeInternal());
+  }
+
+  /**
+   * @internal The native engine's `configure` payload and the default guest
+   * environment, without starting anything (`gondolin --print-configure`).
+   */
+  async describeNativeConfigure(): Promise<{
+    configure: Record<string, unknown>;
+    env: string[];
+  }> {
+    if (!(this.server instanceof NativeSandboxServer)) {
+      throw new Error("--print-configure requires the native engine");
+    }
+    return {
+      configure: (await this.server.buildConfigure()) as Record<
+        string,
+        unknown
+      >,
+      env: mergeEnvInputs(this.defaultEnv, undefined) ?? [],
+    };
   }
 
   /**
@@ -1520,18 +1573,12 @@ fi
     if (!session.stdinEnabled) return;
     // Send in chunks and wait while too much is unacknowledged so large
     // inputs never overflow the server's stdin queue.
+    const chunkBytes = this.stdinChunkBytes();
     const sendAll = async (data: Buffer | string) => {
       const payload = typeof data === "string" ? Buffer.from(data) : data;
-      for (
-        let offset = 0;
-        offset < payload.length;
-        offset += DEFAULT_STDIN_CHUNK
-      ) {
+      for (let offset = 0; offset < payload.length; offset += chunkBytes) {
         if (!this.sessions.has(id)) return;
-        this.sendStdinData(
-          id,
-          payload.subarray(offset, offset + DEFAULT_STDIN_CHUNK),
-        );
+        this.sendStdinData(id, payload.subarray(offset, offset + chunkBytes));
         await waitStdinDrain(session);
       }
     };
@@ -1605,20 +1652,24 @@ fi
   }
 
   private sendStdinDataNow(id: number, data: Buffer | string) {
-    const payload =
-      typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
-    for (
-      let offset = 0;
-      offset < payload.length;
-      offset += DEFAULT_STDIN_CHUNK
-    ) {
-      const slice = payload.subarray(offset, offset + DEFAULT_STDIN_CHUNK);
+    const payload = typeof data === "string" ? Buffer.from(data) : data;
+    const chunkBytes = this.stdinChunkBytes();
+    for (let offset = 0; offset < payload.length; offset += chunkBytes) {
+      // raw bytes (in-process); a copy, so callers may reuse their buffer
       this.sendJson({
         type: "stdin",
         id,
-        data: slice.toString("base64"),
+        data: Buffer.from(payload.subarray(offset, offset + chunkBytes)),
       });
     }
+  }
+
+  /** stdin message size: the server's per-message limit (64 KiB default) */
+  private stdinChunkBytes(): number {
+    const limit = this.resolvedSandboxOptions.maxStdinBytes;
+    return Number.isFinite(limit) && limit > 0
+      ? Math.min(limit, MAX_STDIN_CHUNK)
+      : DEFAULT_STDIN_CHUNK;
   }
 
   private sendStdinEofNow(id: number) {
@@ -1757,15 +1808,16 @@ fi
   }
 
   private async waitForVfsReadyInternal() {
-    await this.waitForMount(this.fuseMount, "fuse.sandboxfs");
+    // sandboxfs (FUSE over virtio-serial) or virtio-fs (native engine)
+    await this.waitForMount(this.fuseMount, ["fuse.sandboxfs", "virtiofs"]);
     for (const mountPoint of this.fuseBinds) {
       await this.waitForBindMount(mountPoint);
     }
   }
 
-  private async waitForMount(mountPoint: string, fsType?: string) {
-    const mountCheck = fsType
-      ? `grep -qF -- " $2 ${fsType} " /proc/mounts`
+  private async waitForMount(mountPoint: string, fsTypes?: string[]) {
+    const mountCheck = fsTypes
+      ? `{ ${fsTypes.map((t) => `grep -qF -- " $2 ${t} " /proc/mounts`).join(" || ")}; }`
       : `grep -qF -- " $2 " /proc/mounts`;
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 

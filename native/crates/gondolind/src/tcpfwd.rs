@@ -129,6 +129,12 @@ impl TcpForwarder {
         })
     }
 
+    /// The stream table; a panic while it was held is contained (see
+    /// `panics.rs`), the table stays usable.
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn to_ctl<P: Serialize>(&self, t: &str, stream: u32, p: P) {
         self.ctl.send(t, 0, &Fwd { channel: self.channel, stream, p });
     }
@@ -150,7 +156,7 @@ impl TcpForwarder {
 
     /// Forgets a stream; returns whether it existed.
     fn remove(&self, stream: u32) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.lock();
         let Some(s) = st.streams.remove(&stream) else { return false };
         st.queued -= s.queue.iter().map(Vec::len).sum::<usize>();
         self.update_activity(&st);
@@ -162,7 +168,7 @@ impl TcpForwarder {
     /// Drops every stream (guest channel reset), telling the controller.
     fn reset(&self, message: &str) {
         let ids: Vec<u32> = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.lock();
             let ids = st.streams.keys().copied().collect();
             st.streams.clear();
             st.queued = 0;
@@ -202,7 +208,7 @@ impl TcpForwarder {
         match t {
             "tcp_opened" => {
                 let ok = p.bool("ok").unwrap_or(false);
-                if !self.state.lock().unwrap().streams.contains_key(&stream) {
+                if !self.lock().streams.contains_key(&stream) {
                     return;
                 }
                 let message =
@@ -214,7 +220,7 @@ impl TcpForwarder {
             }
             "tcp_data" => {
                 let Some(data) = p.bytes("data") else { return };
-                let mut st = self.state.lock().unwrap();
+                let mut st = self.lock();
                 let Some(s) = st.streams.get_mut(&stream) else { return };
                 if s.queue.is_empty() && s.credit >= data.len() as u64 {
                     s.credit -= data.len() as u64;
@@ -226,7 +232,7 @@ impl TcpForwarder {
                 }
             }
             "tcp_close" => {
-                let mut st = self.state.lock().unwrap();
+                let mut st = self.lock();
                 let Some(s) = st.streams.get_mut(&stream) else { return };
                 if s.queue.is_empty() {
                     st.streams.remove(&stream);
@@ -255,7 +261,7 @@ impl TcpForwarder {
                     return;
                 };
                 {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = self.lock();
                     st.streams.insert(
                         stream,
                         StreamState { credit: STREAM_WINDOW, ..Default::default() },
@@ -267,20 +273,24 @@ impl TcpForwarder {
                 let _ = self.events.send(Event::Resume(tx));
                 let this = self.clone();
                 tokio::spawn(async move {
-                    let resumed = rx.await.unwrap_or_else(|_| Err("session closed".into()));
-                    let failure = match resumed {
-                        Err(err) => Some(err),
-                        Ok(())
-                            if !this.to_guest(
-                                "tcp_open",
-                                stream,
-                                GuestOpen { host: &host, port },
-                            ) =>
-                        {
-                            Some("virtio tcp queue exceeded".to_string())
+                    let failure = crate::panics::CatchUnwind::new(async {
+                        let resumed = rx.await.unwrap_or_else(|_| Err("session closed".into()));
+                        match resumed {
+                            Err(err) => Some(err),
+                            Ok(())
+                                if !this.to_guest(
+                                    "tcp_open",
+                                    stream,
+                                    GuestOpen { host: &host, port },
+                                ) =>
+                            {
+                                Some("virtio tcp queue exceeded".to_string())
+                            }
+                            Ok(()) => None,
                         }
-                        Ok(()) => None,
-                    };
+                    })
+                    .await
+                    .unwrap_or_else(|panic| Some(format!("internal error: {panic}")));
                     if let Some(message) = failure
                         && this.remove(stream)
                     {
@@ -294,7 +304,7 @@ impl TcpForwarder {
             }
             FWD_DATA => {
                 let Some(data) = p.bytes("data") else { return };
-                if !self.state.lock().unwrap().streams.contains_key(&stream) {
+                if !self.lock().streams.contains_key(&stream) {
                     return;
                 }
                 for chunk in data.chunks(GUEST_CHUNK) {
@@ -311,7 +321,7 @@ impl TcpForwarder {
                 }
             }
             FWD_EOF => {
-                if self.state.lock().unwrap().streams.contains_key(&stream) {
+                if self.lock().streams.contains_key(&stream) {
                     let _ = self.to_guest("tcp_eof", stream, Empty {});
                 }
             }
@@ -323,7 +333,7 @@ impl TcpForwarder {
             FWD_WINDOW => {
                 let bytes = p.int("bytes").and_then(|b| u64::try_from(b).ok()).unwrap_or(0);
                 let (frames, close) = {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = self.lock();
                     let Some(s) = st.streams.get_mut(&stream) else { return };
                     s.credit = s.credit.saturating_add(bytes).min(16 * STREAM_WINDOW);
                     self.flush_stream(&mut st, stream)
@@ -343,7 +353,7 @@ impl TcpForwarder {
     async fn wait_queue_room(&self) {
         loop {
             let notified = self.drained.notified();
-            if self.state.lock().unwrap().queued <= CHANNEL_QUEUE_LIMIT {
+            if self.lock().queued <= CHANNEL_QUEUE_LIMIT {
                 return;
             }
             notified.await;
@@ -406,7 +416,16 @@ impl ControllerHandler for FwdDispatch {
             );
             return;
         };
-        fwd.controller_message(&msg.t, stream, &f);
+        if let Err(panic) = crate::panics::catch(|| fwd.controller_message(&msg.t, stream, &f)) {
+            // the stream may be half updated: drop it on both sides
+            fwd.remove(stream);
+            let _ = fwd.to_guest("tcp_close", stream, Empty {});
+            fwd.to_ctl(
+                FWD_CLOSE,
+                stream,
+                Closed { message: Some(format!("internal error: {panic}")) },
+            );
+        }
     }
 }
 

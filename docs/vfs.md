@@ -342,3 +342,12 @@ provide your own trust store.
 
 Disk checkpoints capture the VM root disk. Data written to VFS mounts is backed
 by the provider (memory or host filesystem) and is not part of checkpoints.
+
+## Native Engine
+
+With the native engine (`engine: "native"`), `RealFSProvider`,
+`ReadonlyProvider` and path-list `ShadowProvider` mounts are served by the
+daemon itself; other providers keep working through a cached whole-file tier.
+Whole-file providers can implement `ObjectProvider` directly
+(`createObjectMount()`), and `nativeMounts.memory()` / `nativeMounts.host()`
+mount daemon-side filesystems. See [Native Engine](native.md#filesystem).

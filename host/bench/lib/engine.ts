@@ -26,36 +26,55 @@ export function getEngine(): EngineName {
 }
 
 /**
- * Create a VM for the selected engine. `engine` is only passed when it is not
- * `node` so the harness keeps working on versions without `VMOptions.engine`.
+ * Create a VM for the selected engine. The engine is always passed explicitly:
+ * the default (`auto`) would pick the native engine when it is available.
  */
 export async function createVm(options: VMOptions = {}): Promise<VM> {
-  const opts: VMOptions & { engine?: EngineName } = {
+  const opts: VMOptions = {
     ...options,
     sandbox: { console: "none", ...options.sandbox },
+    engine: currentEngine,
   };
   if (currentEngine === "node") return VM.create(opts);
-  opts.engine = currentEngine;
   const vm = await VM.create(opts);
   await assertNativeEngine(vm);
   return vm;
 }
 
+/** `gondolind` pid of a native-engine VM (`SandboxServer` has no daemon) */
+function daemonPid(vm: VM): number | null {
+  const server = (
+    vm as unknown as { server?: { getDaemonPid?: () => number | null } }
+  ).server;
+  return server?.getDaemonPid?.() ?? null;
+}
+
 /**
- * Guard against silently benchmarking the node engine when `engine` is not
- * supported yet: the VM's host pid must be a `gondolind` process.
+ * Guard against silently benchmarking the node engine: the VM must report
+ * `engine === "native"` and its daemon pid must be a `gondolind` process.
  */
+let nativeEngineChecked = false;
+
 async function assertNativeEngine(vm: VM) {
-  if (process.env.GONDOLIN_BENCH_SKIP_ENGINE_CHECK === "1") return;
+  // Checked once per process: the check starts the VM, which would otherwise
+  // move boot time from the first exec into `createMs`.
+  if (
+    process.env.GONDOLIN_BENCH_SKIP_ENGINE_CHECK === "1" ||
+    nativeEngineChecked
+  )
+    return;
   try {
     await vm.start();
-    const pid = vm.getHostPid();
+    const engine = (vm as unknown as { engine?: string }).engine;
+    const pid = daemonPid(vm);
     const info = pid ? await readProcess(pid) : null;
-    if (!info?.comm.includes("gondolind")) {
+    // the daemon is `gondolind` or the multi-call `gondolin daemon`
+    if (engine !== "native" || !info?.comm.includes("gondolin")) {
       throw new Error(
-        `engine=native but VM host pid ${pid} is '${info?.comm ?? "?"}', not gondolind (set GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1 to bypass)`,
+        `engine=native but VM engine is '${engine}' and daemon pid ${pid} is '${info?.comm ?? "?"}' (set GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1 to bypass)`,
       );
     }
+    nativeEngineChecked = true;
   } catch (err) {
     await vm.close().catch(() => {});
     throw err;
@@ -63,20 +82,21 @@ async function assertNativeEngine(vm: VM) {
 }
 
 /**
- * Engine-side processes of a VM for resource accounting.
- *
- * `VM.getHostPid()` is the VMM (QEMU) pid on the node engine and the
- * `gondolind` pid on the native engine; descendants (e.g. QEMU under the
- * daemon) are included. A `getEnginePids()` method on the VM, if present,
+ * Engine-side processes of a VM for resource accounting: the `gondolind`
+ * daemon (native engine) and `VM.getHostPid()` (QEMU on both engines), each
+ * with its descendants. A `getEnginePids()` method on the VM, if present,
  * wins so engines can report exactly what they own.
  */
 export async function enginePids(vm: VM): Promise<number[]> {
   const custom = (vm as unknown as { getEnginePids?: () => number[] })
     .getEnginePids;
   if (typeof custom === "function") return custom.call(vm);
-  const pid = vm.getHostPid();
-  if (!pid || pid === process.pid) return [];
-  return processTree(pid);
+  const pids = new Set<number>();
+  for (const root of [daemonPid(vm), vm.getHostPid()]) {
+    if (!root || root === process.pid || pids.has(root)) continue;
+    for (const pid of await processTree(root)) pids.add(pid);
+  }
+  return [...pids];
 }
 
 /** Run a shell command in the guest and fail on a non-zero exit */
@@ -128,7 +148,7 @@ export async function guestTime(
 
 /**
  * Remove a guest directory tree. Uses `shutil.rmtree` because busybox
- * `rm -rf` leaves entries behind on sandboxfs mounts with many entries.
+ * `rm -rf` used to leave entries behind on sandboxfs mounts (fixed since).
  */
 export async function guestRmTree(vm: VM, dir: string) {
   await sh(
@@ -171,6 +191,21 @@ export function machineInfo() {
     gitDirty:
       (tryRun("git", ["status", "--porcelain", "--untracked-files=no"]) ??
         "") !== "",
-    image: process.env.GONDOLIN_DEFAULT_IMAGE ?? "alpine-base:latest",
+    image: imageInfo(),
+    nativeBin: process.env.GONDOLIN_NATIVE_BIN ?? null,
   };
+}
+
+/** Guest image in use: `GONDOLIN_GUEST_DIR` (with its build id) or the default image ref */
+function imageInfo() {
+  const dir = process.env.GONDOLIN_GUEST_DIR;
+  if (!dir) return process.env.GONDOLIN_DEFAULT_IMAGE ?? "alpine-base:latest";
+  try {
+    const manifest = JSON.parse(
+      fs.readFileSync(`${dir}/manifest.json`, "utf8"),
+    );
+    return `${dir} (buildId ${manifest.buildId})`;
+  } catch {
+    return dir;
+  }
 }

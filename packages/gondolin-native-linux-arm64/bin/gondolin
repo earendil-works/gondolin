@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+console.error("the static gondolin CLI is not staged in this workspace checkout. Build it with 'cargo build -p gondolin-cli' (or 'make native-release') or use a published package.");
+process.exit(1);

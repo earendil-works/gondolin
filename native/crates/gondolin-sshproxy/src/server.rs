@@ -17,11 +17,16 @@ use crate::{Inner, SshConfigError, SshExecRequest, SshHookCall, SshTarget, upstr
 
 /// Identification string of the guest-facing server (as the node engine).
 const SERVER_ID: &str = "SSH-2.0-gondolin-ssh-proxy";
-/// Messages (≤ 32 KiB each) russh buffers per channel before it stops reading
-/// the whole connection. russh grants SSH window eagerly, so this buffer is
-/// the real flow control; it must be large enough that a channel saturated in
-/// both directions (guest→upstream blocked on upstream, upstream→guest blocked
-/// on the guest) does not stall both connections at once.
+/// Messages russh buffers per channel before its session loop stops reading
+/// the connection. Both of our sessions advertise SSH window only as the
+/// bridge consumes data (`window_on_consume`, our russh patch), so a channel
+/// holds at most one window (2 MiB, 64 full-size packets) and this buffer
+/// never fills unless a peer sends tiny packets. Flow control is the SSH
+/// window: a direction blocked on its far side stops consuming, its sender
+/// runs out of window, and the connection keeps being read (window adjusts
+/// for the other direction get through). With russh's default (window
+/// granted on receipt) the only backpressure was a full buffer stopping the
+/// whole connection, which deadlocked a channel saturated both ways.
 pub(crate) const CHANNEL_BUFFER: usize = 256;
 
 pub(crate) fn ephemeral_host_key() -> Result<PrivateKey, SshConfigError> {
@@ -49,6 +54,7 @@ pub(crate) fn server_config(host_key: PrivateKey) -> Arc<server::Config> {
         inactivity_timeout: None,
         nodelay: true,
         channel_buffer_size: CHANNEL_BUFFER,
+        window_on_consume: true,
         ..Default::default()
     })
 }
@@ -75,6 +81,7 @@ pub(crate) async fn serve(inner: Arc<Inner>, flow: TcpFlow, target: SshTarget) {
         username: String::new(),
         tasks: JoinSet::new(),
     };
+    let stream = crate::pump::Pumped::new(stream);
     let result = match server::run_stream(inner.server_config.clone(), stream, handler).await {
         Ok(session) => session.await,
         Err(e) => Err(e),

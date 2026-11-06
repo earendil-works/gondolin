@@ -1,8 +1,84 @@
-# virtio-fs for gondolind (M7 feasibility)
+# virtio-fs for gondolind (M7)
 
-Status: research and prototype (November 2026). The prototype is
-`native/crates/gondolin-virtiofs`; this document records what was checked,
-what was measured and what we recommend.
+Status: implemented (November 2026). `gondolind` serves the VFS over
+virtio-fs whenever the QEMU binary supports vhost-user-fs, and falls back to
+sandboxfs otherwise (see "Implementation" below). Sections 1–7 are the
+original feasibility study of the prototype in
+`native/crates/gondolin-virtiofs`.
+
+## Implementation
+
+- **Selection.** `configure.vfs.transport` (`auto` by default;
+  `GONDOLIN_VIRTIOFS=0|1` on the controller) and a probe of the QEMU binary
+  (`-machine none -device help` for `vhost-user-fs-pci`/`vhost-user-fs-device`,
+  `-object help` for `memory-backend-memfd` on Linux or `memory-backend-shm`
+  elsewhere). The probe runs once per binary (path, size, mtime) and is cached
+  in memory and in `<cache>/gondolin/qemu-virtiofs.json`. krun keeps
+  sandboxfs.
+- **QEMU.** `-object <backend>,id=mem,size=<memory>,share=on`,
+  `-machine <type>,memory-backend=mem`, `-chardev socket,id=vhostfs0,...` and
+  `-device vhost-user-fs-pci` (`vhost-user-fs-device` on microvm) with tag
+  `gondolin`, `queue-size=1024` and `num-request-queues=min(cpus, 4)`.
+- **Guest.** The kernel command line gets `sandboxfs.virtiofs=gondolin`. init
+  loads `virtiofs` and starts `sandboxfs --virtiofs gondolin`, which fetches
+  the bind list over the RPC port as before, mounts the tag and exits; if the
+  mount fails it serves FUSE over virtio-serial as before. Images without the
+  flag ignore it, so old images keep working with new hosts and vice versa.
+  The host waits for either `fuse.sandboxfs` or `virtiofs` in `/proc/mounts`.
+- **Backend.** `gondolin-vfs` keeps the mount table; `FsCore` (`core.rs`) is
+  the inode-level state shared by both transports (lookup counts and FORGET,
+  file and directory handles with listing snapshots, flush/fsync, utimes),
+  and `virtiofs.rs` implements the prototype's `FileSystem` trait over it.
+  Every request is driven on the tokio runtime with `block_on` from its queue
+  thread; host filesystem calls run inline on that thread. Host reads go
+  straight into guest memory (`preadv` into the descriptor buffers).
+- **Commit errors.** FLUSH is forwarded when an object mount buffers writes
+  (`commit: close`) and commits there; FSYNC commits too. A failing commit is
+  the guest's `close()`/`fsync()` error. Without buffered mounts FLUSH answers
+  ENOSYS once, so the kernel stops sending it.
+- **Robustness.** A panicking request answers EIO and the queue keeps
+  serving (debug builds; release builds abort, like every daemon panic). Idle
+  pause (QMP `stop`/`cont`) and VMM restarts reconnect through the
+  vhost-user protocol.
+
+Measured on the M5 Max (release build, QEMU 10.2.1 with vhost-user, a busy
+machine: load average 12–20), `host/bench` vfs suite on a `RealFSProvider`
+mount, same daemon with `GONDOLIN_VIRTIOFS=0` vs `1`:
+
+| workload | sandboxfs | virtio-fs | speedup |
+|---|---|---|---|
+| small-create 1,000 × 4 KiB | 1,680 ms | 749 ms | 2.2× |
+| small-stat 1,000 | 288 ms | 144 ms | 2.0× |
+| small-read 1,000 | 1,104 ms | 487 ms | 2.3× |
+| readdir 5,000 | 79 ms | 18 ms | 4.4× |
+| tree find | 1,305 ms | 581 ms | 2.2× |
+| untar 2,000 files | 13,724 ms | 7,696 ms | 1.8× |
+| 256 MiB write | 102 MB/s | 1,051 MB/s | 10× |
+| 256 MiB read | 102 MB/s | 1,446 MB/s | 14× |
+
+Since then host mounts keep a directory fd cache (per symlink-free path,
+opened `O_NOFOLLOW` per component or with `openat2(RESOLVE_BENEATH |
+RESOLVE_NO_SYMLINKS)`, trusted for 1 s, at most 256 fds per mount with LRU
+eviction, dropped when the provider renames or removes the directory or an
+ancestor), hide rules take the real path of symlink-free paths from that
+cache instead of walking, FLUSH no longer fsyncs host files (it made every
+`close()` an `F_FULLFSYNC` whenever an object mount was present), and host
+writes go from the request buffer to `pwrite` without a copy. Same machine,
+same load, before → after, virtio-fs:
+
+| workload | realfs | shadow |
+|---|---|---|
+| small-create | 5,387 → 662 ms | 5,406 → 278 ms |
+| small-stat | 120 → 72 ms | 155 → 30 ms |
+| small-read | 475 → 405 ms | 550 → 173 ms |
+| tree find | 452 → 281 ms | 604 → 139 ms |
+| untar | 14,833 → 5,043 ms | 13,367 → 1,757 ms |
+
+(the "before" small-create/untar numbers include the FLUSH bug; at low load
+without it the directory cache alone gave stat 1.7×, find 2.4×, untar 1.2×
+on realfs and find 3.7×, untar 1.45× on shadow). With sandboxfs the same
+changes help less (its per-request round trip dominates): find 1.3–3×,
+readonly find 1.4–4.7×, shadow up to 3× (load-dependent).
 
 ## Summary
 
@@ -83,7 +159,9 @@ stay as they are, since they are plain bind mounts inside the guest.
 - **Linux:** stock QEMU (Debian, Fedora, Ubuntu) ships vhost-user-fs, and
   `memory-backend-memfd` provides the shared RAM.
 
-Getting a vhost-user-capable QEMU to macOS users, options from cheapest:
+Getting a vhost-user-capable QEMU to macOS users, options from cheapest
+(the write-up with a recommendation and the ready QEMU patch is
+`qemu-macos-vhost-user.md`):
 
 1. A Homebrew formula change: add `--enable-vhost-user --disable-vhost-net`.
    This also needs a QEMU fix so `vhost-net` builds or is auto-disabled on

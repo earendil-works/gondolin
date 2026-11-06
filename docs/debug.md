@@ -89,3 +89,7 @@ vm.setDebugLog((component, message) => {
 
 - `exec` debug logs only include environment *keys* (not values) to reduce accidental secret leakage.
 - Debug messages are best-effort: if your callback throws, Gondolin will ignore the error.
+- With the [native engine](./native.md) the flags are passed to `gondolind`,
+  which forwards its events to the same callback (QEMU output with
+  `protocol`, network stack tracing with `net`). Lines the daemon writes to its
+  stderr arrive as the `error` component, prefixed with `gondolind:`.

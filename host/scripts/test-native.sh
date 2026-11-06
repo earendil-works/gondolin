@@ -17,8 +17,10 @@ if [[ "${1:-}" == "--release" ]]; then
   shift
 fi
 
-(cd "$native" && cargo build -p gondolind ${cargo_flags[@]+"${cargo_flags[@]}"})
-export GONDOLIN_NATIVE_BIN="$native/target/$profile/gondolind"
+(cd "$native" && cargo build -p gondolind -p gondolin-cli ${cargo_flags[@]+"${cargo_flags[@]}"})
+# the multi-call binary as the platform packages ship it (`gondolin daemon`)
+export GONDOLIN_NATIVE_BIN="$native/target/$profile/gondolin"
+export GONDOLIN_CLI_BIN="$native/target/$profile/gondolin"
 export GONDOLIN_ENGINE=native
 
 # Tests covering what the native engine implements (exec, file operations,
@@ -26,8 +28,11 @@ export GONDOLIN_ENGINE=native
 # streams, krun).
 default_tests=(
   test/native-transport.test.ts
+  test/native-cli.test.ts
+  test/cli-configure-parity.test.ts
   test/native-qemu-args.test.ts
   test/native-mitm-ca.test.ts
+  test/native-panic.test.ts
   test/ssh.test.ts
   test/ingress-large-response.test.ts
   test/backend-parity.test.ts
@@ -44,6 +49,8 @@ default_tests=(
   test/host-pid-stats.test.ts
   test/vfs.test.ts
   test/vfs-many-mounts.test.ts
+  test/native-vfs.test.ts
+  test/fs-rpc.test.ts
   test/checkpoint.test.ts
   test/vm-internals.test.ts
   test/sandbox-stdin-limits.test.ts

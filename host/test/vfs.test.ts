@@ -260,7 +260,10 @@ test("fuse-backed /data triggers hooks for guest file operations", {
         `mount check failed (exit ${mounts.exitCode}): ${mounts.stderr.trim()}`,
       );
     }
-    assert.ok(mounts.stdout.includes("fuse.sandboxfs"));
+    assert.ok(
+      mounts.stdout.includes("fuse.sandboxfs") ||
+        mounts.stdout.includes(" virtiofs "),
+    );
 
     fuseHookEvents.length = 0;
 

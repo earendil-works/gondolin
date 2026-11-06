@@ -31,7 +31,7 @@ pub mod wire;
 
 pub use config::{DnsConfig, DnsMode, MacAddr, NetConfig, NetLimits, SyntheticHostMapping};
 pub use dns::SyntheticHostMap;
-pub use stack::{NetStack, NetStackError, NetStats};
+pub use stack::{NetStack, NetStackError, NetStats, READ_HOLD};
 
 /// Addressing of one guest TCP connection.
 #[derive(Debug, Clone, PartialEq, Eq)]

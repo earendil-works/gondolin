@@ -43,6 +43,9 @@ fn control_queue_limit(limits: &Limits) -> usize {
     (8 * 1024 * 1024).max((limits.max_stdin_bytes as usize).saturating_mul(2))
 }
 
+/// Control channel events handled per round after the first (output coalescing).
+const CONTROL_BATCH: usize = 256;
+
 /// Delay before an automatic restart after an unexpected VM exit.
 const AUTO_RESTART_DELAY: Duration = Duration::from_millis(1000);
 
@@ -118,7 +121,50 @@ struct Runtime {
     netdev_path: Option<PathBuf>,
     netdev_task: Option<tokio::task::JoinHandle<()>>,
     qmp_path: Option<PathBuf>,
+    /// vhost-user-fs device served by the daemon
+    virtiofs: Option<VirtioFsRuntime>,
     dir: SocketDir,
+}
+
+/// The vhost-user-fs socket and its accept thread.
+struct VirtioFsRuntime {
+    path: PathBuf,
+    queues: usize,
+    memory_backend: &'static str,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for VirtioFsRuntime {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Listens for QEMU's vhost-user connection (one at a time; a restarted QEMU
+/// reconnects) and serves it on a dedicated thread.
+fn spawn_virtiofs(
+    path: &std::path::Path,
+    service: Arc<dyn crate::subsystem::VirtioFsService>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    listener.set_nonblocking(true)?;
+    std::thread::Builder::new().name("virtiofs-accept".into()).spawn(move || {
+        use std::sync::atomic::Ordering;
+        while !stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    let _ = conn.set_nonblocking(false);
+                    service.serve(conn);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    })?;
+    Ok(())
 }
 
 /// VMM lifecycle state (`SandboxController`).
@@ -263,7 +309,18 @@ impl Session {
                 biased;
                 Some(ev) = ch.events.recv() => self.handle_event(ev),
                 Some((generation, ev)) = ch.vmm.recv() => self.handle_vmm(generation, ev),
-                Some(ev) = ch.control.recv() => self.handle_control(ev),
+                Some(ev) = ch.control.recv() => {
+                    self.handle_control(ev);
+                    // handle what else is queued in the same round, so back
+                    // to back output frames are coalesced
+                    for _ in 0..CONTROL_BATCH {
+                        if self.finished {
+                            break;
+                        }
+                        let Ok(ev) = ch.control.try_recv() else { break };
+                        self.handle_control(ev);
+                    }
+                }
                 msg = ctl_rx.recv(), if !controller_gone && !self.intake_blocked() => match msg {
                     Some(msg) => self.handle_controller(msg),
                     None => {
@@ -279,6 +336,7 @@ impl Session {
 
     /// Work deferred to the end of an event (`setImmediate` in the node engine).
     pub(crate) fn after_event(&mut self) {
+        self.flush_output();
         self.run_deferred_continuations();
         self.run_scheduled_flushes();
         self.pump_file_waiters();
@@ -336,6 +394,7 @@ impl Session {
     // ---- event dispatch ------------------------------------------------
 
     pub(crate) fn handle_event(&mut self, ev: Event) {
+        self.flush_output();
         match ev {
             Event::GuestWritable => {
                 self.guest_writable.store(false, Ordering::Release);
@@ -394,6 +453,7 @@ impl Session {
     }
 
     pub(crate) fn handle_controller(&mut self, msg: RawEnvelope) {
+        self.flush_output();
         let t = msg.t.as_str();
         match t {
             ps::CONFIGURE => self.handle_configure(msg),
@@ -681,8 +741,60 @@ impl Session {
             _ => (None, None),
         };
         let qmp_path = self.idle.enabled().then(|| path("qmp.sock"));
-        self.runtime = Some(Runtime { chardevs, ports, netdev_path, netdev_task, qmp_path, dir });
+        let virtiofs = self.setup_virtiofs(&path("virtiofs.sock"))?;
+        self.runtime =
+            Some(Runtime { chardevs, ports, netdev_path, netdev_task, qmp_path, virtiofs, dir });
         Ok(())
+    }
+
+    /// Serves the VFS over virtio-fs when the backend offers it and the QEMU
+    /// binary supports vhost-user-fs with shared RAM; otherwise the guest
+    /// keeps using sandboxfs over virtio-serial.
+    fn setup_virtiofs(&self, sock: &std::path::Path) -> Result<Option<VirtioFsRuntime>, String> {
+        let Some(service) = self.vfs.as_ref().and_then(|v| v.virtio_fs()) else {
+            return Ok(None);
+        };
+        let Some(cfg) = self.configured.as_ref() else { return Ok(None) };
+        if qemu::is_krun(&cfg.vm) {
+            if service.required() {
+                self.emit_debug("vfs", "virtio-fs is not available with krun; using sandboxfs");
+            }
+            return Ok(None);
+        }
+        let vm = &cfg.vm;
+        let target_arch = qemu::detect_target_arch(&vm.qemu_path, &self.host);
+        let accel = vm
+            .accel
+            .clone()
+            .unwrap_or_else(|| qemu::select_accel(&target_arch, &self.host).to_string());
+        let machine = vm.machine_type.clone().unwrap_or_else(|| {
+            qemu::select_machine_type(&target_arch, Some(&accel), &self.host).to_string()
+        });
+        let support = qemu::probe_virtiofs(&vm.qemu_path, &self.host);
+        if !support.usable(&machine) {
+            let message = format!(
+                "virtio-fs unavailable ({} lacks vhost-user-fs or a shared memory backend); using sandboxfs",
+                vm.qemu_path
+            );
+            if service.required() {
+                tracing::warn!("{message}");
+                let log = gondolin_proto::session::Log { component: "vfs".into(), message };
+                self.ctl.send(gondolin_proto::session::LOG, 0, &log);
+            } else {
+                self.emit_debug("vfs", message);
+            }
+            return Ok(None);
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        spawn_virtiofs(sock, service.clone(), stop.clone())
+            .map_err(|e| format!("cannot listen on the virtio-fs socket: {e}"))?;
+        self.emit_debug("vfs", "serving the VFS over virtio-fs");
+        Ok(Some(VirtioFsRuntime {
+            path: sock.to_path_buf(),
+            queues: (vm.cpus as usize).clamp(1, service.request_queues()),
+            memory_backend: support.memory_backend.unwrap_or("memory-backend-memfd"),
+            stop,
+        }))
     }
 
     fn handle_shutdown(&mut self, id: u64) {
@@ -914,7 +1026,10 @@ impl Session {
 
     pub(crate) fn handle_control(&mut self, ev: ControlEvent) {
         match ev {
-            ControlEvent::Error(message) => self.port_error("control", message),
+            ControlEvent::Error(message) => {
+                self.flush_output();
+                self.port_error("control", message)
+            }
             ControlEvent::Frame(v) => self.handle_guest_message(v),
         }
     }
@@ -922,6 +1037,10 @@ impl Session {
     fn handle_guest_message(&mut self, v: Value) {
         let f = Fields::of(&v);
         let t = f.text("t").unwrap_or("");
+        if t != "exec_output" {
+            // keep output ordered before responses/errors of the same exec
+            self.flush_output();
+        }
         let id = fields::request_id(f.get("id"));
         let p = f.get("p").map(Fields::of).unwrap_or_else(|| Fields::of(&Value::Null));
         if self.debug_enabled("protocol") {
@@ -1085,9 +1204,20 @@ impl Session {
             let program = crate::krun::runner_path(&cfg.vm);
             (program, vec!["--config".to_string(), path.display().to_string()])
         } else {
+            let virtiofs = rt.virtiofs.as_ref().map(|v| qemu::VirtioFsArgs {
+                socket: v.path.to_str().unwrap_or_default(),
+                queues: v.queues,
+                memory_backend: v.memory_backend,
+            });
+            // tells the guest's init to mount the virtio-fs tag (older images ignore it)
+            let append = match &virtiofs {
+                Some(_) => format!("{} sandboxfs.virtiofs={}", self.vm.append, qemu::VIRTIOFS_TAG),
+                None => self.vm.append.clone(),
+            };
             let args = qemu::build_qemu_args(&QemuArgs {
                 vm: &cfg.vm,
-                append: &self.vm.append,
+                append: &append,
+                virtiofs,
                 chardevs: &rt.chardevs,
                 net_socket: net_socket.as_deref(),
                 qmp_socket: qmp.as_deref(),
@@ -1153,6 +1283,7 @@ impl Session {
     }
 
     fn handle_vmm(&mut self, generation: u64, ev: VmmEvent) {
+        self.flush_output();
         match ev {
             VmmEvent::Log { stderr, chunk } => {
                 if generation != self.vm.generation {

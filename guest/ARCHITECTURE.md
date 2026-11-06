@@ -579,9 +579,9 @@ The child keeps sandboxd's session and process group in pipe mode (no
 
 ### 6.1 Arguments and startup
 
-`sandboxfs [--mount DIR] [--rpc-path PATH] [--binds-file PATH]`
-(defaults `/data`, `/dev/virtio-ports/virtio-fs`, none; unknown arguments
-are ignored).
+`sandboxfs [--mount DIR] [--rpc-path PATH] [--binds-file PATH]
+[--virtiofs TAG]` (defaults `/data`, `/dev/virtio-ports/virtio-fs`, none,
+none; unknown arguments are ignored).
 
 1. Open `/dev/fuse` (`O_RDWR`).
 2. Open the RPC port: up to 50 attempts, 100 ms apart, each trying `PATH`
@@ -594,9 +594,16 @@ are ignored).
    created (init then falls back to the `sandboxfs.bind=` kernel argument).
    This happens before mounting so the file is complete when the mount
    appears.
-4. `mount("sandboxfs", DIR, "fuse.sandboxfs", MS_NOSUID|MS_NODEV,
+4. With `--virtiofs TAG`: `mount(TAG, DIR, "virtiofs", MS_NOSUID|MS_NODEV,
+   "")` and exit 0 on success (the guest kernel then talks to the host's
+   vhost-user-fs device directly; the RPC port only served the bind list).
+   If that mount fails (no device, no `virtiofs` module) continue with step 5.
+   init passes `--virtiofs TAG` when the kernel command line has
+   `sandboxfs.virtiofs=TAG` (after `modprobe virtiofs`); images without this
+   support ignore the argument and keep using FUSE over the RPC port.
+5. `mount("sandboxfs", DIR, "fuse.sandboxfs", MS_NOSUID|MS_NODEV,
    "fd=<fd>,rootmode=40000,user_id=0,group_id=0,default_permissions")`.
-5. Serve requests until the filesystem is unmounted (`ENODEV` on the FUSE
+6. Serve requests until the filesystem is unmounted (`ENODEV` on the FUSE
    fd → exit 0).
 
 ### 6.2 RPC protocol

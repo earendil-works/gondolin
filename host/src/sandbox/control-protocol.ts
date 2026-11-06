@@ -53,8 +53,8 @@ export type StdinCommandMessage = {
   type: "stdin";
   /** request id */
   id: number;
-  /** stdin chunk as base64 */
-  data?: string;
+  /** stdin chunk as base64, or raw bytes from in-process clients */
+  data?: string | Buffer;
   /** whether this chunk closes stdin */
   eof?: boolean;
 };

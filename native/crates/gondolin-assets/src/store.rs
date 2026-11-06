@@ -141,6 +141,9 @@ pub struct StoreLock {
     _file: fs::File,
 }
 
+/// Removed refs as `(reference, arch)` and removed build ids.
+pub type Removed = (Vec<(String, Arch)>, Vec<String>);
+
 /// The image store.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -428,6 +431,150 @@ impl Store {
         }
         load_guest_assets(&object)?;
         Ok(Imported { build_id, arch, asset_dir: object, created })
+    }
+
+    /// Build ids referenced by any ref.
+    fn referenced_ids(&self) -> std::collections::BTreeSet<String> {
+        self.list_refs()
+            .into_iter()
+            .flat_map(|r| r.targets.0.into_iter().map(|(_, id)| id))
+            .collect()
+    }
+
+    /// Complete objects no ref points at (`listUntaggedImages`), as
+    /// `(build_id, arch)`.
+    pub fn untagged(&self) -> Vec<(String, Option<Arch>)> {
+        let referenced = self.referenced_ids();
+        self.object_ids()
+            .into_iter()
+            .filter(|id| !referenced.contains(id))
+            .filter_map(|id| {
+                let dir = self.ensure_object(&id).ok()?;
+                Some((id, load_manifest(&dir).and_then(|m| m.arch())))
+            })
+            .collect()
+    }
+
+    fn remove_unreferenced_object(&self, build_id: &str) -> bool {
+        if self.referenced_ids().contains(build_id) {
+            return false;
+        }
+        match self.object_dir(build_id) {
+            Ok(dir) if dir.exists() => fs::remove_dir_all(&dir).is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Removes a tag or a build id (`removeImage`): removed refs as
+    /// `(reference, arch)` and removed build ids.
+    pub fn remove_image(&self, selector: &str, force: bool) -> Result<Removed, AssetsError> {
+        let trimmed = selector.trim();
+        if trimmed.is_empty() {
+            return Err(AssetsError::invalid("image selector must not be empty"));
+        }
+        let mut removed_refs = Vec::new();
+        let mut removed_ids = Vec::new();
+        if is_build_id(trimmed) {
+            let build_id = normalize_build_id(trimmed)?;
+            let dir = self.object_dir(&build_id)?;
+            if !dir.exists() {
+                return Err(AssetsError::object_not_found(format!(
+                    "image object not found for buildId {build_id} (expected {})",
+                    dir.display()
+                )));
+            }
+            let refs: Vec<(String, Arch)> = self
+                .list_refs()
+                .into_iter()
+                .flat_map(|r| {
+                    let reference = r.reference.clone();
+                    r.targets
+                        .0
+                        .into_iter()
+                        .filter(|(_, id)| *id == build_id)
+                        .map(move |(arch, _)| (reference.clone(), arch))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            if !refs.is_empty() && !force {
+                let labels: Vec<String> = refs.iter().map(|(r, a)| format!("{r} ({a})")).collect();
+                return Err(AssetsError::invalid(format!(
+                    "image object {build_id} is referenced by {}; remove those tags first or use --force",
+                    labels.join(", ")
+                )));
+            }
+            for (reference, arch) in refs {
+                let r = ImageRef::parse(&reference)?;
+                let _ = fs::remove_file(self.ref_link_path(&r, arch)?);
+                removed_refs.push((reference, arch));
+            }
+            fs::remove_dir_all(&dir).map_err(|e| AssetsError::io(&dir, e))?;
+            removed_ids.push(build_id);
+            return Ok((removed_refs, removed_ids));
+        }
+        let r = ImageRef::parse(trimmed)?;
+        let mut targets = std::collections::BTreeSet::new();
+        let mut found = false;
+        for arch in Arch::ALL {
+            let link = self.ref_link_path(&r, arch)?;
+            match fs::symlink_metadata(&link) {
+                Ok(m) if m.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(AssetsError::invalid(format!(
+                        "invalid image ref link: {} is not a symlink",
+                        link.display()
+                    )));
+                }
+                Err(_) => continue,
+            }
+            found = true;
+            if let Ok(id) = self.build_id_from_link(&link) {
+                targets.insert(id);
+            }
+            fs::remove_file(&link).map_err(|e| AssetsError::io(&link, e))?;
+            removed_refs.push((r.canonical(), arch));
+        }
+        if !found {
+            return Err(AssetsError::new(
+                crate::ErrorKind::RefNotFound,
+                format!("image ref not found: {}", r.canonical()),
+            ));
+        }
+        for id in targets {
+            if self.remove_unreferenced_object(&id) {
+                removed_ids.push(id);
+            }
+        }
+        Ok((removed_refs, removed_ids))
+    }
+
+    /// Removes every untagged object (`removeUntaggedImages`).
+    pub fn remove_untagged(&self) -> Vec<String> {
+        self.untagged()
+            .into_iter()
+            .filter(|(id, _)| self.remove_unreferenced_object(id))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Removes all refs and objects (`removeAllImages`).
+    pub fn remove_all(&self) -> Removed {
+        let refs: Vec<(String, Arch)> = self
+            .list_refs()
+            .into_iter()
+            .flat_map(|r| {
+                let reference = r.reference.clone();
+                r.targets
+                    .0
+                    .into_iter()
+                    .map(move |(a, _)| (reference.clone(), a))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let ids = self.object_ids();
+        let _ = fs::remove_dir_all(self.refs_dir());
+        let _ = fs::remove_dir_all(self.objects_dir());
+        (refs, ids)
     }
 
     /// Object directories that are complete images, by build id.

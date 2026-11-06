@@ -72,6 +72,7 @@ fn client_config(inner: &Inner, target: &SshTarget) -> client::Config {
         inactivity_timeout: None,
         nodelay: true,
         channel_buffer_size: crate::server::CHANNEL_BUFFER,
+        window_on_consume: true,
         ..Default::default()
     };
     if let HostVerifier::KnownHosts(known) = &inner.verifier {
@@ -121,16 +122,19 @@ pub(crate) async fn connect(
             port: target.port,
             rejected: rejected.clone(),
         };
-        let mut handle =
-            client::connect_stream(Arc::new(client_config(inner, target)), tcp, handler)
-                .await
-                .map_err(|e| {
-                    if rejected.load(Ordering::SeqCst) {
-                        "Host denied (verification failed)".to_string()
-                    } else {
-                        e.to_string()
-                    }
-                })?;
+        let mut handle = client::connect_stream(
+            Arc::new(client_config(inner, target)),
+            crate::pump::Pumped::new(tcp),
+            handler,
+        )
+        .await
+        .map_err(|e| {
+            if rejected.load(Ordering::SeqCst) {
+                "Host denied (verification failed)".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
         authenticate(inner, target, guest_username, &mut handle).await?;
         Ok::<_, String>(handle)
     };

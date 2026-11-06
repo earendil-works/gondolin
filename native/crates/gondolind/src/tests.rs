@@ -611,3 +611,70 @@ fn unknown_types_are_unsupported() {
     assert_eq!(ctl[1].t, "error");
     assert_eq!(Fields::of(&ctl[1].p).text("type"), Some("bogus_event"));
 }
+
+#[test]
+fn back_to_back_output_is_coalesced_in_order() {
+    let mut h = Harness::new(Limits::default());
+    h.open(1);
+    h.exec(1, 3, vec![]);
+    h.controller_frames();
+    let out = |stream: &str, data: &[u8]| {
+        ControlEvent::Frame(map(vec![
+            ("v", int(1)),
+            ("t", text("exec_output")),
+            ("id", int(3)),
+            ("p", map(vec![("stream", text(stream)), ("data", Value::Bytes(data.to_vec()))])),
+        ]))
+    };
+    // one round: stdout, stdout, stderr, stdout, then the response
+    h.s.handle_control(out("stdout", b"a"));
+    h.s.handle_control(out("stdout", b"b"));
+    h.s.handle_control(out("stderr", b"c"));
+    h.s.handle_control(out("stdout", b"d"));
+    h.s.handle_control(ControlEvent::Frame(map(vec![
+        ("v", int(1)),
+        ("t", text("exec_response")),
+        ("id", int(3)),
+        ("p", map(vec![("exit_code", int(0))])),
+    ])));
+    h.s.after_event();
+    let frames = h.controller_frames();
+    let got: Vec<(String, Option<String>, Option<Vec<u8>>)> = frames
+        .iter()
+        .map(|f| {
+            let p = Fields::of(&f.p);
+            (f.t.clone(), p.text("stream").map(str::to_string), p.bytes("data").map(<[u8]>::to_vec))
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("exec_output".into(), Some("stdout".into()), Some(b"ab".to_vec())),
+            ("exec_output".into(), Some("stderr".into()), Some(b"c".to_vec())),
+            ("exec_output".into(), Some("stdout".into()), Some(b"d".to_vec())),
+            ("exec_response".into(), None, None),
+        ]
+    );
+
+    // a chunk that would exceed the bound starts a new frame
+    let mut h = Harness::new(Limits::default());
+    h.open(1);
+    h.exec(1, 4, vec![]);
+    h.controller_frames();
+    let big = vec![7u8; crate::exec::OUTPUT_COALESCE_BYTES - 1];
+    for data in [&big[..], b"xy"] {
+        h.s.handle_control(ControlEvent::Frame(map(vec![
+            ("v", int(1)),
+            ("t", text("exec_output")),
+            ("id", int(4)),
+            ("p", map(vec![("stream", text("stdout")), ("data", Value::Bytes(data.to_vec()))])),
+        ])));
+    }
+    h.s.after_event();
+    let sizes: Vec<usize> = h
+        .controller_frames()
+        .iter()
+        .map(|f| Fields::of(&f.p).bytes("data").map_or(0, <[u8]>::len))
+        .collect();
+    assert_eq!(sizes, vec![big.len(), 2]);
+}

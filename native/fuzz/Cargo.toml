@@ -1,0 +1,90 @@
+[package]
+name = "gondolin-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "cargo-fuzz targets for the guest-facing parsers of gondolind (nightly; not a workspace member)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+gondolin-wire = { path = "../crates/gondolin-wire" }
+gondolin-proto = { path = "../crates/gondolin-proto" }
+gondolin-netstack = { path = "../crates/gondolin-netstack" }
+gondolin-egress = { path = "../crates/gondolin-egress" }
+gondolin-sshproxy = { path = "../crates/gondolin-sshproxy" }
+gondolind = { path = "../crates/gondolind" }
+
+# standalone: not part of the native/ workspace (needs nightly + cargo-fuzz)
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "netstack_parse"
+path = "fuzz_targets/netstack_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "netstack_stack"
+path = "fuzz_targets/netstack_stack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egress_flow"
+path = "fuzz_targets/egress_flow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egress_policy"
+path = "fuzz_targets/egress_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client_hello"
+path = "fuzz_targets/tls_client_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_guest"
+path = "fuzz_targets/wire_guest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sshproxy_flow"
+path = "fuzz_targets/sshproxy_flow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sshproxy_parse"
+path = "fuzz_targets/sshproxy_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Same vendored, patched dependencies as the main workspace.
+[patch.crates-io]
+russh = { path = "../vendor/russh" }

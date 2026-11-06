@@ -37,6 +37,7 @@ default_tests=(
   test/clock-sync.test.ts
   test/vfs.test.ts
   test/vfs-many-mounts.test.ts
+  test/native-vfs.test.ts
   test/ssh.test.ts
   test/backend-parity.test.ts
   test/network-egress.test.ts

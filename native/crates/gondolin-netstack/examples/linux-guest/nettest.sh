@@ -2,6 +2,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 modprobe virtio_net; modprobe af_packet
 ip link set lo up; ip link set eth0 up
 udhcpc -i eth0 -q -n -s /usr/share/udhcpc/default.script
+[ -n "$GUEST_MTU" ] && ip link set eth0 mtu $GUEST_MTU; cat /sys/class/net/eth0/mtu
 ip addr show eth0 | grep inet; ip route; cat /etc/resolv.conf
 ping -c 2 -W 2 192.168.127.1
 ping -c 1 -W 2 8.8.8.8
