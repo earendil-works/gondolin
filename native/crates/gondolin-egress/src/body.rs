@@ -1,0 +1,566 @@
+//! Body plumbing: boxed bodies, lazily pulled hook bodies with replay, size
+//! limits and request body recording for redirect replays.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use http_body::{Body, Frame, SizeHint};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty, Full};
+
+use crate::error::{Blocked, BoxError};
+
+/// Body type used between pipeline stages and hooks.
+pub type HookBody = BoxBody<Bytes, BoxError>;
+
+pub fn empty() -> HookBody {
+    Empty::new().map_err(|e| match e {}).boxed()
+}
+
+pub fn full(data: impl Into<Bytes>) -> HookBody {
+    Full::new(data.into()).map_err(|e| match e {}).boxed()
+}
+
+/// Error raised by [`LimitedBody`] when the limit is exceeded.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct BodyLimitExceeded(pub Blocked);
+
+/// Fails with [`BodyLimitExceeded`] once more than `limit` bytes were read.
+pub struct LimitedBody<B> {
+    inner: B,
+    remaining: u64,
+    error: Option<Blocked>,
+}
+
+impl<B> LimitedBody<B> {
+    pub fn new(inner: B, limit: u64, error: Blocked) -> Self {
+        Self { inner, remaining: limit, error: Some(error) }
+    }
+}
+
+impl<B> Body for LimitedBody<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        let this = &mut *self;
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    let len = data.len() as u64;
+                    if len > this.remaining {
+                        let err = this.error.take().unwrap_or_else(|| {
+                            Blocked::new(413, "Payload Too Large", "body too large")
+                        });
+                        return Poll::Ready(Some(Err(Box::new(BodyLimitExceeded(err)))));
+                    }
+                    this.remaining -= len;
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Finds a [`BodyLimitExceeded`] (or other [`Blocked`]) in an error chain.
+pub fn find_blocked(err: &(dyn std::error::Error + 'static)) -> Option<Blocked> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    let mut depth = 0;
+    while let Some(e) = current {
+        if let Some(limit) = e.downcast_ref::<BodyLimitExceeded>() {
+            return Some(limit.0.clone());
+        }
+        if let Some(blocked) = e.downcast_ref::<Blocked>() {
+            return Some(blocked.clone());
+        }
+        depth += 1;
+        if depth > 16 {
+            break;
+        }
+        current = e.source();
+    }
+    None
+}
+
+/// Errors of [`BodyHandle::pull`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PullError {
+    /// retained bytes would exceed the limit
+    #[error(transparent)]
+    Limit(Blocked),
+    /// reading the underlying body failed
+    #[error("body read failed: {0}")]
+    Read(String),
+    /// the pipeline already took the body back (decision made)
+    #[error("body stream released")]
+    Released,
+}
+
+struct PullState {
+    source: Option<HookBody>,
+    retained: Vec<Bytes>,
+    retained_bytes: u64,
+    limit: u64,
+    limit_error: Blocked,
+    /// read cursor: chunk index + offset in that chunk
+    chunk: usize,
+    offset: usize,
+    eof: bool,
+    pulled: bool,
+    released: bool,
+}
+
+/// Lazily pulled body offered to a hook. Pulled chunks are retained so the
+/// pipeline can replay them when the decision keeps the original body.
+#[derive(Clone)]
+pub struct BodyHandle {
+    state: Arc<tokio::sync::Mutex<PullState>>,
+}
+
+impl std::fmt::Debug for BodyHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BodyHandle")
+    }
+}
+
+impl BodyHandle {
+    /// Reads the next chunk of at most `max` bytes; `None` at end of body.
+    pub async fn pull(&self, max: usize) -> Result<Option<Bytes>, PullError> {
+        let max = max.max(1);
+        let mut state = self.state.lock().await;
+        if state.released {
+            return Err(PullError::Released);
+        }
+        state.pulled = true;
+        loop {
+            if state.chunk < state.retained.len() {
+                let chunk = state.retained[state.chunk].clone();
+                let start = state.offset;
+                let end = (start + max).min(chunk.len());
+                if end >= chunk.len() {
+                    state.chunk += 1;
+                    state.offset = 0;
+                } else {
+                    state.offset = end;
+                }
+                if end > start {
+                    return Ok(Some(chunk.slice(start..end)));
+                }
+                continue;
+            }
+            if state.eof {
+                return Ok(None);
+            }
+            let Some(source) = state.source.as_mut() else {
+                state.eof = true;
+                return Ok(None);
+            };
+            match source.frame().await {
+                Some(Ok(frame)) => {
+                    let Ok(data) = frame.into_data() else {
+                        continue;
+                    };
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let len = data.len() as u64;
+                    if state.retained_bytes + len > state.limit {
+                        return Err(PullError::Limit(state.limit_error.clone()));
+                    }
+                    state.retained_bytes += len;
+                    state.retained.push(data);
+                }
+                Some(Err(e)) => {
+                    if let Some(blocked) = find_blocked(e.as_ref()) {
+                        return Err(PullError::Limit(blocked));
+                    }
+                    return Err(PullError::Read(e.to_string()));
+                }
+                None => {
+                    state.eof = true;
+                    state.source = None;
+                }
+            }
+        }
+    }
+
+    /// Reads at most `max` bytes at byte `offset` of the body (independent of
+    /// the [`BodyHandle::pull`] cursor); `None` at end of body. Offsets beyond
+    /// what was read so far are an error.
+    pub async fn pull_at(&self, offset: u64, max: usize) -> Result<Option<Bytes>, PullError> {
+        let max = max.max(1);
+        let mut state = self.state.lock().await;
+        if state.released {
+            return Err(PullError::Released);
+        }
+        state.pulled = true;
+        loop {
+            if offset < state.retained_bytes {
+                let mut start = 0u64;
+                for chunk in &state.retained {
+                    let end = start + chunk.len() as u64;
+                    if offset < end {
+                        let from = (offset - start) as usize;
+                        let to = (from + max).min(chunk.len());
+                        return Ok(Some(chunk.slice(from..to)));
+                    }
+                    start = end;
+                }
+            }
+            if offset > state.retained_bytes {
+                return Err(PullError::Read(format!("offset {offset} beyond body position")));
+            }
+            if state.eof {
+                return Ok(None);
+            }
+            let Some(source) = state.source.as_mut() else {
+                state.eof = true;
+                return Ok(None);
+            };
+            match source.frame().await {
+                Some(Ok(frame)) => {
+                    let Ok(data) = frame.into_data() else {
+                        continue;
+                    };
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let len = data.len() as u64;
+                    if state.retained_bytes + len > state.limit {
+                        return Err(PullError::Limit(state.limit_error.clone()));
+                    }
+                    state.retained_bytes += len;
+                    state.retained.push(data);
+                }
+                Some(Err(e)) => {
+                    if let Some(blocked) = find_blocked(e.as_ref()) {
+                        return Err(PullError::Limit(blocked));
+                    }
+                    return Err(PullError::Read(e.to_string()));
+                }
+                None => {
+                    state.eof = true;
+                    state.source = None;
+                }
+            }
+        }
+    }
+
+    /// Reads the whole remaining body (up to the limit).
+    pub async fn read_to_end(&self) -> Result<Bytes, PullError> {
+        let mut out = bytes::BytesMut::new();
+        while let Some(chunk) = self.pull(64 * 1024).await? {
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out.freeze())
+    }
+}
+
+/// Owner side of a [`BodyHandle`].
+pub struct PullableBody {
+    state: Arc<tokio::sync::Mutex<PullState>>,
+}
+
+impl PullableBody {
+    /// Wraps `body`; hooks may retain at most `limit` bytes (`limit_error` otherwise).
+    pub fn new(body: HookBody, limit: u64, limit_error: Blocked) -> Self {
+        Self {
+            state: Arc::new(tokio::sync::Mutex::new(PullState {
+                source: Some(body),
+                retained: Vec::new(),
+                retained_bytes: 0,
+                limit,
+                limit_error,
+                chunk: 0,
+                offset: 0,
+                eof: false,
+                pulled: false,
+                released: false,
+            })),
+        }
+    }
+
+    pub fn handle(&self) -> BodyHandle {
+        BodyHandle { state: self.state.clone() }
+    }
+
+    /// Takes the body back: retained chunks first, then the unread rest.
+    /// Never-pulled bodies come back unchanged (no copy, no buffering).
+    pub async fn into_body(self) -> HookBody {
+        let mut state = self.state.lock().await;
+        state.released = true;
+        let source = state.source.take();
+        let retained = std::mem::take(&mut state.retained);
+        let pulled = state.pulled;
+        drop(state);
+        match (pulled, source) {
+            (false, Some(source)) => source,
+            (_, source) => ReplayBody { retained: retained.into(), rest: source }.boxed(),
+        }
+    }
+
+    /// Drops the body (decision did not keep it).
+    pub async fn discard(self) {
+        let mut state = self.state.lock().await;
+        state.released = true;
+        state.source = None;
+        state.retained.clear();
+    }
+}
+
+struct ReplayBody {
+    retained: std::collections::VecDeque<Bytes>,
+    rest: Option<HookBody>,
+}
+
+impl Body for ReplayBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        if let Some(chunk) = self.retained.pop_front() {
+            return Poll::Ready(Some(Ok(Frame::data(chunk))));
+        }
+        match self.rest.as_mut() {
+            Some(rest) => Pin::new(rest).poll_frame(cx),
+            None => Poll::Ready(None),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.retained.is_empty() && self.rest.as_ref().is_none_or(|r| r.is_end_stream())
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let retained: u64 = self.retained.iter().map(|b| b.len() as u64).sum();
+        let rest =
+            self.rest.as_ref().map(|r| r.size_hint()).unwrap_or_else(|| SizeHint::with_exact(0));
+        let mut hint = SizeHint::new();
+        if let Some(u) = rest.upper() {
+            hint.set_upper(u + retained);
+        }
+        hint.set_lower(rest.lower() + retained);
+        hint
+    }
+}
+
+/// Shared record of a request body as it is sent upstream.
+#[derive(Default)]
+pub struct Recording {
+    chunks: Vec<Bytes>,
+    bytes: u64,
+    overflowed: bool,
+    complete: bool,
+}
+
+impl Recording {
+    /// The full body if it was completely recorded.
+    pub fn complete_body(&self) -> Option<Bytes> {
+        if !self.complete || self.overflowed {
+            return None;
+        }
+        let mut out = bytes::BytesMut::with_capacity(self.bytes as usize);
+        for c in &self.chunks {
+            out.extend_from_slice(c);
+        }
+        Some(out.freeze())
+    }
+}
+
+/// Records up to `limit` bytes of a body while it is polled (redirect replays).
+pub struct RecordingBody {
+    inner: HookBody,
+    record: Arc<Mutex<Recording>>,
+    limit: u64,
+}
+
+impl RecordingBody {
+    pub fn new(inner: HookBody, limit: u64) -> (Self, Arc<Mutex<Recording>>) {
+        let record = Arc::new(Mutex::new(Recording::default()));
+        (Self { inner, record: record.clone(), limit }, record)
+    }
+}
+
+impl Body for RecordingBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        let limit = self.limit;
+        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        let mut rec = self.record.lock().unwrap();
+        match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref()
+                    && !rec.overflowed
+                {
+                    if rec.bytes + data.len() as u64 > limit {
+                        rec.overflowed = true;
+                        rec.chunks.clear();
+                    } else {
+                        rec.bytes += data.len() as u64;
+                        rec.chunks.push(data.clone());
+                    }
+                }
+                // hyper stops polling once a length-delimited body reports its end
+                if self.inner.is_end_stream() {
+                    rec.complete = true;
+                }
+            }
+            Poll::Ready(None) => rec.complete = true,
+            _ => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Fails when no frame arrives for `timeout` (undici `bodyTimeout`).
+pub struct IdleTimeoutBody<B> {
+    inner: B,
+    timeout: std::time::Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+    /// whether a wait for the next frame is in progress (timer armed)
+    waiting: bool,
+}
+
+impl<B> IdleTimeoutBody<B> {
+    pub fn new(inner: B, timeout: std::time::Duration) -> Self {
+        Self { inner, timeout, sleep: Box::pin(tokio::time::sleep(timeout)), waiting: false }
+    }
+}
+
+impl<B> Body for IdleTimeoutBody<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        let this = &mut *self;
+        if !this.waiting {
+            // the reader may have paused (guest backpressure): time only our wait
+            this.sleep.as_mut().reset(tokio::time::Instant::now() + this.timeout);
+            this.waiting = true;
+        }
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(frame) => {
+                this.waiting = false;
+                Poll::Ready(frame.map(|f| f.map_err(Into::into)))
+            }
+            Poll::Pending => match this.sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Some(Err("upstream body timeout".into()))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunks(parts: &[&'static str]) -> HookBody {
+        let frames: Vec<Result<Frame<Bytes>, BoxError>> =
+            parts.iter().map(|p| Ok(Frame::data(Bytes::from_static(p.as_bytes())))).collect();
+        http_body_util::StreamBody::new(futures_util::stream::iter(frames)).boxed()
+    }
+
+    #[tokio::test]
+    async fn unpulled_body_passes_through() {
+        let body = PullableBody::new(chunks(&["ab", "cd"]), 10, Blocked::bad_gateway("x"));
+        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        assert_eq!(&out[..], b"abcd");
+    }
+
+    #[tokio::test]
+    async fn pulled_chunks_are_replayed() {
+        let body = PullableBody::new(chunks(&["hello", " world"]), 100, Blocked::bad_gateway("x"));
+        let handle = body.handle();
+        assert_eq!(&handle.pull(3).await.unwrap().unwrap()[..], b"hel");
+        assert_eq!(&handle.pull(10).await.unwrap().unwrap()[..], b"lo");
+        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        assert_eq!(&out[..], b"hello world");
+        assert!(matches!(handle.pull(1).await, Err(PullError::Released)));
+    }
+
+    #[tokio::test]
+    async fn offset_pulls_are_independent() {
+        let body = PullableBody::new(chunks(&["hello", " world"]), 100, Blocked::bad_gateway("x"));
+        let handle = body.handle();
+        assert_eq!(&handle.pull_at(0, 100).await.unwrap().unwrap()[..], b"hello");
+        assert_eq!(&handle.pull_at(5, 100).await.unwrap().unwrap()[..], b" world");
+        assert!(handle.pull_at(11, 100).await.unwrap().is_none());
+        assert_eq!(&handle.pull_at(2, 2).await.unwrap().unwrap()[..], b"ll");
+        assert!(handle.pull_at(50, 1).await.is_err());
+        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        assert_eq!(&out[..], b"hello world");
+    }
+
+    #[tokio::test]
+    async fn pull_limit() {
+        let body =
+            PullableBody::new(chunks(&["hello", " world"]), 6, Blocked::bad_gateway("too big"));
+        let handle = body.handle();
+        let err = handle.read_to_end().await.unwrap_err();
+        assert!(matches!(err, PullError::Limit(b) if b.message == "too big"));
+    }
+
+    #[tokio::test]
+    async fn recording() {
+        let (rec, record) = RecordingBody::new(chunks(&["ab", "cd"]), 10);
+        let _ = rec.boxed().collect().await.unwrap();
+        assert_eq!(&record.lock().unwrap().complete_body().unwrap()[..], b"abcd");
+        let (rec, record) = RecordingBody::new(chunks(&["ab", "cd"]), 3);
+        let _ = rec.boxed().collect().await.unwrap();
+        assert!(record.lock().unwrap().complete_body().is_none());
+    }
+}

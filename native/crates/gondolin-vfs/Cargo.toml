@@ -1,0 +1,16 @@
+[package]
+name = "gondolin-vfs"
+description = "Host side of the sandboxfs RPC: mount table, native providers, object-tier cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gondolin-wire.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

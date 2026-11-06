@@ -201,6 +201,19 @@ export {
   type ResolvedImage,
 } from "./images.ts";
 
+// Native engine binaries (gondolind) for this and remote platforms
+export {
+  ensureNativeBinary,
+  getNativeBinaryPath,
+  nativePackageName,
+  nativeRustTarget,
+  type EnsureNativeBinaryOptions,
+  type NativeArch,
+  type NativeBinaryLookupOptions,
+  type NativeBinaryTarget,
+  type NativePlatform,
+} from "./native/binary.ts";
+
 // Build configuration and builder
 export {
   type Architecture,

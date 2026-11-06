@@ -1,0 +1,29 @@
+{
+  "name": "@earendil-works/gondolin-native-darwin-x64",
+  "version": "0.14.0",
+  "description": "Prebuilt gondolind (Gondolin native engine) for macOS x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/earendil-works/gondolin.git",
+    "directory": "packages/gondolin-native-darwin-x64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "bin": {
+    "gondolind": "bin/gondolind"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

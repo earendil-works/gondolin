@@ -1,0 +1,15 @@
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+modprobe virtio_blk; modprobe ext4
+mkdir -p /newroot
+mount -t ext4 /dev/vda /newroot
+mount --bind /dev /newroot/dev
+mount -t proc proc /newroot/proc
+mount -t sysfs sysfs /newroot/sys
+mount -t tmpfs tmpfs /newroot/tmp
+cp /nettest.sh /newroot/tmp/nettest.sh
+chroot /newroot /bin/sh /tmp/nettest.sh
+echo NETTEST-DONE
+poweroff -f

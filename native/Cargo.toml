@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/gondolin-wire",
+    "crates/gondolin-proto",
+    "crates/gondolin-vfs",
+    "crates/gondolin-netstack",
+    "crates/gondolin-egress",
+    "crates/gondolin-sshproxy",
+    "crates/gondolin-assets",
+    "crates/gondolin-virtiofs",
+    "crates/gondolind",
+]
+
+[workspace.package]
+version = "0.14.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+gondolin-wire = { path = "crates/gondolin-wire" }
+gondolin-proto = { path = "crates/gondolin-proto" }
+gondolin-vfs = { path = "crates/gondolin-vfs" }
+gondolin-netstack = { path = "crates/gondolin-netstack" }
+gondolin-egress = { path = "crates/gondolin-egress" }
+gondolin-sshproxy = { path = "crates/gondolin-sshproxy" }
+gondolin-assets = { path = "crates/gondolin-assets" }
+async-trait = "0.1"
+bytes = "1"
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

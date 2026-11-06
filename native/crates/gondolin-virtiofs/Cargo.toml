@@ -1,0 +1,13 @@
+[package]
+name = "gondolin-virtiofs"
+description = "Prototype vhost-user virtio-fs backend (FUSE over virtqueues) for gondolind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

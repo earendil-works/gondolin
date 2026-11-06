@@ -471,6 +471,9 @@ test("vm internals: stale timeout cleanup does not close newer startup", async (
   let staleCloseCalls = 0;
   const originalCloseInternal = (vm as any).closeInternal.bind(vm);
 
+  // keep the 10ms budget for the startup stages under test (the native
+  // engine spawns its daemon in server.start())
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});

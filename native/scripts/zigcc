@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# `zig cc` as C compiler and linker for cross builds (no other toolchain
+# needed). The zig target comes from ZIGCC_TARGET (e.g. aarch64-linux-musl).
+# Rust's self-contained musl start files are replaced by zig's (zig always
+# links its own when linking libc), and flags zig rejects are filtered, as
+# cargo-zigbuild does.
+set -euo pipefail
+: "${ZIGCC_TARGET:?ZIGCC_TARGET must be set}"
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    */self-contained/*.o) continue ;;        # zig links its own musl crt objects
+    -nostartfiles) continue ;;
+    -Wl,-O1) continue ;;
+    --target=*) continue ;;                  # we pass our own target
+    -Wl,--no-undefined-version) continue ;;
+    -Wl,-znostart-stop-gc) continue ;;
+    -Wl,--fix-cortex-a53-843419) continue ;;
+    -lgcc_s) args+=("-lunwind") ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec zig cc -target "$ZIGCC_TARGET" "${args[@]}"

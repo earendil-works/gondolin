@@ -59,6 +59,8 @@ jobs:
 
             Platform runner packages are published as optional dependencies for supported krun targets.
 
+            The native engine (`gondolind`) is published as `@earendil-works/gondolin-native-<platform>-<arch>` optional dependencies (darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static).
+
             ### Sandbox Helpers
 
             Sandbox helper binary bundles are published to `sandbox-helpers--${{ steps.npm_version.outputs.version }}` and registered in `builtin-sandbox-helper-registry.json`.
@@ -166,9 +168,133 @@ jobs:
           cd "${{ matrix.package_dir }}"
           npm publish --access public --provenance
 
+  build-native:
+    name: Build gondolind (all platforms)
+    needs: [create-release]
+    # Cross-compiles every target from one machine: darwin via Xcode, the
+    # static linux-musl builds via `zig cc` (native/scripts/).
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          fetch-depth: 0
+
+      - name: Verify native version matches tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          TAG_VERSION="${VERSION#v}"
+          CARGO_VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' native/Cargo.toml)
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch: native/Cargo.toml has $CARGO_VERSION but tag is v$TAG_VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches: $CARGO_VERSION"
+
+      - name: Install Zig
+        run: scripts/install-zig.sh 0.17.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+
+      - name: Build release binaries
+        run: make native-release
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: gondolind-dist
+          path: native/target/dist/
+          if-no-files-found: error
+
+  publish-native:
+    name: Publish gondolind (${{ matrix.package_name }})
+    needs: [create-release, build-native, publish-sandbox-helpers]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            package_dir: packages/gondolin-native-darwin-arm64
+            package_name: '@earendil-works/gondolin-native-darwin-arm64'
+          - runner: macos-15-intel
+            package_dir: packages/gondolin-native-darwin-x64
+            package_name: '@earendil-works/gondolin-native-darwin-x64'
+          - runner: ubuntu-24.04-arm
+            package_dir: packages/gondolin-native-linux-arm64
+            package_name: '@earendil-works/gondolin-native-linux-arm64'
+          - runner: ubuntu-latest
+            package_dir: packages/gondolin-native-linux-x64
+            package_name: '@earendil-works/gondolin-native-linux-x64'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolind-dist
+          path: native/target/dist/
+
+      - name: Prepare package payload
+        run: |
+          node scripts/prepare-native-package.mjs \
+            --package "${{ matrix.package_dir }}"
+
+      - name: Verify package version matches tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          TAG_VERSION="${VERSION#v}"
+          PKG_VERSION=$(node -p "require('./${{ matrix.package_dir }}/package.json').version")
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch for ${{ matrix.package_name }}: package.json has $PKG_VERSION but tag is v$TAG_VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches: $PKG_VERSION"
+
+      - name: Smoke test packed package
+        run: |
+          PKG_DIR="${{ matrix.package_dir }}"
+          PKG_TGZ=$(cd "$PKG_DIR" && npm pack --silent)
+          PKG_PATH="$PWD/$PKG_DIR/$PKG_TGZ"
+
+          TMP_DIR=$(mktemp -d)
+          cd "$TMP_DIR"
+          npm init -y >/dev/null
+          npm install "$PKG_PATH" >/dev/null
+          ./node_modules/.bin/gondolind --version
+
+      - name: Publish native package (with provenance)
+        run: |
+          cd "${{ matrix.package_dir }}"
+          npm publish --access public --provenance
+
   publish-npm:
     name: Publish main package to NPM
-    needs: [create-release, publish-sandbox-helpers, publish-krun-runner]
+    needs: [create-release, publish-sandbox-helpers, publish-krun-runner, publish-native]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -217,7 +343,7 @@ jobs:
       - name: Verify runner dependency versions
         run: |
           TAG_VERSION="${{ steps.tag_version.outputs.version }}"
-          node -e 'const pkg = require("./host/package.json"); const deps = pkg.optionalDependencies || {}; for (const [name, version] of Object.entries(deps)) { if (version !== process.argv[1]) { console.error(`❌ ${name} version ${version} does not match tag version ${process.argv[1]}`); process.exit(1); } } console.log("✅ Runner optional dependency versions match tag");' "$TAG_VERSION"
+          node -e 'const pkg = require("./host/package.json"); const deps = pkg.optionalDependencies || {}; for (const [name, version] of Object.entries(deps)) { if (version !== process.argv[1]) { console.error(`❌ ${name} version ${version} does not match tag version ${process.argv[1]}`); process.exit(1); } } console.log("✅ Runner and native optional dependency versions match tag");' "$TAG_VERSION"
 
       - name: Build package artifacts
         run: pnpm --filter @earendil-works/gondolin run build

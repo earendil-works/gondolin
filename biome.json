@@ -13,6 +13,7 @@
       "host/fuzz/**/*.ts",
       "host/examples/**/*.ts",
       "host/scripts/**/*.ts",
+      "host/bench/**/*.ts",
       "scripts/**/*.mjs",
       "!host/src/vfs/node/vendored-node-vfs"
     ]

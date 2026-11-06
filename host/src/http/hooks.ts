@@ -47,6 +47,54 @@ export const BASE64URL_ALPHABET =
 
 export type SecretPlaceholderMode = "shared" | "unique";
 
+/**
+ * Hidden property on `createHttpHooks().httpHooks` describing its declarative
+ * options, so the native engine can evaluate them without calling back into
+ * JavaScript. Non-enumerable: spreading the hooks object drops it, and the
+ * native engine then treats every hook as an opaque callback.
+ */
+export const NATIVE_HTTP_POLICY = Symbol.for("gondolin.http.nativePolicy");
+
+/** Declarative rules in the `configure.net.policy.rules` wire shape */
+export type NativeHttpRules = {
+  /** normalized allowed host patterns merged with internal hosts */
+  allowed_hosts: string[];
+  /** normalized host patterns allowed to resolve to internal ranges */
+  allowed_internal_hosts: string[];
+  block_internal_ranges: boolean;
+  secrets: Array<{
+    name: string;
+    identifier: string;
+    placeholder: string;
+    value: string;
+    revoked_values: string[];
+    hosts: string[];
+    deleted: boolean;
+  }>;
+  replace_secrets_in_query: boolean;
+  placeholder_mode: SecretPlaceholderMode;
+  /** random marker of shared placeholders (absent in unique mode) */
+  marker?: string;
+};
+
+/** Value stored under {@link NATIVE_HTTP_POLICY} */
+export type NativeHttpPolicyDescriptor = {
+  /** current rules (reflects SecretManager changes) */
+  rules(): NativeHttpRules;
+  /** user callbacks passed to createHttpHooks (evaluated as tier-3 hooks) */
+  user: Pick<
+    CreateHttpHooksOptions,
+    "isRequestAllowed" | "isIpAllowed" | "onRequest" | "onResponse"
+  >;
+  /** the generated hook functions (to detect replaced methods) */
+  generated: Required<
+    Pick<HttpHooks, "isRequestAllowed" | "isIpAllowed" | "onRequest">
+  > &
+    Pick<HttpHooks, "onResponse">;
+  /** subscribe to rule changes; returns an unsubscribe function */
+  subscribe(listener: () => void): () => void;
+};
+
 export type CreateHttpHooksOptions = {
   /** allowed host patterns (omitted = allow all, explicit empty = deny all) */
   allowedHosts?: string[];
@@ -204,6 +252,17 @@ export function createHttpHooks(
   const getSecretEntries = (): SecretEntry[] =>
     Array.from(secretEntries.values());
 
+  const ruleListeners = new Set<() => void>();
+  const notifyRuleChange = () => {
+    for (const listener of ruleListeners) {
+      try {
+        listener();
+      } catch {
+        // listeners must not break secret management
+      }
+    }
+  };
+
   const getSecretEntry = (name: string): SecretEntry => {
     const entry = secretEntries.get(name);
     if (!entry) {
@@ -239,6 +298,7 @@ export function createHttpHooks(
           (value) => value !== entry.value,
         );
       }
+      notifyRuleChange();
     },
     deleteSecret(name) {
       const entry = getSecretEntry(name);
@@ -246,6 +306,7 @@ export function createHttpHooks(
         return;
       }
       entry.deleted = true;
+      notifyRuleChange();
     },
   };
 
@@ -351,6 +412,48 @@ export function createHttpHooks(
     onRequest,
     onResponse: options.onResponse,
   };
+
+  const descriptor: NativeHttpPolicyDescriptor = {
+    rules: () => ({
+      allowed_hosts: [...allowedHosts],
+      allowed_internal_hosts: [...allowedInternalHosts],
+      block_internal_ranges: blockInternalRanges,
+      secrets: getSecretEntries().map((entry) => ({
+        name: entry.name,
+        identifier: entry.identifier,
+        placeholder: entry.placeholder,
+        value: entry.value,
+        revoked_values: [...entry.revokedValues],
+        hosts: [...entry.hosts],
+        deleted: entry.deleted,
+      })),
+      replace_secrets_in_query: options.replaceSecretsInQuery ?? false,
+      placeholder_mode: secretPlaceholderMode,
+      ...(secretMarker ? { marker: secretMarker } : {}),
+    }),
+    user: {
+      isRequestAllowed: options.isRequestAllowed,
+      isIpAllowed: options.isIpAllowed,
+      onRequest: options.onRequest,
+      onResponse: options.onResponse,
+    },
+    generated: {
+      isRequestAllowed: httpHooks.isRequestAllowed!,
+      isIpAllowed: httpHooks.isIpAllowed!,
+      onRequest: httpHooks.onRequest!,
+      onResponse: httpHooks.onResponse,
+    },
+    subscribe(listener) {
+      ruleListeners.add(listener);
+      return () => {
+        ruleListeners.delete(listener);
+      };
+    },
+  };
+  Object.defineProperty(httpHooks, NATIVE_HTTP_POLICY, {
+    value: descriptor,
+    enumerable: false,
+  });
 
   return { httpHooks, env, allowedHosts, secretManager };
 }

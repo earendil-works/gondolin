@@ -1,0 +1,63 @@
+[package]
+name = "gondolin-egress"
+description = "HTTP/TLS mediation, policy and secret injection for gondolind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gondolin-netstack.workspace = true
+gondolin-proto.workspace = true
+gondolin-sshproxy.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+lru = "0.16"
+pin-project-lite = "0.2"
+ring = "0.17"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1", features = ["std"] }
+time = "0.3"
+tower-service = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+url = "2"
+webpki-roots = "1"
+
+[dev-dependencies]
+serde_json = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# guest side of the netstack integration test (netstack's smoltcp test harness)
+smoltcp = { version = "0.14", default-features = false, features = [
+    "std",
+    "alloc",
+    "medium-ethernet",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+    "async",
+] }
+
+[[bench]]
+name = "mitm_throughput"
+harness = false

@@ -1,0 +1,26 @@
+[package]
+name = "djs-hooks-experiment"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway prototype: djs as gondolind's tier-2 hook engine (native/docs/djs-hooks.md)"
+
+# Not part of the native workspace (so `make check` is unaffected): its own root.
+[workspace]
+
+[dependencies]
+# djs is not published; this experiment expects a checkout at ~/Development/djs.
+djs-core = { path = "/Users/mitsuhiko/Development/djs/crates/djs-core", default-features = false, features = ["full", "unicode"] }
+djs-prelude = { path = "/Users/mitsuhiko/Development/djs/crates/djs-prelude" }
+gondolin-egress = { path = "../../crates/gondolin-egress" }
+gondolin-proto = { path = "../../crates/gondolin-proto" }
+gondolin-wire = { path = "../../crates/gondolin-wire" }
+serde = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+bytes = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+url = "2"
+
+[profile.release]
+debug = 1

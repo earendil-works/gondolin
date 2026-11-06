@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner native native-check native-test native-release native-test-linux
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -60,16 +60,23 @@ help:
 	@echo "  make hooks       - Install git hooks"
 	@echo "  make libkrun     - Build + stage libkrun locally under .cache/"
 	@echo "  make krun-runner - Build libkrun + host/krun-runner helper"
+	@echo "  make native      - Build the native engine workspace (native/)"
+	@echo "  make native-check - cargo fmt --check + clippy for native/"
+	@echo "  make native-test - Run native/ tests on this machine"
+	@echo "  make native-release - Static release binaries for linux-musl + darwin (native/target/dist)"
+	@echo "  make native-test-linux - Run native/ tests cross-compiled for Linux inside a VM"
 
 build:
-	@$(RUN_PARALLEL) -j 2 \
+	@$(RUN_PARALLEL) -j 3 \
 		"guest:build" "$(MAKE) -C guest build" \
-		"host:build" "$(MAKE) -C host build"
+		"host:build" "$(MAKE) -C host build" \
+		"native:build" "$(MAKE) -C native build"
 
 lint:
-	@$(RUN_PARALLEL) -j 2 \
+	@$(RUN_PARALLEL) -j 3 \
 		"guest:lint" "$(MAKE) -C guest lint" \
-		"host:lint" "$(MAKE) -C host lint"
+		"host:lint" "$(MAKE) -C host lint" \
+		"native:lint" "$(MAKE) -C native check"
 
 typecheck:
 	@$(RUN_PARALLEL) -j 2 \
@@ -81,23 +88,27 @@ check:
 		"guest:lint" "$(MAKE) -C guest lint" \
 		"guest:typecheck" "$(MAKE) -C guest typecheck" \
 		"host:lint" "$(MAKE) -C host lint" \
-		"host:typecheck" "$(MAKE) -C host typecheck"
+		"host:typecheck" "$(MAKE) -C host typecheck" \
+		"native:check" "$(MAKE) -C native check"
 
 test:
 	@$(MAKE) -C guest test
+	@$(MAKE) -C native test
 	@$(MAKE) -C host test
 
 format:
-	@$(RUN_PARALLEL) -j 2 \
+	@$(RUN_PARALLEL) -j 3 \
 		"guest:format" "$(MAKE) -C guest format" \
-		"host:format" "$(MAKE) -C host format"
+		"host:format" "$(MAKE) -C host format" \
+		"native:format" "$(MAKE) -C native format"
 
 fix: format
 
 clean:
-	@$(RUN_PARALLEL) -j 2 \
+	@$(RUN_PARALLEL) -j 3 \
 		"guest:clean" "$(MAKE) -C guest clean" \
-		"host:clean" "$(MAKE) -C host clean"
+		"host:clean" "$(MAKE) -C host clean" \
+		"native:clean" "$(MAKE) -C native clean"
 
 hooks:
 	@git config core.hooksPath .husky
@@ -224,3 +235,18 @@ fuzz-sandbox-repro:
 
 fuzz-clean:
 	@$(MAKE) -C guest fuzz-clean
+
+native:
+	@$(MAKE) -C native build
+
+native-check:
+	@$(MAKE) -C native check
+
+native-test:
+	@$(MAKE) -C native test
+
+native-release:
+	@$(MAKE) -C native dist
+
+native-test-linux:
+	@$(MAKE) -C native test-linux

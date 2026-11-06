@@ -35,6 +35,13 @@ import {
   type ClientMessage,
 } from "../sandbox/control-protocol.ts";
 import { SandboxServer } from "../sandbox/server.ts";
+import { NativeSandboxServer } from "../native/server.ts";
+import {
+  type SandboxEngine,
+  resolveNativeEngineOptions,
+  resolveVmEngine,
+} from "../native/config.ts";
+import { resolveRemoteSandboxOptions } from "../native/remote.ts";
 import { assertMacHypervisorEntitlement } from "../sandbox/krun-controller.ts";
 import {
   type ResolvedSandboxServerOptions,
@@ -51,7 +58,11 @@ import {
   registerSession,
   unregisterSession,
 } from "../session-registry.ts";
-import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs.ts";
+import {
+  createMitmCaProvider,
+  mitmCaSetters,
+  resolveMitmMounts,
+} from "./mitm-vfs.ts";
 import type { EnvInput, VMOptions, VmVfsOptions } from "./types.ts";
 import {
   buildShellEnv,
@@ -235,7 +246,11 @@ export class VM {
   private readonly autoStart: boolean;
   private readonly startTimeoutMs: number;
   private readonly sessionLabel: string | undefined;
-  private server: SandboxServer | null;
+  private server: SandboxServer | NativeSandboxServer | null;
+  /** host engine implementation */
+  readonly engine: SandboxEngine;
+  /** gondolind runs on another machine (no shared filesystem) */
+  readonly remote: boolean;
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
   private rootDisk: RootDiskState | null = null;
   private checkpointed = false;
@@ -339,6 +354,12 @@ export class VM {
       sandboxOptions.tmpfs = options.tmpfs;
     }
 
+    // A remote daemon resolves (and downloads) its own image
+    const native = resolveNativeEngineOptions(options.native);
+    if (resolveVmEngine(options.engine, native) === "native" && native.remote) {
+      return new VM(options);
+    }
+
     // Resolve options with asset fetching
     const resolvedSandboxOptions =
       await resolveSandboxServerOptionsAsync(sandboxOptions);
@@ -362,6 +383,9 @@ export class VM {
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
   ) {
     this.id = randomUUID();
+    const native = resolveNativeEngineOptions(options.native);
+    this.engine = resolveVmEngine(options.engine, native);
+    this.remote = this.engine === "native" && Boolean(native.remote);
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
@@ -414,6 +438,7 @@ export class VM {
     this.fuseMount = fuseConfig.fuseMount;
     this.fuseBinds = fuseConfig.fuseBinds;
 
+    const caSetters = mitmCaSetters(mitmMounts);
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
     if (sandboxOptions.vfsProvider && options.vfs) {
       throw new Error("VM cannot specify both vfs and sandbox.vfsProvider");
@@ -424,6 +449,7 @@ export class VM {
         sandboxOptions.mitmCertDir,
         sandboxOptions.netEnabled ?? true,
       );
+      caSetters.push(...mitmCaSetters(injectedMounts));
       if (Object.keys(injectedMounts).length > 0) {
         const normalized = normalizeMountMap({
           "/": sandboxOptions.vfsProvider,
@@ -492,9 +518,15 @@ export class VM {
     }
 
     // Resolve sandbox options (sync) if needed so we can prepare the root disk.
-    const resolved = resolvedSandboxOptions
-      ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
-      : resolveSandboxServerOptions(sandboxOptions);
+    // Remote daemons resolve assets themselves: no local paths at all.
+    const remoteResolution = this.remote
+      ? resolveRemoteSandboxOptions(sandboxOptions, native)
+      : null;
+    const resolved = remoteResolution
+      ? remoteResolution.resolved
+      : resolvedSandboxOptions
+        ? ({ ...resolvedSandboxOptions } as ResolvedSandboxServerOptions)
+        : resolveSandboxServerOptions(sandboxOptions);
 
     // Merge VFS provider into resolved options
     if (this.vfs) {
@@ -507,7 +539,9 @@ export class VM {
       sandboxOptions.rootDiskReadOnly !== undefined ||
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
-    const manifestRootfsMode = resolveManifestRootfsMode(resolved);
+    const manifestRootfsMode = this.remote
+      ? undefined
+      : resolveManifestRootfsMode(resolved);
     const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
     const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
 
@@ -515,7 +549,10 @@ export class VM {
       // Prepare root disk:
       // - Explicit sandbox.rootDisk* options win.
       // - Otherwise, use rootfs mode from VM options/manifest/default.
-      if (hasUserRootDiskConfig) {
+      if (this.remote) {
+        // the daemon creates the overlay / applies the mode and size
+        if (rootfsSizeBytes !== null) this.rootfsGuestResizePending = true;
+      } else if (hasUserRootDiskConfig) {
         this.rootDisk = prepareConfiguredRootDisk(resolved, sandboxOptions);
       } else if (rootfsMode === "readonly") {
         this.rootDisk = prepareBaseRootDisk(resolved, {
@@ -536,7 +573,7 @@ export class VM {
         throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
 
-      if (rootfsSizeBytes !== null) {
+      if (rootfsSizeBytes !== null && !this.remote) {
         prepareRootDiskResize(
           this.rootDisk,
           resolved.rootfsPath,
@@ -550,11 +587,43 @@ export class VM {
     }
 
     this.resolvedSandboxOptions = resolved;
-    this.server = new SandboxServer(resolved, {
+    const serverInternalOptions = {
       qemuRootDiskVolatileMode: this.rootDisk?.snapshot
-        ? "snapshot"
+        ? ("snapshot" as const)
         : undefined,
-    });
+      native,
+      setMitmCaCert: (certPem: string) => {
+        for (const set of caSetters) set(certPem);
+      },
+      remote: remoteResolution
+        ? {
+            image: remoteResolution.image,
+            checkpointPath: native.checkpoint,
+            rootfsMode: native.checkpoint
+              ? ("checkpoint" as const)
+              : (options.rootfs?.mode ?? ("auto" as const)),
+            rootfsSizeBytes: rootfsSizeBytes ?? undefined,
+            qemuPath: sandboxOptions.qemuPath,
+            krunRunnerPath: sandboxOptions.krunRunnerPath,
+          }
+        : undefined,
+    };
+    try {
+      this.server =
+        this.engine === "native"
+          ? new NativeSandboxServer(
+              resolved,
+              serverInternalOptions,
+              options.sandbox,
+            )
+          : new SandboxServer(resolved, {
+              qemuRootDiskVolatileMode:
+                serverInternalOptions.qemuRootDiskVolatileMode,
+            });
+    } catch (err) {
+      this.cleanupRootDiskSync();
+      throw err;
+    }
     this.fs = new VmFsController({
       start: () => this.start(),
       exec: (command, fsOptions = {}) => this.exec(command, fsOptions),
@@ -1160,6 +1229,12 @@ fi
     const server = this.server;
     if (!server) {
       throw new Error("sandbox server is not available");
+    }
+
+    if (this.remote) {
+      // the daemon checks its VMM binary when the session starts
+      this.vmmChecked = true;
+      return;
     }
 
     const vmmPath = server.getVmmPath();
@@ -1927,6 +2002,84 @@ fi
     });
   }
 
+  /**
+   * Remote checkpoint: the daemon stops the VM and streams its root disk
+   * overlay; the checkpoint file (qcow2 + trailer) is written here.
+   */
+  private async checkpointRemote(
+    checkpointPath: string,
+    options: {
+      /** keep session attach IPC open until caller performs post-checkpoint cleanup */
+      keepSessionIpc: boolean;
+    },
+  ): Promise<VmCheckpoint> {
+    const server = this.server;
+    if (!(server instanceof NativeSandboxServer)) {
+      throw new Error("sandbox server is not available");
+    }
+    if (server.getState() === "running") {
+      try {
+        await this.exec(["/bin/sh", "-c", "sync; sync"]);
+      } catch {
+        // ignore
+      }
+    }
+    const resolvedCheckpointPath = path.resolve(checkpointPath);
+    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
+    const partial = `${resolvedCheckpointPath}.partial-${process.pid}`;
+    let exported: { buildId: string | null };
+    try {
+      exported = await server.exportCheckpoint(partial);
+    } catch (err) {
+      fs.rmSync(partial, { force: true });
+      throw err;
+    }
+    if (options.keepSessionIpc) {
+      await this.closeSingleflight.run(() =>
+        this.closeInternal({
+          keepSessionIpc: true,
+          keepSessionRegistration: true,
+        }),
+      );
+    } else {
+      await this.close();
+    }
+    if (!exported.buildId) {
+      fs.rmSync(partial, { force: true });
+      throw new Error(
+        "cannot checkpoint: the daemon's guest image has no manifest buildId",
+      );
+    }
+    fs.rmSync(resolvedCheckpointPath, { force: true });
+    fs.renameSync(partial, resolvedCheckpointPath);
+
+    const image = server.getResolvedImage();
+    const createdWithVmm = this.resolvedSandboxOptions.vmm;
+    const data: VmCheckpointData = {
+      version: 1,
+      name: path.basename(
+        resolvedCheckpointPath,
+        path.extname(resolvedCheckpointPath),
+      ),
+      createdAt: new Date().toISOString(),
+      diskFile: path.basename(resolvedCheckpointPath),
+      guestAssetBuildId: exported.buildId,
+      snapshotKind: "disk",
+      createdWithVmm,
+      compatibleVmm:
+        image?.krun_kernel || createdWithVmm === "krun"
+          ? ["qemu", "krun"]
+          : ["qemu"],
+    };
+    VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
+    this.checkpointed = true;
+    return new VmCheckpoint(
+      resolvedCheckpointPath,
+      data,
+      this.baseOptionsForClone,
+    );
+  }
+
   private async checkpointInternal(
     checkpointPath: string,
     options: {
@@ -1943,6 +2096,9 @@ fi
       );
     }
 
+    if (this.remote) {
+      return await this.checkpointRemote(checkpointPath, options);
+    }
     const rootDisk = this.rootDisk;
     if (!rootDisk) {
       throw new Error("vm has no root disk");

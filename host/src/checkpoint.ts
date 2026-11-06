@@ -1,4 +1,9 @@
 import fs from "node:fs";
+
+import {
+  resolveNativeEngineOptions,
+  resolveVmEngine,
+} from "./native/config.ts";
 import path from "node:path";
 
 import {
@@ -438,6 +443,31 @@ export class VmCheckpoint {
       throw new Error(
         `checkpoint is not compatible with vmm=${requestedVmm} (compatible backends: ${compatibleVmm.join(", ")})`,
       );
+    }
+
+    // A remote native daemon boots the checkpoint itself: upload it and let
+    // the daemon resolve the image by build id.
+    const native = resolveNativeEngineOptions(mergedForResume.native);
+    if (
+      resolveVmEngine(mergedForResume.engine, native) === "native" &&
+      native.remote
+    ) {
+      if (!fs.existsSync(this.diskPath)) {
+        throw new Error(`checkpoint disk not found: ${this.diskPath}`);
+      }
+      const imagePath = mergedForResume.sandbox?.imagePath;
+      return (await createVm({
+        ...mergedForResume,
+        native: {
+          ...native,
+          image:
+            native.image ??
+            (typeof imagePath === "string"
+              ? imagePath
+              : this.data.guestAssetBuildId),
+          checkpoint: this.diskPath,
+        },
+      })) as TVm;
     }
 
     ensureQemuImgAvailable();

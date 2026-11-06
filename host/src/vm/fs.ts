@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import type { ExecResult } from "../exec.ts";
 import type { SandboxServer } from "../sandbox/server.ts";
+import type { NativeSandboxServer } from "../native/server.ts";
 import {
   getRelativePath,
   isNoEntryError,
@@ -179,7 +180,7 @@ export type VmFsControllerOptions = {
     options?: VmFsExecOptions,
   ) => PromiseLike<ExecResult>;
   /** lookup sandbox server when started */
-  getServer: () => SandboxServer | null;
+  getServer: () => SandboxServer | NativeSandboxServer | null;
   /** optional wrapped vfs provider */
   vfs: SandboxVfsProvider | null;
   /** guest path where fuse is mounted */

@@ -6,6 +6,9 @@ importers:
   .:
     configDependencies: {}
     packageManagerDependencies:
+      '@pnpm/exe':
+        specifier: 12.8.1
+        version: 12.8.1
       pnpm:
         specifier: 12.8.1
         version: 12.8.1
@@ -89,6 +92,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@pnpm/exe@12.8.1':
+    resolution: {integrity: sha512-ju5MeefhEEXI7NO3u6oj54uGBOkN0pVhI+tcmuZDkTTqVdRZvEVEo+zhjwAoe8vEXguQCvsa6cTDhmFPxpOXeQ==}
+    engines: {node: '>=18.*'}
+    hasBin: true
+
   pnpm@12.8.1:
     resolution: {integrity: sha512-9kupB1B/XOr+BsjTjmBS0BeURFgOwSed3Vv8EctIqoomRLZlmOB+dh2oSHKp/FfV+QK4f6SdAkGY1VhhKqu+RQ==}
     engines: {node: '>=18.*'}
@@ -137,6 +145,23 @@ snapshots:
 
   '@pnpm/exe.win32-x64@12.8.1':
     optional: true
+
+  '@pnpm/exe@12.8.1':
+    optionalDependencies:
+      '@pnpm/exe.android-arm64': 12.8.1
+      '@pnpm/exe.android-x64': 12.8.1
+      '@pnpm/exe.darwin-arm64': 12.8.1
+      '@pnpm/exe.darwin-x64': 12.8.1
+      '@pnpm/exe.freebsd-x64': 12.8.1
+      '@pnpm/exe.linux-arm64': 12.8.1
+      '@pnpm/exe.linux-arm64-musl': 12.8.1
+      '@pnpm/exe.linux-ppc64': 12.8.1
+      '@pnpm/exe.linux-riscv64': 12.8.1
+      '@pnpm/exe.linux-s390x': 12.8.1
+      '@pnpm/exe.linux-x64': 12.8.1
+      '@pnpm/exe.linux-x64-musl': 12.8.1
+      '@pnpm/exe.win32-arm64': 12.8.1
+      '@pnpm/exe.win32-x64': 12.8.1
 
   pnpm@12.8.1:
     optionalDependencies:
@@ -198,10 +223,25 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
+    optionalDependencies:
+      '@earendil-works/gondolin-krun-runner-darwin-arm64':
+        specifier: 0.14.0
+        version: 0.14.0
+      '@earendil-works/gondolin-krun-runner-linux-x64':
+        specifier: 0.14.0
+        version: 0.14.0
 
   packages/gondolin-krun-runner-darwin-arm64: {}
 
   packages/gondolin-krun-runner-linux-x64: {}
+
+  packages/gondolin-native-darwin-arm64: {}
+
+  packages/gondolin-native-darwin-x64: {}
+
+  packages/gondolin-native-linux-arm64: {}
+
+  packages/gondolin-native-linux-x64: {}
 
 packages:
 
@@ -265,6 +305,18 @@ packages:
   '@cto.af/wtf8@0.0.5':
     resolution: {integrity: sha512-LfUFi+Vv4eDzj+XAtR89e3wwjXA/NZjUSwU5NhwbBrLecxPaBYFy3exCuc1j+D4UZeOVdqlsl8G7LmOt18V0tg==}
     engines: {node: '>=20'}
+
+  '@earendil-works/gondolin-krun-runner-darwin-arm64@0.14.0':
+    resolution: {integrity: sha512-fvuhz1CZPaEbmXC0luZoXd1obAb0bjaaGJz33Jo63bhMlosYunAahItakh7cU0dnTlNFzufOSnpGOPqtuYjnpQ==}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
+  '@earendil-works/gondolin-krun-runner-linux-x64@0.14.0':
+    resolution: {integrity: sha512-91iw4smoOH/yOoAuQS6N2UZOxqSFwRhtk8rTyrokXBoWiWcveAzg4kHvnLcm40ZlNrWwzIDFrere4bkZeGDQcA==}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
 
   '@types/node@18.19.130':
     resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
@@ -479,6 +531,12 @@ snapshots:
     optional: true
 
   '@cto.af/wtf8@0.0.5': {}
+
+  '@earendil-works/gondolin-krun-runner-darwin-arm64@0.14.0':
+    optional: true
+
+  '@earendil-works/gondolin-krun-runner-linux-x64@0.14.0':
+    optional: true
 
   '@types/node@18.19.130':
     dependencies:

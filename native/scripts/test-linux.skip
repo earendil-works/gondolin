@@ -1,0 +1,2 @@
+# Tests that cannot run inside the Gondolin test VM.
+# format: <test-binary|*> <test-name-filter>  # reason

@@ -23,6 +23,9 @@
     "start": "node dist/bin/gondolin.js exec",
     "dev": "node bin/gondolin.ts exec",
     "test": "node --test test/*.test.ts",
+    "test:native": "./scripts/test-native.sh",
+    "test:native:remote": "./scripts/test-native-remote.sh",
+    "test:both": "./scripts/test-both.sh",
     "test:backend-parity": "node --test test/backend-parity.test.ts",
     "bash": "node bin/gondolin.ts bash",
     "gondolin": "node bin/gondolin.ts",
@@ -53,7 +56,11 @@
   },
   "optionalDependencies": {
     "@earendil-works/gondolin-krun-runner-darwin-arm64": "0.14.0",
-    "@earendil-works/gondolin-krun-runner-linux-x64": "0.14.0"
+    "@earendil-works/gondolin-krun-runner-linux-x64": "0.14.0",
+    "@earendil-works/gondolin-native-darwin-arm64": "0.14.0",
+    "@earendil-works/gondolin-native-darwin-x64": "0.14.0",
+    "@earendil-works/gondolin-native-linux-arm64": "0.14.0",
+    "@earendil-works/gondolin-native-linux-x64": "0.14.0"
   },
   "devDependencies": {
     "@types/node": "22.19.21",

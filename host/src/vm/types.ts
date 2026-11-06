@@ -1,4 +1,5 @@
 import type { DebugLogFn } from "../debug.ts";
+import type { NativeEngineOptions } from "../native/config.ts";
 import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts.ts";
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
@@ -27,6 +28,10 @@ export type VmRootfsOptions = {
 };
 
 export type VMOptions = {
+  /** how to reach gondolind (native engine): local binary, a command, a connection, remote mode */
+  native?: NativeEngineOptions;
+  /** host engine: in-process TypeScript (`node`) or the `gondolind` daemon (`native`); default `GONDOLIN_ENGINE`, else `node` */
+  engine?: "node" | "native";
   /** sandbox controller options */
   sandbox?: SandboxServerOptions;
   /** rootfs mode override */

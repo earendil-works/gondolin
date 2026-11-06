@@ -3,6 +3,26 @@ import type { VmVfsOptions } from "./types.ts";
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "../mitm.ts";
 import { listMountPaths } from "../vfs/mounts.ts";
 import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
+import { ReadonlyProvider } from "../vfs/readonly.ts";
+
+/** Hidden setter replacing the certificate of a {@link createMitmCaProvider} mount */
+const MITM_CA_SETTER = Symbol.for("gondolin.mitmCaSetter");
+
+/** Certificate setters of the MITM CA mounts among `mounts` */
+export function mitmCaSetters(
+  mounts: Record<string, VirtualProvider>,
+): Array<(certPem: string) => void> {
+  const out: Array<(certPem: string) => void> = [];
+  for (const provider of Object.values(mounts)) {
+    const setter = (provider as unknown as Record<symbol, unknown>)[
+      MITM_CA_SETTER
+    ];
+    if (typeof setter === "function") {
+      out.push(setter as (certPem: string) => void);
+    }
+  }
+  return out;
+}
 
 /** guest mount path for host-provided MITM trust material */
 const MITM_CA_MOUNT_PATH = "/etc/gondolin/mitm";
@@ -33,14 +53,22 @@ export function resolveMitmMounts(
 export function createMitmCaProvider(mitmCertDir?: string): VirtualProvider {
   const resolvedDir = resolveMitmCertDir(mitmCertDir);
   const ca = loadOrCreateMitmCaSync(resolvedDir);
-  const provider = new MemoryProvider();
-  const certPem = ca.certPem.endsWith("\n") ? ca.certPem : `${ca.certPem}\n`;
-  const handle = provider.openSync(`/${MITM_CA_FILENAME}`, "w");
-  try {
-    handle.writeFileSync(certPem);
-  } finally {
-    handle.closeSync();
-  }
-  provider.setReadOnly();
+  const memory = new MemoryProvider();
+  const write = (pem: string) => {
+    const certPem = pem.endsWith("\n") ? pem : `${pem}\n`;
+    const handle = memory.openSync(`/${MITM_CA_FILENAME}`, "w");
+    try {
+      handle.writeFileSync(certPem);
+    } finally {
+      handle.closeSync();
+    }
+  };
+  write(ca.certPem);
+  const provider = new ReadonlyProvider(memory);
+  // a remote native daemon terminates TLS with its own CA (`mitm_ca`)
+  Object.defineProperty(provider, MITM_CA_SETTER, {
+    value: write,
+    enumerable: false,
+  });
   return provider;
 }

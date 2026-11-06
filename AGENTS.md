@@ -6,6 +6,7 @@ Start by reading `README.md` in the repo root for the current status, repo layou
 
 - `guest/` — Zig-based `sandboxd` daemon and Alpine initramfs build (cross-compiled, targets aarch64/x86_64 Linux)
 - `host/` — TypeScript host controller, networking stack, VFS, and CLI (`pnpm` workspace)
+- `native/` — `gondolind`, the native host engine (Rust workspace); see `native/DESIGN.md` and `native/PLAN.md`
 - `scripts/` — Build tooling (`run-parallel` etc.)
 - `docs/` — Additional documentation (custom images, etc.)
 - `examples/` — Usage examples
@@ -45,12 +46,12 @@ When preparing a package release, keep all package versions in sync with the rel
 
 1. Move relevant `CHANGELOG.md` entries from `## Unreleased` into a new `## X.Y.Z` section, leaving `## Unreleased` in place at the top.
 2. Update `host/package.json` `version` to `X.Y.Z`.
-3. Update `host/package.json` `optionalDependencies` for `@earendil-works/gondolin-krun-runner-*` to `X.Y.Z`.
-4. Update `packages/gondolin-krun-runner-darwin-arm64/package.json` and `packages/gondolin-krun-runner-linux-x64/package.json` `version` fields to `X.Y.Z`.
-5. Run `pnpm install --lockfile-only` from the repo root to refresh `pnpm-lock.yaml`.
+3. Update `host/package.json` `optionalDependencies` for `@earendil-works/gondolin-krun-runner-*` and `@earendil-works/gondolin-native-*` to `X.Y.Z`.
+4. Update the `version` fields of `packages/gondolin-krun-runner-darwin-arm64/package.json`, `packages/gondolin-krun-runner-linux-x64/package.json` and the four `packages/gondolin-native-{darwin-arm64,darwin-x64,linux-arm64,linux-x64}/package.json` to `X.Y.Z`, and `[workspace.package] version` in `native/Cargo.toml` (it is what `gondolind --version` reports).
+5. Run `pnpm install --lockfile-only` from the repo root to refresh `pnpm-lock.yaml`, and `cargo update --workspace` in `native/` to refresh `native/Cargo.lock`.
 6. Run at least `make check`; run `make test` when practical.
 7. Commit the version/changelog/lockfile changes, then create and push the tag `vX.Y.Z`.
-8. Watch the Release workflow complete. It creates the package release, publishes sandbox helper bundles to `sandbox-helpers--X.Y.Z`, updates `builtin-sandbox-helper-registry.json` on `main`, publishes optional krun runner packages, then publishes the main npm package.
+8. Watch the Release workflow complete. It creates the package release, publishes sandbox helper bundles to `sandbox-helpers--X.Y.Z`, updates `builtin-sandbox-helper-registry.json` on `main`, publishes optional krun runner packages, cross-builds `gondolind` for all platforms on macOS (`make native-release`) and publishes the `gondolin-native-*` packages, then publishes the main npm package.
 
 The package release workflow is tag-driven (`.github/workflows/release.yml`) and verifies that package versions match `vX.Y.Z` before publishing. The main package must not be published until the exact `gondolin:X.Y.Z` sandbox helper registry entry exists; the workflow enforces this by making npm publish depend on the sandbox helper release and registry update. If the helper/registry step needs recovery, dispatch `.github/workflows/sandbox-helpers-release.yml` for `X.Y.Z`/`vX.Y.Z` and wait for the registry commit on `main` before rerunning npm publication. Image releases are separate and are run via the Image Release workflow; do not update package versions for image-only releases. If a release was already published without a changelog entry, add a follow-up `CHANGELOG.md` commit on `main` instead of retagging or republishing.
 

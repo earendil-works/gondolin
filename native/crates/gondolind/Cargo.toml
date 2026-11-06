@@ -1,0 +1,32 @@
+[package]
+name = "gondolind"
+description = "Gondolin's native host engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gondolin-wire.workspace = true
+gondolin-proto.workspace = true
+gondolin-assets.workspace = true
+gondolin-vfs.workspace = true
+gondolin-netstack.workspace = true
+gondolin-egress.workspace = true
+gondolin-sshproxy.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+indexmap = "2"
+libc = "0.2"
+serde_json = "1"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+ring = "0.17"
+rsa = "=0.10.0-rc.18"
+rand_core = "0.10"
+rustls-pki-types = "1"
+time = "0.3"

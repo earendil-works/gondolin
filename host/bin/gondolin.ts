@@ -215,7 +215,7 @@ function renderCliError(err: unknown) {
 }
 
 function usage() {
-  console.log("Usage: gondolin <command> [options]");
+  console.log("Usage: gondolin [engine options] <command> [options]");
   console.log("Commands:");
   console.log(
     "  exec         Run a command via a session IPC socket or in-process VM",
@@ -232,6 +232,16 @@ function usage() {
   console.log("  image        Manage local image refs and objects");
   console.log("  tools        Inspect/download managed helper tools");
   console.log("  help         Show this help");
+  console.log("\nEngine options (before the command):");
+  console.log(
+    "  --engine node|native|auto  Host engine (default: $GONDOLIN_ENGINE, else node; auto = native when gondolind is available)",
+  );
+  console.log(
+    "  --native-command CMD     Start gondolind with CMD (e.g. 'ssh host gondolind'); implies native",
+  );
+  console.log(
+    "  --remote                 gondolind runs on another machine (no shared files); implies native",
+  );
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
 
@@ -3401,8 +3411,56 @@ async function runImage(argv: string[]) {
   }
 }
 
+/**
+ * Global engine flags (before the command): `--engine node|native`,
+ * `--native-command CMD`, `--remote`. They are applied through the
+ * environment (`GONDOLIN_ENGINE`, `GONDOLIN_NATIVE_COMMAND`,
+ * `GONDOLIN_NATIVE_REMOTE`) so every VM the command creates (including
+ * checkpoint resumes) uses them.
+ */
+function applyGlobalEngineFlags(argv: string[]): string[] {
+  const rest = [...argv];
+  const fail = (message: string): never => {
+    console.error(message);
+    usage();
+    process.exit(1);
+  };
+  while (rest.length > 0 && rest[0]!.startsWith("--")) {
+    const arg = rest[0]!;
+    const [name, inline] = arg.includes("=")
+      ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)]
+      : [arg, undefined];
+    const takeValue = (): string => {
+      if (inline !== undefined) return inline;
+      const value = rest[1];
+      if (value === undefined || value.startsWith("--")) {
+        fail(`${name} requires an argument`);
+      }
+      rest.shift();
+      return value!;
+    };
+    if (name === "--engine") {
+      const engine = takeValue().trim().toLowerCase();
+      if (engine !== "node" && engine !== "native" && engine !== "auto") {
+        fail(`invalid --engine: ${engine} (expected node, native or auto)`);
+      }
+      process.env.GONDOLIN_ENGINE = engine;
+    } else if (name === "--native-command") {
+      process.env.GONDOLIN_NATIVE_COMMAND = takeValue();
+      process.env.GONDOLIN_ENGINE ??= "native";
+    } else if (name === "--remote") {
+      process.env.GONDOLIN_NATIVE_REMOTE = "1";
+      process.env.GONDOLIN_ENGINE ??= "native";
+    } else {
+      break;
+    }
+    rest.shift();
+  }
+  return rest;
+}
+
 async function main() {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = applyGlobalEngineFlags(process.argv.slice(2));
 
   if (
     !command ||

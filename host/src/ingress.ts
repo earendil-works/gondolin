@@ -871,6 +871,9 @@ export type IngressAccess = {
   close(): Promise<void>;
 };
 
+/** What the ingress gateway needs from a sandbox server */
+export type IngressSandbox = Pick<SandboxServer, "openIngressStream">;
+
 export class IngressGateway {
   private server: http.Server | null = null;
   private hooks: IngressGatewayHooks | null;
@@ -879,11 +882,11 @@ export class IngressGateway {
   private maxBufferedResponseBodyBytes: number;
   private upstreamHeaderTimeoutMs: number;
   private upstreamResponseTimeoutMs: number;
-  private readonly sandbox: SandboxServer;
+  private readonly sandbox: IngressSandbox;
   private readonly listeners: GondolinListeners;
 
   constructor(
-    sandbox: SandboxServer,
+    sandbox: IngressSandbox,
     listeners: GondolinListeners,
     options: Pick<
       EnableIngressOptions,

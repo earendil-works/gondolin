@@ -27,7 +27,8 @@
     "scripts/**/*.ts",
     "test/**/*.ts",
     "fuzz/**/*.ts",
-    "examples/**/*.ts"
+    "examples/**/*.ts",
+    "bench/**/*.ts"
   ],
   "exclude": [
     "dist",

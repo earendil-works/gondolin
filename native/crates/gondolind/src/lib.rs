@@ -1,0 +1,225 @@
+//! gondolind: Gondolin's native host engine. Speaks the controller protocol on
+//! stdin/stdout (`native/DESIGN.md`); stderr carries free-form diagnostics.
+//!
+//! Module map:
+//! - [`controller`]: controller framing, request correlation, handler registry
+//! - [`session`]: the session actor (configuration, clients, boot, VMM lifecycle)
+//! - `exec`, `files`, `idle`: exec handling, guest file operations, idle pause
+//! - [`guest`], [`guestmsg`], [`vfs_port`]: guest channels and messages
+//! - [`qemu`], [`vmm`], [`qmp`]: QEMU command line, process, monitor
+//! - [`subsystem`], [`vfs_proxy`]: VFS/network integration points
+//! - [`net`]: native network (netstack + egress + SSH proxy, tier-3 hooks)
+
+pub mod bootcfg;
+mod checkpoint;
+pub mod controller;
+mod exec;
+pub mod fields;
+mod files;
+pub mod guest;
+pub mod guestmsg;
+pub mod idle;
+pub mod image;
+pub mod krun;
+pub mod mitm_ca;
+pub mod net;
+pub mod net_relay;
+mod netlog;
+pub mod qemu;
+pub mod qmp;
+pub mod rootdisk;
+pub mod session;
+pub mod subsystem;
+pub mod tcpfwd;
+pub mod vfs_port;
+pub mod vfs_proxy;
+pub mod vmm;
+
+#[cfg(test)]
+mod tests;
+
+/// Runs a test future with a deadline so a deadlock fails instead of hanging.
+#[cfg(test)]
+pub(crate) async fn test_timeout<F: std::future::Future>(f: F) -> F::Output {
+    tokio::time::timeout(std::time::Duration::from_secs(20), f).await.expect("test timed out")
+}
+
+use gondolin_proto::PROTOCOL_VERSION;
+use gondolin_proto::session::{HELLO, Hello};
+
+use crate::controller::{Controller, Dispatcher};
+use crate::qemu::HostInfo;
+use crate::session::Session;
+
+/// Optional features announced in `hello`.
+const FEATURES: &[&str] = &[
+    "exec",
+    "files",
+    "idle_pause",
+    "vfs.controller",
+    "net.external",
+    "tcp_forward",
+    "mitm_ca",
+    "image",
+    "net.native",
+];
+
+/// Process entry point (argument handling, runtime setup).
+pub fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            println!("gondolind {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("assets") => {
+            // image management (`gondolind assets ...`), shares the node engine's cache
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let code = runtime.block_on(gondolin_assets::cli::run(&args[1..]));
+            runtime.shutdown_background();
+            std::process::exit(code);
+        }
+        Some("--mitm-ca") => {
+            // load or create the MITM CA (default: node's cache dir) and print its certificate
+            let dir =
+                args.get(1).map(std::path::PathBuf::from).unwrap_or_else(mitm_ca::default_dir);
+            match mitm_ca::load_or_create(&dir) {
+                Ok(ca) => {
+                    print!("{}", ca.cert_pem);
+                    return;
+                }
+                Err(err) => {
+                    eprintln!("gondolind: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Some("--vmm-watchdog") => {
+            let pid = args.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+            std::process::exit(if pid > 0 { vmm::run_watchdog(pid) } else { 2 });
+        }
+        Some("--qemu-args") => {
+            // debugging/parity helper: print the QEMU argv for a configure payload (JSON on stdin)
+            std::process::exit(print_qemu_args());
+        }
+        Some(other) => {
+            eprintln!("gondolind: unknown argument {other}");
+            eprintln!(
+                "usage: gondolind [--version | assets ...]  (speaks the controller protocol on stdio)"
+            );
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
+    // kill QEMU if we go down abnormally
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        vmm::kill_current();
+        default_hook(info);
+    }));
+    // SAFETY: ignoring SIGPIPE so writes to a closed pipe fail with EPIPE.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("gondolind")
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(run());
+    vmm::kill_current();
+    // stdin is read on a blocking thread that would keep the runtime alive
+    runtime.shutdown_background();
+    std::process::exit(0);
+}
+
+async fn run() {
+    let ctl = Controller::new();
+    let dispatcher = Dispatcher::default();
+    let writer = tokio::spawn(ctl.clone().run_writer(tokio::io::stdout()));
+
+    ctl.send(
+        HELLO,
+        0,
+        &Hello {
+            protocol: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            pid: std::process::id(),
+        },
+    );
+
+    dispatcher.register(mitm_ca::MITM_CA, std::sync::Arc::new(mitm_ca::MitmCaHandler));
+    let (session, channels) = Session::new(ctl.clone(), dispatcher.clone(), HostInfo::detect());
+    let (session_tx, session_rx) = tokio::sync::mpsc::channel(64);
+    let reader = {
+        let ctl = ctl.clone();
+        let dispatcher = dispatcher.clone();
+        tokio::spawn(async move {
+            if let Err(err) = dispatcher.run_reader(tokio::io::stdin(), ctl, session_tx).await {
+                eprintln!("gondolind: controller input failed: {err}");
+            }
+        })
+    };
+
+    session.run(channels, session_rx).await;
+    reader.abort();
+    // flush what is queued, then stop the writer
+    let flush = async {
+        while ctl.queued_bytes() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), flush).await;
+    ctl.close();
+    let _ = writer.await;
+}
+
+fn print_qemu_args() -> i32 {
+    use std::io::Read;
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return 1;
+    }
+    let json: serde_json::Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("invalid JSON: {err}");
+            return 1;
+        }
+    };
+    let vm: gondolin_proto::session::VmConfig = match serde_json::from_value(json["vm"].clone()) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("invalid vm config: {err}");
+            return 1;
+        }
+    };
+    let s = |key: &str| json[key].as_str().map(str::to_string);
+    let chardevs = qemu::ChardevPaths {
+        control: s("control").unwrap_or_default().into(),
+        fs: s("fs").unwrap_or_default().into(),
+        ssh: s("ssh").unwrap_or_default().into(),
+        ingress: s("ingress").unwrap_or_default().into(),
+    };
+    let append = s("append").unwrap_or_else(|| qemu::base_append(&vm, &HostInfo::detect()));
+    let net = s("net_socket");
+    let qmp = s("qmp_socket");
+    let host = HostInfo::detect();
+    let args = qemu::build_qemu_args(&qemu::QemuArgs {
+        vm: &vm,
+        append: &append,
+        chardevs: &chardevs,
+        net_socket: net.as_deref(),
+        qmp_socket: qmp.as_deref(),
+        host: &host,
+    });
+    println!("{}", serde_json::to_string(&args).unwrap());
+    0
+}
