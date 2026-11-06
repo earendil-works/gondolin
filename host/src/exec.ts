@@ -418,12 +418,50 @@ export type ExecSession = {
   signal?: AbortSignal;
   signalListener?: () => void;
 
+  /** stdin sent but not yet acknowledged by the server in `bytes` */
+  stdinPendingBytes: number;
+  /** writers waiting for {@link stdinPendingBytes} to fall below the high-water mark */
+  stdinDrainWaiters: Array<() => void>;
+
   requestReady: boolean;
   pendingStdin: Array<
     { type: "data"; data: Buffer | string } | { type: "eof" }
   >;
   pendingResize: { rows: number; cols: number } | null;
 };
+
+/**
+ * Unacknowledged stdin per exec in `bytes` above which writers wait (the
+ * servers queue at most a few MiB per exec before failing).
+ */
+export const STDIN_HIGH_WATER_BYTES = 1024 * 1024;
+
+/** Account stdin handed to the server */
+export function addPendingStdin(session: ExecSession, bytes: number): void {
+  session.stdinPendingBytes += bytes;
+}
+
+/** The server forwarded `bytes` of stdin (`stdin_ack`) */
+export function ackStdin(session: ExecSession, bytes: number): void {
+  session.stdinPendingBytes = Math.max(0, session.stdinPendingBytes - bytes);
+  if (session.stdinPendingBytes < STDIN_HIGH_WATER_BYTES) {
+    releaseStdinWaiters(session);
+  }
+}
+
+function releaseStdinWaiters(session: ExecSession) {
+  const waiters = session.stdinDrainWaiters;
+  session.stdinDrainWaiters = [];
+  for (const waiter of waiters) waiter();
+}
+
+/** Resolves once stdin may be written again (or the exec finished) */
+export function waitStdinDrain(session: ExecSession): Promise<void> {
+  if (session.stdinPendingBytes < STDIN_HIGH_WATER_BYTES) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => session.stdinDrainWaiters.push(resolve));
+}
 
 export type ExecProcessCallbacks = {
   sendStdin: (id: number, data: Buffer | string) => void;
@@ -472,11 +510,22 @@ export class ExecProcess
     return this.session.resultPromise;
   }
 
-  write(data: string | Buffer): void {
+  /**
+   * Write to the process's stdin. Returns `false` once more than
+   * {@link STDIN_HIGH_WATER_BYTES} are unacknowledged; await {@link drain}
+   * before writing more to keep memory bounded.
+   */
+  write(data: string | Buffer): boolean {
     if (!this.session.stdinEnabled) {
       throw new Error("stdin was not enabled for this exec");
     }
     this.callbacks.sendStdin(this.session.id, data);
+    return this.session.stdinPendingBytes < STDIN_HIGH_WATER_BYTES;
+  }
+
+  /** Resolves once stdin accepts more data (see {@link write}) */
+  drain(): Promise<void> {
+    return waitStdinDrain(this.session);
   }
 
   end(): void {
@@ -702,6 +751,8 @@ export function createExecSession(
     stdinEnabled: options.stdinEnabled,
     encoding: options.encoding ?? DEFAULT_ENCODING,
     signal: options.signal,
+    stdinPendingBytes: 0,
+    stdinDrainWaiters: [],
     requestReady: false,
     pendingStdin: [],
     pendingResize: null,
@@ -808,6 +859,8 @@ export function finishExecSession(
 
   session.stdoutPipe?.endStream();
   session.stderrPipe?.endStream();
+  session.stdinPendingBytes = 0;
+  releaseStdinWaiters(session);
 
   if (session.signal && session.signalListener) {
     session.signal.removeEventListener("abort", session.signalListener);
@@ -817,6 +870,8 @@ export function finishExecSession(
 }
 
 export function rejectExecSession(session: ExecSession, error: Error): void {
+  session.stdinPendingBytes = 0;
+  releaseStdinWaiters(session);
   session.stdoutPipe?.endStream();
   session.stderrPipe?.endStream();
 

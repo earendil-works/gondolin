@@ -729,6 +729,75 @@ export async function bridgeSshExecChannel(options: {
     }
   });
 
+  // Wire the channel inside ssh2's exec callback: a fast upstream can deliver
+  // output, `exit` and `close` in the same tick, and events emitted before
+  // listeners exist (after an `await`) are lost.
+  const wireUpstreamChannel = (channel: SshClientChannel) => {
+    if (backend.options.debug) {
+      backend.emitDebug(
+        `ssh proxy exec ${hostname} ${JSON.stringify(command)}`,
+      );
+    }
+
+    channel.on("data", (data: Buffer) => {
+      guestChannel.write(data);
+    });
+
+    channel.stderr.on("data", (data: Buffer) => {
+      guestChannel.stderr.write(data);
+    });
+
+    channel.on("exit", (code: number | null, signal?: string) => {
+      if (typeof code === "number") {
+        guestChannel.exit(code);
+      } else if (signal) {
+        guestChannel.exit(signal);
+      }
+    });
+
+    channel.on("close", () => {
+      try {
+        guestChannel.close();
+      } catch {
+        // ignore
+      }
+      removeUpstream();
+      try {
+        upstream.end();
+      } catch {
+        // ignore
+      }
+    });
+
+    guestChannel.on("data", (data: Buffer) => {
+      channel.write(data);
+    });
+
+    guestChannel.on("eof", () => {
+      channel.end();
+    });
+
+    guestChannel.on("close", () => {
+      channel.close();
+    });
+
+    guestChannel.on("signal", (signalName: string) => {
+      try {
+        channel.signal(signalName);
+      } catch {
+        // ignore
+      }
+    });
+
+    channel.on("error", (err: Error) => {
+      backend.abortTcpSession(
+        key,
+        session,
+        `ssh-upstream-channel-error (${errorMessage(err)})`,
+      );
+    });
+  };
+
   try {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -757,6 +826,8 @@ export async function bridgeSshExecChannel(options: {
           reject(err);
           return;
         }
+        upstreamChannel = channel;
+        wireUpstreamChannel(channel);
         resolve(channel);
       });
     });
@@ -769,68 +840,6 @@ export async function bridgeSshExecChannel(options: {
     }
     throw err;
   }
-
-  if (backend.options.debug) {
-    backend.emitDebug(`ssh proxy exec ${hostname} ${JSON.stringify(command)}`);
-  }
-
-  upstreamChannel.on("data", (data: Buffer) => {
-    guestChannel.write(data);
-  });
-
-  upstreamChannel.stderr.on("data", (data: Buffer) => {
-    guestChannel.stderr.write(data);
-  });
-
-  upstreamChannel.on("exit", (code: number | null, signal?: string) => {
-    if (typeof code === "number") {
-      guestChannel.exit(code);
-    } else if (signal) {
-      guestChannel.exit(signal);
-    }
-  });
-
-  upstreamChannel.on("close", () => {
-    try {
-      guestChannel.close();
-    } catch {
-      // ignore
-    }
-    removeUpstream();
-    try {
-      upstream.end();
-    } catch {
-      // ignore
-    }
-  });
-
-  guestChannel.on("data", (data: Buffer) => {
-    upstreamChannel!.write(data);
-  });
-
-  guestChannel.on("eof", () => {
-    upstreamChannel!.end();
-  });
-
-  guestChannel.on("close", () => {
-    upstreamChannel!.close();
-  });
-
-  guestChannel.on("signal", (signalName: string) => {
-    try {
-      upstreamChannel!.signal(signalName);
-    } catch {
-      // ignore
-    }
-  });
-
-  upstreamChannel.on("error", (err: Error) => {
-    backend.abortTcpSession(
-      key,
-      session,
-      `ssh-upstream-channel-error (${errorMessage(err)})`,
-    );
-  });
 
   upstream.on("error", (err: Error) => {
     backend.abortTcpSession(

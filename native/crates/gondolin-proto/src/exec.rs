@@ -23,6 +23,7 @@
 //! | d→c | `client_closed` | [`ClientRef`]: the daemon closed the client |
 //! | d→c | `exec_output` | [`ExecOutput`] |
 //! | d→c | `exec_response` | [`ExecResponse`] |
+//! | d→c | `client_stdin_ack` | [`StdinAck`]: stdin bytes forwarded to the guest (client backpressure) |
 //!
 //! Field types are validated leniently by the daemon (a wrongly typed field is
 //! an `invalid_request` client error, not a protocol error), so the structs
@@ -46,6 +47,7 @@ pub const CLIENT_ERROR: &str = "client_error";
 pub const CLIENT_CLOSED: &str = "client_closed";
 pub const EXEC_OUTPUT: &str = "exec_output";
 pub const EXEC_RESPONSE: &str = "exec_response";
+pub const CLIENT_STDIN_ACK: &str = "client_stdin_ack";
 
 /// Client number chosen by the controller.
 pub type ClientId = u32;
@@ -185,6 +187,15 @@ pub struct ExecResponse {
     pub exit_code: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+}
+
+/// Stdin of an exec that left the daemon's queue towards the guest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StdinAck {
+    pub client: ClientId,
+    pub id: u32,
+    /// acknowledged stdin in `bytes`
+    pub bytes: u64,
 }
 
 #[cfg(test)]

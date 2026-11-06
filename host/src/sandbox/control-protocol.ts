@@ -16,6 +16,7 @@
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
  * - exec_response { type: "exec_response", id, exit_code, signal? }
+ * - stdin_ack { type: "stdin_ack", id, bytes } (stdin bytes forwarded to the guest)
  * - snapshot_response { type: "snapshot_response", id, path, name }
  * - error { type: "error", id?, code, message }
  *
@@ -119,6 +120,18 @@ export type ExecResponseMessage = {
   signal?: number;
 };
 
+/**
+ * Stdin bytes of an exec that left the server's queue towards the guest; the
+ * client keeps its unacknowledged stdin bounded with it (backpressure).
+ */
+export type StdinAckMessage = {
+  type: "stdin_ack";
+  /** request id */
+  id: number;
+  /** acknowledged stdin in `bytes` */
+  bytes: number;
+};
+
 export type ErrorMessage = {
   type: "error";
   /** request id (when the error is correlated to a request) */
@@ -147,6 +160,7 @@ export type StatusMessage = {
 
 export type ServerMessage =
   | ExecResponseMessage
+  | StdinAckMessage
   | ErrorMessage
   | SnapshotResponseMessage
   | StatusMessage;

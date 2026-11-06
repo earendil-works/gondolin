@@ -1487,6 +1487,14 @@ export class SandboxServerOps {
 
     if (!progressed) return false;
 
+    const acked = (this.queuedStdinBytes.get(id) ?? 0) - remainingBytes;
+    if (acked > 0) {
+      const client = this.inflight.get(id);
+      if (client) {
+        sendJson(client, { type: "stdin_ack", id, bytes: acked });
+      }
+    }
+
     if (removed >= list.length) {
       this.queuedStdin.delete(id);
       this.queuedStdinBytes.delete(id);

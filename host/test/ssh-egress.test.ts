@@ -95,13 +95,12 @@ function upstream(): Promise<Upstream | null> {
           session.on("exec", (acceptExec, _reject, info) => {
             const stream = acceptExec();
             execs.push(info.command);
-            // answer a moment later like a real server (the node engine attaches
-            // its upstream channel listeners asynchronously)
-            setTimeout(() => {
-              stream.write(`upstream:${info.command}\n`);
-              stream.exit(0);
-              stream.end();
-            }, 50);
+            // answer immediately: output, exit status and close arrive in
+            // the same tick as the exec reply (regression: the node engine
+            // used to attach its listeners after an await and lose them)
+            stream.write(`upstream:${info.command}\n`);
+            stream.exit(0);
+            stream.end();
           });
         });
       },

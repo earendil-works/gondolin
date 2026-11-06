@@ -105,6 +105,8 @@ export async function bridgeWebSocketUpgrade(
   info: {
     protocol: "http" | "https";
     address: string;
+    /** allowed addresses to try in order (defaults to `address`) */
+    addresses?: string[];
     port: number;
     method: string;
     parsedUrl: URL;
@@ -126,6 +128,7 @@ export async function bridgeWebSocketUpgrade(
     protocol: info.protocol,
     hostname: info.parsedUrl.hostname,
     address: info.address,
+    addresses: info.addresses,
     port: info.port,
   });
 
@@ -314,14 +317,38 @@ export async function connectWebSocketUpstream(
     protocol: "http" | "https";
     hostname: string;
     address: string;
+    /** allowed addresses to try in order (defaults to `address`) */
+    addresses?: string[];
     port: number;
   },
+): Promise<net.Socket> {
+  const addresses =
+    info.addresses && info.addresses.length > 0
+      ? info.addresses
+      : [info.address];
+  let lastError: unknown = null;
+  for (const address of addresses) {
+    try {
+      return await connectWebSocketUpstreamAddress(backend, info, address);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("websocket upstream connect failed");
+}
+
+async function connectWebSocketUpstreamAddress(
+  backend: QemuNetworkBackend,
+  info: { protocol: "http" | "https"; hostname: string; port: number },
+  address: string,
 ): Promise<net.Socket> {
   const timeoutMs = backend.http.webSocketUpstreamConnectTimeoutMs;
 
   if (info.protocol === "https") {
     const socket = tls.connect({
-      host: info.address,
+      host: address,
       port: info.port,
       servername: info.hostname,
       ALPNProtocols: ["http/1.1"],
@@ -331,7 +358,7 @@ export async function connectWebSocketUpstream(
   }
 
   const socket = new net.Socket();
-  socket.connect(info.port, info.address);
+  socket.connect(info.port, address);
   await waitForSocketConnect(socket, "connect", timeoutMs);
   return socket;
 }

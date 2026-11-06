@@ -4924,3 +4924,79 @@ test("qemu-net: http bridge limits concurrent upstream fetches", async () => {
   releaseBlockedFetches();
   await Promise.all(runs);
 });
+
+test("qemu-net: websocket upgrade falls through to the next allowed address", async () => {
+  const serverSockets: net.Socket[] = [];
+  const server = net.createServer((sock) => {
+    serverSockets.push(sock);
+    sock.once("data", () => {
+      sock.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "\r\n" +
+          "welcome",
+      );
+    });
+  });
+  // IPv4 only: the first (IPv6) answer refuses the connection
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+
+  const backend = makeBackend({
+    httpHooks: { isIpAllowed: () => true },
+    allowWebSockets: true,
+  });
+  backend.options.dnsLookup = dnsLookupStub([
+    { address: "::1", family: 6 },
+    { address: "127.0.0.1", family: 4 },
+  ]);
+
+  const key = "TCP:1.1.1.1:1235:2.2.2.2:80";
+  const session: any = {
+    socket: null,
+    srcIP: "1.1.1.1",
+    srcPort: 1235,
+    dstIP: "2.2.2.2",
+    dstPort: 80,
+    connectIP: "2.2.2.2",
+    flowControlPaused: false,
+    protocol: "http",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+  backend.tcpSessions.set(key, session);
+
+  const writes: Buffer[] = [];
+  try {
+    await qemuHttp.handleHttpDataWithWriter(
+      backend,
+      key,
+      session,
+      Buffer.from(
+        "GET /chat HTTP/1.1\r\n" +
+          `Host: localhost:${addr.port}\r\n` +
+          "Connection: Upgrade\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Sec-WebSocket-Key: x\r\n" +
+          "Sec-WebSocket-Version: 13\r\n" +
+          "\r\n",
+      ),
+      {
+        scheme: "http",
+        write: (chunk: Buffer) => writes.push(Buffer.from(chunk)),
+        finish: () => {},
+      },
+    );
+    await delay(50);
+    const out = Buffer.concat(writes).toString("utf8");
+    assert.match(out, /^HTTP\/1\.1 101 /);
+    assert.ok(out.includes("welcome"));
+  } finally {
+    await backend.close().catch(() => {});
+    for (const s of serverSockets) s.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

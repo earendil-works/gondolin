@@ -307,6 +307,19 @@ function maybeSend100ContinueFromHead(
   }
 }
 
+/**
+ * Copy a body chunk out of a larger buffer. Guest TCP payloads are views into
+ * big receive buffers; a hook that clones the request body (`tee`) keeps every
+ * chunk of the unread branch alive, and views would pin their whole parent
+ * buffers (a 32 MiB upload retained gigabytes).
+ */
+function compactBodyChunk(chunk: Buffer): Buffer {
+  if (chunk.byteLength * 2 >= chunk.buffer.byteLength) return chunk;
+  const copy = Buffer.allocUnsafeSlow(chunk.byteLength);
+  chunk.copy(copy);
+  return copy;
+}
+
 function cleanupStreamingBodyState(
   backend: QemuNetworkBackend,
   httpSession: HttpSession,
@@ -392,7 +405,7 @@ export async function handleHttpDataWithWriter(
       streamState.remaining -= take;
 
       if (!streamState.dropRemainingBody) {
-        streamState.pending.push(data.subarray(0, take));
+        streamState.pending.push(compactBodyChunk(data.subarray(0, take)));
         streamState.pendingBytes += take;
         streamState.drain();
       }
@@ -1385,6 +1398,12 @@ export async function fetchHookRequestAndRespond(
     // Avoid duplicate Content-Length when Fetch derives framing for buffered bodies.
     // Remove it from a copy so redirects and hooks keep the measured length.
     const fetchHeaders = { ...currentRequest.headers };
+    // The bridge answers `Expect: 100-continue` towards the guest itself;
+    // undici's fetch rejects the header (every large curl upload failed with
+    // 502).
+    for (const name of Object.keys(fetchHeaders)) {
+      if (name.toLowerCase() === "expect") delete fetchHeaders[name];
+    }
     if (bodyInit && !bodyStream) {
       // Hooks may return headers with arbitrary casing.
       for (const name of Object.keys(fetchHeaders)) {
@@ -1818,10 +1837,11 @@ async function handleWebSocketUpgrade(
     throw new HttpRequestBlockedError("invalid port", 400, "Bad Request");
   }
 
-  // Resolve all A/AAAA records and pick the first IP allowed by policy.
-  // This pins the websocket tunnel to an allowed address and avoids rejecting
-  // a hostname just because the first DNS answer is blocked.
-  const { address } = await resolveHostname(backend, parsedUrl.hostname, {
+  // Resolve all A/AAAA records and keep the IPs allowed by policy. The tunnel
+  // connects to them in order (pinned to allowed addresses), so a hostname is
+  // neither rejected because its first answer is blocked nor unreachable
+  // because its first allowed address does not answer (`::1` vs 127.0.0.1).
+  const addresses = await resolveAllowedAddresses(backend, parsedUrl.hostname, {
     protocol,
     port,
   });
@@ -1832,7 +1852,8 @@ async function handleWebSocketUpgrade(
     session,
     {
       protocol,
-      address,
+      address: addresses[0]!.address,
+      addresses: addresses.map((entry) => entry.address),
       port,
       method,
       parsedUrl,
@@ -1990,6 +2011,28 @@ export async function resolveHostname(
   hostname: string,
   policy?: { protocol: "http" | "https"; port: number },
 ): Promise<{ address: string; family: 4 | 6 }> {
+  const [first] = await resolveAddresses(backend, hostname, policy, false);
+  return first!;
+}
+
+/**
+ * Every address of `hostname` the IP policy allows, in resolver order
+ * (connect attempts fall through them like the native engine does).
+ */
+export async function resolveAllowedAddresses(
+  backend: QemuNetworkBackend,
+  hostname: string,
+  policy: { protocol: "http" | "https"; port: number },
+): Promise<Array<{ address: string; family: 4 | 6 }>> {
+  return await resolveAddresses(backend, hostname, policy, true);
+}
+
+async function resolveAddresses(
+  backend: QemuNetworkBackend,
+  hostname: string,
+  policy: { protocol: "http" | "https"; port: number } | undefined,
+  all: boolean,
+): Promise<Array<{ address: string; family: 4 | 6 }>> {
   const ipFamily = net.isIP(hostname);
 
   let entries: LookupEntry[];
@@ -2025,10 +2068,11 @@ export async function resolveHostname(
 
   if (!policy) {
     const first = entries[0]!;
-    return { address: first.address, family: first.family };
+    return [{ address: first.address, family: first.family }];
   }
 
   const { isIpAllowed, isDefault } = getIpPolicy(backend);
+  const allowedEntries: Array<{ address: string; family: 4 | 6 }> = [];
   for (const entry of entries) {
     const allowed = await isIpAllowed({
       hostname,
@@ -2038,9 +2082,11 @@ export async function resolveHostname(
       protocol: policy.protocol,
     } satisfies HttpIpAllowInfo);
     if (allowed) {
-      return { address: entry.address, family: entry.family };
+      if (!all) return [{ address: entry.address, family: entry.family }];
+      allowedEntries.push({ address: entry.address, family: entry.family });
     }
   }
+  if (allowedEntries.length > 0) return allowedEntries;
 
   if (backend.options.debug) {
     backend.emitDebug(

@@ -114,16 +114,15 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       sandboxfs fallback (probe `-device help`)
 - [ ] macOS: Homebrew/QEMU build fix or a shipped QEMU
 
-## Node-engine issues found along the way
+## Node-engine issues found along the way (fixed)
 
-- stdin has no backpressure in `vm.exec` (whole input pushed, 8 MiB queue cap)
-- `rm -rf` on sandboxfs mounts leaves entries: readdir cookies index a cached
-  listing that every unlink drops (`vfs/rpc-service.ts`); fixed natively
-- WebSocket upgrade only tries the first allowed address (`::1` vs 127.0.0.1)
-- SSH egress loses exec results from fast upstreams (async listener attach)
-- `MemoryProvider` writes degrade with file size (quadratic growth; 64 MiB file
-  → 4.4 GB host RSS)
-- body-reading hooks buffer whole bodies (1.5 GB RSS for a 32 MiB upload)
+- stdin had no backpressure in `vm.exec`: `stdin_ack` credits, `write()`/`drain()`
+- `rm -rf` on sandboxfs mounts left entries (readdir cookies vs unlink)
+- `MemoryProvider` writes copied the whole buffer on every extend
+- body-reading hooks pinned large receive buffers (5.4 GB RSS → 361 MB);
+  `Expect: 100-continue` uploads through the node bridge failed with 502
+- WebSocket upgrade only tried the first allowed address
+- SSH egress lost exec results from fast upstreams
 
 ## Log
 

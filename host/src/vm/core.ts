@@ -31,6 +31,7 @@ import {
   type ErrorMessage,
   type ExecResponseMessage,
   type StatusMessage,
+  type StdinAckMessage,
   decodeOutputFrame,
   type ClientMessage,
 } from "../sandbox/control-protocol.ts";
@@ -110,6 +111,9 @@ import {
   rejectExecSession,
   resolveOutputMode,
   applyOutputChunk,
+  ackStdin,
+  addPendingStdin,
+  waitStdinDrain,
   normalizeCommand,
   toAsyncIterable,
 } from "../exec.ts";
@@ -1514,16 +1518,33 @@ fi
 
   private async pipeStdin(id: number, input: ExecStdin, session: ExecSession) {
     if (!session.stdinEnabled) return;
+    // Send in chunks and wait while too much is unacknowledged so large
+    // inputs never overflow the server's stdin queue.
+    const sendAll = async (data: Buffer | string) => {
+      const payload = typeof data === "string" ? Buffer.from(data) : data;
+      for (
+        let offset = 0;
+        offset < payload.length;
+        offset += DEFAULT_STDIN_CHUNK
+      ) {
+        if (!this.sessions.has(id)) return;
+        this.sendStdinData(
+          id,
+          payload.subarray(offset, offset + DEFAULT_STDIN_CHUNK),
+        );
+        await waitStdinDrain(session);
+      }
+    };
     try {
       if (typeof input === "string" || Buffer.isBuffer(input)) {
-        this.sendStdinData(id, input);
-        this.sendStdinEof(id);
+        await sendAll(input);
+        if (this.sessions.has(id)) this.sendStdinEof(id);
       } else if (typeof input === "boolean") {
         // no-op for `true`
       } else {
         for await (const chunk of toAsyncIterable(input)) {
           if (!this.sessions.has(id)) return;
-          this.sendStdinData(id, chunk);
+          await sendAll(chunk);
         }
         if (this.sessions.has(id)) {
           this.sendStdinEof(id);
@@ -1562,6 +1583,10 @@ fi
   private sendStdinData(id: number, data: Buffer | string) {
     const session = this.sessions.get(id);
     if (!session) return;
+    addPendingStdin(
+      session,
+      typeof data === "string" ? Buffer.byteLength(data) : data.length,
+    );
     if (!session.requestReady) {
       session.pendingStdin.push({ type: "data", data });
       return;
@@ -1873,12 +1898,17 @@ fi
       return;
     }
 
-    let message: StatusMessage | ExecResponseMessage | ErrorMessage;
+    let message:
+      | StatusMessage
+      | ExecResponseMessage
+      | ErrorMessage
+      | StdinAckMessage;
     try {
       message = JSON.parse(typeof data === "string" ? data : data.toString()) as
         | StatusMessage
         | ExecResponseMessage
-        | ErrorMessage;
+        | ErrorMessage
+        | StdinAckMessage;
     } catch {
       return;
     }
@@ -1890,6 +1920,12 @@ fi
 
     if (message.type === "exec_response") {
       this.handleExecResponse(message);
+      return;
+    }
+
+    if (message.type === "stdin_ack") {
+      const session = this.sessions.get(message.id);
+      if (session) ackStdin(session, Number(message.bytes) || 0);
       return;
     }
 

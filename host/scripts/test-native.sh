@@ -38,6 +38,8 @@ default_tests=(
   test/http-hooks.test.ts
   test/exec.test.ts
   test/backpressure.test.ts
+  test/exec-stdin-backpressure.test.ts
+  test/network-upload.test.ts
   test/clock-sync.test.ts
   test/host-pid-stats.test.ts
   test/vfs.test.ts

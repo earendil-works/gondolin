@@ -472,6 +472,13 @@ export class SessionIpcServer {
               return;
             }
 
+            if (message.type === "stdin_ack") {
+              const externalId = internalToExternal.get(message.id);
+              if (externalId === undefined) return;
+              sendJson(socket, { ...message, id: externalId });
+              return;
+            }
+
             if (message.type === "error" && message.id !== undefined) {
               const externalId = internalToExternal.get(message.id);
               if (externalId === undefined) return;

@@ -286,6 +286,7 @@ const primordials = {
   FunctionPrototypeCall: (fn, thisArg, ...args) => fn.call(thisArg, ...args),
   MathCeil: Math.ceil,
   MathFloor: Math.floor,
+  MathMax: Math.max,
   MathMin: Math.min,
   ObjectDefineProperties: Object.defineProperties,
   ObjectDefineProperty: Object.defineProperty,

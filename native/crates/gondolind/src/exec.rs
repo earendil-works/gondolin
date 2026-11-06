@@ -529,6 +529,7 @@ impl Session {
         }
         let mut credit = self.x.stdin_credits.get(&id).copied().unwrap_or(0);
         let mut remaining = self.x.queued_stdin_bytes.get(&id).copied().unwrap_or(0);
+        let queued_before = remaining;
         let mut progressed = false;
         // take the queue out of the map without changing the map's order
         let mut queue = std::mem::take(self.x.queued_stdin.get_mut(&id).expect("queued stdin"));
@@ -569,6 +570,12 @@ impl Session {
         *self.x.queued_stdin.get_mut(&id).expect("queued stdin") = queue;
         if !progressed {
             return false;
+        }
+        let acked = queued_before.saturating_sub(remaining);
+        if acked > 0
+            && let Some(&client) = self.x.inflight.get(&id)
+        {
+            self.ctl.send(px::CLIENT_STDIN_ACK, 0, &px::StdinAck { client, id, bytes: acked });
         }
         if empty {
             self.x.queued_stdin.shift_remove(&id);

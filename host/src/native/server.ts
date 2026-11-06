@@ -394,6 +394,13 @@ export class NativeSandboxServer extends EventEmitter {
       if (typeof p.signal === "number") message.signal = p.signal;
       this.clients.get(p.client)?.sendJson(message);
     });
+    transport.onMessage("client_stdin_ack", (p) => {
+      this.clients.get(p.client)?.sendJson({
+        type: "stdin_ack",
+        id: p.id,
+        bytes: p.bytes,
+      });
+    });
     transport.onMessage("log", (p) => {
       this.emitDebug(p.component as DebugComponent, String(p.message ?? ""));
     });
