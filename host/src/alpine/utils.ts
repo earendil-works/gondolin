@@ -356,16 +356,94 @@ function quoteDebugfsPath(pathSpec: string): string {
   return `"${pathSpec.replace(/([\\"])/g, "\\$1")}"`;
 }
 
-/** Create a compressed initramfs from a directory tree */
+/** Size of a legacy LZ4 frame with no content: the magic number alone */
+const EMPTY_LZ4_FRAME_BYTES = 4;
+
+/** Describe a failed `execFileSync` call: exit status plus captured output */
+function describeExecError(err: unknown): string {
+  const e = err as {
+    status?: number | null;
+    signal?: string | null;
+    stdout?: unknown;
+    stderr?: unknown;
+    message?: string;
+  };
+  const decode = (value: unknown): string =>
+    Buffer.isBuffer(value)
+      ? value.toString("utf8")
+      : typeof value === "string"
+        ? value
+        : "";
+  const status =
+    typeof e.status === "number"
+      ? `exit ${e.status}`
+      : typeof e.signal === "string"
+        ? `signal ${e.signal}`
+        : null;
+  const output = `${decode(e.stdout)}${decode(e.stderr)}`.trim();
+
+  if (status && output) return `${status}: ${output}`;
+  if (status) return status;
+  if (output) return output;
+  return e.message ?? String(err);
+}
+
+/**
+ * Create a compressed initramfs from a directory tree.
+ *
+ * The cpio archive and the compression run as separate commands so a missing
+ * `cpio` (or a failing `find`) cannot be hidden by a successful downstream
+ * `lz4` in the same shell pipeline.
+ */
 export function createInitramfs(sourceDir: string, outputPath: string): void {
-  execFileSync(
-    "sh",
-    [
-      "-c",
-      `cd "${sourceDir}" && find . -print0 | cpio --null -ov --format=newc | lz4 -l -c > "${outputPath}"`,
-    ],
-    { stdio: "pipe" },
-  );
+  const archivePath = `${outputPath}.cpio`;
+
+  try {
+    // `cpio` is the last command in the pipeline, so its exit status (127 when
+    // the binary is missing) is the one execFileSync reports.
+    execFileSync(
+      "sh",
+      [
+        "-c",
+        'cd "$1" && find . -print0 | cpio --null -ov --format=newc > "$2"',
+        "sh",
+        sourceDir,
+        archivePath,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (err) {
+    fs.rmSync(archivePath, { force: true });
+    throw new Error(
+      `Failed to create the initramfs cpio archive from ${sourceDir} (cpio is required)\n` +
+        "On macOS: brew install cpio\n" +
+        "On Debian/Ubuntu: sudo apt install cpio\n" +
+        describeExecError(err),
+    );
+  }
+
+  try {
+    execFileSync("lz4", ["-l", "-f", archivePath, outputPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    throw new Error(
+      "Failed to compress the initramfs (lz4 is required)\n" +
+        "On macOS: brew install lz4\n" +
+        "On Debian/Ubuntu: sudo apt install lz4\n" +
+        describeExecError(err),
+    );
+  } finally {
+    fs.rmSync(archivePath, { force: true });
+  }
+
+  const size = fs.statSync(outputPath).size;
+  if (size <= EMPTY_LZ4_FRAME_BYTES) {
+    throw new Error(
+      `initramfs archive is empty (${size} bytes): ${outputPath}\n` +
+        `The cpio archive of ${sourceDir} contained no entries`,
+    );
+  }
 }
 
 const EXT4_BLOCK_SIZE = 4096;

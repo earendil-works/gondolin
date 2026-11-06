@@ -164,7 +164,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.qemu }} lz4
+          sudo apt-get install -y ${{ matrix.qemu }} lz4 cpio
           curl -LsSf https://astral.sh/uv/install.sh | sh
 
           UV_BIN_DIR=""
