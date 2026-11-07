@@ -206,7 +206,6 @@ export function getDefaultBuildConfig(): BuildConfig {
       kernelImage: "vmlinuz-virt",
       rootfsPackages: [
         "linux-virt",
-        "rng-tools",
         "bash",
         "ca-certificates",
         "ca-certificates-bundle",

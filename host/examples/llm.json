@@ -7,7 +7,6 @@
     "kernelImage": "vmlinuz-virt",
     "rootfsPackages": [
       "linux-virt",
-      "rng-tools",
       "bash",
       "ca-certificates",
       "curl",

@@ -4,6 +4,7 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Guest images no longer run `rngd` (and drop the `rng-tools` package): the kernel feeds virtio-rng entropy into the pool by itself, and `rngd`'s startup kept two vCPUs busy for about 11 s after every boot (about 21 s of host CPU per VM).  Requires a rebuilt guest image; older images keep starting `rngd`.
 - Deprecate the node engine: selecting it explicitly (`GONDOLIN_ENGINE=node`, `VMOptions.engine: "node"`, `gondolin --engine node`) prints a one-time `DeprecationWarning` (code `GONDOLIN_NODE_ENGINE`).  It keeps working and is still the `auto` fallback when no usable `gondolind` is available; it will be removed in a later release.  The debugging fallbacks `GONDOLIN_NATIVE_VFS=controller` and `GONDOLIN_NATIVE_NET=external|relay` are internal and deprecated as well.
 - Behaviour change: `VMOptions.fetch` is only for asset downloads, as documented.  A custom `fetch` no longer switches the native engine's guest network to the node network stack; guest HTTP egress is always served by the daemon (use `httpHooks.onRequest` to intercept or replace requests).  The deprecated node engine still uses it as its upstream client.
 - Static `gondolin` CLI without Node.js (`native/crates/gondolin-cli`): `bash` (including `--listen`, `--ssh`, `--resume`), `exec`, `list`, `attach`, `snapshot` and `image` on the native engine in-process.  Sessions and checkpoints are interchangeable with the Node CLI.  Both CLIs gain `--print-configure` to print the native engine's session configuration.

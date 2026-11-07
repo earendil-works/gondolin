@@ -31,7 +31,6 @@ const BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV =
 
 export const DEFAULT_ROOTFS_PACKAGES = [
   "linux-virt",
-  "rng-tools",
   "bash",
   "ca-certificates",
   "ca-certificates-bundle",

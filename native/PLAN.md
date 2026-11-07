@@ -190,7 +190,13 @@ like the code it replaces. `make -C native deps` enforces the budget (CI job).
       x86_64 microvm, whole host suite 760/0), Linux VM tests 32/32, 18 fuzz
       targets × 5 min clean, release dry run incl. krun; fixed native resume
       from locally built images
+- [x] Post-diet perf: no regression. Same-run A/B of pre-diet (510d126) vs
+      post-diet binaries: concurrent execs 5.3k vs 5.9k/s, sandboxfs equal; the
+      gaps in SUMMARY.md compared runs at different load (use
+      `--interleave native-prev,native` with several rounds)
 - [ ] Optional: smoltcp's 6 unconditional helpers (trimmed vendor or own TCP)
+- [ ] Optional: fewer thread handoffs per sandboxfs request (virtio-fs is the
+      fast path; sandboxfs suffers most under host load)
 
 ## Hardening
 
@@ -202,6 +208,12 @@ like the code it replaces. `make -C native deps` enforces the budget (CI job).
       errors, session/netstack-driver panics fail closed (+1.6 MB binary)
 - [x] IPv6 transition formats (NAT64, 6to4, Teredo, mapped) checked for
       embedded internal IPv4 in both engines
+
+## Guest
+
+- [x] rngd removed (the kernel's hwrng thread credits virtio-rng entropy; crng
+      ready before userspace): QEMU CPU in the first 15 s after boot 22 s → 1 s
+      on both engines; reaches users with the next image release
 
 ## Node-engine issues found along the way (fixed)
 

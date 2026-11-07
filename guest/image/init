@@ -78,10 +78,10 @@ fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
-if [ -e /dev/hwrng ]; then
-  log "[init] starting rngd"
-  rngd -r /dev/hwrng -o /dev/random > /dev/null 2>&1 &
-else
+# No rngd: the kernel's hwrng thread feeds virtio-rng output into the input
+# pool by itself, and the crng is seeded at boot (rngd kept two vCPUs busy for
+# ~11 s after every boot).
+if [ ! -e /dev/hwrng ]; then
   log "[init] /dev/hwrng missing"
 fi
 
