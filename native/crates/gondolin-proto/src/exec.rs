@@ -16,6 +16,7 @@
 //! | c→d | `stdin` | [`Stdin`] |
 //! | c→d | `pty_resize` | [`PtyResize`] |
 //! | c→d | `exec_window` | [`ExecWindow`] |
+//! | c→d | `exec_signal` | [`ExecSignal`]: signal the exec's process group in the guest; a not yet started exec is dropped and answered with `exec_response` (`exit_code = 128 + signal`) |
 //! | c→d | `lifecycle` | [`Lifecycle`] |
 //! | c→d | `client_unknown` | [`ClientUnknown`]: a client message of another type (answered with `unknown_type`) |
 //! | d→c | `client_status` | [`ClientStatus`]: status sent to one client |
@@ -38,6 +39,7 @@ pub const EXEC: &str = "exec";
 pub const STDIN: &str = "stdin";
 pub const PTY_RESIZE: &str = "pty_resize";
 pub const EXEC_WINDOW: &str = "exec_window";
+pub const EXEC_SIGNAL: &str = "exec_signal";
 pub const LIFECYCLE: &str = "lifecycle";
 pub const CLIENT_UNKNOWN: &str = "client_unknown";
 pub const CLIENT_STATUS: &str = "client_status";
@@ -105,6 +107,16 @@ gondolin_wire::wire_struct! {
         pub id: u32,
         pub rows: u32,
         pub cols: u32,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExecSignal {
+        pub client: ClientId,
+        pub id: u32,
+        /// Linux signal number (1-64)
+        pub signal: u32,
     }
 }
 

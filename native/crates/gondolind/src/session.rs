@@ -224,6 +224,8 @@ pub struct Session {
     pub(crate) boot_config: Option<SandboxFsConfig>,
     pub(crate) status: State,
     vfs_ready: bool,
+    /// optional protocol features sandboxd announced (`vfs_ready`/`vfs_error`)
+    pub(crate) guest_features: Vec<String>,
 
     pub(crate) x: ExecState,
     pub(crate) f: FileState,
@@ -290,6 +292,7 @@ impl Session {
             boot_config: None,
             status: State::Stopped,
             vfs_ready: false,
+            guest_features: Vec::new(),
             x: ExecState::default(),
             f: FileState::default(),
             vm: VmState::default(),
@@ -499,6 +502,7 @@ impl Session {
             | px::STDIN
             | px::PTY_RESIZE
             | px::EXEC_WINDOW
+            | px::EXEC_SIGNAL
             | px::LIFECYCLE
             | px::CLIENT_UNKNOWN => self.handle_client_message(msg),
             crate::checkpoint::CHECKPOINT_EXPORT
@@ -967,6 +971,7 @@ impl Session {
             px::STDIN => self.handle_stdin(client, &f),
             px::PTY_RESIZE => self.handle_pty_resize(client, &f),
             px::EXEC_WINDOW => self.handle_exec_window(client, &f),
+            px::EXEC_SIGNAL => self.handle_exec_signal(client, &f),
             px::LIFECYCLE => match f.text("action") {
                 Some("restart") => self.restart_vm(),
                 Some("shutdown") => {
@@ -1062,6 +1067,7 @@ impl Session {
                 // clear the previous run's logs so hints stay scoped to this VM
                 self.log_tail.clear();
                 self.vfs_ready = false;
+                self.guest_features.clear();
                 self.status = State::Starting;
             }
             State::Running => self.status = State::Running,
@@ -1123,8 +1129,12 @@ impl Session {
             "file_read_done" | "file_write_done" | "file_delete_done" => self.resolve_file_op(id),
             "time_sync_done" => self.time_sync_done(id),
             "error" => self.guest_error(id, &p),
-            "vfs_ready" => self.handle_vfs_ready(),
+            "vfs_ready" => {
+                self.guest_features = features_of(&p);
+                self.handle_vfs_ready();
+            }
             "vfs_error" => {
+                self.guest_features = features_of(&p);
                 let message = p.text("message").unwrap_or("").to_string();
                 self.handle_vfs_error(&message);
             }
@@ -1497,6 +1507,11 @@ impl PortHandler for ControlHandler {
     fn error(&self, message: String) {
         let _ = self.tx.try_send(ControlEvent::Error(message));
     }
+}
+
+/// `features` of a `vfs_ready`/`vfs_error` payload (absent on older guests).
+fn features_of(p: &Fields<'_>) -> Vec<String> {
+    p.get_some("features").and_then(crate::fields::string_list).unwrap_or_default()
 }
 
 fn describe_client_message(t: &str, f: &Fields<'_>) -> String {

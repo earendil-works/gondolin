@@ -173,6 +173,7 @@ Options (`ExecOptions`) are listed in
 | `drain()` | Resolves when stdin accepts more data |
 | `end()` | Close stdin |
 | `resize(rows, cols)` | Resize the PTY |
+| `kill(signal?)` | Signal the command and its child processes in the guest (default `"SIGTERM"`); `false` when it already finished ([Cancellation](./exec.md#cancellation)) |
 | `stdout`, `stderr` | Readable streams in `"pipe"` mode, else `null` |
 | `[Symbol.asyncIterator]()` | Stdout chunks as strings (`"pipe"` mode) |
 | `lines()` | Stdout lines (`"pipe"` mode) |

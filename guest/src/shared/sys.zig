@@ -468,6 +468,11 @@ pub fn kill(pid: pid_t, sig: SIG) void {
     _ = linux.kill(pid, sig);
 }
 
+/// Signal every process in process group `pgid`.
+pub fn killGroup(pgid: pid_t, sig: SIG) void {
+    _ = linux.kill(-pgid, sig);
+}
+
 pub fn dup2(old: fd_t, new: fd_t) Unexpected!void {
     while (true) {
         const rc = linux.dup2(old, new);

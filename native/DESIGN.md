@@ -595,7 +595,10 @@ The SDK multiplexes its sandbox connections (the VM, `gondolin attach`
 sessions) as numbered clients: `client_open { client }`, `client_close {
 client }`. Client messages keep the types and fields of `control-protocol.ts`
 plus `client`: `boot { fuseMount?, fuseBinds? }`, `exec`, `stdin` (data as a
-byte string), `pty_resize`, `exec_window`, `lifecycle`; other client message
+byte string), `pty_resize`, `exec_window`, `exec_signal { id, signal }` (a
+Linux signal number for the exec's process group; a queued exec is dropped and
+answered like a killed one; only sent to guests that announce the
+`exec_signal` feature), `lifecycle`; other client message
 types are sent as `client_unknown { client, type }`. The daemon validates them
 exactly like the removed node engine's `SandboxServer` did (uint32 exec ids,
 global across clients) and implements its queueing and credit rules: exec admission limit, execs queued

@@ -30,6 +30,7 @@ export {
 } from "./vm/core.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
 export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
+export type { ExecSignalName } from "./utils/signals.ts";
 
 // Guest tmpfs mounts
 export {

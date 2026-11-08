@@ -513,6 +513,68 @@ test("exec aborts with signal", {
   });
 });
 
+/** pids of guest processes whose command line starts with `marker` (a regex) */
+async function guestPids(vm: any, marker: string): Promise<string[]> {
+  const r = await vm.exec([
+    "/bin/sh",
+    "-c",
+    `for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q -- '^${marker}' && echo \${p#/proc/}; done; true`,
+  ]);
+  return r.stdout.split("\n").filter(Boolean);
+}
+
+/** Wait until no guest process matches `marker` (or the timeout passes) */
+async function waitGone(vm: any, marker: string, ms = 3000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if ((await guestPids(vm, marker)).length === 0) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+test("exec abort kills the command and its children in the guest", {
+  skip: skipVmTests,
+  timeout: timeoutMs,
+}, async (t) => {
+  await withVm(execVmKey, execVmOptions, async (vm) => {
+    await vm.start();
+    // kill() support depends on the guest image (sandboxd with exec_signal)
+    const probe = vm.exec(["sleep", "937"]);
+    await new Promise((r) => setTimeout(r, 200));
+    probe.kill("SIGKILL");
+    if (!(await waitGone(vm, "sleep 937", 2000))) {
+      // the probe keeps running until the VM closes
+      probe.result.catch(() => {});
+      t.skip("guest image predates exec_signal (rebuild it)");
+      return;
+    }
+    const killed = await probe;
+    assert.equal(killed.signal, 9);
+    assert.equal(killed.exitCode, 137);
+
+    for (const pty of [false, true]) {
+      const controller = new AbortController();
+      const proc = vm.exec("sleep 938 & sleep 939; echo never", {
+        signal: controller.signal,
+        pty,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal((await guestPids(vm, "sleep 93[89]")).length, 2);
+      controller.abort();
+      await assert.rejects(proc.result, /exec aborted/);
+      assert.ok(await waitGone(vm, "sleep 93[89]"), `pty=${pty}`);
+    }
+
+    const term = vm.exec(["sleep", "940"]);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(term.kill(), true);
+    const result = await term;
+    assert.equal(result.signal, 15);
+    assert.equal(term.kill(), false);
+  });
+});
+
 test("pty exec completes even when background jobs keep the PTY open", {
   skip: skipVmTests,
   timeout: timeoutMs,

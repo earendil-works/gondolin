@@ -128,7 +128,8 @@ commands is capped by `sandbox.maxQueuedExecs` (default 64); beyond that,
 | `buffer` | `true` | Legacy switch: `false` makes unset `stdout`/`stderr` default to `"ignore"` |
 | `encoding` | `"utf-8"` | Decoding of `result.stdout`/`stderr` and of streamed chunks |
 | `windowBytes` | 256 KiB | Output flow-control window per stream in streaming modes (4 KiB–16 MiB) |
-| `signal` | — | `AbortSignal` to stop waiting (see [Cancellation](#cancellation)) |
+| `signal` | — | `AbortSignal` that stops the command (see [Cancellation](#cancellation)) |
+| `killSignal` | `"SIGKILL"` | Signal sent to the command on abort (a Linux signal name or number) |
 
 ### What Is in `ExecResult`
 
@@ -314,7 +315,7 @@ For moving files in and out of the guest, `vm.fs.readFileStream()` and
 
 ### Cancellation
 
-`signal` stops waiting for a command:
+`signal` stops a command:
 
 ```ts
 try {
@@ -328,10 +329,27 @@ try {
 }
 ```
 
-Aborting rejects the local promise and stops delivering output; it does
-**not** terminate the guest process, which keeps running until it exits on
-its own or the VM is closed. To bound a command's run time inside the guest,
-wrap it, for example `vm.exec(["timeout", "10", "make"])`, or close the VM.
+Aborting sends `killSignal` (default `SIGKILL`) to the command and every
+process it started (each exec runs in its own session and process group in
+the guest), then rejects the promise with "exec aborted" and stops delivering
+output. An exec that has not started yet is never started.
+
+To signal a command without aborting, use `proc.kill(signal)` (default
+`SIGTERM`). The exec then finishes as usual: `result.signal` is set and
+`result.exitCode` is `128 + signal` when the command died from it. `kill()`
+returns `false` when the exec already finished.
+
+```ts
+const proc = vm.exec(["python3", "server.py"]);
+// ...
+proc.kill("SIGINT");
+const result = await proc; // result.signal === 2
+```
+
+Signal names and numbers are Linux ones (`SIGUSR1` is 10, also on macOS
+hosts). Signalling needs a guest image whose `sandboxd` supports it (images
+built with this release); with older images the daemon logs a warning and the
+command keeps running until it exits or the VM is closed.
 
 ## `vm.shell()`
 

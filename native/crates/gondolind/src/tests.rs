@@ -466,6 +466,67 @@ fn exec_window_is_forwarded_only_for_the_owner() {
     assert_eq!((f.int("stdout"), f.int("stderr")), (Some(10), Some(5)));
 }
 
+fn signal(h: &mut Harness, client: u32, id: u32, signal: i64) {
+    h.msg(
+        "exec_signal",
+        0,
+        map(vec![("client", int(client.into())), ("id", int(id.into())), ("signal", int(signal))]),
+    );
+}
+
+#[test]
+fn exec_signal_is_forwarded_when_the_guest_supports_it() {
+    let mut h = Harness::new(Limits::default());
+    h.open(1);
+    h.open(2);
+    h.exec(1, 1, vec![]);
+    h.guest_frames();
+    h.controller_frames();
+
+    // an older guest (no features) is not sent the message
+    signal(&mut h, 1, 1, 15);
+    assert!(h.guest_frames().is_empty());
+    assert!(h.controller_frames().iter().any(|f| f.t == "log"));
+
+    h.guest("vfs_ready", 0, map(vec![("features", Value::Array(vec![text("exec_signal")]))]));
+    // other clients and invalid signals are refused
+    signal(&mut h, 2, 1, 15);
+    assert!(h.guest_frames().is_empty());
+    signal(&mut h, 1, 1, 0);
+    assert_eq!(client_errors(&h.controller_frames(), 1), vec!["invalid_request"]);
+
+    // retried once the guest channel drains
+    h.jam();
+    signal(&mut h, 1, 1, 9);
+    assert!(h.guest_frames().is_empty());
+    h.s.handle_event(crate::session::Event::GuestWritable);
+    h.s.after_event();
+    let frames = h.guest_frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!((frames[0].0.as_str(), frames[0].1), ("exec_signal", 1));
+    assert_eq!(Fields::of(&frames[0].2).int("signal"), Some(9));
+}
+
+#[test]
+fn exec_signal_drops_a_queued_exec() {
+    let mut h = Harness::new(Limits::default());
+    h.open(1);
+    h.s.f.active = Some(100);
+    h.exec(1, 2, vec![]);
+    assert!(h.s.x.exec_queue.iter().any(|e| e.id == 2));
+    h.controller_frames();
+    signal(&mut h, 1, 2, 9);
+    assert!(h.s.x.exec_queue.iter().all(|e| e.id != 2));
+    assert!(!h.s.x.inflight.contains_key(&2));
+    let frames = h.controller_frames();
+    let resp = frames.iter().find(|f| f.t == "exec_response").expect("exec_response");
+    let f = Fields::of(&resp.p);
+    assert_eq!((f.int("id"), f.int("exit_code"), f.int("signal")), (Some(2), Some(137), Some(9)));
+    h.s.f.active = None;
+    h.s.pump_exec_queue();
+    assert!(h.guest_frames().iter().all(|(t, _, _)| t != "exec_request"));
+}
+
 #[test]
 fn file_operations_wait_for_exec_idle_and_block_execs() {
     let mut h = Harness::new(Limits::default());

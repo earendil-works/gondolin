@@ -8,7 +8,7 @@ use crate::ordmap::{OrderedMap, OrderedSet};
 use gondolin_proto::exec::{self as px, ClientId, Stream};
 
 use crate::fields::{self, Fields};
-use crate::guestmsg::{ExecRequest, ExecWindow, PtyResize, StdinData};
+use crate::guestmsg::{ExecRequest, ExecSignal, ExecWindow, PtyResize, StdinData};
 use crate::idle::Continuation;
 use crate::session::Session;
 
@@ -68,6 +68,8 @@ pub(crate) struct ExecState {
     /// stdin credit granted by the guest in `bytes`
     pub stdin_credits: HashMap<u32, u64>,
     pub queued_pty_resize: OrderedMap<u32, (u32, u32)>,
+    /// signals not yet sent because the guest channel was full
+    pub queued_signals: OrderedMap<u32, u32>,
     /// output credit not yet forwarded (stdout, stderr) in `bytes`
     pub pending_windows: OrderedMap<u32, (u64, u64)>,
     pub window_flush_scheduled: bool,
@@ -93,6 +95,7 @@ impl ExecState {
         self.pending_windows.shift_remove(&id);
         self.clear_queued_stdin(id);
         self.queued_pty_resize.shift_remove(&id);
+        self.queued_signals.shift_remove(&id);
     }
 
     /// `failInflight` part: forget everything.
@@ -108,6 +111,7 @@ impl ExecState {
         self.queued_stdin_bytes.clear();
         self.queued_stdin_total = 0;
         self.queued_pty_resize.clear();
+        self.queued_signals.clear();
     }
 
     /// `execPressure`: started execs plus accepted-but-not-started ones.
@@ -451,6 +455,86 @@ impl Session {
         }
     }
 
+    /// `exec_signal`: signal a running exec's process group in the guest, or
+    /// drop an exec that has not started yet (answered like a command killed
+    /// by the signal).
+    pub(crate) fn handle_exec_signal(&mut self, client: ClientId, f: &Fields<'_>) {
+        let Some(id) = fields::request_id(f.get("id")) else {
+            self.client_error(client, None, "invalid_request", "exec_signal requires a uint32 id");
+            return;
+        };
+        let signal = match fields::request_id(f.get("signal")) {
+            Some(s @ 1..=64) => s,
+            _ => {
+                self.client_error(
+                    client,
+                    Some(id),
+                    "invalid_request",
+                    "exec_signal requires a signal number between 1 and 64",
+                );
+                return;
+            }
+        };
+        match self.x.inflight.get(&id) {
+            // the exec already finished, or it is not this client's
+            None => return,
+            Some(owner) if *owner != client => return,
+            Some(_) => {}
+        }
+        if self.debug_enabled("exec") {
+            self.emit_debug("exec", format!("exec_signal id={id} signal={signal}"));
+        }
+        if !self.x.started_execs.contains(&id) {
+            // not sent to the guest yet: drop it
+            self.x.exec_queue.retain(|e| e.id != id);
+            self.x.forget(id);
+            let code = 128 + signal as i32;
+            let resp =
+                px::ExecResponse { client, id, exit_code: code, signal: Some(signal as i32) };
+            self.ctl.send(px::EXEC_RESPONSE, 0, &resp);
+            self.schedule_idle_pause();
+            return;
+        }
+        if !self.guest_features.iter().any(|f| f == "exec_signal") {
+            let message = "the guest image cannot signal commands (its sandboxd predates exec_signal; rebuild the image); the command keeps running".to_string();
+            gondolin_log::warn!("{message}");
+            self.ctl.send(
+                gondolin_proto::session::LOG,
+                0,
+                &gondolin_proto::session::Log { component: "exec".into(), message },
+            );
+            return;
+        }
+        self.x.queued_signals.insert(id, signal);
+        if !self.flush_signal_for(id) {
+            self.x.io_flush_scheduled = true;
+        }
+    }
+
+    fn flush_signal_for(&mut self, id: u32) -> bool {
+        let Some(&signal) = self.x.queued_signals.get(&id) else {
+            return true;
+        };
+        if !self.x.started_execs.contains(&id) {
+            self.x.queued_signals.shift_remove(&id);
+            return true;
+        }
+        if !self.guest_send("exec_signal", id, ExecSignal { signal }) {
+            return false;
+        }
+        self.x.queued_signals.shift_remove(&id);
+        true
+    }
+
+    fn flush_signals(&mut self) {
+        let ids: Vec<u32> = self.x.queued_signals.keys().copied().collect();
+        for id in ids {
+            if !self.flush_signal_for(id) {
+                return;
+            }
+        }
+    }
+
     pub(crate) fn handle_exec_window(&mut self, client: ClientId, f: &Fields<'_>) {
         let Some(id) = fields::request_id(f.get("id")) else {
             self.client_error(client, None, "invalid_request", "exec_window requires a uint32 id");
@@ -497,6 +581,7 @@ impl Session {
             self.flush_windows();
         }
         if std::mem::take(&mut self.x.io_flush_scheduled) {
+            self.flush_signals();
             self.flush_pty_resizes();
             self.flush_stdin();
         }

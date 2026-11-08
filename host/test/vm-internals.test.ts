@@ -879,6 +879,86 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
   }
 });
 
+test("vm internals: exec signals wait for the request and abort sends killSignal", async () => {
+  const { vm, cleanup } = makeVm({ vfs: null });
+  try {
+    const sent: any[] = [];
+    (vm as any).connection = {
+      send: (msg: any) => sent.push(msg),
+      close: () => {},
+    };
+    // keep the exec from starting: it waits for the VM
+    (vm as any).startImplicitly = () => new Promise(() => {});
+
+    const proc = vm.exec(["sleep", "10"]);
+    assert.equal(proc.kill("SIGINT"), true);
+    assert.equal(sent.length, 0);
+    const session = (vm as any).sessions.get(proc.id);
+    (vm as any).markSessionReady(session);
+    assert.deepEqual(sent, [{ type: "exec_signal", id: proc.id, signal: 2 }]);
+
+    // abort after the request: SIGKILL by default, then reject
+    sent.length = 0;
+    const ac = new AbortController();
+    const aborted = vm.exec(["sleep", "10"], { signal: ac.signal });
+    (vm as any).markSessionReady((vm as any).sessions.get(aborted.id));
+    ac.abort();
+    await assert.rejects(aborted.result, /exec aborted/);
+    assert.deepEqual(sent, [
+      { type: "exec_signal", id: aborted.id, signal: 9 },
+    ]);
+    assert.equal(aborted.kill(), false);
+
+    // killSignal; numbers are passed through, names are Linux numbers
+    sent.length = 0;
+    const ac2 = new AbortController();
+    const term = vm.exec(["sleep", "10"], {
+      signal: ac2.signal,
+      killSignal: "SIGUSR1",
+    });
+    (vm as any).markSessionReady((vm as any).sessions.get(term.id));
+    ac2.abort();
+    await assert.rejects(term.result, /exec aborted/);
+    assert.deepEqual(sent, [{ type: "exec_signal", id: term.id, signal: 10 }]);
+    assert.throws(
+      () => vm.exec("true", { killSignal: "SIGNOPE" as any }),
+      /unknown signal/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: an exec aborted before it started is never sent", async () => {
+  const { vm, cleanup } = makeVm({ vfs: null });
+  try {
+    const sent: any[] = [];
+    (vm as any).connection = {
+      send: (msg: any) => sent.push(msg),
+      close: () => {},
+    };
+    let release!: () => void;
+    (vm as any).startImplicitly = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    const ac = new AbortController();
+    const proc = vm.exec(["sleep", "10"], { signal: ac.signal });
+    ac.abort();
+    await assert.rejects(proc.result, /exec aborted/);
+    release();
+    await delay(10);
+    assert.deepEqual(sent, []);
+
+    await assert.rejects(
+      vm.exec(["sleep", "10"], { signal: AbortSignal.abort() }).result,
+      /exec aborted/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("vm internals: ensureRunning sends boot and resolves once running", async () => {
   const { vm, cleanup } = makeVm({ autoStart: true, vfs: null });
 

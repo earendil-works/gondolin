@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 
 import { attachTty } from "./utils/tty-attach.ts";
+import { type ExecSignalName, linuxSignalNumber } from "./utils/signals.ts";
 
 const DEFAULT_ENCODING = "utf-8";
 const DEFAULT_WINDOW_BYTES = 256 * 1024;
@@ -105,8 +106,14 @@ export type ExecOptions = {
   pty?: boolean;
   /** string encoding for decoded output (default: utf-8) */
   encoding?: BufferEncoding;
-  /** abort signal */
+  /**
+   * abort signal: aborting rejects the exec with "exec aborted" and sends
+   * {@link killSignal} to the command (and the processes it started) in the
+   * guest
+   */
   signal?: AbortSignal;
+  /** signal sent to the guest process group on abort (default: `"SIGKILL"`) */
+  killSignal?: ExecSignalName | number;
 
   /** stdout handling (default: "buffer") */
   stdout?: ExecOutputMode;
@@ -428,6 +435,8 @@ export type ExecSession = {
     { type: "data"; data: Buffer | string } | { type: "eof" }
   >;
   pendingResize: { rows: number; cols: number } | null;
+  /** signal requested before the exec reached the server (Linux number) */
+  pendingSignal: number | null;
 };
 
 /**
@@ -467,6 +476,8 @@ export type ExecProcessCallbacks = {
   sendStdin: (id: number, data: Buffer | string) => void;
   sendStdinEof: (id: number) => void;
   sendResize?: (id: number, rows: number, cols: number) => void;
+  /** send a Linux signal number to the exec's process group; false when it already finished */
+  sendSignal?: (id: number, signal: number) => boolean;
   cleanup: (id: number) => void;
 };
 
@@ -538,6 +549,18 @@ export class ExecProcess
   resize(rows: number, cols: number): void {
     if (!this.callbacks.sendResize) return;
     this.callbacks.sendResize(this.session.id, rows, cols);
+  }
+
+  /**
+   * Send a signal (default `"SIGTERM"`) to the command and the processes it
+   * started in the guest. The exec then finishes as usual (`ExecResult.signal`
+   * is set when the command died from it). Returns `false` when the exec
+   * already finished.
+   */
+  kill(signal: ExecSignalName | number = "SIGTERM"): boolean {
+    const number = linuxSignalNumber(signal);
+    if (!this.callbacks.sendSignal) return false;
+    return this.callbacks.sendSignal(this.session.id, number);
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<string> {
@@ -756,6 +779,7 @@ export function createExecSession(
     requestReady: false,
     pendingStdin: [],
     pendingResize: null,
+    pendingSignal: null,
   };
 
   if (session.stdoutMode.mode === "pipe") {

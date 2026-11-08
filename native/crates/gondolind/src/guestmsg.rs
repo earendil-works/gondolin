@@ -35,6 +35,16 @@ gondolin_wire::wire_struct! {
 }
 
 gondolin_wire::wire_struct! {
+    /// `exec_signal`: signal the process group of an exec (guest feature
+    /// `exec_signal`)
+    #[derive(Debug, Clone)]
+    pub struct ExecSignal {
+        /// Linux signal number (1-64)
+        pub signal: u32,
+    }
+}
+
+gondolin_wire::wire_struct! {
     #[derive(Debug, Clone)]
     pub struct ExecWindow {
         pub stdout: Option<u32>,

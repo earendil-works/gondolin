@@ -9,6 +9,7 @@
  * - exec { type: "exec", id, cmd, argv?, env?, cwd?, stdin?, pty? }
  * - stdin { type: "stdin", id, data?: base64 string, eof? }
  * - pty_resize { type: "pty_resize", id, rows, cols }
+ * - exec_signal { type: "exec_signal", id, signal } (Linux signal number)
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
  * - snapshot { type: "snapshot", id, path }
  * - boot { type: "boot", fuseMount?, fuseBinds? }
@@ -73,6 +74,14 @@ export type PtyResizeCommandMessage = {
   cols: number;
 };
 
+export type ExecSignalCommandMessage = {
+  type: "exec_signal";
+  /** request id */
+  id: number;
+  /** Linux signal number (1-64) */
+  signal: number;
+};
+
 export type LifecycleCommandMessage = {
   type: "lifecycle";
   /** lifecycle action */
@@ -110,6 +119,7 @@ export type ClientMessage =
   | ExecCommandMessage
   | StdinCommandMessage
   | PtyResizeCommandMessage
+  | ExecSignalCommandMessage
   | ExecWindowCommandMessage
   | LifecycleCommandMessage
   | SnapshotCommandMessage;

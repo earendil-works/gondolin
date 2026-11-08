@@ -247,6 +247,15 @@ pub const Session = struct {
         self.stderr.credit = @min(self.stderr.max_credit, self.stderr.credit + window.stderr);
     }
 
+    /// Send `signo` to the command's process group (it is a session leader, so
+    /// this also reaches the processes it started). Signals for a group that
+    /// is already gone are ignored.
+    pub fn signal(self: *Session, signo: u32) error{InvalidSignal}!void {
+        if (signo == 0 or signo > 64) return error.InvalidSignal;
+        if (self.pid <= 0) return;
+        sys.killGroup(self.pid, @fromBackingInt(@intCast(signo)));
+    }
+
     pub fn resize(self: *Session, size: protocol.PtyResize) void {
         if (self.pty) {
             if (self.stdout.fd) |fd| sys.setWinsize(fd, size.rows, size.cols);
@@ -426,6 +435,9 @@ fn childExec(
             }
         },
         .pipes => |p| {
+            // own session and process group, so `exec_signal` reaches the
+            // whole command without touching sandboxd
+            sys.setsid();
             const stdin = p.stdin orelse sys.openZ("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch sys.exit(127);
             sys.dup2(stdin, sys.stdin_fd) catch sys.exit(127);
             sys.dup2(p.stdout, sys.stdout_fd) catch sys.exit(127);

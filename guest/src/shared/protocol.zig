@@ -32,6 +32,7 @@ pub const Tag = enum {
     stdin_data,
     pty_resize,
     exec_window,
+    exec_signal,
     file_read_request,
     file_write_request,
     file_write_data,
@@ -67,6 +68,7 @@ pub fn Payload(comptime tag: Tag) type {
         .stdin_data => StdinData,
         .pty_resize => PtyResize,
         .exec_window => ExecWindow,
+        .exec_signal => ExecSignal,
         .file_read_request => FileReadRequest,
         .file_write_request => FileWriteRequest,
         .file_write_data => FileWriteData,
@@ -76,7 +78,8 @@ pub fn Payload(comptime tag: Tag) type {
         .exec_response => ExecResponse,
         .stdin_window => StdinWindow,
         .file_read_data, .tcp_data => Data,
-        .file_read_done, .file_write_done, .file_delete_done, .time_sync_done, .vfs_ready, .tcp_eof, .tcp_close => Empty,
+        .file_read_done, .file_write_done, .file_delete_done, .time_sync_done, .tcp_eof, .tcp_close => Empty,
+        .vfs_ready => VfsReady,
         .vfs_error => VfsError,
         .@"error" => Error,
         .fs_request => @compileError("fs_request payloads are built with encodeRaw"),
@@ -142,6 +145,13 @@ pub const ExecWindow = struct {
     stderr: u32 = 0,
 };
 
+/// Send a signal to the process group of exec `id` (the command and everything
+/// it started); finished sessions answer `unknown_id`.
+pub const ExecSignal = struct {
+    /// Linux signal number (1-64)
+    signal: u32,
+};
+
 pub const FileReadRequest = struct {
     path: []const u8,
     /// base for relative `path`; must be absolute
@@ -200,8 +210,19 @@ pub const StdinWindow = struct {
     stdin: u32,
 };
 
+/// Optional sandboxd features, announced in `vfs_ready` / `vfs_error` so the
+/// host only sends messages this guest understands.
+pub const features: []const []const u8 = &.{"exec_signal"};
+
+pub const VfsReady = struct {
+    /// optional protocol features of this sandboxd
+    features: []const []const u8 = &.{},
+};
+
 pub const VfsError = struct {
     message: []const u8,
+    /// optional protocol features of this sandboxd
+    features: []const []const u8 = &.{},
 };
 
 pub const Error = struct {

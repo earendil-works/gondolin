@@ -186,6 +186,7 @@ Host → guest:
 | `stdin_data` | `data` bytes; `eof` bool (false) | stdin for exec `id` |
 | `pty_resize` | `rows` u32; `cols` u32 | resize the pty of exec `id` |
 | `exec_window` | `stdout` u32 (0); `stderr` u32 (0) | add output credit for exec `id` |
+| `exec_signal` | `signal` u32 (1–64) | signal the process group of exec `id` |
 | `file_read_request` | `path` text; `cwd` text (none); `chunk_size` u32 (0) | stream a guest file to the host |
 | `file_write_request` | `path` text; `cwd` text (none); `truncate` bool (true) | start an upload |
 | `file_write_data` | `data` bytes; `eof` bool (false) | upload chunk for `id` |
@@ -196,8 +197,8 @@ Guest → host:
 
 | `t` | Payload | When |
 |---|---|---|
-| `vfs_ready` | `{}` (id 0) | once at startup, VFS mounted |
-| `vfs_error` | `message` text (id 0) | once at startup, VFS failed |
+| `vfs_ready` | `features` [text] (id 0) | once at startup, VFS mounted |
+| `vfs_error` | `message` text; `features` [text] (id 0) | once at startup, VFS failed |
 | `exec_output` | `stream` `"stdout"`/`"stderr"`; `data` bytes (1–8192 B) | child output |
 | `stdin_window` | `stdin` u32 (> 0) | stdin credit grant |
 | `exec_response` | `exit_code` i32; `signal` i32 (omitted unless killed by a signal) | exec finished; last message for that id |
@@ -221,6 +222,11 @@ After opening the port `sandboxd` sends exactly one of:
 - `vfs_ready` otherwise.
 
 If the marker file exists but cannot be read, nothing is sent (logged).
+
+Both carry `features`, the optional protocol features of this `sandboxd`
+(currently `["exec_signal"]`); older guests send none, and hosts must not send
+messages for features the guest did not announce (an unknown message type is
+answered with an id-0 `invalid_request`).
 
 ### 4.3 time_sync
 
@@ -258,7 +264,8 @@ prints `exec failed` and exits with 127.
 **Modes.**
 
 - *Pipe mode* (`pty` false): stdout and stderr are separate pipes.  stdin is
-  a pipe if `stdin` is true, otherwise `/dev/null`.
+  a pipe if `stdin` is true, otherwise `/dev/null`.  The child calls
+  `setsid()` (no controlling terminal), so it leads its own process group.
 - *PTY mode* (`pty` true): stdin/stdout/stderr are one pseudo terminal (no
   initial window size, kernel default termios).  All output is reported as
   `"stdout"`.  stdin is always enabled (regardless of `stdin`).
@@ -324,8 +331,12 @@ with `exit_code = WEXITSTATUS` for normal exits, or `exit_code = 128 + sig`
 and `signal = sig` when the child was killed by signal `sig`, then forgets
 the session.  Messages for that id afterwards get `unknown_id`.
 
-The host cannot kill sessions through this protocol; it can only stop
-reading (credit runs out) or close stdin.
+**exec_signal** sends `signal` to the session's process group
+(`kill(-pid, signal)`): the command and everything it started that stayed in
+the group, in both modes.  A group that is already gone is ignored; a signal
+outside 1–64 → `error{id, "invalid_request", "invalid signal"}`; finished
+sessions → `unknown_id`.  The session then completes as usual and reports the
+signal in `exec_response` if it killed the command.
 
 ### 4.5 File operations
 
@@ -535,8 +546,8 @@ blocking and close-on-exec.  Child:
 
 1. `SIGPIPE` → `SIG_DFL`; restore the original signal mask (unblocks
    `SIGCHLD`).  Other inherited dispositions are left alone.
-2. `dup2` stdin pipe read end (or a fresh `/dev/null` fd) → 0, stdout write
-   end → 1, stderr write end → 2.
+2. `setsid()`; `dup2` stdin pipe read end (or a fresh `/dev/null` fd) → 0,
+   stdout write end → 1, stderr write end → 2.
 3. `chdir(cwd)` if given (failure: `_exit(127)`).
 4. `execvpe`; on failure write `exec failed\n` to fd 2 and `_exit(127)`.
 
@@ -548,8 +559,9 @@ as above, `setsid()`, `ioctl(slave, TIOCSCTTY, 0)`, `dup2(slave → 0, 1, 2)`,
 then steps 3–4.  Parent: close the slave; the master (`O_NONBLOCK`) is both
 the output stream and the stdin fd.
 
-The child keeps sandboxd's session and process group in pipe mode (no
-`setsid`).
+In both modes the child leads its own session and process group, so
+`exec_signal` reaches the command and its children without touching
+`sandboxd`.
 
 ### 5.4 Backpressure and memory bounds
 

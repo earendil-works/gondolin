@@ -144,7 +144,9 @@ published, build the helpers from source in a checkout with
 [Building Custom Images](./custom-images.md#sandbox-helper-binaries)).
 
 Rebuilt images also stop running `rngd`, which kept two vCPUs busy for about
-11 s after every boot; older images keep starting it.
+11 s after every boot; older images keep starting it. And only rebuilt images
+can signal commands: aborting `vm.exec()` (or `proc.kill()`) kills the
+command in the guest only when its `sandboxd` supports `exec_signal`.
 
 ### krun Runner
 
@@ -157,6 +159,11 @@ supports it.
 
 ### Other Changes
 
+- Aborting `vm.exec()` now kills the command and its child processes in the
+  guest (`SIGKILL`, configurable with `killSignal`) instead of leaving it
+  running; `ExecProcess.kill(signal)` is new. Execs now run in their own
+  session and process group in the guest (also without a pty), so a command
+  no longer shares `sandboxd`'s process group.
 - `ExecProcess.write()` returns `false` once more than 1 MiB of stdin is
   unacknowledged; wait for `ExecProcess.drain()` before writing more. Stdin
   passed to `vm.exec()` (buffers, strings, streams) is sent with this
@@ -168,8 +175,9 @@ supports it.
 - If you talk to the guest helpers' protocol directly: undecodable control
   frames are answered with `invalid_request` / `invalid message`, stdin
   credit is batched, the remaining frames of a failed upload are dropped
-  silently, and `sandboxssh`/`sandboxingress` wait for the host to reconnect
-  instead of exiting. The wire protocol is otherwise unchanged
+  silently, `sandboxssh`/`sandboxingress` wait for the host to reconnect
+  instead of exiting, `vfs_ready`/`vfs_error` carry a `features` list, and
+  `exec_signal` is new. The wire protocol is otherwise unchanged
   ([`guest/ARCHITECTURE.md`](https://github.com/earendil-works/gondolin/blob/main/guest/ARCHITECTURE.md)).
 
 New in this release, nothing to migrate: [remote daemons](./remote.md), the

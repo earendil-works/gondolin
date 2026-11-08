@@ -182,6 +182,7 @@ export type {
   VmFsWriteFileOptions,
   VmFsDeleteOptions,
 } from "./fs.ts";
+import { linuxSignalNumber } from "../utils/signals.ts";
 export type { VMOptions, VmRootfsOptions, VmVfsOptions } from "./types.ts";
 
 export type ShellOptions = {
@@ -1190,6 +1191,7 @@ fi
 
     const stdout = resolveOutputMode(options.stdout, options.buffer, "stdout");
     const stderr = resolveOutputMode(options.stderr, options.buffer, "stderr");
+    const killSignal = linuxSignalNumber(options.killSignal ?? "SIGKILL");
 
     const session = createExecSession(id, {
       stdinEnabled,
@@ -1200,17 +1202,23 @@ fi
       windowBytes: options.windowBytes,
     });
 
-    // Setup abort handling
+    this.sessions.set(id, session);
+
+    // Setup abort handling: stop the command in the guest, then reject
     if (options.signal) {
       const onAbort = () => {
+        if (!this.sessions.has(id)) return;
+        this.sendExecSignal(id, killSignal);
         rejectExecSession(session, new Error("exec aborted"));
         this.sessions.delete(id);
       };
-      options.signal.addEventListener("abort", onAbort, { once: true });
       session.signalListener = onAbort;
+      if (options.signal.aborted) {
+        queueMicrotask(onAbort);
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
     }
-
-    this.sessions.set(id, session);
 
     // Wire up credit-based flow control
     session.sendWindowUpdate = (stdoutBytes, stderrBytes) => {
@@ -1232,6 +1240,7 @@ fi
       sendStdin: (id, data) => this.sendStdinData(id, data),
       sendStdinEof: (id) => this.sendStdinEof(id),
       sendResize: (id, rows, cols) => this.sendPtyResize(id, rows, cols),
+      sendSignal: (id, signal) => this.sendExecSignal(id, signal),
       cleanup: (id) => this.sessions.delete(id),
     });
 
@@ -1267,6 +1276,8 @@ fi
         stderr_window: session.windowBytes,
       };
 
+      // aborted while the VM was starting: never start the command
+      if (!this.sessions.has(id)) return;
       this.sendJson(message);
       this.markSessionReady(session);
 
@@ -1613,6 +1624,12 @@ fi
     if (session.requestReady) return;
     session.requestReady = true;
 
+    if (session.pendingSignal !== null) {
+      const signal = session.pendingSignal;
+      session.pendingSignal = null;
+      this.sendExecSignalNow(session.id, signal);
+    }
+
     if (session.pendingResize) {
       const { rows, cols } = session.pendingResize;
       session.pendingResize = null;
@@ -1696,6 +1713,31 @@ fi
       return;
     }
     this.sendPtyResizeNow(id, safeRows, safeCols);
+  }
+
+  /**
+   * Signal the exec's process group in the guest (Linux signal number).
+   * Returns `false` when the exec already finished. Before the exec reached
+   * the server the signal is kept and sent right after the exec.
+   */
+  private sendExecSignal(id: number, signal: number): boolean {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    if (!session.requestReady) {
+      session.pendingSignal = signal;
+      return true;
+    }
+    this.sendExecSignalNow(id, signal);
+    return true;
+  }
+
+  private sendExecSignalNow(id: number, signal: number) {
+    if (!this.connection) return;
+    try {
+      this.sendJson({ type: "exec_signal", id, signal });
+    } catch {
+      // the connection closed: the command dies with the VM
+    }
   }
 
   private sendPtyResizeNow(id: number, rows: number, cols: number) {

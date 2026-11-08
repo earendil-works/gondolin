@@ -64,6 +64,7 @@ const CLIENT_MESSAGE_TYPES = new Set([
   "stdin",
   "pty_resize",
   "exec_window",
+  "exec_signal",
   "lifecycle",
 ]);
 
