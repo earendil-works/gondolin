@@ -384,6 +384,11 @@ jobs:
     name: Test (node engine, deprecated)
     needs: [check, build-guest]
     runs-on: ubuntu-latest
+    env:
+      # krun is the default where a runner is installed (the npm runner
+      # package is), but it is best-effort on shared runners and these jobs
+      # cover the QEMU paths (virtio-fs, sandboxfs); see backend-parity
+      GONDOLIN_VMM: qemu
     steps:
       - uses: actions/checkout@v7
 
@@ -449,6 +454,11 @@ jobs:
     name: Test (native engine)
     needs: [check, build-guest, native]
     runs-on: ubuntu-latest
+    env:
+      # krun is the default where a runner is installed (the npm runner
+      # package is), but it is best-effort on shared runners and these jobs
+      # cover the QEMU paths (virtio-fs, sandboxfs); see backend-parity
+      GONDOLIN_VMM: qemu
     steps:
       - uses: actions/checkout@v7
 

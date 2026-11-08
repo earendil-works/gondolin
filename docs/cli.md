@@ -119,7 +119,11 @@ Differences:
   `NODE_EXTRA_CA_CERTS` is added; the Node CLI uses Node's CA store), and DNS
   resolvers are read from `/etc/resolv.conf` by the network stack;
 - `gondolin exec` (VM mode) streams output as it arrives instead of printing it
-  when each command finished.
+  when each command finished;
+- the krun runner is looked up without the npm runner packages
+  (`GONDOLIN_KRUN_RUNNER`, `host/krun-runner/zig-out/bin` and
+  `krun-runner/zig-out/bin` in the current directory, next to the binary, then
+  `PATH`), so without one of those the default backend is `qemu`.
 
 `--print-configure` is a diagnostic option of both CLIs: it prints the session
 configuration as JSON (byte strings as `{ "$base64": ... }`, the MITM CA key
@@ -146,7 +150,8 @@ options for configuring filesystem mounts and mediated network egress policy.
     - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 - `--vmm BACKEND`
-    - Select backend per command: `qemu` (default) or `krun`
+    - Select backend per command: `qemu` or `krun`
+    - Default: `GONDOLIN_VMM`, else `krun` where it can run (supported host, installed runner, image with krun boot assets), else `qemu`; see [VM Backends](./backends.md#default-backend-selection)
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
@@ -363,7 +368,7 @@ If `-- COMMAND` is provided, the given command is run instead of the default
 - `--cwd PATH` -- set the working directory for the shell / command
 - `--env KEY=VALUE` -- set an environment variable (repeatable)
 - `--resume ID_OR_PATH` -- resume from a snapshot id (from cache) or `.qcow2` path
-- `--vmm BACKEND` -- backend selection (`qemu` or `krun`)
+- `--vmm BACKEND` -- backend selection (`qemu` or `krun`; default: `krun` where it can run, else `qemu`)
 - `--listen [HOST:PORT]` -- start a host ingress gateway (default: `127.0.0.1:0`)
 
 #### Debugging Options (bash only)
@@ -393,8 +398,8 @@ gondolin bash --listen 127.0.0.1:3000
 # Resume from a snapshot id created by `gondolin snapshot`
 gondolin bash --resume 4a8f2b0c
 
-# Run with the krun backend
-gondolin bash --vmm krun
+# Force the QEMU backend (krun is the default where it can run)
+gondolin bash --vmm qemu
 ```
 
 ### `gondolin list`
@@ -648,7 +653,7 @@ gondolin tools trufflehog --json
 
 - `GONDOLIN_VMM`
     - Default VM backend when `--vmm` / `sandbox.vmm` is not set
-    - Values: `qemu`, `krun` (default: `qemu`)
+    - Values: `qemu`, `krun` (default: `krun` where it can run, else `qemu`; see [VM Backends](./backends.md#default-backend-selection))
 
 - `GONDOLIN_CPU`
     - QEMU CPU model override when `sandbox.cpu` is not set, for example `cortex-a72`
@@ -670,7 +675,7 @@ gondolin tools trufflehog --json
     - Enable debug logging (see [Debug Logging](./debug.md))
 
 - `GONDOLIN_KRUN_RUNNER`
-    - Path of the krun runner binary (`--vmm krun`)
+    - Path of the krun runner binary (also counts as an installed runner for the default backend selection)
 
 - `GONDOLIN_VIRTIOFS`
     - Guest filesystem transport on the native engine: `1` forces virtio-fs,

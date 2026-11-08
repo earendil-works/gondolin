@@ -33,7 +33,14 @@ function run(
 ): Promise<Run> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      env: { ...process.env, ...env, GONDOLIN_GUEST_DIR: guestDir! },
+      // the default backend depends on where each CLI finds a krun runner
+      // (node also checks the npm runner packages): compare qemu payloads
+      env: {
+        ...process.env,
+        GONDOLIN_VMM: "qemu",
+        ...env,
+        GONDOLIN_GUEST_DIR: guestDir!,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

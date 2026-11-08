@@ -368,3 +368,103 @@ test("resolveSandboxServerOptions auto-detects local krun runner path", () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+function withoutVmmEnv<T>(fn: () => T): T {
+  const prev = process.env.GONDOLIN_VMM;
+  delete process.env.GONDOLIN_VMM;
+  try {
+    return fn();
+  } finally {
+    if (prev !== undefined) process.env.GONDOLIN_VMM = prev;
+  }
+}
+
+const hostGuestArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+const krunUsable = {
+  hostSupportsKrun: () => true,
+  detectKrunRunnerPath: () => "/opt/krun/gondolin-krun-runner",
+};
+
+test("resolveSandboxServerOptions defaults to krun where it can run", () => {
+  const dir = makeTempAssetsDir(hostGuestArch);
+  try {
+    const resolved = withoutVmmEnv(() =>
+      resolveSandboxServerOptions({ imagePath: dir }, undefined, krunUsable),
+    );
+    assert.equal(resolved.vmm, "krun");
+    assert.equal(resolved.krunRunnerPath, "/opt/krun/gondolin-krun-runner");
+    assert.equal(resolved.kernelPath, path.join(dir, "krun-kernel"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions default falls back to qemu", () => {
+  const dir = makeTempAssetsDir(hostGuestArch);
+  const noKrunAssets = makeTempAssetsDir(hostGuestArch, {
+    includeKrunAssets: false,
+  });
+  const foreignArch = makeTempAssetsDir(
+    hostGuestArch === "aarch64" ? "x86_64" : "aarch64",
+  );
+  try {
+    const vmmOf = (
+      options: Parameters<typeof resolveSandboxServerOptions>[0],
+      deps: Parameters<typeof resolveSandboxServerOptions>[2] = krunUsable,
+    ) =>
+      withoutVmmEnv(
+        () => resolveSandboxServerOptions(options, undefined, deps).vmm,
+      );
+
+    // no runner, unsupported host
+    assert.equal(
+      vmmOf(
+        { imagePath: dir },
+        { ...krunUsable, detectKrunRunnerPath: () => null },
+      ),
+      "qemu",
+    );
+    assert.equal(
+      vmmOf(
+        { imagePath: dir },
+        { ...krunUsable, hostSupportsKrun: () => false },
+      ),
+      "qemu",
+    );
+    // image without krun boot assets or for another architecture
+    assert.equal(vmmOf({ imagePath: noKrunAssets }), "qemu");
+    assert.equal(vmmOf({ imagePath: foreignArch }), "qemu");
+    // explicit asset paths
+    assert.equal(
+      vmmOf({
+        imagePath: {
+          kernelPath: path.join(dir, "vmlinuz-virt"),
+          initrdPath: path.join(dir, "initramfs.cpio.lz4"),
+          rootfsPath: path.join(dir, "rootfs.ext4"),
+        },
+      }),
+      "qemu",
+    );
+    // qemu-only options
+    assert.equal(vmmOf({ imagePath: dir, machineType: "virt" }), "qemu");
+    assert.equal(vmmOf({ imagePath: dir, qemuIdlePauseMs: 0 }), "qemu");
+    // explicit choices win
+    assert.equal(vmmOf({ imagePath: dir, vmm: "qemu" }), "qemu");
+    const prev = process.env.GONDOLIN_VMM;
+    process.env.GONDOLIN_VMM = "qemu";
+    try {
+      assert.equal(
+        resolveSandboxServerOptions({ imagePath: dir }, undefined, krunUsable)
+          .vmm,
+        "qemu",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.GONDOLIN_VMM;
+      else process.env.GONDOLIN_VMM = prev;
+    }
+  } finally {
+    for (const d of [dir, noKrunAssets, foreignArch]) {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  }
+});

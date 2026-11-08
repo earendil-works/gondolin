@@ -68,7 +68,11 @@ test("disk checkpoints can be resumed (qcow2 backing)", {
 
     const metadata = checkpoint.toJSON();
     assert.equal(metadata.snapshotKind, "disk");
-    assert.equal(metadata.createdWithVmm, "qemu");
+    // the default backend: krun where it can run, qemu otherwise
+    assert.ok(
+      metadata.createdWithVmm === "qemu" || metadata.createdWithVmm === "krun",
+    );
+    assert.ok(metadata.compatibleVmm?.includes(metadata.createdWithVmm!));
     assert.ok(metadata.compatibleVmm?.includes("qemu"));
 
     // Ensure checkpoints can be reloaded from disk.

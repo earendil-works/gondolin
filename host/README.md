@@ -2,8 +2,8 @@
 
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
-Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
-default, optional `krun` backend). Every guest network connection and file
+Gondolin runs lightweight micro-VMs on your Mac or Linux machine (`krun`
+where available, QEMU otherwise). Every guest network connection and file
 access goes through the host, and this TypeScript SDK gives you complete
 programmatic control over what the sandbox can access and what secrets it can
 use.
@@ -20,7 +20,8 @@ one-time `DeprecationWarning`). See
 ## Requirements
 
 - Node.js >= 22.19.0
-- QEMU to run the micro-VMs (default backend):
+- QEMU: the VM backend where `krun` is not available, and `qemu-img` (part of
+  QEMU) creates the root disk overlays on both backends:
 
 | macOS               | Linux (Debian/Ubuntu)                                                 |
 | ------------------- | --------------------------------------------------------------------- |
@@ -29,17 +30,23 @@ one-time `DeprecationWarning`). See
 Homebrew's QEMU lacks vhost-user, so on macOS the native engine serves guest
 files over sandboxfs instead of the faster virtio-fs.
 
-Optional experimental backend:
+The `krun` backend (`libkrun` via `gondolin-krun-runner`) is the default
+wherever it can run, QEMU everywhere else:
 
-- `libkrun` + `host/krun-runner` (`sandbox.vmm = "krun"`)
-- `make krun-runner` from repo root stages dependencies locally and builds the runner
+- `@earendil-works/gondolin` installs the runner as an optional platform
+  package on macOS arm64 and Linux x86_64 (`@earendil-works/gondolin-krun-runner-{darwin-arm64,linux-x64}`)
+- `make krun-runner` from the repo root stages dependencies locally and builds
+  the runner (also for Linux arm64)
   - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
-  - Gondolin auto-detects this local runner for `--vmm krun`
-- `@earendil-works/gondolin` publishes platform-specific optional runner packages for supported targets (`darwin-arm64`, `linux-x64`)
+  - Gondolin auto-detects this local runner
+- Linux needs read/write access to `/dev/kvm`; macOS needs Apple silicon
 - krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
-- `gondolin bash --vmm krun` selects the backend per-command
-- `GONDOLIN_VMM=krun` still works as a global default
-- backend parity matrix: [docs/backends.md](../docs/backends.md)
+- without a runner, KVM, or krun boot assets, or with a qemu-only option
+  (`sandbox.qemuPath`, `machineType`, `accel`, `cpu`, `qemuIdlePauseMs`),
+  Gondolin uses QEMU
+- `gondolin bash --vmm qemu|krun`, `sandbox.vmm` or `GONDOLIN_VMM=qemu|krun`
+  pins a backend
+- selection rules and the backend parity matrix: [docs/backends.md](../docs/backends.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 

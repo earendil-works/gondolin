@@ -185,6 +185,47 @@ fn krun_runner_path() -> String {
     "gondolin-krun-runner".into()
 }
 
+/// Whether `command` names an executable file (bare names are looked up on `PATH`).
+fn is_executable_command(command: &str) -> bool {
+    fn executable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    if command.contains('/') {
+        return executable(Path::new(command));
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| executable(&dir.join(command)))
+    })
+}
+
+/// `hostSupportsKrun`: libkrun runs on macOS arm64 and Linux arm64/x86_64, on
+/// Linux only with an accessible `/dev/kvm` (it has no emulation fallback).
+fn host_supports_krun() -> bool {
+    if cfg!(target_os = "macos") {
+        Arch::host() == Arch::Aarch64
+    } else if cfg!(target_os = "linux") {
+        std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok()
+    } else {
+        false
+    }
+}
+
+/// The default backend (`selectDefaultVmm`): krun with the runner it found
+/// when this host can run it, a runner is installed and the image has krun boot
+/// assets for the host architecture; qemu otherwise.
+fn default_vmm(image: &ResolvedImage) -> (String, Option<String>) {
+    let image_ok = image.krun_kernel.as_ref().is_some_and(|k| k.exists())
+        && image.arch.is_none_or(|a| a == Arch::host());
+    if image_ok && host_supports_krun() {
+        let runner = krun_runner_path();
+        if is_executable_command(&runner) {
+            return ("krun".into(), Some(runner));
+        }
+    }
+    ("qemu".into(), None)
+}
+
 /// Builds the payload and prepares the root disk.
 pub async fn prepare(
     common: &CommonOptions,
@@ -237,11 +278,15 @@ pub fn prepare_with_image(
         |name: &str| env(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
 
     // --- VMM and paths (resolveSandboxServerOptions)
-    let vmm = match common.vmm.clone().or_else(|| env_opt("GONDOLIN_VMM").map(|v| v.to_lowercase()))
-    {
-        Some(v) if v == "qemu" || v == "krun" => v,
-        Some(_) | None => "qemu".into(),
-    };
+    let (vmm, detected_runner) =
+        match common.vmm.clone().or_else(|| env_opt("GONDOLIN_VMM").map(|v| v.to_lowercase())) {
+            Some(v) if v == "qemu" || v == "krun" => (v, None),
+            // the default may only pick krun when the checkpoint allows it
+            _ if resume.is_some_and(|r| !r.data.compatible_vmm().iter().any(|v| v == "krun")) => {
+                ("qemu".into(), None)
+            }
+            _ => default_vmm(&image),
+        };
     let krun = vmm == "krun";
     let arch = image.arch.unwrap_or_else(Arch::host);
     if krun && arch != Arch::host() {
@@ -280,7 +325,7 @@ pub fn prepare_with_image(
     };
     let mut vm = VmConfig {
         vmm: Some(vmm.clone()),
-        krun_runner_path: krun.then(krun_runner_path),
+        krun_runner_path: krun.then(|| detected_runner.unwrap_or_else(krun_runner_path)),
         qemu_path: if krun { String::new() } else { qemu_path },
         image: None,
         arch: None,

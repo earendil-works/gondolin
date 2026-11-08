@@ -93,7 +93,8 @@ function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   return null;
 }
 
-function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
+/** The backend requested for a resume, or `null` for the default selection */
+function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm | null {
   const explicitRaw = options.sandbox?.vmm;
   if (explicitRaw !== undefined) {
     const explicit = normalizeSandboxVmm(explicitRaw);
@@ -105,7 +106,7 @@ function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
     return explicit;
   }
 
-  return normalizeSandboxVmm(process.env.GONDOLIN_VMM) ?? "qemu";
+  return normalizeSandboxVmm(process.env.GONDOLIN_VMM);
 }
 
 function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
@@ -439,7 +440,12 @@ export class VmCheckpoint {
 
     const requestedVmm = resolveRequestedResumeVmm(mergedForResume);
     const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
-    if (!compatibleVmm.includes(requestedVmm)) {
+    if (requestedVmm === null) {
+      // the default selection may only pick krun when the checkpoint allows it
+      if (!compatibleVmm.includes("krun")) {
+        mergedForResume.sandbox = { ...mergedForResume.sandbox, vmm: "qemu" };
+      }
+    } else if (!compatibleVmm.includes(requestedVmm)) {
       throw new Error(
         `checkpoint is not compatible with vmm=${requestedVmm} (compatible backends: ${compatibleVmm.join(", ")})`,
       );

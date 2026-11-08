@@ -33,7 +33,8 @@ Gondolin is not trying to defend against:
   machines they run on are trusted.
 - **A malicious local user** on the same host account: they can usually access
   the Unix sockets and cached files.
-- **VM escape / hypervisor bugs**: Gondolin uses QEMU; a QEMU escape is a host compromise.
+- **VM escape / hypervisor bugs**: Gondolin uses libkrun (the default where it
+  can run) or QEMU; an escape from either VMM is a host compromise.
 - **Side channels** (timing/cache/etc.) between host and guest.
 - **Denial of service**: the guest can still burn CPU, allocate memory inside
   the VM, or cause large amounts of host work (there are some buffer caps, but no
@@ -62,7 +63,8 @@ the trust is divided.
 - The host processes (your Node runtime + Gondolin library, and the
   `gondolind` daemon of the native engine) are trusted.
 - The guest image is trusted *to the extent you trust its supply chain*.
-- The VM boundary provided by QEMU is trusted.
+- The VM boundary provided by the VMM (libkrun in the `gondolin-krun-runner`
+  process, or QEMU) is trusted.
 
 ## System Architecture and Trust Boundaries
 
@@ -120,7 +122,11 @@ This is what Gondolin actually enforces.
 
 > "guest code does not directly run on the host OS"
 
-- Guest code runs inside a QEMU VM.
+- Guest code runs inside a hardware-accelerated VM: libkrun (via the
+  `gondolin-krun-runner` helper, see [VM Backends](./backends.md)) where it
+  can run, otherwise QEMU. Both get the same guest-facing devices (virtio
+  serial ports, a virtio-net NIC backed by the host's network stack socket, a
+  virtio-blk root disk); libkrun implements them inside the runner process.
 - The QEMU invocation is intentionally minimal (see
   `native/crates/gondolind/src/qemu.rs`; node engine:
   `host/src/sandbox/controller.ts`):
@@ -132,7 +138,7 @@ This is what Gondolin actually enforces.
       guest RAM then lives in a shared memory backend that the daemon maps)
     - the root filesystem is attached as a copy-on-write disk (qcow2 overlay, or QEMU's snapshot mode) so writes do not persist to the base image
 
-**Guarantee:** absent a QEMU escape, guest processes cannot directly access the
+**Guarantee:** absent a VMM (libkrun or QEMU) escape, guest processes cannot directly access the
 *host kernel, host memory, or host filesystem.
 
 ### Network Egress Confinement
@@ -440,7 +446,8 @@ Operational guidance:
 
 Guidance:
 - For high assurance, build images yourself and verify checksums.
-- Keep QEMU up to date; the VM boundary is fundamental.
+- Keep the VMM up to date (QEMU, and the krun runner, which bundles libkrun and
+  is updated with Gondolin); the VM boundary is fundamental.
 
 ## Known Limitations and Sharp Edges
 
@@ -455,7 +462,8 @@ Guidance:
   destination.
 
 ### VM Escape Risk
-- The strongest guarantee depends on QEMU isolation.
+- The strongest guarantee depends on the isolation of the VMM in use (libkrun
+  or QEMU).
 
 ### Local Host Attacker
 - Virtio Unix sockets are created in a temp directory (`gondolind` uses a

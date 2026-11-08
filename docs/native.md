@@ -62,8 +62,9 @@ SDK starts the daemon from whichever binary it finds, in this order:
    installed automatically with `@earendil-works/gondolin` where supported;
    its npm `bin` links the binary as `gondolind`
 
-QEMU (or the krun runner for `vmm: "krun"`) is still needed on the machine the
-daemon runs on, exactly as for the node engine.
+QEMU or the krun runner (whichever backend is selected, see
+[VM Backends](./backends.md#default-backend-selection)) is still needed on the
+machine the daemon runs on, exactly as for the node engine.
 
 ### CLI
 
@@ -150,6 +151,11 @@ files):
 - **SSH and ingress access** (`vm.enableSsh()`, `vm.enableIngress()`,
   `--listen`) listen on the controller's machine; the streams are tunneled
   through the daemon connection.
+- **Backend**: the default is `qemu`, as the controller cannot see whether
+  the daemon's machine has a krun runner and `/dev/kvm`. Set
+  `sandbox.vmm: "krun"` (or `GONDOLIN_VMM=krun`) to use krun; the runner is
+  `sandbox.krunRunnerPath` on the daemon's machine, else
+  `gondolin-krun-runner` from its `PATH`.
 - `vm.getHostPid()` returns `null` (the VMM runs on another machine).
 - Not supported remotely (clear errors): `sandbox.rootDisk*` options and the
   `sandbox.virtio*SocketPath` overrides.

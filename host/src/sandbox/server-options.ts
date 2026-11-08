@@ -68,7 +68,10 @@ const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
  * - an object with explicit asset paths
  */
 export type SandboxServerOptions = {
-  /** vm backend implementation */
+  /**
+   * vm backend implementation (default: `GONDOLIN_VMM`, else `krun` where it
+   * can run, else `qemu`)
+   */
   vmm?: SandboxVmm;
   /** qemu binary path */
   qemuPath?: string;
@@ -566,13 +569,92 @@ function resolveDefaultKrunRunnerPath(
   }
 
   const resolvePackagedPath =
-    deps.resolvePackagedPath ?? resolvePackagedKrunRunnerPath;
+    deps.resolvePackagedPath ?? cachedPackagedKrunRunnerPath;
   const packaged = resolvePackagedPath();
   if (packaged) {
     return packaged;
   }
 
   return "gondolin-krun-runner";
+}
+
+let packagedKrunRunnerPathCache: { value: string | null } | null = null;
+
+/** {@link resolvePackagedKrunRunnerPath}, probed once per process */
+function cachedPackagedKrunRunnerPath(): string | null {
+  packagedKrunRunnerPathCache ??= { value: resolvePackagedKrunRunnerPath() };
+  return packagedKrunRunnerPathCache.value;
+}
+
+/** Whether `command` names an executable file (bare names are looked up on `PATH`) */
+function isExecutableCommand(command: string): boolean {
+  const isExecutable = (candidate: string) => {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  };
+  if (command.includes(path.sep) || command.includes("/")) {
+    return isExecutable(command);
+  }
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (dir && isExecutable(path.join(dir, command))) return true;
+  }
+  return false;
+}
+
+/**
+ * The krun runner the default backend selection would use, or `null` when
+ * none is installed (same precedence as {@link resolveDefaultKrunRunnerPath})
+ */
+function detectKrunRunnerPath(): string | null {
+  const candidate = resolveDefaultKrunRunnerPath();
+  return isExecutableCommand(candidate) ? candidate : null;
+}
+
+/** Host platforms libkrun supports (`process.platform`-`arch`) */
+const KRUN_HOST_PLATFORMS = new Set([
+  "darwin-arm64",
+  "linux-arm64",
+  "linux-x64",
+]);
+
+/**
+ * Whether this host can run libkrun VMs: a supported platform and, on Linux,
+ * an accessible `/dev/kvm` (libkrun has no software emulation fallback)
+ */
+function hostSupportsKrun(): boolean {
+  if (
+    !KRUN_HOST_PLATFORMS.has(`${process.platform}-${getHostNodeArchCached()}`)
+  ) {
+    return false;
+  }
+  if (process.platform === "linux") {
+    try {
+      fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Whether the image manifest names an existing krun kernel */
+function imageHasKrunKernel(
+  imageManifest: ReturnType<typeof loadAssetManifest>,
+  imageDir: string | null,
+): boolean {
+  const rel = imageManifest?.assets?.krunKernel;
+  if (!imageDir || !rel) return false;
+  try {
+    return fs.existsSync(
+      resolveManifestAssetPath(imageDir, rel, "manifest.assets.krunKernel"),
+    );
+  } catch {
+    return false;
+  }
 }
 
 type KrunKernelOverride = {
@@ -774,7 +856,20 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
 type ResolveSandboxServerOptionsDeps = {
   /** test-only override for default krun runner resolution */
   resolveDefaultKrunRunnerPath?: () => string;
+  /** override for the installed krun runner used by default backend selection (`null`: none) */
+  detectKrunRunnerPath?: () => string | null;
+  /** test-only override for whether this host can run libkrun */
+  hostSupportsKrun?: () => boolean;
 };
+
+/** Sandbox options that only apply to (and therefore select) the qemu backend */
+const QEMU_ONLY_OPTIONS = [
+  "qemuPath",
+  "machineType",
+  "accel",
+  "cpu",
+  "qemuIdlePauseMs",
+] as const;
 
 export function resolveSandboxServerOptions(
   options: SandboxServerOptions = {},
@@ -853,7 +948,42 @@ export function resolveSandboxServerOptions(
     );
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
-  const vmm = explicitVmm ?? envVmm ?? "qemu";
+  const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
+  // Fail fast if we can detect that the guest image doesn't match the selected backend target.
+  // Without this, the VM often just "hangs" until some higher-level timeout.
+  const guestFromManifest = detectGuestArchFromManifest({
+    kernelPath: baseKernelPath,
+    initrdPath: baseInitrdPath,
+    rootfsPath,
+  });
+
+  // Without an explicit choice, krun is the default wherever it can run:
+  // a supported host, an installed runner, an image with krun boot assets for
+  // the host architecture and no qemu-only options. Otherwise qemu.
+  let detectedKrunRunnerPath: string | null = null;
+  const selectDefaultVmm = (): SandboxVmm => {
+    if (QEMU_ONLY_OPTIONS.some((key) => options[key] !== undefined)) {
+      return "qemu";
+    }
+    if (explicitImageObject || !imageHasKrunKernel(imageManifest, imageDir)) {
+      return "qemu";
+    }
+    if (
+      guestFromManifest &&
+      hostArchNormalized &&
+      guestFromManifest.arch !== hostArchNormalized
+    ) {
+      return "qemu";
+    }
+    if (!(deps.hostSupportsKrun ?? hostSupportsKrun)()) {
+      return "qemu";
+    }
+    detectedKrunRunnerPath =
+      options.krunRunnerPath ??
+      (deps.detectKrunRunnerPath ?? detectKrunRunnerPath)();
+    return detectedKrunRunnerPath ? "krun" : "qemu";
+  };
+  const vmm = explicitVmm ?? envVmm ?? selectDefaultVmm();
   const envCpu = process.env.GONDOLIN_CPU?.trim() || undefined;
   const cpu = vmm === "qemu" ? (options.cpu ?? envCpu) : options.cpu;
   let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
@@ -862,7 +992,7 @@ export function resolveSandboxServerOptions(
   const krunRunnerPath =
     options.krunRunnerPath ??
     (vmm === "krun"
-      ? resolveDefaultKrunRunnerPathFn()
+      ? (detectedKrunRunnerPath ?? resolveDefaultKrunRunnerPathFn())
       : "gondolin-krun-runner");
 
   if (vmm === "krun") {
@@ -882,8 +1012,6 @@ export function resolveSandboxServerOptions(
       );
     }
   }
-
-  const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
@@ -906,14 +1034,6 @@ export function resolveSandboxServerOptions(
         "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
   }
-
-  // Fail fast if we can detect that the guest image doesn't match the selected backend target.
-  // Without this, the VM often just "hangs" until some higher-level timeout.
-  const guestFromManifest = detectGuestArchFromManifest({
-    kernelPath: baseKernelPath,
-    initrdPath: baseInitrdPath,
-    rootfsPath,
-  });
 
   if (
     vmm === "qemu" &&

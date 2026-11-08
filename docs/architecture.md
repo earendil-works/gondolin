@@ -8,7 +8,7 @@ Gondolin is not a single binary. It is a small system made of:
 - **A host engine**: `gondolind`, a static Rust daemon that runs the VM and
   mediates its I/O (the deprecated `node` engine does this in-process)
 - **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
-- **VM backend**: QEMU (default) or `libkrun` (experimental)
+- **VM backend**: `libkrun` (default where it can run) or QEMU
 
 The high-level idea is:
 
@@ -82,10 +82,13 @@ The host side comes in two engines with the same SDK and CLI:
 
 See [Native Engine](./native.md).
 
-### VM backend (QEMU default, optional krun)
+### VM backend (krun where available, otherwise QEMU)
 
-QEMU is the default VM engine (and primary isolation boundary). Gondolin also
-has an experimental `libkrun` backend.
+The VM backend is the primary isolation boundary. Gondolin uses `libkrun` (via
+the `gondolin-krun-runner` helper) by default where it can run: macOS on Apple
+silicon and Linux arm64/x86_64 with KVM, with a runner installed and an image
+that ships krun boot assets. Everywhere else, or when selected explicitly, it
+uses QEMU.
 
 See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
 [QEMU](./qemu.md) for QEMU-specific internals.

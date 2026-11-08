@@ -91,11 +91,11 @@ test("checkpoint: createdWithVmm fallback is used when list is missing", () => {
   assert.deepEqual(compatible, ["krun"]);
 });
 
-test("checkpoint: resume vmm selection defaults to qemu and honors overrides", () => {
+test("checkpoint: resume vmm selection defaults to auto and honors overrides", () => {
   const prev = process.env.GONDOLIN_VMM;
   try {
     delete process.env.GONDOLIN_VMM;
-    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "qemu");
+    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), null);
 
     process.env.GONDOLIN_VMM = "krun";
     assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "krun");

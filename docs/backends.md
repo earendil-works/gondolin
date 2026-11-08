@@ -2,19 +2,51 @@
 
 Gondolin supports two VM backends:
 
-- `qemu` (default, broader feature support)
-- `krun` (experimental, uses `libkrun` via `host/krun-runner`)
+- `krun` (default where it can run; uses `libkrun` via the `gondolin-krun-runner` helper)
+- `qemu` (the fallback everywhere else, broader feature support and tuning knobs)
 
 Both backends work with both host engines (`native`, the default, and the
 deprecated `node`; see [Native Engine](./native.md)).
 
 This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
+## Default Backend Selection
+
+The backend is chosen in this order:
+
+1. `sandbox.vmm` (SDK) or `--vmm qemu|krun` (CLI)
+2. `GONDOLIN_VMM=qemu|krun`
+3. Otherwise `krun` when all of these hold, else `qemu`:
+    - the host supports libkrun: macOS on Apple silicon (arm64), or Linux on
+      arm64/x86_64 with read/write access to `/dev/kvm` (libkrun has no
+      software emulation, QEMU falls back to TCG)
+    - a krun runner is installed (see [runner path resolution](#krun) below;
+      published installs ship it for macOS arm64 and Linux x86_64)
+    - the image ships krun boot assets (`manifest.assets.krunKernel`) for the
+      host architecture; explicit asset paths (`sandbox.imagePath` as an
+      object) always use `qemu`
+    - no qemu-only option is set (`sandbox.qemuPath`, `machineType`, `accel`,
+      `cpu`, `qemuIdlePauseMs`); setting one selects `qemu`
+
+So macOS arm64 and Linux x86_64 installs from npm boot with `krun` out of the
+box, and every other setup keeps working with `qemu`.  Pin a backend with
+`GONDOLIN_VMM=qemu` (or `sandbox.vmm`) when you rely on QEMU-only behavior such
+as virtio-fs on Linux.
+
+Two cases keep `qemu` as the default:
+
+- Resuming a checkpoint whose metadata does not list `krun` as compatible
+  (built from an image without krun boot assets) without an explicit backend.
+- A [remote native daemon](./native.md#remote-daemons): the runner and
+  `/dev/kvm` live on the daemon's machine, so the controller cannot detect
+  them; set `sandbox.vmm: "krun"` (and `sandbox.krunRunnerPath` if the runner
+  is not on the daemon's `PATH`) to use krun there.
+
 ## Feature Parity Matrix
 
 | Capability / setting                                           | `qemu` | `krun` | Notes                                                                                                                        |
 | -------------------------------------------------------------- | ------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `sandbox.vmm`                                                  | ✓      | ✓      | Select backend (`"qemu"` or `"krun"`)                                                                                        |
+| `sandbox.vmm`                                                  | ✓      | ✓      | Select backend (`"qemu"` or `"krun"`); default: see [above](#default-backend-selection)                                     |
 | `sandbox.qemuPath`                                             | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
 | `sandbox.krunRunnerPath`                                       |        | ✓      | Used only with `vmm=krun`                                                                                                    |
 | `sandbox.machineType`                                          | ✓      |        | Rejected when `vmm=krun`                                                                                                     |
@@ -64,7 +96,7 @@ from its `PATH`.
 
 ## Runtime Caveats
 
-- `krun` backend is still experimental and has less runtime parity coverage than `qemu`
+- `krun` has less runtime parity coverage than `qemu`
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
 - Some krun networking edge cases are still under investigation
 - Guest filesystem mounts always use sandboxfs on krun (libkrun has no pluggable virtio-fs backend), so they are slower than on QEMU with virtio-fs and `close()`/`fsync()` cannot report object-tier commit errors
@@ -72,4 +104,9 @@ from its `PATH`.
 
 ## Recommendation
 
-Use `qemu` unless you specifically want to exercise the `krun` backend. If you expose backend knobs in higher-level tooling, gate them by backend and fail fast on unsupported combinations.
+Use the default unless you need something only one backend offers: `qemu` for
+virtio-fs (faster guest mounts with a vhost-user QEMU, e.g. Linux distribution
+builds), QEMU tuning knobs, or guests for another architecture. When the backend
+matters, pin it explicitly (`sandbox.vmm`, `--vmm`, `GONDOLIN_VMM`) rather than
+relying on detection. If you expose backend knobs in higher-level tooling, gate
+them by backend and fail fast on unsupported combinations.

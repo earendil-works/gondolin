@@ -49,19 +49,20 @@ UDP connectivity) will not work in the default network model.
 
 ## Backend parity gaps (QEMU vs krun)
 
-Gondolin supports both `qemu` (default) and an experimental `krun` backend, but
-feature parity is not complete.
+Gondolin supports both `krun` (the default where it can run) and `qemu` (the
+fallback), but feature parity is not complete.
 
 Notable gaps today:
 
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
-- qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
-  rejected when `vmm=krun`
+- qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`,
+  `qemuIdlePauseMs`) are rejected when `vmm=krun`; without an explicit backend
+  they select `qemu`
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun` (or on `qemu` when
   combined with `rootfs.size`); it is implemented as a temporary qcow2 overlay
   file on disk that is deleted on close
 - `krun` has no virtio-fs: guest mounts always use the slower sandboxfs
-  transport
+  transport (pin `vmm: "qemu"` on Linux for virtio-fs)
 
 See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 

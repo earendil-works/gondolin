@@ -282,7 +282,7 @@ function bashUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun (default: krun when usable, else qemu)",
   );
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
@@ -451,7 +451,7 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun (default: krun when usable, else qemu)",
   );
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",

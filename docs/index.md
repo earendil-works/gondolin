@@ -7,8 +7,8 @@ to control network egress and protect secrets from exfiltration. You also
 want to be able to tightly control the file system, for convenience of the agent
 and to control persistence.
 
-Gondolin gives you that. Lightweight micro-VMs (QEMU by default, optional
-libkrun backend) boot in under a second on your Mac or Linux machine. The
+Gondolin gives you that. Lightweight micro-VMs (libkrun where available,
+QEMU otherwise) boot in under a second on your Mac or Linux machine. The
 network stack and virtual filesystem run on the host (in a native daemon by
 default) and are programmable from JavaScript, giving you complete control
 over what the sandbox can access and what secrets it can use.

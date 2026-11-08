@@ -3,9 +3,13 @@
 This document explains how Gondolin uses QEMU, why it is operated this way, and
 how we keep behavior consistent across macOS and Linux.
 
-Gondolin runs untrusted code inside a real Linux VM. QEMU is the VM engine that
-provides the hardware boundary and the virtio devices that Gondolin uses for I/O
-mediation.
+Gondolin runs untrusted code inside a real Linux VM. QEMU is one of the two VM
+engines that provide the hardware boundary and the virtio devices that Gondolin
+uses for I/O mediation: the default where the `krun` backend cannot run (hosts
+without libkrun support or KVM, no krun runner installed, images without krun
+boot assets, guests of another architecture), and whenever it is selected
+explicitly (`sandbox.vmm: "qemu"`, `--vmm qemu`, `GONDOLIN_VMM=qemu`) or a
+qemu-only option is set.
 
 For backend capability differences (`qemu` vs `krun`), see
 [VM Backends (QEMU vs krun)](./backends.md).
