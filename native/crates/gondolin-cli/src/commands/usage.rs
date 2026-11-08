@@ -1,6 +1,6 @@
 //! Usage texts (kept in sync with `host/bin/gondolin.ts`).
 
-pub const MAIN: &str = "Usage: gondolin <command> [options]
+pub const MAIN: &str = "Usage: gondolin [engine options] <command> [options]
 Commands:
   exec         Run a command via a session IPC socket or in-process VM
   bash         Start an interactive shell session in the VM (bash -> sh fallback)
@@ -10,6 +10,12 @@ Commands:
   image        Manage local image refs and objects
   daemon       Run as gondolind (the controller protocol on stdio)
   help         Show this help
+  version      Print the version (also --version, -V)
+
+Engine options (before the command):
+  --engine native|auto  Accepted for compatibility with the Node CLI; this CLI
+                        always uses the native engine (--engine node,
+                        --native-command and --remote need the Node CLI)
 
 This is the static gondolin CLI (native engine, no Node.js). `build` and
 `tools` need the Node CLI: npx @earendil-works/gondolin.

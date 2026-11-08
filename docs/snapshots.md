@@ -125,6 +125,12 @@ If resolution still fails, the error includes the required build id and a
 remediation hint (for example, pull a known ref that points to that build id
 or provide `sandbox.imagePath` explicitly).
 
+With a remote native daemon (`native.remote`), `vm.checkpoint(...)` streams
+the root disk overlay from the daemon into the local checkpoint file, and
+`resume()` uploads the checkpoint to the daemon, which resolves the guest
+image by build id on its machine (or by `native.image` / a string
+`sandbox.imagePath`).
+
 ## qcow2 Backing File Rebasing
 
 qcow2 overlays embed the backing filename in the image metadata. When you move

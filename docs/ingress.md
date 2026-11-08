@@ -29,7 +29,8 @@ Ingress enabled: http://127.0.0.1:58650
 Configure routes by editing /etc/gondolin/listeners inside the VM.
 ```
 
-By default, the gateway binds to `127.0.0.1` on an ephemeral port.
+By default, the gateway binds to `127.0.0.1` on an ephemeral port. `--listen`
+works the same in the [static CLI](./cli.md#static-cli-no-nodejs).
 
 To bind a specific host interface and port:
 
@@ -37,8 +38,12 @@ To bind a specific host interface and port:
 # HOST:PORT
 gondolin bash --listen 127.0.0.1:8008
 
-# :PORT (defaults to 127.0.0.1)
+# :PORT or PORT (host defaults to 127.0.0.1)
 gondolin bash --listen :8008
+gondolin bash --listen 8008
+
+# IPv6 hosts in brackets
+gondolin bash --listen '[::1]:8008'
 
 # PORT=0 picks an ephemeral port
 gondolin bash --listen 127.0.0.1:0
@@ -55,7 +60,7 @@ echo '/ :8000' > /etc/gondolin/listeners
 And then start a server:
 
 ```sh
-python -m http.server 8000
+python3 -m http.server 8000
 ```
 
 Now from the host:
@@ -123,7 +128,7 @@ Example route:
 
 - Host request `GET /api/users` becomes guest request `GET /users`.
 
-To disable rewriting:
+To disable rewriting (`strip_prefix` accepts `true` or `false`):
 
 ```text
 /api :9000 strip_prefix=false

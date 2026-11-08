@@ -1,4 +1,4 @@
-// Runs cross-compiled Linux test binaries inside a Gondolin VM (node engine).
+// Runs cross-compiled Linux test binaries inside a Gondolin VM (default engine).
 //
 // usage: node native/scripts/test-linux.mts <cargo-json-file> [skip-file]
 //

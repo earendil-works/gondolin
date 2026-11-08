@@ -84,8 +84,8 @@ pub struct StatFs {
     pub frsize: u32,
 }
 
-/// Inode-level filesystem served to the guest (what `gondolin-vfs` would
-/// implement over its mount table). Node 1 is the root.
+/// Inode-level filesystem served to the guest (implemented by `gondolin-vfs`
+/// over its mount table, `gondolin-vfs/src/virtiofs.rs`). Node 1 is the root.
 pub trait FileSystem: Send + Sync + 'static {
     fn lookup(&self, parent: u64, name: &OsStr) -> Result<Entry>;
     fn forget(&self, node: u64, nlookup: u64);

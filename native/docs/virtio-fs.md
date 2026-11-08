@@ -6,6 +6,15 @@ sandboxfs otherwise (see "Implementation" below). Sections 1–7 are the
 original feasibility study of the prototype in
 `native/crates/gondolin-virtiofs`.
 
+> Status note: the prototype's vhost-user, virtqueue and FUSE code is the
+> production `gondolin-virtiofs`; its `passthrough.rs` is only used by the
+> demo (`examples/virtiofs_demo.rs`) and the crate's tests, production serves `gondolin-vfs`'s
+> `FsCore`. Release builds now unwind, so the "release builds abort" remark
+> under "Robustness" is outdated: a panicking request answers EIO there too.
+> macOS needs a QEMU with vhost-user (`qemu-macos-vhost-user.md`); guests
+> need sandbox helpers with `--virtiofs` (source-built until the next helper
+> release, `PLAN.md` M7).
+
 ## Implementation
 
 - **Selection.** `configure.vfs.transport` (`auto` by default;

@@ -3,7 +3,7 @@
 See also: [SDK Overview](./sdk.md), [Networking, Ingress, and SSH](./sdk-network.md)
 
 When working with the SDK you create a `VM` object, use it, then close it.
-If you do not close it, the QEMU instance keeps running.
+If you do not close it, the VM keeps running.
 
 ## Creating, Starting, and Closing
 
@@ -24,6 +24,22 @@ await vm.start();
 // ...use the VM...
 await vm.close();
 ```
+
+## Engine and Remote Daemons
+
+`engine` selects the host engine (default: `GONDOLIN_ENGINE`, else `"auto"`,
+which is the native engine when a working `gondolind` binary is found and the
+deprecated node engine otherwise; see [SDK Overview](./sdk.md#engines)).
+
+`native` tells the native engine how to reach its daemon; setting `command`,
+`connect` or `remote` implies `engine: "native"`:
+
+- `command`: argv that starts the daemon with the controller protocol on stdio (e.g. `["ssh", host, "gondolind"]`)
+- `connect`: a connection factory (wins over `command`)
+- `remote`: the daemon runs on another machine; it then resolves the image and creates the root disk overlay itself
+- `image`: image selector for a remote daemon (`name:tag`, build id, or a directory on the daemon's machine)
+
+See [Native Engine](./native.md) for details.
 
 ## Session Identity and External Attaching
 
@@ -57,6 +73,10 @@ including:
 - after the VM has been closed or the runner process has exited
 - while `vm.close()` is in progress, after Gondolin has released its runner handle
 - if a backend fails before spawning its runner, or a future backend does not expose a PID
+- when the VM runs under a remote native daemon (the PID would belong to another machine)
+
+With the native engine the PID is that of the QEMU (or krun runner) process
+started by the daemon, not of the daemon itself.
 
 ## `vm.exec()`
 
@@ -70,7 +90,7 @@ There are two forms:
 
 - `vm.exec("...")` (string): runs the command via a login shell, equivalent to:
   `vm.exec(["/bin/sh", "-lc", "..."])`
-- `vm.exec([cmd, ...argv])` (array): executes an executable directly. **It does not search `$PATH`**, so `cmd` must be an **absolute path**.
+- `vm.exec([cmd, ...argv])` (array): executes an executable directly, without a shell. A `cmd` without a `/` is looked up in the guest's `$PATH` (`/bin:/usr/bin` when `PATH` is unset).
 
 If you want shell features (pipelines, `$VARS`, globbing, `$(...)`, etc.), use the string form (or call `/bin/sh` explicitly):
 

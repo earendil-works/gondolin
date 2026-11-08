@@ -7,13 +7,16 @@
  * of `SandboxServer` and this class translates between the in-process client
  * API (JSON messages + binary output frames) and the daemon protocol.
  *
- * Interim subsystems until the native ones land (see `native/DESIGN.md`):
- * - VFS: the daemon forwards sandboxfs requests (`vfs_rpc`) and this class
- *   serves them with the node engine's `FsRpcService`;
- * - network: served natively by the daemon (`NativeNetwork`: netstack, egress,
- *   SSH proxy; JS hooks are called back over the pipe). Internal, deprecated
+ * Subsystems (see `native/DESIGN.md`):
+ * - VFS: served by the daemon's mount table (`NativeVfs`, `vfs.ts`); JS providers
+ *   are reached through the object tier (`vfs_call`). Internal, deprecated
+ *   fallback (`GONDOLIN_NATIVE_VFS=controller`): the daemon forwards sandboxfs
+ *   requests (`vfs_rpc`) and this class serves them with `FsRpcService`;
+ * - network: served by the daemon (`NativeNetwork`: netstack, egress, SSH
+ *   proxy; JS hooks are called back over the pipe). Internal, deprecated
  *   fallback (`GONDOLIN_NATIVE_NET=external|relay`): the node network stack
- *   (`QemuNetworkBackend`) listens on a local socket QEMU connects to.
+ *   (`QemuNetworkBackend`) on a local socket QEMU connects to, or relayed
+ *   over the connection for remote daemons.
  */
 
 import { EventEmitter } from "node:events";

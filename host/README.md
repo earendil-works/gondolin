@@ -3,17 +3,31 @@
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
 Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
-default, optional `krun` backend). The network stack and virtual filesystem are
-implemented in TypeScript, giving you complete programmatic control over what
-the sandbox can access and what secrets it can use.
+default, optional `krun` backend). Every guest network connection and file
+access goes through the host, and this TypeScript SDK gives you complete
+programmatic control over what the sandbox can access and what secrets it can
+use.
+
+The host side runs in the native engine, `gondolind` (Rust), which ships as an
+optional platform package (`@earendil-works/gondolin-native-*` for macOS
+arm64/x64 and Linux arm64/x64) installed with this package. The default
+engine `auto` uses it when a working binary is found and otherwise falls back
+to the in-process TypeScript engine (`node`), which is deprecated
+(`GONDOLIN_ENGINE=node` or `engine: "node"` selects it explicitly and prints a
+one-time `DeprecationWarning`). See
+[Native Engine](https://earendil-works.github.io/gondolin/native/).
 
 ## Requirements
 
-You need QEMU installed to run the micro-VMs (default backend):
+- Node.js >= 22.19.0
+- QEMU to run the micro-VMs (default backend):
 
-| macOS               | Linux (Debian/Ubuntu)              |
-| ------------------- | ---------------------------------- |
-| `brew install qemu` | `sudo apt install qemu-system-arm` |
+| macOS               | Linux (Debian/Ubuntu)                                                 |
+| ------------------- | --------------------------------------------------------------------- |
+| `brew install qemu` | `sudo apt install qemu-system-arm` (arm64) or `qemu-system-x86` (x64) |
+
+Homebrew's QEMU lacks vhost-user, so on macOS the native engine serves guest
+files over sandboxfs instead of the faster virtio-fs.
 
 Optional experimental backend:
 
@@ -40,8 +54,6 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 
 # install Zig 0.17.0 for your Linux architecture
 ```
-
-- Node.js >= 22.19
 
 > **Note:** Runtime validation is currently strongest on ARM64 (Apple Silicon, Linux aarch64).
 > Linux x86_64 is currently smoke-tested for `make krun-runner` in CI.
@@ -74,6 +86,10 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
+The same commands (except `build` and `tools`) are also available without
+Node.js in the static `gondolin` binary of the native platform packages; see
+[CLI: Static CLI](https://earendil-works.github.io/gondolin/cli/#static-cli-no-nodejs).
+
 Guest images (~200MB) are automatically resolved on first run via
 `builtin-image-registry.json` and cached in `~/.cache/gondolin/images/`.
 If no explicit image is provided, Gondolin uses `GONDOLIN_DEFAULT_IMAGE`
@@ -104,8 +120,8 @@ const vm = await VM.create({
 
 // NOTE:
 // - `vm.exec("...")` runs via `/bin/sh -lc "..."` (shell features work)
-// - `vm.exec([cmd, ...argv])` executes `cmd` directly and does not search `$PATH`
-//   so `cmd` must be an absolute path
+// - `vm.exec([cmd, ...argv])` executes `cmd` directly (no shell); a bare name
+//   is looked up in the guest's `$PATH`
 const cmd = `
   curl -sS -f \
     -H "Accept: application/vnd.github+json" \
@@ -175,8 +191,9 @@ const vm = await VM.create({
 });
 ```
 
-`syntheticHostMapping: "per-host"` is required so the host can map outbound
-TCP connections on port `22` back to the intended hostname.
+`syntheticHostMapping: "per-host"` (the default when `ssh` is configured) is
+required so the host can map outbound TCP connections on port `22` back to the
+intended hostname.
 
 When credentials or an SSH agent are configured, the host terminates the guest SSH
 session and proxies `exec` requests (including Git smart-protocol commands) to the

@@ -22,8 +22,8 @@ Options:
 
 | flag | meaning |
 |---|---|
-| `--engine node\|native` | engine (default: `GONDOLIN_ENGINE`, else `node`) |
-| `--interleave node,native[,native-virtiofs]` | run several engines, alternating per workload group |
+| `--engine NAME` | engine, see [Engines](#engines) (default: `GONDOLIN_ENGINE`, else `auto`: `native` when a working native binary is found, else `node`, as in the SDK) |
+| `--interleave node,native[,...]` | run several engines (see [Engines](#engines)), alternating per workload group |
 | `--suite a,b` | suites to run: `boot`, `exec`, `vfs`, `net`, `cli` (default: all) |
 | `--quick` | at most 1 warmup and 3 iterations, smaller payloads |
 | `--iterations N` | override measured iterations of every workload |
@@ -79,9 +79,10 @@ before trusting a small difference.
   iterable into `wc -c`).
 - `vfs`: one VM with every mount kind: guest tmpfs (reference),
   `MemoryProvider`, `RealFSProvider`, `ShadowProvider(RealFSProvider)`,
-  `ReadonlyProvider(RealFSProvider)` and a JS delegating provider standing in
-  for the object tier. Per kind: create+write 1000 x 4 KiB files, stat and read
-  them, `scandir` of a 5000 entry directory, `find`/`ls -lR` of a 2000 file
+  `ReadonlyProvider(RealFSProvider)`, a JS delegating provider (served through
+  the object tier on native), `nativeMounts.memory()` and
+  `createObjectMount()` with an in-memory `ObjectProvider`. Per kind:
+  create+write 1000 x 4 KiB files, stat and read them, `scandir` of a 5000 entry directory, `find`/`ls -lR` of a 2000 file
   source-like tree, untar of that tree, large sequential write (`dd
   conv=fsync`) and read. Guest caches are dropped before read workloads. Large
   files are 256 MiB, 64 MiB on memory-backed mounts.
@@ -92,16 +93,21 @@ before trusting a small difference.
   this process' default CA store. One VM per hook variant: `policy`
   (`createHttpHooks({ allowedHosts, allowedInternalHosts })`, full workload
   set), `ip-allow` (`{ isIpAllowed: () => true }`), `policy-noop-hooks` and
-  `policy-body-hooks` (onRequest/onResponse reading cloned bodies). Workloads:
+  `policy-body-hooks` (onRequest/onResponse reading cloned bodies), and
+  `policy-noop-djs`/`policy-body-djs`, the same two as tier-2
+  `createDjsHooks()` policies (in `gondolind` on native, `node:vm` on node).
+  Workloads:
   sequential small GETs with a new connection each and with keep-alive,
   8-way concurrent GETs, 32 MiB download/upload, 256 MiB download.
 
 ## Engines
 
 - `node`: the in-process TypeScript engine.
-- `native`: the native engine (`GONDOLIN_NATIVE_BIN`, the multi-call `gondolin`
-  binary started as `gondolin daemon`), with the QEMU on `PATH` (Homebrew's
-  QEMU has no vhost-user, so the guest uses sandboxfs).
+- `native`: the native engine (the binary the SDK resolves, normally
+  `GONDOLIN_NATIVE_BIN` pointing at the multi-call `gondolin`, started as
+  `gondolin daemon`), with the QEMU on `PATH` (Homebrew's QEMU has no
+  vhost-user, so on macOS the guest uses sandboxfs). The `cli` suite needs
+  `GONDOLIN_NATIVE_BIN` (the static CLI under test).
 - `native-virtiofs`: the native engine with `GONDOLIN_VIRTIOFS=1` and a
   vhost-user capable QEMU first on `PATH` (`GONDOLIN_BENCH_VIRTIOFS_QEMU_DIR`,
   default `/tmp/qemu-vu/qemu-10.2.1/build`; see
@@ -133,9 +139,11 @@ runs share one; the image always comes from `GONDOLIN_GUEST_DIR`.
 
 ## Engine processes and checks
 
-`--engine native` passes `engine: "native"` to `VM.create` (never for `node`)
-and refuses to run unless the VM reports `engine === "native"` and its daemon
-pid is a `gondolind` process (bypass with `GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1`).
+The engine is resolved once at startup (`auto` becomes `native` or `node`)
+and passed explicitly to `VM.create`. For the native variants (requested or
+picked by `auto`) the harness refuses to run unless the VM reports
+`engine === "native"` and its daemon pid is a `gondolin`/`gondolind` process
+(bypass with `GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1`).
 Set `GONDOLIN_NATIVE_BIN` to the binary under test and `GONDOLIN_GUEST_DIR` so
 both engines boot the same image (both are recorded in the results).
 

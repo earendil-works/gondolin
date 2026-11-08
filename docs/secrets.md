@@ -130,7 +130,11 @@ its own.
 
 Important:
 
-- In `createHttpHooks`, user-provided `onRequest` handlers may run after placeholder substitution
+- In `createHttpHooks`, placeholders are substituted after your `onRequest`
+  handler (so a rewritten request is checked against the per-secret host
+  allowlists), but on redirect hops `onRequest` sees the request derived
+  from the previous hop, which may contain substituted secret values, and
+  `onResponse` receives the final request after substitution
 - There is **no guarantee** that custom hooks (`onRequest` / `onResponse`) only see placeholders
 
 Do not log request headers/URLs from hooks unless you are comfortable potentially logging real secret values.
@@ -140,6 +144,8 @@ Do not log request headers/URLs from hooks unless you are comfortable potentiall
 CLI `--host-secret NAME@HOST[,HOST...][=VALUE]` uses the same mechanism.
 
 - If `=VALUE` is omitted, the value is read from host env var `NAME`
+- The Node.js CLI also accepts `NAME[=VALUE]` without hosts and suggests hosts
+  to choose from; the static `gondolin` CLI requires explicit hosts
 - Inside the guest, `$NAME` is a placeholder, not the real value
 
 ## Operational guidance

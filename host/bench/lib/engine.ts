@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 
 import { VM, type VMOptions } from "../../src/index.ts";
+import { resolveSandboxEngine } from "../../src/native/config.ts";
 import { nsToMs, processTree, readProcess } from "./harness.ts";
 
 /**
@@ -32,11 +33,19 @@ export function isVirtiofsEngine(engine: EngineName): boolean {
   return engine.endsWith("-virtiofs");
 }
 
+/**
+ * Engine from `--engine` (or one `--interleave` entry), else
+ * `GONDOLIN_ENGINE`, else `auto`. `auto` follows the SDK default: `native`
+ * when a working native binary is found, else `node`; it is resolved here so
+ * results are labelled with the engine that actually ran.
+ */
 export function resolveEngine(flag: string | undefined): EngineName {
-  const value = flag ?? process.env.GONDOLIN_ENGINE ?? "node";
+  const raw = (flag ?? process.env.GONDOLIN_ENGINE ?? "").trim();
+  const value =
+    raw === "" || raw === "auto" ? resolveSandboxEngine("auto") : raw;
   if (!ENGINE_NAMES.includes(value as EngineName)) {
     throw new Error(
-      `unknown engine '${value}' (expected ${ENGINE_NAMES.join(", ")})`,
+      `unknown engine '${value}' (expected auto, ${ENGINE_NAMES.join(", ")})`,
     );
   }
   return value as EngineName;

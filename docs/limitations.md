@@ -60,9 +60,19 @@ Notable gaps today:
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun` (or on `qemu` when
   combined with `rootfs.size`); it is implemented as a temporary qcow2 overlay
   file on disk that is deleted on close
+- `krun` has no virtio-fs: guest mounts always use the slower sandboxfs
+  transport
 
 See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 
+## No fast filesystem transport on stock macOS QEMU
+
+The native engine serves guest mounts over virtio-fs only with a QEMU that
+supports vhost-user. Homebrew's QEMU does not, so on macOS mounts use
+sandboxfs (FUSE over virtio-serial) unless you build QEMU yourself; see
+[QEMU](./qemu.md#virtio-fs-and-vhost-user).
+
 ## No Windows support
 
-The host side of Gondolin is currently supported on macOS and Linux.
+The host side of Gondolin is currently supported on macOS and Linux (native
+engine binaries for macOS arm64/x64 and Linux arm64/x64).

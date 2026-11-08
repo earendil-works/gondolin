@@ -15,12 +15,18 @@
 import { parseArgs } from "node:util";
 
 import { createHttpHooks } from "../src/index.ts";
-import { createVm, installGuestTools, setEngine, sh } from "./lib/engine.ts";
+import {
+  createVm,
+  installGuestTools,
+  resolveEngine,
+  setEngine,
+  sh,
+} from "./lib/engine.ts";
 import { startUpstreams } from "./suites/net.ts";
 
 const { values } = parseArgs({
   options: {
-    engine: { type: "string", default: process.env.GONDOLIN_ENGINE ?? "node" },
+    engine: { type: "string" },
     work: {
       type: "string",
       default: "seq,download,upload,https-seq,https-download,https-upload",
@@ -31,7 +37,7 @@ const { values } = parseArgs({
   },
 });
 
-setEngine(values.engine as "node" | "native");
+setEngine(resolveEngine(values.engine));
 const up = await startUpstreams();
 const vm = await createVm({
   httpHooks: createHttpHooks({

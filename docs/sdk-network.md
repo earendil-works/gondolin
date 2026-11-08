@@ -7,7 +7,8 @@ See also: [SDK Overview](./sdk.md), [Network Stack](./network.md), [Ingress](./i
 The network stack mediates HTTP and TLS traffic by default. TCP flows are
 classified and non-HTTP/TLS traffic is dropped unless explicitly enabled via
 SSH egress or host-mapped TCP rules. HTTP requests are intercepted and replayed
-via `fetch` on the host side, enabling:
+by the host (the native engine's daemon; the deprecated node engine uses
+`fetch`), enabling:
 
 - Host allowlists with wildcard support
 - Request/response hooks for logging and modification
@@ -49,8 +50,9 @@ Egress hook behavior:
     - return `undefined` to keep it unchanged
     - return a `Response` to rewrite
 
-Important note: secrets may be expanded before `onRequest` is invoked. This
-means request-hook logging may include secrets.
+Important note: secrets may be expanded before `onRequest` is invoked (on
+redirect hops), and `onResponse` receives the request after substitution. This
+means hook logging may include secrets.
 
 Short-circuited responses skip upstream fetch (including DNS/IP policy checks)
 and do not call `onResponse`. If `onRequest` performs its own host-side `fetch()`
@@ -71,7 +73,8 @@ onRequest: async (request) => {
 
 Hook policies written as self-contained JavaScript can run inside the native
 engine's daemon instead of your Node process: no round trip per request, and
-they work with remote daemons and the static CLI (`--hooks-script FILE`).
+they work with remote daemons and the CLIs (`--hooks-script FILE`). On the
+deprecated node engine a script policy runs in a `node:vm` context instead.
 Spread them into `createHttpHooks()` to combine them with allowlists and
 secrets:
 
@@ -154,6 +157,7 @@ Semantics:
 Safety model:
 
 - This mode requires `dns.mode: "synthetic"` and `dns.syntheticHostMapping: "per-host"`
+  (the defaults when `tcp.hosts` or `ssh.allowedHosts` are set)
 - Hostname matching uses synthetic DNS host attribution (same model as SSH egress)
 - Mapped TCP flows are raw tunnels to the configured upstream target
     - they do **not** use HTTP request/response hooks
@@ -192,10 +196,9 @@ console.log("Ingress:", ingress.url);
 // Route all requests to the guest server on port 8000
 vm.setIngressRoutes([{ prefix: "/", port: 8000, stripPrefix: true }]);
 
-// Start a server inside the guest
-// NOTE: the guest currently executes one command at a time; a long-running
-// vm.exec() (like a server) will block additional exec requests.
-const server = vm.exec(["/bin/sh", "-lc", "python -m http.server 8000"], {
+// Start a server inside the guest (it keeps running while other
+// vm.exec() calls run)
+const server = vm.exec(["/bin/sh", "-lc", "python3 -m http.server 8000"], {
   buffer: false,
   stdout: "inherit",
   stderr: "inherit",
@@ -346,4 +349,7 @@ Notes:
 - SSH egress is proxied by the host and intentionally limited to non-interactive
   `exec` usage (no shells, no subsystems like `sftp`)
 - SSH egress is not necessary to attach to a VM, that can also happen with `gondolin attach`.
+- With a remote native daemon `ssh.agent` is not supported (the agent socket
+  is on the controller; use `credentials`), and `knownHostsFile` is read on the
+  controller and sent to the daemon
 - See: [SSH](./ssh.md) and [Network stack](./network.md)

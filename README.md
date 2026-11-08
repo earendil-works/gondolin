@@ -20,7 +20,7 @@ const { httpHooks, env } = createHttpHooks({
   secrets: {
     GITHUB_TOKEN: {
       hosts: ["api.github.com"],
-      value: process.env.GITHUB_TOKEN,
+      value: process.env.GITHUB_TOKEN!,
     },
   },
 });
@@ -74,18 +74,25 @@ Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default: `alpine-base:latest`).
 
 Requirements:
 
-| macOS                    | Linux (Debian/Ubuntu)                         |
-| ------------------------ | --------------------------------------------- |
-| `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` |
+| macOS                    | Linux (Debian/Ubuntu)                                                        |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| `brew install qemu node` | `sudo apt install qemu-system-arm nodejs npm` (x86_64: `qemu-system-x86`) |
 
-By default the VM is run by the [native engine](docs/native.md) when its
-`gondolind` binary (a static Rust daemon, shipped as an optional platform
-package) is available, and by the in-process node engine otherwise
-(`GONDOLIN_ENGINE=node` / `--engine node` forces the node engine, which is
-deprecated). It can run on another machine (`--native-command "ssh host gondolind"
---remote`): that machine only needs QEMU and the `gondolind` binary, no
-Node.js; policy, hooks, credentials and file providers stay with your local
-Node.js process.
+Node.js 22.19 or newer is required for the SDK and the npm CLI.
+
+By default the VM is run by the [native engine](docs/native.md): `gondolind`,
+a static Rust daemon shipped with the optional platform packages
+(`@earendil-works/gondolin-native-*`, macOS and Linux on arm64 and x64). Where
+no usable binary is found, the deprecated in-process node engine is used
+(`GONDOLIN_ENGINE=node` / `--engine node` forces it). The daemon can run on
+another machine (`--native-command "ssh host gondolind" --remote`): that
+machine only needs QEMU and the binary, no Node.js; policy, hooks, credentials
+and file providers stay with your local Node.js process. The same binary is
+also a [static `gondolin` CLI](docs/cli.md#static-cli-no-nodejs) without
+Node.js.
+
+Homebrew's QEMU lacks vhost-user, so on macOS guest file access uses the
+slower sandboxfs transport instead of virtio-fs (see [QEMU](docs/qemu.md#virtio-fs-and-vhost-user)).
 
 Optional experimental libkrun backend setup:
 
@@ -136,7 +143,8 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
   - optional guest -> upstream allowlisted SSH egress (proxied, exec-oriented)
 - **Disk checkpoints (snapshots)** with resume support
 - **Custom image builds** (Alpine-based build pipeline, optional OCI rootfs source)
-- **Native engine** (default when available): a static Rust daemon (`gondolind`) runs the VM, also on remote machines without Node.js
+- **Native engine** (default): a static Rust daemon (`gondolind`) runs the VM, also on remote machines without Node.js; the same binary is a static CLI
+- **Tier-2 hooks**: self-contained JavaScript policies (`createDjsHooks()`, `--hooks-script`) that run inside the daemon
 - **Configurable DNS behavior** (`synthetic`, `trusted`, `open`), rootfs modes (`readonly`, `memory`, `cow`), and runtime rootfs sizing
 
 ## Documentation
@@ -148,7 +156,7 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
 - [SSH](https://earendil-works.github.io/gondolin/ssh/)
 - [Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
 - [Architecture Overview](https://earendil-works.github.io/gondolin/architecture/)
-- [VM Backends (QEMU vs krun)](docs/backends.md)
+- [VM Backends (QEMU vs krun)](https://earendil-works.github.io/gondolin/backends/)
 - [Native Engine](https://earendil-works.github.io/gondolin/native/)
 - [Security Design](https://earendil-works.github.io/gondolin/security/)
 - [Limitations](https://earendil-works.github.io/gondolin/limitations/)

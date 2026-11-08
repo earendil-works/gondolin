@@ -138,8 +138,12 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       tier order declarative → djs → controller; 0.23 ms vs 0.29 ms (tier 3) vs
       0.58 ms (node) per hooked request; +1.8 MB binary (feature `djs-hooks`);
       third-party budget unchanged (djs counted as first-party)
-- [ ] Modules from disk for the CLIs; TypeScript policies; heap-size API in djs
-      for pool capping
+- [x] djs pin 0e58f62c; pooled instances shrink to 1 MiB after reset instead
+      of being dropped; TypeScript and JSON policies; CLIs (and
+      `djsHooksOptionsFromFile`) load relative imports from disk into the
+      in-memory module map
+- [ ] TypeScript `./x.js` → `x.ts` import mapping (NodeNext convention)
+- [ ] Clean tier-2 vs tier-3 VM benchmark on a quiet machine
 - [ ] djs: ES modules (requirements M1–M8; esbuild bundling as interim) and
       builtins B1–B3
 - [x] Profile byte passing and hook cost (ASCII/UTF-8 fast path found)

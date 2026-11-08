@@ -39,6 +39,14 @@ Conceptually:
 - The host speaks "real networking" only for a narrow subset, and otherwise
   drops packets.
 
+On the native engine (the default) all of this runs in `gondolind`:
+`gondolin-netstack` (a userspace stack built on smoltcp) terminates the
+guest's traffic and `gondolin-egress` classifies flows and mediates HTTP/TLS;
+only hooks registered in your program run in the Node.js controller. The
+deprecated node engine implements the same pipeline in TypeScript
+(`host/src/qemu/`). Both behave the same apart from the differences listed
+in [Native Engine](./native.md#differences-from-the-node-engine).
+
 ## Addressing and "LAN" Model
 
 The guest is placed into a small private IPv4 subnet with a host-side "gateway":
@@ -224,7 +232,8 @@ For connections classified as HTTP:
 
 1. The host parses the request line and headers.
 2. The host applies the configured request hooks and policy checks.
-3. The host performs the actual upstream request using a host HTTP client.
+3. The host performs the actual upstream request using a host HTTP client
+   (`gondolin-http` on the native engine, `fetch` on the node engine).
 4. The host streams (or buffers, depending on hooks) the response back to the
    guest as an HTTP/1.x response.
 
@@ -236,7 +245,8 @@ the guest never gets a raw upstream TCP tunnel.
 For connections classified as TLS, Gondolin performs a controlled MITM:
 
 1. The host reads the TLS ClientHello and extracts the intended server name (SNI).
-2. The host presents a dynamically generated certificate for that name, signed by a local CA.
+2. The host presents a dynamically generated certificate for that name, signed by a local CA
+   (the native engine issues ECDSA P-256 leaf certificates and caches them per host).
 3. The guest establishes TLS to the host (believing it is the origin).
 4. The host decrypts the HTTP request inside TLS and then repeats the same HTTP
    bridging pipeline as for plain HTTP.
@@ -245,9 +255,12 @@ For connections classified as TLS, Gondolin performs a controlled MITM:
 
 To make this work, the guest must trust the host-generated CA:
 
-- Gondolin creates (and caches) a CA keypair on the host.
+- Gondolin creates (and caches) a CA keypair on the host (in
+  `~/.cache/gondolin/ssl`; a remote `gondolind` keeps its own on its machine).
 - The CA certificate is made available inside the guest so common TLS clients
   (curl, node, python, etc.) will accept MITM certificates.
+
+See [Security Design](./security.md#tls-mitm-ca-handling) for handling the CA key.
 
 ## Policy Enforcement
 
@@ -313,6 +326,12 @@ Request bodies are streams. If your hook needs body-aware decisions, read from
 A key design principle is that hooks run on the host **after** the traffic has
 been parsed into structured HTTP requests, not on raw packets.
 
+Policy is evaluated in tiers: the declarative `createHttpHooks()` options
+(allowlists, internal ranges, secrets) first, then a self-contained
+`createDjsHooks()` policy that the native daemon runs itself, then your
+JavaScript hooks in the controller. See
+[Tier-2 Hooks](./native.md#tier-2-hooks).
+
 ## Secret Injection
 
 Secrets are handled as part of the HTTP mediation pipeline:
@@ -364,4 +383,5 @@ If networking is not behaving as expected, useful things to check first:
 - Whether the protocol is actually HTTP/1.x or TLS with SNI (non-HTTP TLS traffic will be blocked)
 
 Gondolin also includes debug logging for networking to help trace policy
-decisions and connection classification.
+decisions and connection classification (`GONDOLIN_DEBUG=net`, see
+[Debug Logging](./debug.md)).

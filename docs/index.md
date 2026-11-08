@@ -9,9 +9,9 @@ and to control persistence.
 
 Gondolin gives you that. Lightweight micro-VMs (QEMU by default, optional
 libkrun backend) boot in under a second on your Mac or Linux machine. The
-network stack and virtual filesystem are implemented entirely in JavaScript,
-giving you complete programmatic control over what the sandbox can access and
-what secrets it can use.
+network stack and virtual filesystem run on the host (in a native daemon by
+default) and are programmable from JavaScript, giving you complete control
+over what the sandbox can access and what secrets it can use.
 
 This documentation helps you get started with it. We also welcome your feedback
 as this is an early project and we are eager to learn more about how you want
@@ -33,7 +33,7 @@ const { httpHooks, env } = createHttpHooks({
   secrets: {
     GITHUB_TOKEN: {
       hosts: ["api.github.com"],
-      value: process.env.GITHUB_TOKEN,
+      value: process.env.GITHUB_TOKEN!,
     },
   },
 });
@@ -42,8 +42,8 @@ const vm = await VM.create({ httpHooks, env });
 
 // NOTE:
 // - `vm.exec("...")` runs via `/bin/sh -lc "..."` (shell features work)
-// - `vm.exec([cmd, ...argv])` executes `cmd` directly and does not search `$PATH`
-//   so `cmd` must be an absolute path
+// - `vm.exec([cmd, ...argv])` executes `cmd` directly (no shell); a bare name
+//   is looked up in the guest's `$PATH`
 const cmd = `
   curl -sS -f \
     -H "Accept: application/vnd.github+json" \
@@ -69,6 +69,7 @@ await vm.close();
 - [Ingress](./ingress.md): expose guest HTTP servers on the host
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
+- [Native Engine](./native.md): the default host engine (`gondolind`), remote daemons, and differences from the deprecated node engine
 
 ## SDK
 

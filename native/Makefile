@@ -6,9 +6,10 @@ CARGO ?= cargo
 build:
 	@$(CARGO) build --workspace
 
-# Optimised gondolind for this machine (native/target/release/gondolind)
+# Optimised binaries for this machine: the multi-call gondolin (static CLI and
+# daemon, what the packages ship) and gondolind (native/target/release/)
 release:
-	@$(CARGO) build --release -p gondolind
+	@$(CARGO) build --release -p gondolin-cli -p gondolind
 
 # Static release binaries for all targets into target/dist/<target>/
 # (TARGETS="aarch64-unknown-linux-musl ..." to restrict, EXAMPLES=1 to include examples)

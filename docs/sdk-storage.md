@@ -32,6 +32,9 @@ Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
 resolved automatically from local overrides/store first, then from
 `builtin-image-registry.json` when needed.
 The default cache location is `~/.cache/gondolin/images/`.
+With a remote native daemon (`native.remote`), the daemon resolves and
+downloads the image on its own machine (`native.image` or a string
+`sandbox.imagePath` selects it).
 
 Override image selection / source:
 

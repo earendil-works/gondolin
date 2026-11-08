@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { loadOrCreateMitmCaSync } from "../src/mitm.ts";
 import { checkoutGuestDir, resolveNativeCli } from "./helpers/native-cli.ts";
 
 const cli = resolveNativeCli();
@@ -98,6 +99,10 @@ fs.writeFileSync(
   hooksModule,
   "export function isRequestAllowed(req) { return !req.url.includes('deny'); }\n",
 );
+// created up front: both CLIs run concurrently and must load the same CA
+const mitmDir = path.join(hostDir, "mitm");
+loadOrCreateMitmCaSync(mitmDir);
+const mitmCertPem = fs.readFileSync(path.join(mitmDir, "ca.crt"), "utf8");
 test.after(() => fs.rmSync(hostDir, { recursive: true, force: true }));
 
 type Case = {
@@ -106,6 +111,8 @@ type Case = {
   env?: Record<string, string>;
   /** both CLIs must fail with this message */
   error?: string;
+  /** extra assertion on each CLI's parsed output */
+  check?: (out: any) => void;
 };
 
 const cases: Case[] = [
@@ -230,6 +237,14 @@ const cases: Case[] = [
     },
   },
   {
+    name: "GONDOLIN_MITM_CERT_DIR",
+    args: ["exec", "--print-configure"],
+    env: { GONDOLIN_MITM_CERT_DIR: mitmDir },
+    check: (out) => {
+      assert.equal(out.configure.net.mitm.cert_pem, mitmCertPem);
+    },
+  },
+  {
     name: "missing host dir",
     args: [
       "exec",
@@ -289,6 +304,10 @@ for (const c of cases) {
       normalize(native.stdout, c.args),
       normalize(node.stdout, c.args),
     );
+    if (c.check) {
+      c.check(JSON.parse(node.stdout));
+      c.check(JSON.parse(native.stdout));
+    }
   });
 }
 

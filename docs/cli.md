@@ -9,6 +9,7 @@ Gondolin ships with a small command line interface (CLI) that lets you:
 - run one or more commands non-interactively (`exec`)
 - build and verify custom guest assets (`build`)
 - manage local image refs/objects (`image`)
+- inspect managed helper tools (`tools`)
 
 ## Installation / Running
 
@@ -27,7 +28,9 @@ gondolin bash
 
 ### Requirements
 
-- QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux)
+- QEMU installed (`brew install qemu` on macOS, `apt install qemu-system-*` on Linux);
+  Homebrew's QEMU has no vhost-user, so the native engine uses sandboxfs
+  instead of virtio-fs there (see [Native Engine](./native.md))
 - Node.js >= 22.19.0 (not for the [static CLI](#static-cli-no-nodejs))
 
 With the [native engine](./native.md) and a remote daemon, QEMU is needed on
@@ -46,9 +49,13 @@ gondolin [--engine node|native|auto] [--native-command CMD] [--remote] <command>
   and `node` otherwise; `--engine node` / `GONDOLIN_ENGINE=node` selects the
   node engine, which is deprecated and prints a warning)
 - `--native-command CMD` -- start `gondolind` with `CMD`, e.g.
-  `"ssh build-box gondolind"` (implies `native`)
+  `"ssh build-box gondolind"` (implies `native`; same as
+  `GONDOLIN_NATIVE_COMMAND`)
 - `--remote` -- the daemon runs on another machine; images, disks and the MITM
-  CA are handled on its side (implies `native`)
+  CA are handled on its side (implies `native`; same as
+  `GONDOLIN_NATIVE_REMOTE=1`)
+
+The flags also accept the `--flag=VALUE` form.
 
 See [Native Engine](./native.md) for details.
 
@@ -61,7 +68,8 @@ When you do not pass `--image`, Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default:
 
 Running VMs are also registered in the cache under
 `~/.cache/gondolin/sessions/` as `<uuid>.json` + `<uuid>.sock` pairs so other
-CLI processes can discover and attach to them.
+CLI processes can discover and attach to them. (All `~/.cache/gondolin` paths
+move to `$XDG_CACHE_HOME/gondolin` when `XDG_CACHE_HOME` is set.)
 
 ## Static CLI (no Node.js)
 
@@ -107,8 +115,9 @@ Differences:
 - there is only the native engine: `--engine native|auto` is accepted,
   `--engine node`, `--native-command` and `--remote` are not;
 - upstream TLS for mediated HTTPS trusts the system and webpki root stores
-  (the Node CLI uses Node's CA store), and DNS resolvers are read from
-  `/etc/resolv.conf` by the network stack;
+  (`SSL_CERT_FILE`/`SSL_CERT_DIR` replace the system bundle,
+  `NODE_EXTRA_CA_CERTS` is added; the Node CLI uses Node's CA store), and DNS
+  resolvers are read from `/etc/resolv.conf` by the network stack;
 - `gondolin exec` (VM mode) streams output as it arrives instead of printing it
   when each command finished.
 
@@ -131,11 +140,13 @@ options for configuring filesystem mounts and mediated network egress policy.
 - `--mount-memfs GUEST_PATH`
     - Create an in-memory mount at `GUEST_PATH` (ephemeral)
 
+### VM Options
+
 - `--image IMAGE`
     - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 - `--vmm BACKEND`
-    - Select backend per command: `qemu` or `krun`
+    - Select backend per command: `qemu` (default) or `krun`
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
@@ -183,10 +194,14 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
       `onResponse`, `isRequestAllowed` and/or `isIpAllowed`) for every HTTP
       request; a `.mjs` file is an ES module exporting them, a `.ts`/`.mts`
       file a TypeScript module
+    - Any other extension (for example `.js`) is a script defining them as
+      global functions
     - Files a module imports with relative specifiers (`./lib/x.ts`,
       `./data.json`) are read from next to it and sent along
     - On the native engine it runs inside the daemon (also in the static
-      CLI); see [Native Engine: Tier-2 Hooks](./native.md#tier-2-hooks)
+      CLI); on the deprecated node engine a script runs in a `node:vm`
+      context and a module policy is refused at startup; see
+      [Native Engine: Tier-2 Hooks](./native.md#tier-2-hooks)
     - Combines with `--allow-host`/`--host-secret` (declarative policy runs
       first, secrets are substituted after the hook)
 
@@ -370,7 +385,7 @@ gondolin bash \
   --host-secret GITHUB_TOKEN@api.github.com
 
 # Run a specific command instead of bash
-gondolin bash -- claude --cwd /workspace
+gondolin bash --cwd /workspace -- claude
 
 # Start an ingress gateway to forward traffic into the VM
 gondolin bash --listen 127.0.0.1:3000
@@ -444,7 +459,8 @@ gondolin snapshot <SESSION_ID> [--output PATH] [--name NAME]
 - `SESSION_ID` may be a full UUID or an unambiguous UUID prefix
 - default output path is `~/.cache/gondolin/checkpoints/<uuid>.qcow2`
 - `--name` customizes the default filename stem
-- `--output` sets an explicit output path (`.qcow2` recommended)
+- `--output` sets an explicit output path (`.qcow2` recommended); it cannot be
+  combined with `--name`
 
 On success, Gondolin prints the snapshot id/path and a matching resume command.
 
@@ -463,7 +479,7 @@ gondolin snapshot 9e3a2e2d --output ./my-snapshot.qcow2
 
 Run one or more commands and exit.
 
-### VM Mode (Default)
+#### VM Mode (Default)
 
 Without `--sock`, `gondolin exec` creates a VM, runs the command(s), prints
 stdout/stderr, and exits with the command's exit code:
@@ -482,7 +498,7 @@ gondolin exec -- uname -a
 gondolin exec --mount-hostfs "$PWD:/workspace" -- sh -lc 'cd /workspace && npm test'
 ```
 
-### Multi-Command Form
+#### Multi-Command Form
 
 You can provide multiple commands using `--cmd` (each command can have its own args/env/cwd):
 
@@ -499,7 +515,7 @@ Per-command flags apply to the most recent `--cmd`:
 - `--cwd PATH` -- set working directory
 - `--id N` -- set a request id (mainly useful with `--sock`)
 
-### Socket Mode (Advanced)
+#### Socket Mode (Advanced)
 
 To run non-interactive commands in an already running Gondolin session (for
 example one started with `gondolin bash`), pass its session id (or a unique
@@ -516,7 +532,8 @@ shells.
 
 ### `gondolin build`
 
-Build and verify custom guest assets (kernel + initramfs + rootfs):
+Build and verify custom guest assets (kernel + initramfs + rootfs; Node CLI
+only):
 
 ```bash
 gondolin build [options]
@@ -605,6 +622,17 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 - image build id (`uuid`)
 - image ref (`name:tag`)
 
+### `gondolin tools` (Node CLI only)
+
+You can inspect the managed `trufflehog` helper (used by `--host-secret NAME`
+without hosts) with:
+
+```bash
+gondolin tools trufflehog
+gondolin tools trufflehog --install
+gondolin tools trufflehog --json
+```
+
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`
@@ -634,14 +662,6 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
     - Override checkpoint directory used by `gondolin snapshot` / `gondolin bash --resume`
     - Default: `~/.cache/gondolin/checkpoints`
 
-You can inspect the managed `trufflehog` helper with:
-
-```bash
-gondolin tools trufflehog
-gondolin tools trufflehog --install
-gondolin tools trufflehog --json
-```
-
 - `GONDOLIN_SESSIONS_DIR`
     - Override session registry directory used by `gondolin list` / `gondolin attach`
     - Default: `~/.cache/gondolin/sessions`
@@ -649,12 +669,35 @@ gondolin tools trufflehog --json
 - `GONDOLIN_DEBUG`
     - Enable debug logging (see [Debug Logging](./debug.md))
 
-The static CLI also reads `GONDOLIN_KRUN_RUNNER` (krun runner binary),
-`GONDOLIN_MITM_CERT_DIR` (MITM CA directory) and `GONDOLIN_VIRTIOFS=0|1`
-(guest filesystem transport, see [Native Engine](./native.md)).
+- `GONDOLIN_KRUN_RUNNER`
+    - Path of the krun runner binary (`--vmm krun`)
 
+- `GONDOLIN_VIRTIOFS`
+    - Guest filesystem transport on the native engine: `1` forces virtio-fs,
+      `0` forces sandboxfs (default: virtio-fs when QEMU and the guest image
+      support it, else sandboxfs; see [Native Engine](./native.md))
+
+- `GONDOLIN_MITM_CERT_DIR`
+    - MITM CA directory (default: `~/.cache/gondolin/ssl`; the SDK's
+      `sandbox.mitmCertDir` option wins over it)
+
+Node CLI only:
+
+- `GONDOLIN_ENGINE`
+    - Host engine when `--engine` is not given: `native`, `node` (deprecated)
+      or `auto` (default)
+
+- `GONDOLIN_NATIVE_BIN`
+    - Native engine binary to use instead of the one from the
+      `gondolin-native-*` package (`gondolin` or `gondolind`)
+
+- `GONDOLIN_NATIVE_COMMAND`, `GONDOLIN_NATIVE_REMOTE`
+    - Same as `--native-command` and `--remote`
 
 ## Help
 
 - `gondolin help`
 - `gondolin <command> --help`
+- `gondolin version` (also `--version`): the package version and the
+  `gondolind` command the Node CLI would use; the static CLI prints
+  `gondolin X.Y.Z (static)`

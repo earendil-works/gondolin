@@ -5,6 +5,9 @@ Gondolin supports two VM backends:
 - `qemu` (default, broader feature support)
 - `krun` (experimental, uses `libkrun` via `host/krun-runner`)
 
+Both backends work with both host engines (`native`, the default, and the
+deprecated `node`; see [Native Engine](./native.md)).
+
 This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
 ## Feature Parity Matrix
@@ -25,6 +28,7 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 | `rootfs.size`                                                   | ✓      | ✓      | Ensures the effective writable root disk is at least the requested size before boot and runs `resize2fs` in the guest; requires `resize2fs` in the image |
 | `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |
 | Exec/VFS/network mediation/SSH/ingress APIs                    | ✓      | ✓      | Same host-side control plane and policy stack                                                                                |
+| VFS over virtio-fs                                             | ✓      |        | Native engine with a QEMU that has vhost-user (`vhost-user-fs-pci`/`-device`); otherwise, and always on krun, sandboxfs (FUSE over virtio-serial) |
 
 ## Architecture and Kernel Constraints
 
@@ -45,16 +49,25 @@ This page is the authoritative backend-parity reference for SDK/CLI behavior.
 - Build/setup path: `gondolin build` (or published image assets)
 - `make krun-runner` builds the runner binary; it does not provide kernel assets
 
-Runner path resolution:
+Runner path resolution (when `sandbox.krunRunnerPath` is not set):
 
+- `GONDOLIN_KRUN_RUNNER`
 - Auto-detected from local `host/krun-runner/zig-out/bin/gondolin-krun-runner` when present
-- Auto-detected from installed platform runner package when available (for example `@earendil-works/gondolin-krun-runner-darwin-arm64` or `@earendil-works/gondolin-krun-runner-linux-x64`)
+- Auto-detected from installed platform runner package when available (`@earendil-works/gondolin-krun-runner-darwin-arm64` or `@earendil-works/gondolin-krun-runner-linux-x64`, the only published platforms)
+- `gondolin-krun-runner` on `PATH`
+
+The static `gondolin` CLI checks `GONDOLIN_KRUN_RUNNER`,
+`host/krun-runner/zig-out/bin` and `krun-runner/zig-out/bin` in the current
+directory, the directory of the `gondolin` binary, then `PATH`. A remote native daemon uses
+`sandbox.krunRunnerPath` as a path on its machine, else `gondolin-krun-runner`
+from its `PATH`.
 
 ## Runtime Caveats
 
 - `krun` backend is still experimental and has less runtime parity coverage than `qemu`
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
 - Some krun networking edge cases are still under investigation
+- Guest filesystem mounts always use sandboxfs on krun (libkrun has no pluggable virtio-fs backend), so they are slower than on QEMU with virtio-fs and `close()`/`fsync()` cannot report object-tier commit errors
 - Host CA trust configuration can cause guest-visible HTTP `502` errors on both backends when upstream TLS validation fails
 
 ## Recommendation

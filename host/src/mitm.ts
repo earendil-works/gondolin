@@ -90,8 +90,16 @@ export function getDefaultMitmCertDir() {
   return gondolinCacheDir("ssl");
 }
 
+/**
+ * MITM CA directory: the explicit option, else `GONDOLIN_MITM_CERT_DIR`, else
+ * the shared cache (`~/.cache/gondolin/ssl`); the static CLI does the same.
+ */
 export function resolveMitmCertDir(mitmCertDir?: string) {
-  return mitmCertDir ?? getDefaultMitmCertDir();
+  return (
+    mitmCertDir ??
+    (process.env.GONDOLIN_MITM_CERT_DIR?.trim() || undefined) ??
+    getDefaultMitmCertDir()
+  );
 }
 
 function parsePersistedMitmCa(keyPem: string, certPem: string): MitmCa {

@@ -73,6 +73,15 @@ const FEATURES: &[&str] = &[
     "net.native",
 ];
 
+/// Usage for unknown arguments (without arguments the daemon speaks the
+/// controller protocol on stdio).
+const USAGE: &str = "usage: gondolind                     speak the controller protocol on stdio
+       gondolind --version | -V      print the version
+       gondolind assets ...          manage guest images (assets --help)
+       gondolind --mitm-ca [DIR]     load or create the MITM CA, print its certificate
+       gondolind --qemu-args         print the QEMU argv for a configure payload (JSON on stdin)
+       gondolind --vmm-watchdog PID  (macOS, internal) kill the VMM PID when the daemon exits";
+
 /// Process entry point (argument handling, runtime setup).
 pub fn main() {
     main_with_args(std::env::args().skip(1).collect());
@@ -123,9 +132,7 @@ pub fn main_with_args(args: Vec<String>) {
         }
         Some(other) => {
             eprintln!("gondolind: unknown argument {other}");
-            eprintln!(
-                "usage: gondolind [--version | assets ...]  (speaks the controller protocol on stdio)"
-            );
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
         None => {}

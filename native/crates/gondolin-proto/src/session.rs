@@ -32,7 +32,7 @@ gondolin_wire::wire_struct! {
         pub protocol: u32,
         /// daemon version (crate version)
         pub version: String,
-        /// optional features the daemon supports (e.g. `vfs.controller`, `net.external`)
+        /// optional features the daemon supports (e.g. `net.native`, `djs_hooks`)
         pub features: Vec<String>,
         /// daemon process id
         pub pid: u32,
@@ -51,9 +51,9 @@ gondolin_wire::wire_struct! {
         pub limits: Limits = Default::default(),
         /// enabled debug components (`exec`, `protocol`, `vfs`, `net`)
         pub debug: Vec<String> = Default::default(),
-        /// VFS configuration (`{ mode: "controller" }` or a native mount table)
+        /// VFS configuration (a native mount table, `{ mode: "native", ... }`; or the deprecated `{ mode: "controller" }`)
         pub vfs: Option<Value>,
-        /// network configuration (`{ mode: "external", socket_path }` or native config)
+        /// network configuration (`{ mode: "native", ... }`; or the deprecated `external`/`relay` fallbacks)
         pub net: Option<Value>,
     }
 }

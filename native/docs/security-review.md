@@ -8,6 +8,14 @@ in `docs/security.md` and `docs/network.md`, and the node engine as the
 behavioural baseline. Reviewed at the state of `native/egress` after the
 phase 2 merge (November 2026).
 
+> Status (historical): later changes are not reviewed here beyond the notes
+> already added (own HTTP/1.1, SSH and x509 code, panic containment). Release
+> builds now unwind (`panic = "unwind"`), so finding 1's `panic = "abort"`
+> impact no longer applies. Tier-2 djs hooks (`gondolin-hooks-djs`) came
+> after this review; they and the newer fuzz targets `wire_cbor`,
+> `wire_json`, `assets_tar`, `assets_gzip` and `hooks_djs` are not in the
+> tables below (`native/fuzz/fuzz_targets/` has the full list).
+
 ## Summary
 
 | # | finding | severity | status |

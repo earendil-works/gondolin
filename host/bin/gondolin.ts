@@ -374,7 +374,7 @@ function bashUsage() {
   );
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
-  console.log("  gondolin bash --cmd claude --cwd /workspace");
+  console.log("  gondolin bash --cwd /workspace -- claude");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --resume 4a8f2b0c");

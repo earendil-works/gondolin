@@ -1,5 +1,16 @@
 # Should gondolind drop tokio?
 
+> Status (historical): the recommendation was implemented in M8 (`PLAN.md`).
+> tokio stays with `rt`, `rt-multi-thread`, `net`, `time`, `sync` and
+> `io-util` (plus `io-std` in gondolind and `fs` in gondolin-assets);
+> russh, rsa, hyper/reqwest/tower, url/idna, rcgen, serde/ciborium/serde_json,
+> tracing, async-trait, futures-util, thiserror, flate2/tar,
+> rustls-native-certs and rustix were replaced by own code or libc. The
+> binary has 26 third-party runtime crates; the budget is
+> `native/deps-budget` (`make -C native deps`). Counts and tables below are
+> from before the diet. Conventions for new code: `native/DESIGN.md`,
+> "Dependency diet conventions".
+
 Research note for the dependency diet (owner target: fewer than 30 runtime
 crates; today 249 on macOS, 248 on Linux for `gondolin-cli`, which links the
 whole daemon). Measurements are from an M5 Max (macOS 26, 18 cores) and the

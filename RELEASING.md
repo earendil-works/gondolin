@@ -44,8 +44,9 @@ release needs for virtio-fs.
    - Uploads them to the release `sandbox-helpers--X.Y.Z`.
    - Commits the `gondolin:X.Y.Z` entry to `builtin-sandbox-helper-registry.json`
      on `main`.
-3. **`build-native`, `publish-native`, `publish-krun-runner`.** These run in
-   parallel once the helpers are out:
+3. **`build-native`, `publish-native`, `publish-krun-runner`.**
+   `build-native` starts right after `create-release`; the two publish jobs
+   wait for the helpers (and `publish-native` for `build-native`):
    - `build-native` (macos-15) cross-builds the multi-call `gondolin` (static
      CLI and `gondolind` daemon) for the four targets (`make native-release`).
    - `publish-native` packs, smoke-tests (`gondolind --version`,
@@ -82,10 +83,9 @@ The image carries the helpers and `/init` of `source_ref`. The workflow:
 - passes `GONDOLIN_SANDBOX_HELPERS_DIR=guest/zig-out`, as CI does.
 
 Without `GONDOLIN_SANDBOX_HELPERS_DIR`, `gondolin build` would download the
-*published* helpers for `host/package.json`'s version. That is what the
-workflow did before this change: images built from `main` before a package
-release would have shipped the previous release's `sandboxfs`, without
-virtio-fs.
+*published* helpers for `host/package.json`'s version. Earlier versions of
+the workflow did that, so images built from `main` before a package release
+shipped the previous release's `sandboxfs`, without virtio-fs.
 
 ### virtio-fs in the next release
 
@@ -103,6 +103,9 @@ What has to happen for users to get virtio-fs (native engine,
    for hosts whose QEMU lacks `vhost-user-fs-pci`, which includes Homebrew's
    QEMU on macOS (see `native/docs/qemu-macos-vhost-user.md`), and for krun.
    `GONDOLIN_VIRTIOFS=0|1` overrides the choice.
+
+The same image release also brings the guest without `rngd` (and
+`rng-tools`) to users of the default image.
 
 ## Workflow validation
 

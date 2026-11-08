@@ -35,7 +35,7 @@ endif
 
 help:
 	@echo "Available commands:"
-	@echo "  make build       - Build guest + host"
+	@echo "  make build       - Build guest + host + native"
 	@echo "  make lint        - Run linters"
 	@echo "  make typecheck   - Run type checks"
 	@echo "  make check       - Run lint + typecheck"
@@ -61,7 +61,7 @@ help:
 	@echo "  make libkrun     - Build + stage libkrun locally under .cache/"
 	@echo "  make krun-runner - Build libkrun + host/krun-runner helper"
 	@echo "  make native      - Build the native engine workspace (native/)"
-	@echo "  make native-check - cargo fmt --check + clippy for native/"
+	@echo "  make native-check - cargo fmt --check + clippy + dependency budget for native/"
 	@echo "  make native-test - Run native/ tests on this machine"
 	@echo "  make native-release - Static release binaries for linux-musl + darwin (native/target/dist)"
 	@echo "  make native-test-linux - Run native/ tests cross-compiled for Linux inside a VM"

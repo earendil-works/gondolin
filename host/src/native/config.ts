@@ -25,7 +25,8 @@ import type { NativeConnection } from "./transport.ts";
  * `connect` the daemon may run elsewhere; set `remote` then, so the
  * controller sends no paths of its own machine: the image is a selector
  * resolved by the daemon, the root disk overlay is created by the daemon,
- * the network runs over the connection (`relay`).
+ * the MITM CA is the daemon's own, and controller-local VFS providers are
+ * served through the object tier.
  */
 export type NativeEngineOptions = {
   /** command that starts gondolind with the controller protocol on stdio (e.g. `["ssh", host, "gondolind"]`) */

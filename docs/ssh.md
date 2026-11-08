@@ -15,8 +15,12 @@ When you call `vm.enableSsh()`:
    TCP streams to guest loopback.
 3. The host creates a local TCP listener (default `127.0.0.1:<ephemeral>`), and
    forwards each incoming connection to the guest's `127.0.0.1:22` via `sandboxssh`.
-4. The host generates an ephemeral Ed25519 keypair and installs the public key
-   into the target user's `authorized_keys`.
+4. The host generates an ephemeral Ed25519 keypair (with the host's
+   `ssh-keygen`, which must be installed) and installs the public key into the
+   target user's `authorized_keys`.
+
+The CLI equivalent is `gondolin bash --ssh` (see [CLI](./cli.md)); it works the
+same way in the static CLI.
 
 The returned `SshAccess` includes:
 
@@ -110,13 +114,17 @@ How it works:
 
 - The guest connects to `HOST:PORT` as usual (default `22`; non-standard ports are enabled by allowlisting `HOST:PORT`)
 - The host intercepts that TCP flow (SSH is only allowed when explicitly
-  configured) and terminates it in an in-process SSH server.
+  configured) and terminates it in a host-side SSH server (in `gondolind` on
+  the native engine, in-process on the node engine).
 - For each guest `exec` request, the host opens an upstream SSH connection to
   the real destination using either:
     - a host ssh-agent, or
     - a configured private key
-- Upstream host keys are verified on the host via OpenSSH `known_hosts` (or a
-  custom verifier).
+- Upstream host keys are verified on the host via OpenSSH `known_hosts`
+  (default: `~/.ssh/known_hosts`) or a custom `hostVerifier` callback.
+- SSH egress needs synthetic DNS (the default) with per-host mapping; the
+  mapping defaults to `per-host` when SSH egress is configured, and other DNS
+  settings are rejected.
 
 Limitations:
 

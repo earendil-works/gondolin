@@ -2,7 +2,8 @@
 
 Gondolin exposes a programmable Virtual File System (VFS) to the guest. The VFS
 is backed by host-side providers (JavaScript objects) and is mounted into the
-guest via FUSE.
+guest via FUSE (sandboxfs) or, with the native engine and a QEMU that supports
+vhost-user, virtio-fs.
 
 > **Implementation note:** Gondolin does not use Node's VFS implementation
 > unchanged.  We vendor a snapshot and maintain local patches needed for
@@ -18,8 +19,9 @@ common patterns for safely sharing a workspace with a sandboxed VM.
 
 A VFS setup has three layers:
 
-- The guest runs a FUSE filesystem ("sandboxfs")
-- The host translates VFS operations into RPC calls
+- The guest mounts the tree, either with its FUSE helper ("sandboxfs") or over
+  virtio-fs (see [Native Engine](native.md#filesystem))
+- The host translates VFS operations into provider calls
 - A host-side provider (or a stack of providers) implements the filesystem
 
 In the SDK you configure this via `VM.create({ vfs: { ... } })`:
@@ -55,9 +57,11 @@ with the longest matching mount prefix.
 Under the hood Gondolin mounts the VFS once (default mount point: `/data`) and
 then bind-mounts individual entries into their configured locations.
 
-You can change the underlying FUSE mount point:
+You can change the underlying mount point:
 
 ```ts
+import { VM, MemoryProvider } from "@earendil-works/gondolin";
+
 const vm = await VM.create({
   vfs: {
     fuseMount: "/vfs",
@@ -297,6 +301,10 @@ Hooks are useful for:
 - Collecting metrics
 - Debugging unexpected file reads
 
+On the native engine, `before` hooks cost a round trip per hooked operation,
+and `after` hooks run asynchronously after the guest got its reply (see
+[Native Engine](native.md#filesystem)).
+
 ## Provider Composition
 
 Providers are designed to be stackable.
@@ -345,9 +353,9 @@ by the provider (memory or host filesystem) and is not part of checkpoints.
 
 ## Native Engine
 
-With the native engine (`engine: "native"`), `RealFSProvider`,
-`ReadonlyProvider` and path-list `ShadowProvider` mounts are served by the
-daemon itself; other providers keep working through a cached whole-file tier.
+With the native engine (the default), `RealFSProvider`, `ReadonlyProvider`
+and path-list `ShadowProvider` mounts are served by the daemon itself (for
+local daemons); other providers keep working through a cached whole-file tier.
 Whole-file providers can implement `ObjectProvider` directly
 (`createObjectMount()`), and `nativeMounts.memory()` / `nativeMounts.host()`
 mount daemon-side filesystems. See [Native Engine](native.md#filesystem).

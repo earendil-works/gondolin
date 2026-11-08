@@ -14,9 +14,12 @@ Set `GONDOLIN_DEBUG` to a comma-separated list of flags:
 
 - `net`: networking stack / HTTP bridge
 - `exec`: exec + stdin/pty control messages
-- `vfs`: VFS (FUSE/RPC) operations
+- `vfs`: VFS (FUSE/RPC) operations (`fs` is accepted as an alias)
 - `protocol`: virtio/control-protocol traffic and QEMU log forwarding
-- `all`: turns on everything
+- `all` (or `*`, `1`, `true`): turns on everything
+
+Unknown flags are ignored. The [static CLI](./cli.md#static-cli-no-nodejs)
+reads `GONDOLIN_DEBUG` the same way and prints the messages to stderr.
 
 Examples:
 
@@ -30,7 +33,8 @@ export GONDOLIN_DEBUG=all
 
 ### Programmatic (per-VM)
 
-Debug flags are also available on `sandbox.debug`:
+Debug flags are also available on `sandbox.debug`; when set, it replaces
+`GONDOLIN_DEBUG` for that VM:
 
 ```ts
 import { VM } from "@earendil-works/gondolin";
@@ -52,6 +56,8 @@ const vm = await VM.create({
 When any debug mode is enabled, the VM will emit debug messages to a callback:
 
 - By default it logs to `console.log` as `[component] message`
+- The component is one of the flags above, `qemu` (QEMU output, forwarded
+  with `protocol`) or `error`
 - You can override it with `debugLog`
 - You can disable debug printing entirely by passing `debugLog: null`
 
@@ -90,6 +96,6 @@ vm.setDebugLog((component, message) => {
 - `exec` debug logs only include environment *keys* (not values) to reduce accidental secret leakage.
 - Debug messages are best-effort: if your callback throws, Gondolin will ignore the error.
 - With the [native engine](./native.md) the flags are passed to `gondolind`,
-  which forwards its events to the same callback (QEMU output with
+  which forwards its events to the same callback (QEMU output as `qemu` with
   `protocol`, network stack tracing with `net`). Lines the daemon writes to its
   stderr arrive as the `error` component, prefixed with `gondolind:`.

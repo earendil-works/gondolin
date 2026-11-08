@@ -1,7 +1,7 @@
 /**
  * Gondolin engine benchmarks.
  *
- *   node bench/run.ts [--engine node|native | --interleave node,native] [--suite boot,exec,vfs,net]
+ *   node bench/run.ts [--engine auto|node|native|... | --interleave node,native] [--suite boot,exec,vfs,net]
  *                     [--quick] [--iterations N] [--filter regex]
  *                     [--out dir] [--note text] [--no-save] [--summary-only]
  *

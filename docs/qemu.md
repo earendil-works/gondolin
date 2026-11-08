@@ -17,7 +17,8 @@ Gondolin is designed to behave the same way on developer laptops and in CI.
 QEMU was chosen primarily because:
 
 - It runs on both macOS and Linux with widely available acceleration backends.
-- It supports the virtio devices we need (virtio-net, virtio-serial, virtio-blk, virtio-rng).
+- It supports the virtio devices we need (virtio-net, virtio-serial, virtio-blk, virtio-rng,
+  and vhost-user-fs for virtio-fs).
 - It is flexible enough to run in a minimal, tightly controlled configuration.
 
 Alternatives like Firecracker are attractive on Linux, but they do not provide
@@ -31,6 +32,8 @@ From inside the VM, the guest sees familiar devices:
 - A block device for the root filesystem
 - A network interface (typically as eth0)
 - Four virtio-serial ports used for exec control, VFS RPC, SSH forwarding, and ingress
+- Optionally a virtio-fs device (tag `gondolin`) for the programmable
+  filesystem, see [virtio-fs](#virtio-fs-and-vhost-user)
 
 The guest experience is intentionally "normal Linux" so that standard tooling
 works without custom kernels or unusual userspace stacks.
@@ -38,7 +41,10 @@ works without custom kernels or unusual userspace stacks.
 ## How Gondolin Connects to QEMU
 
 Gondolin runs QEMU as a child process and connects to it over local transports
-(Unix domain sockets).  The host side is responsible for:
+(Unix domain sockets).  On the native engine QEMU is a child of `gondolind`,
+which listens on the sockets in a private directory (mode `0700`) and also
+talks QMP to QEMU (to pause an idle VM, for example); on the node engine it is
+a child of your Node.js process.  The host side is responsible for:
 
 - Launching and shutting down the VM process
 - Wiring up virtio channels used for exec control and filesystem RPC
@@ -94,7 +100,9 @@ For details of the mediation pipeline, see [Network stack](./network.md).
 
 ## Control Plane: Virtio-Serial
 
-Gondolin uses dedicated virtio-serial ports for host-guest control traffic.
+Gondolin uses dedicated virtio-serial ports for host-guest control traffic
+(`virtio-port` for exec, `virtio-fs` for the filesystem RPC, `virtio-ssh` and
+`virtio-ingress` for the TCP forwarders).
 
 Reasons:
 
@@ -134,9 +142,9 @@ primary differences are in the acceleration backend and QEMU machine defaults.
     - Works on Apple Silicon and on Intel Macs with HVF support.
     - Some QEMU features may differ slightly from KVM.
 
-If hardware acceleration is not available, QEMU can fall back to software
-emulation (TCG).  This is much slower and is not the recommended mode for regular
-use.
+Gondolin falls back to software emulation (TCG) when `/dev/kvm` is not
+usable on Linux or the guest architecture differs from the host's.  This is
+much slower and is not the recommended mode for regular use.
 
 ### Machine Type and CPU Model
 
@@ -149,8 +157,10 @@ model, set `sandbox.cpu` or the `GONDOLIN_CPU` environment variable:
 GONDOLIN_CPU=cortex-a72 gondolin bash
 ```
 
-You should generally not rely on a specific QEMU machine type as part of the
-public API. The important guarantee is that the guest boots quickly and exposes
+The defaults are `virt` on aarch64, `microvm` for x86_64 guests under KVM
+and `q35` otherwise; `sandbox.machineType` overrides them.  You should
+generally not rely on a specific QEMU machine type as part of the public
+API. The important guarantee is that the guest boots quickly and exposes
 the expected virtio devices.
 
 ### File and Socket Handling
@@ -162,3 +172,25 @@ Both platforms use local IPC primitives to connect to QEMU.  The details differ:
 
 Gondolin treats these as implementation details and keeps them behind the host
 controller abstraction.
+
+## virtio-fs and vhost-user
+
+The native engine can serve the guest's programmable filesystem over
+virtio-fs instead of sandboxfs (FUSE over virtio-serial), which is much faster
+(see [Native Engine](./native.md#filesystem)).
+`gondolind` implements the vhost-user-fs device itself; QEMU only needs to
+support vhost-user:
+
+- a `vhost-user-fs-pci` device (`vhost-user-fs-device` on `microvm`), and
+- a shared memory backend for guest RAM (`memory-backend-memfd` on Linux,
+  else `memory-backend-shm`).
+
+The daemon probes the QEMU binary for both (`-device help`, `-object help`)
+and caches the result per binary in `~/.cache/gondolin/qemu-virtiofs.json`.
+When either is missing, the guest uses sandboxfs; so do guest images whose
+`sandboxfs` predates `--virtiofs`.  Linux distribution QEMU builds support
+vhost-user; Homebrew's QEMU on macOS does not (see
+[`native/docs/qemu-macos-vhost-user.md`](https://github.com/earendil-works/gondolin/blob/main/native/docs/qemu-macos-vhost-user.md)
+for building one).  `GONDOLIN_VIRTIOFS=0` forces sandboxfs,
+`GONDOLIN_VIRTIOFS=1` logs a warning when virtio-fs is unavailable.  The node
+engine and the krun backend always use sandboxfs.

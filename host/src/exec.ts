@@ -138,7 +138,7 @@ export function normalizeCommand(
   argv: string[];
 } {
   // Array form: execute an executable directly
-  // NOTE: the guest does not search `$PATH` for this.
+  // NOTE: the guest resolves a bare name via `$PATH` (execvpe semantics).
   if (Array.isArray(command)) {
     if (command.length === 0) {
       throw new Error("command array must include the executable");

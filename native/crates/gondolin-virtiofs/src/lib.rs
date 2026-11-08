@@ -1,7 +1,9 @@
-//! Prototype virtio-fs backend for gondolind (see `native/docs/virtio-fs.md`):
-//! a minimal vhost-user device ([`vhost_user`]), split virtqueues
-//! ([`virtq`]), the FUSE protocol ([`fuse`]) and a host-directory
-//! passthrough ([`passthrough`]) standing in for `gondolin-vfs`.
+//! virtio-fs backend for gondolind (see `native/docs/virtio-fs.md`): a
+//! minimal vhost-user device ([`vhost_user`]), split virtqueues ([`virtq`])
+//! and the FUSE protocol ([`fuse`]) over the inode-level
+//! [`fuse::FileSystem`] trait. gondolind serves `gondolin-vfs`'s `FsCore`
+//! through it; the host-directory [`passthrough`] is only used by the demo
+//! (`examples/virtiofs_demo.rs`) and the tests.
 
 pub mod fuse;
 pub mod passthrough;

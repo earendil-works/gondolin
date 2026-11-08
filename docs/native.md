@@ -79,8 +79,12 @@ gondolin --native-command "ssh build-box gondolind" --remote bash
 | Flag | Meaning |
 | --- | --- |
 | `--engine node\|native\|auto` | host engine (default: `$GONDOLIN_ENGINE`, else `auto`; `node` is deprecated) |
-| `--native-command CMD` | start `gondolind` with `CMD` (words, or a JSON array); implies `native` |
+| `--native-command CMD` | start the daemon with `CMD` (words, or a JSON array); implies `native` |
 | `--remote` | the daemon runs on another machine (see below); implies `native` |
+
+`gondolind` is the npm `bin` name the platform package installs; where only
+the binary was copied, start it as `gondolin daemon` (for example
+`--native-command "ssh build-box ~/bin/gondolin daemon"`).
 
 `gondolin list`, `attach` and `exec --sock` work for sessions of either engine:
 the session registry lives in the controller.
@@ -179,6 +183,7 @@ type NativeConnection = {
 const vm = await VM.create({
   native: {
     remote: true,
+    // `env`: a pi-env environment (or anything returning a NativeConnection)
     connect: async () => env.openProcess("gondolind", []),
   },
 });
@@ -208,20 +213,21 @@ const { path, args } = await ensureNativeBinary({ platform: "linux", arch: "x64"
 ```
 
 The daemon also brings its own image tooling, which is handy on machines
-without Node.js:
+without Node.js (`gondolind ARGS` is the same as `gondolin daemon ARGS`; the
+static CLI's `gondolin image` manages the same cache):
 
 ```bash
-gondolind --version
-gondolind assets list
-gondolind assets pull alpine-base:latest
-gondolind assets resolve --json
+gondolin daemon --version
+gondolin daemon assets list
+gondolin daemon assets pull alpine-base:latest
+gondolin daemon assets resolve --json
 ```
 
 ## Differences from the Node Engine
 
 Behaviour visible to guests and SDK users is the same unless listed here.
 
-**Network**
+### Network
 
 - Compressed upstream responses (`Content-Encoding: gzip`, ...) are forwarded
   to the guest unchanged. The node engine decodes them (it uses `fetch`) and
@@ -257,7 +263,7 @@ Behaviour visible to guests and SDK users is the same unless listed here.
   e.g. `security find-certificate -a -p -c "My Corp CA" > ca.pem` and
   `NODE_EXTRA_CA_CERTS=ca.pem`.
 
-**Filesystem**
+### Filesystem
 
 The daemon serves the guest filesystem (`/data` and the bind mounts) from its
 own mount table. `VMOptions.vfs.mounts` is translated per mount:
@@ -280,8 +286,9 @@ distribution QEMU builds support it; Homebrew's QEMU on macOS does not
 (`native/crates/gondolin-virtiofs/examples/linux-guest/build-qemu-macos.sh`
 builds one). Without it, and with krun, the guest uses sandboxfs as before.
 `GONDOLIN_VIRTIOFS=0` forces sandboxfs, `GONDOLIN_VIRTIOFS=1` asks for
-virtio-fs and logs a warning when it is unavailable. Guest images older than
-this version always use sandboxfs.
+virtio-fs and logs a warning when it is unavailable. Guest images whose
+`sandboxfs` has no `--virtiofs` option (built before this release) always use
+sandboxfs.
 
 Native mounts cost no controller round trips. Host directories keep the
 `RealFSProvider` hardening: nothing resolves outside the directory (with
@@ -311,7 +318,7 @@ const notes: ObjectProvider = {
   async stat(path) { /* { kind: "file" | "dir" | "symlink", size, mode?, mtimeMs? } */ },
   async readDir(path) { /* [{ name, kind }] */ },
   async readFile(path, range) { /* bytes (the range or the whole file) */ },
-  async writeFile(path, data, { mode }) { /* replace the whole file */ },
+  async writeFile(path, data, options) { /* replace the whole file (options?.mode) */ },
   // optional: unlink, rename, mkdir, rmdir, truncate, chmod, symlink, readlink, link, write
 };
 
@@ -363,7 +370,7 @@ Differences from the node engine:
   engine serves them. For debugging only; it will be removed with the node
   engine.
 
-**Errors and diagnostics**
+### Errors and diagnostics
 
 - Some configuration errors are reported when the VM starts rather than when
   `VM.create()` returns, because the daemon validates them on its machine (for
@@ -373,7 +380,7 @@ Differences from the node engine:
 - Error messages surfaced to callers are the same; debug output is equivalent
   but not byte-identical.
 
-**Process model**
+### Process model
 
 - The VMM runs under the daemon (controller → `gondolind` → QEMU). Starting a
   VM costs one extra process spawn and handshake (a few milliseconds).
@@ -515,9 +522,9 @@ and engine details are in `native/docs/djs-hooks.md`.
 
 ## Troubleshooting
 
-**`native engine binary not found`**: build it (`make -C native release` or
-`cargo build -p gondolin-cli` in a checkout), install the platform package, or
-set `GONDOLIN_NATIVE_BIN`. The
+**`native engine binary not found`**: build it in a checkout (`make native`,
+or `cargo build --release -p gondolin-cli` in `native/`), install the platform
+package, or set `GONDOLIN_NATIVE_BIN`. The
 default (`auto`) falls back to the node engine on machines without a usable
 binary; this error only appears when `native` is selected explicitly.
 

@@ -7,6 +7,17 @@ Status: research and prototype; the production implementation is
 the workspace and path-depends on `~/Development/djs`; this doc used djs
 `88c5fd9b`.
 
+> Status (historical): the recommendations below were implemented
+> differently in places. Production uses djs-embed (git dependency pinned in
+> `gondolin-hooks-djs/Cargo.toml`), the policy is `configure.net.djs_hooks`
+> (not `NetConfig.hooks`), calls run in pooled instances reset to the
+> snapshot after each call (not fresh VMs) on the egress task in fuel slices
+> with a wall-clock deadline (no dedicated pool), policies can be scripts,
+> ES modules, TypeScript or JSON with in-memory imports (no esbuild
+> bundling), URLs are parsed by `gondolin_http::url` (not the `url` crate),
+> and node's consumed-body rule is kept. Current numbers are in `PLAN.md`
+> (M6); the tables here are prototype measurements.
+
 Tier 2 runs user JavaScript hooks inside `gondolind`, so a hook no longer pays
 a controller round trip (tier 3). This doc answers four questions:
 

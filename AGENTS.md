@@ -8,14 +8,14 @@ Start by reading `README.md` in the repo root for the current status, repo layou
 - `host/` — TypeScript host controller, networking stack, VFS, and CLI (`pnpm` workspace)
 - `native/` — the native host engine (Rust workspace): the `gondolind` daemon and the static `gondolin` CLI, shipped as one multi-call binary; see `native/DESIGN.md` and `native/PLAN.md`
 - `scripts/` — Build tooling (`run-parallel` etc.)
-- `docs/` — Additional documentation (custom images, etc.)
-- `examples/` — Usage examples
+- `docs/` — User documentation (the site built by `make docs`)
+- `host/examples/` — Usage examples
 
 ## Building & Testing
 
 ```bash
-make build      # Build everything (guest + host)
-make check      # Lint + typecheck (guest + host)
+make build      # Build everything (guest + host + native)
+make check      # Lint + typecheck (guest + host + native)
 make test       # Run all tests
 ```
 
@@ -27,6 +27,12 @@ cd host && node --test test/specific.test.ts  # Single test
 ```
 
 Guest builds use Zig (`zig build`). The image builder is in TypeScript (`host/src/build/alpine.ts`).
+
+The native workspace builds with cargo (`make native`, `make native-test`,
+`make native-check`). `make native-check` includes `make -C native deps`, which
+fails when the `gondolin` binary pulls in more third-party crates than
+`native/deps-budget` allows; see "Dependency diet conventions" in
+`native/DESIGN.md` before adding a dependency.
 
 ### Documentation
 
