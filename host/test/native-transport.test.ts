@@ -139,7 +139,7 @@ test("native engine rejects options it cannot honour yet", async () => {
   assert.doesNotThrow(() => assertNativeSupported({ vmm: "krun" } as any, {}));
   assert.throws(
     () => assertNativeSupported(resolved, { virtioSocketPath: "/tmp/x.sock" }),
-    /not supported by the native engine yet: sandbox.virtioSocketPath/,
+    /not supported: sandbox.virtioSocketPath/,
   );
 });
 

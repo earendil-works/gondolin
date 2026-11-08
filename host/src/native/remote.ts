@@ -1,5 +1,5 @@
 /**
- * Option resolution for remote native sessions: `gondolind` runs on another
+ * Option resolution for remote sessions: `gondolind` runs on another
  * machine, so nothing that names this machine's files may be resolved here
  * (guest assets, root disks, krun runners). The result has empty asset paths;
  * the daemon resolves the image selector and prepares the root disk.
@@ -34,7 +34,7 @@ const LOCAL_PATH_OPTIONS = [
 
 /** Error for options that cannot work with a remote daemon */
 export function remoteUnsupported(option: string): Error {
-  return new Error(`not supported with a remote native daemon: ${option}`);
+  return new Error(`not supported with a remote daemon: ${option}`);
 }
 
 /**

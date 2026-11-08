@@ -36,7 +36,7 @@ export type VMOptions = {
   sandbox?: SandboxServerOptions;
   /** rootfs mode override */
   rootfs?: VmRootfsOptions;
-  /** whether to boot the vm immediately (default: true) */
+  /** whether operations that need a running vm (`exec`, `vm.fs`, `enableSsh`, `enableIngress`) boot it on demand (default: true); with `false`, call `start()` first */
   autoStart?: boolean;
   /**
    * Ignored: was the guest HTTP egress client of the removed node engine.

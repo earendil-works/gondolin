@@ -104,7 +104,7 @@ export function resolveVmEngine(
 
 /** Error for options the native engine cannot honour yet */
 export function nativeUnsupported(option: string): Error {
-  return new Error(`not supported by the native engine yet: ${option}`);
+  return new Error(`not supported: ${option}`);
 }
 
 /**
@@ -250,18 +250,13 @@ export function assertRemoteConfigure(
   for (const key of ["kernel_path", "initrd_path"]) {
     if (vm[key]) {
       throw new Error(
-        `remote native session must not send a local path: vm.${key}=${vm[key]}`,
+        `remote session must not send a local path: vm.${key}=${vm[key]}`,
       );
     }
   }
   if (vm.root_disk?.path) {
     throw new Error(
-      `remote native session must not send a local path: vm.root_disk.path=${vm.root_disk.path}`,
-    );
-  }
-  if ((payload.net as any)?.mode === "external") {
-    throw new Error(
-      "remote native session cannot use an external network socket",
+      `remote session must not send a local path: vm.root_disk.path=${vm.root_disk.path}`,
     );
   }
   const roots = controllerLocalRoots();
@@ -272,7 +267,7 @@ export function assertRemoteConfigure(
       for (const root of roots) {
         if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) {
           throw new Error(
-            `remote native session must not send a controller-local path: ${where}=${value}`,
+            `remote session must not send a controller-local path: ${where}=${value}`,
           );
         }
       }

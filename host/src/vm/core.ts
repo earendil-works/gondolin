@@ -250,6 +250,8 @@ export class VM {
   /** guest filesystem operations */
   readonly fs: VmFs;
   private readonly autoStart: boolean;
+  /** `start()` was called (with `autoStart: false` only it boots the VM) */
+  private startRequested = false;
   private readonly startTimeoutMs: number;
   private readonly sessionLabel: string | undefined;
   private server: NativeSandboxServer | null;
@@ -635,7 +637,7 @@ export class VM {
       throw err;
     }
     this.fs = new VmFsController({
-      start: () => this.start(),
+      start: () => this.startImplicitly(),
       exec: (command, fsOptions = {}) => this.exec(command, fsOptions),
       getServer: () => this.server,
       vfs: this.nativeFsView(),
@@ -683,11 +685,26 @@ export class VM {
       nativeVfs,
       this.vfs,
       (p) => server!.fsCall(p) as Promise<any>,
-      () => this.start(),
+      () => this.startImplicitly(),
     ) as unknown as SandboxVfsProvider;
   }
 
   async start() {
+    this.startRequested = true;
+    return this.startSingleflight.run(() => this.startInternal());
+  }
+
+  /**
+   * Start for an operation that needs a running VM (`exec`, `vm.fs`,
+   * `enableSsh`, ...): with `autoStart: false` the VM must have been started
+   * with {@link start} first.
+   */
+  private async startImplicitly() {
+    if (!this.autoStart && !this.startRequested) {
+      throw new Error(
+        "vm is not started (autoStart: false); call vm.start() first",
+      );
+    }
     return this.startSingleflight.run(() => this.startInternal());
   }
 
@@ -740,7 +757,8 @@ export class VM {
    * const r1 = await vm.exec("echo hello");
    * console.log(r1.stdout); // 'hello\n'
    *
-   * // Array form executes an executable directly (does not search `$PATH`)
+   * // Array form executes the program directly, without a shell (a bare name
+   * // is looked up in the guest's `$PATH`)
    * const r2 = await vm.exec(["/bin/echo", "hello"]);
    * console.log(r2.stdout); // 'hello\n'
    *
@@ -772,7 +790,7 @@ export class VM {
    * const result = await vm.shell();
    * process.exit(result.exitCode);
    *
-   * // Custom command (absolute path required)
+   * // Custom command
    * const result = await vm.shell({ command: "/bin/sh" });
    *
    * // Manual control
@@ -824,7 +842,7 @@ export class VM {
   async enableSsh(options: EnableSshOptions = {}): Promise<SshAccess> {
     if (this.sshAccess) return this.sshAccess;
 
-    await this.start();
+    await this.startImplicitly();
 
     const user = options.user ?? "root";
     const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1143,7 +1161,7 @@ fi
   ): Promise<IngressAccess> {
     if (this.ingressAccess) return this.ingressAccess;
 
-    await this.start();
+    await this.startImplicitly();
 
     if (!this.gondolinEtc) {
       throw new Error(
@@ -1232,7 +1250,7 @@ fi
     stdinSetting: ExecStdin | undefined,
   ) {
     try {
-      await this.start();
+      await this.startImplicitly();
 
       const mergedEnv = mergeEnvInputs(this.defaultEnv, options.env);
 
@@ -1745,7 +1763,7 @@ fi
 
   private async ensureRunning() {
     const state = await this.waitForStatus();
-    if (state === "stopped" && !this.autoStart) {
+    if (state === "stopped" && !this.autoStart && !this.startRequested) {
       throw new Error("sandbox is stopped");
     }
 

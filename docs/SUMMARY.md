@@ -1,33 +1,38 @@
 - [Home](index.md)
 
-# Using Gondolin
+# Getting Started
 
-- [Workloads](workloads.md)
-- [CLI](cli.md)
-- [Secrets Handling](secrets.md)
+- [Installation](install.md)
+- [Quick Start](quickstart.md)
+- [Workloads and Lifecycle](workloads.md)
+- [Upgrading](upgrading.md)
+
+# Guides
+
+- [Running Commands](exec.md)
+- [Network Access](network-access.md)
+- [HTTP Hooks and Policies](hooks.md)
+- [Secrets](secrets.md)
+- [Files and Mounts](vfs.md)
+- [Persistence and Snapshots](snapshots.md)
 - [Ingress](ingress.md)
 - [SSH](ssh.md)
-- [Debug Logging](debug.md)
-- [Native Engine](native.md)
+- [Images](images.md)
+- [Building Custom Images](custom-images.md)
+- [Remote Machines](remote.md)
+- [Debugging and Troubleshooting](debug.md)
 
-# SDK
+# Reference
 
-- [Overview](sdk.md)
-- [VM Control](sdk-vm.md)
-- [Network Access](sdk-network.md)
-- [Storage Snapshots](sdk-storage.md)
-
-# Images & Filesystem
-
-- [VFS Providers](vfs.md)
-- [Snapshots](snapshots.md)
-- [Custom Images](custom-images.md)
+- [CLI](cli.md)
+- [SDK](sdk.md)
+- [Environment Variables](environment.md)
+- [VM Backends](backends.md)
 
 # Design & Internals
 
-- [Architecture Overview](architecture.md)
+- [Architecture](architecture.md)
 - [Security Design](security.md)
 - [Network Stack](network.md)
-- [VM Backends](backends.md)
 - [QEMU Backend](qemu.md)
 - [Limitations](limitations.md)

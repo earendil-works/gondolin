@@ -379,7 +379,7 @@ export function resolveNativeBinary(
 
   throw new Error(
     host
-      ? `native engine binary not found (install ${nativePackageName(host)}, build it with \`make native\`, or set GONDOLIN_NATIVE_BIN)`
-      : `the native engine is not available for ${process.platform}-${process.arch} (set GONDOLIN_NATIVE_BIN)`,
+      ? `gondolind binary not found (install ${nativePackageName(host)}, build it with \`make native\`, or set GONDOLIN_NATIVE_BIN)`
+      : `gondolind is not available for ${process.platform}-${process.arch} (set GONDOLIN_NATIVE_BIN)`,
   );
 }

@@ -15,12 +15,19 @@ kernel configuration, and init scripts. This is useful for:
 gondolin build --init-config > build-config.json
 
 # Edit the config to add packages, change settings, etc.
-# Then build:
-gondolin build --config build-config.json --output ./my-assets
+# Then build and tag it in the local image store:
+gondolin build --config build-config.json --tag my-image:latest
 
 # Use your custom image:
+gondolin bash --image my-image:latest
+
+# Or keep an output directory and use it directly:
+gondolin build --config build-config.json --output ./my-assets
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
+
+Every build is imported into the local image store (with `--tag`, under that
+ref); see [Images](./images.md) for selecting, sharing and managing images.
 
 `gondolin build` produces both qemu boot assets and libkrun-compatible boot
 artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
@@ -154,6 +161,7 @@ The file has the following structure:
 | `rootfs` | object | Rootfs image settings |
 | `init` | object | Custom init script paths |
 | `postBuild` | object | Host file copies + post-package commands executed in the rootfs |
+| `runtimeDefaults` | object | VM defaults recorded in `manifest.json` (see [Runtime Defaults](#runtime-defaults)) |
 | `container` | object | Container build settings (for cross-platform) |
 | `sandboxdPath` | string | Path to custom sandboxd binary |
 | `sandboxfsPath` | string | Path to custom sandboxfs binary |
@@ -177,9 +185,9 @@ checkout instead of using published helpers, install Zig 0.17.0 and set
 `GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1`. If running outside the checkout,
 set `GONDOLIN_GUEST_SRC` to the local `guest/` directory.
 
-Images can only use virtio-fs for guest mounts (native engine, see
-[QEMU](./qemu.md#virtio-fs-and-vhost-user)) when their `sandboxfs` supports
-`--virtiofs`. Published helpers that predate it keep working over sandboxfs;
+Images can only use virtio-fs for guest mounts (see
+[Files and Mounts](./vfs.md#transport-virtio-fs-and-sandboxfs)) when their
+`sandboxfs` supports `--virtiofs`. Published helpers that predate it keep working over sandboxfs;
 build the helpers from source to get virtio-fs before a helper release
 includes it.
 
@@ -204,6 +212,10 @@ Because `env` is stored in the image, **do not put real secrets here**.
 | `rootfsPackages` | string[] | see below | Packages for the root filesystem |
 | `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
 | `krunfwVersion` | string | `"v5.2.1"` | libkrunfw release tag used to fetch `krun-kernel` |
+
+Keep `e2fsprogs-extra` in `rootfsPackages` if you want to grow the root disk at
+runtime: [`rootfs.size`](./snapshots.md#root-disk-size) runs `resize2fs` in the
+guest.
 
 ### OCI Support
 
@@ -264,7 +276,7 @@ back to sandboxfs.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `rootfsMode` | `"readonly" \| "memory" \| "cow"` | Default VM rootfs mode baked into `manifest.json` |
+| `rootfsMode` | `"readonly" \| "memory" \| "cow"` | Default VM rootfs mode baked into `manifest.json` (see [Root Disk Modes](./snapshots.md#root-disk-modes)) |
 
 Example:
 
@@ -351,35 +363,54 @@ This checks the manifest and file checksums.
 
 ## Using Custom Assets
 
-### Environment Variable
-
-```bash
-GONDOLIN_GUEST_DIR=./my-assets gondolin bash
-```
-
-### Programmatic API
-
-Point `imagePath` at the asset directory (it will use `manifest.json` when present).
-With a remote native daemon, `imagePath` must instead be a selector the daemon
-resolves (`name:tag`, a build id, or a directory on the daemon's machine; see
-[Native Engine](./native.md#what-remote-changes)):
+A built image is used like any other: by ref (`--tag`), by build id, or by
+directory. From the CLI, pass `--image my-image:latest` (or `--image
+./my-assets`, or set `GONDOLIN_GUEST_DIR=./my-assets`); from the SDK, set
+`sandbox.imagePath`:
 
 ```typescript
 import { VM } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
   sandbox: {
-    imagePath: "./my-assets",
+    imagePath: "my-image:latest", // or "./my-assets"
   },
 });
 
 const result = await vm.exec("rustc --version");
-console.log("exitCode:", result.exitCode);
-console.log("stdout:\n", result.stdout);
-console.log("stderr:\n", result.stderr);
+console.log(result.stdout);
 
 await vm.close();
 ```
+
+See [Images](./images.md) for the selector forms, the local image store
+(`gondolin image import`, `tag`, `rm`), architecture matching, and remote
+daemons (which need a selector they can resolve on their machine).
+
+### Building From the SDK
+
+`buildAssets(config, { outputDir })` runs the same build as `gondolin build`
+(with `getDefaultBuildConfig()` as a starting point); unlike the CLI it does
+not import the result, so register it yourself:
+
+```typescript
+import {
+  buildAssets,
+  getDefaultBuildConfig,
+  importImageFromDirectory,
+  setImageRef,
+} from "@earendil-works/gondolin";
+
+const config = getDefaultBuildConfig();
+config.alpine!.rootfsPackages!.push("git");
+
+const { outputDir } = await buildAssets(config, { outputDir: "./my-assets" });
+const image = importImageFromDirectory(outputDir);
+setImageRef("my-image:latest", image.buildId, image.arch);
+```
+
+`verifyAssets(dir)` checks a directory against its manifest checksums, like
+`gondolin build --verify`.
 
 ## Build Output
 
@@ -400,8 +431,10 @@ checksums for verification, and a deterministic `buildId` derived from those
 checksums. When `oci.image` is used, it also records `ociSource` metadata
 including the resolved image digest used during export.
 
-That `buildId` is used by snapshots/checkpoints to locate the correct guest
-assets without embedding absolute host paths.
+That `buildId` identifies the image in the local store and is used by
+[checkpoints](./snapshots.md#portability-and-guest-assets) to locate the
+correct guest assets without embedding absolute host paths (see
+[What an Image Is](./images.md#what-an-image-is)).
 
 ## Troubleshooting
 

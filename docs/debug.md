@@ -1,12 +1,30 @@
-# Debug Logging
+# Debugging and Troubleshooting
 
-Gondolin's host has several debug channels that can be enabled independently.
-Debug output is routed through a callback so you can capture it in your own
-code.
+When something does not work, three tools usually find the cause quickly:
 
-## Enabling Debug Modes
+```bash
+# Debug logging for all components
+GONDOLIN_DEBUG=all gondolin bash
 
-There are two ways to control debugging.
+# The session configuration the CLI would send, without starting a VM
+gondolin bash --allow-host api.github.com --print-configure
+
+# The Gondolin version and the gondolind binary it would use
+gondolin version
+```
+
+```ts
+const vm = await VM.create({ sandbox: { debug: true } });
+```
+
+This page covers [debug logging](#debug-logging),
+[daemon diagnostics](#daemon-diagnostics) and
+[common errors](#troubleshooting).
+
+## Debug Logging
+
+Gondolin has several debug channels that can be enabled independently. Debug
+output is routed through a callback so you can capture it in your own code.
 
 ### Environment Variable
 
@@ -14,7 +32,8 @@ Set `GONDOLIN_DEBUG` to a comma-separated list of flags:
 
 - `net`: networking stack / HTTP bridge
 - `exec`: exec + stdin/pty control messages
-- `vfs`: VFS (FUSE/RPC) operations (`fs` is accepted as an alias)
+- `vfs`: VFS operations and the guest filesystem transport (`fs` is accepted
+  as an alias)
 - `protocol`: virtio/control-protocol traffic and QEMU log forwarding
 - `all` (or `*`, `1`, `true`): turns on everything
 
@@ -51,13 +70,14 @@ const vm = await VM.create({
 });
 ```
 
-## Intercepting Debug Output
+### Intercepting Debug Output
 
-When any debug mode is enabled, the VM will emit debug messages to a callback:
+When any debug mode is enabled, the VM emits debug messages to a callback:
 
 - By default it logs to `console.log` as `[component] message`
-- The component is one of the flags above, `qemu` (QEMU output, forwarded
-  with `protocol`) or `error`
+- The component is one of the flags above, `qemu` (VMM output, forwarded
+  with `protocol`) or `error` (errors and
+  [daemon stderr](#daemon-diagnostics))
 - You can override it with `debugLog`
 - You can disable debug printing entirely by passing `debugLog: null`
 
@@ -83,7 +103,8 @@ console.log("stderr:\n", result.stderr);
 await vm.close();
 ```
 
-You can also change the callback after construction:
+You can also change the callback after construction (debug flags must have
+been enabled when the VM was created):
 
 ```ts
 vm.setDebugLog((component, message) => {
@@ -93,9 +114,170 @@ vm.setDebugLog((component, message) => {
 
 ### Notes
 
-- `exec` debug logs only include environment *keys* (not values) to reduce accidental secret leakage.
-- Debug messages are best-effort: if your callback throws, Gondolin will ignore the error.
-- With the [native engine](./native.md) the flags are passed to `gondolind`,
-  which forwards its events to the same callback (QEMU output as `qemu` with
-  `protocol`, network stack tracing with `net`). Lines the daemon writes to its
-  stderr arrive as the `error` component, prefixed with `gondolind:`.
+- `exec` debug logs only include environment *keys* (not values) to reduce
+  accidental secret leakage.
+- Debug messages are best-effort: if your callback throws, Gondolin ignores
+  the error.
+- The flags are passed to `gondolind`, which forwards its events to the same
+  callback (VMM output as `qemu` with `protocol`, network stack tracing with
+  `net`, the filesystem transport choice with `vfs`).
+- Ingress `502` errors are printed to stderr (`ingress bad gateway: ...`) when
+  `GONDOLIN_DEBUG` is set to anything (see [Ingress](./ingress.md#debugging)).
+
+## Daemon Diagnostics
+
+The VM is driven by the Gondolin daemon (`gondolind`), which your process
+starts (see [Architecture](./architecture.md)). Besides the debug events, it
+offers a few diagnostics of its own.
+
+**Daemon stderr.** Lines the daemon writes to its stderr arrive in the debug
+callback as the `error` component, prefixed with `gondolind:` (with debug
+enabled). When the daemon exits unexpectedly, the error names its exit status
+and the last stderr line: `gondolind exited (code=1) (...)`. An internal
+failure stops the VM with `gondolind internal error, VM stopped: ...`.
+
+**Session configuration.** `--print-configure` (on `gondolin bash` and on
+`gondolin exec` in VM mode, in both CLIs) prints the configuration the CLI
+would send to the daemon as JSON and exits without starting a VM. Byte strings
+appear as `{ "$base64": ... }`; the MITM CA key and secret values are
+redacted. Use it to check what your flags turn into (allowlists, mounts, DNS,
+image, backend):
+
+```bash
+gondolin exec --mount-hostfs "$PWD:/workspace" --print-configure
+gondolin bash --resume 4a8f2b0c --print-configure
+```
+
+**Daemon tools.** The daemon binary has a few subcommands of its own
+(`gondolind ARGS` is the same as `gondolin daemon ARGS` with the static CLI's
+binary):
+
+```bash
+# version of the daemon
+gondolind --version
+
+# QEMU command line the daemon would use for a configuration (JSON on stdin)
+echo '{"vm": {"qemu_path": "qemu-system-aarch64", "kernel_path": "/k", "initrd_path": "/i", "memory": "1G", "cpus": 2}}' \
+  | gondolind --qemu-args
+
+# load or create the MITM CA in a directory and print its certificate
+# (default directory: ~/.cache/gondolin/ssl)
+gondolind --mitm-ca ~/.cache/gondolin/ssl
+
+# images the daemon can see, and what a selector resolves to
+gondolind assets list
+gondolind assets resolve alpine-base:latest --offline --json
+```
+
+`gondolin version` (Node CLI) prints the package version and the `gondolind`
+command it would start, or why none was found. The static CLI prints
+`gondolin X.Y.Z (static)`.
+
+## Troubleshooting
+
+### Installation and Startup
+
+**`gondolind binary not found (install @earendil-works/gondolin-native-..., build it with make native, or set GONDOLIN_NATIVE_BIN)`**:
+the platform package with the `gondolind` binary is missing, typically
+because optional dependencies were skipped (`npm install --omit=optional`).
+Install the platform package, set `GONDOLIN_NATIVE_BIN` to a `gondolin` or
+`gondolind` binary, or in a checkout build it (`make native`). See
+[Installation](./install.md#the-gondolin-daemon-binary).
+
+**`gondolind is not available for <platform>-<arch>`**: there is no
+published binary for this platform; set `GONDOLIN_NATIVE_BIN` to one you
+built.
+
+**`the node engine has been removed; ...`**: drop `engine: "node"`,
+`GONDOLIN_ENGINE=node` or `--engine node`. See [Upgrading](./upgrading.md).
+
+**`Error: QEMU binary 'qemu-system-aarch64' not found.`** (CLI) or a
+`spawnSync qemu-system-... ENOENT` error (SDK): install QEMU on the machine
+the daemon runs on (`brew install qemu`, `sudo apt install qemu-system`), or
+point `sandbox.qemuPath` at it.
+
+**`vm startup timed out after 120000ms while waiting for guest readiness`**:
+the guest did not boot, connect, or mount its filesystems in time. Check the
+debug output (`GONDOLIN_DEBUG=protocol` forwards the VMM's output) first. On
+slow hosts (nested virtualization, software emulation without KVM/HVF) raise
+the limit:
+
+- `VMOptions.startTimeoutMs` or `GONDOLIN_START_TIMEOUT_MS` (in `ms`;
+  default `120000` in the SDK and Node CLI, `60000` in the static CLI;
+  `startTimeoutMs <= 0` disables the timeout)
+- `GONDOLIN_VFS_READY_TIMEOUT_MS` (default `30000`) for
+  `vfs mount <path> not ready` errors
+
+**`Guest assets not found`** or an unknown image: check the selector with
+`gondolin image inspect <selector>`; see [Images](./images.md).
+
+### Options
+
+**`not supported: ...`**: the named option (for
+example `sandbox.virtioSocketPath`) cannot be honoured; remove it. The daemon
+owns its private socket directory.
+
+**`not supported with a remote daemon: ...`** and
+**`remote session must not send a controller-local path: ...`**: an
+option names files on your machine while the daemon is remote. See
+[Remote Machines](./remote.md#troubleshooting).
+
+**`Unsupported sandbox options for vmm=krun: ...`**: `qemuPath`,
+`machineType`, `accel` and `cpu` only work with QEMU. Drop them or select
+`vmm: "qemu"`. See [VM Backends](./backends.md).
+
+### Images and Backends
+
+**`Guest image architecture mismatch`**: the image's architecture does not
+match the QEMU binary (`qemu-system-aarch64` vs `qemu-system-x86_64`), or,
+with krun, the host. Use a matching `sandbox.qemuPath`, or pull or build the
+image for the right architecture (`gondolin image pull <ref> --arch
+x86_64`, `gondolin build --arch ...`).
+
+**`Selected image does not provide krun boot assets.`**: `vmm: "krun"` was
+requested but the image's manifest has no `krunKernel`. Use an image built
+with `gondolin build` or a published image with krun assets, or use QEMU. The
+default backend selection never picks krun for such images.
+
+**`krun runner binary '...' not found`**: install the runner package (macOS
+arm64, Linux x64), build it (`make krun-runner`), or set
+`sandbox.krunRunnerPath` / `GONDOLIN_KRUN_RUNNER`.
+
+**`krun runner is not signed with the macOS Hypervisor entitlement`**: the
+runner on macOS must be signed with `com.apple.security.hypervisor`. Rebuild
+it with `make krun-runner` or set `GONDOLIN_KRUN_RUNNER` to a signed runner.
+
+**The guest uses sandboxfs instead of virtio-fs** (slow mounts; the `vfs`
+debug flag shows `virtio-fs unavailable (...); using sandboxfs`): the VMM
+cannot serve virtio-fs. QEMU needs vhost-user support (`qemu-system-... -device
+help` lists `vhost-user-fs-pci`; Linux distribution builds have it,
+Homebrew's QEMU does not), krun needs a runner with the `virtiofs-socket`
+capability, and images whose `sandboxfs` predates virtio-fs always use
+sandboxfs. `GONDOLIN_VIRTIOFS=1` turns the message into a warning;
+`GONDOLIN_VIRTIOFS=0` forces sandboxfs. See [Files and Mounts](./vfs.md).
+
+### Network
+
+**HTTPS requests from the guest fail with `502`**: the host could not verify
+the upstream certificate (or the host is not allowed). The Node.js SDK and
+CLI trust Node's CA store plus `NODE_EXTRA_CA_CERTS`; the static CLI trusts
+the system roots (`SSL_CERT_FILE`/`SSL_CERT_DIR`) and `NODE_EXTRA_CA_CERTS`
+but not the macOS keychain. A corporate TLS proxy's CA must be exported (e.g.
+`security find-certificate -a -p -c "My Corp CA" > ca.pem`) and passed with
+`NODE_EXTRA_CA_CERTS=ca.pem`. `GONDOLIN_DEBUG=net` traces the upstream
+connection. See
+[Network Access](./network-access.md).
+
+**`dns mode 'trusted' requires at least one IPv4 resolver`**: pass one with
+`--dns-trusted-server` / `dns.trustedServers`.
+
+**SSH egress or ingress problems**: see [SSH](./ssh.md) and
+[Ingress](./ingress.md#debugging).
+
+### Errors Reported at Start
+
+Some configuration errors are reported when the VM starts rather than when
+`VM.create()` returns, because the daemon validates them on its machine (for
+example SSH credential files, a missing QEMU binary, an unknown image). With
+`autoStart: false`, they surface from `vm.start()` (or the first call that
+starts the VM).

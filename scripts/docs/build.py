@@ -76,6 +76,15 @@ EDIT_URL = REPO_URL + "/blob/main/docs/"
 # Copied from docs/ as they are, except for these (the Markdown pages are rendered).
 SKIP_COPY = {"SUMMARY.md"}
 
+# Pages that moved: old page -> new page (a small redirect page is written at
+# the old address so existing links keep working).
+REDIRECTS = {
+    "native.md": "architecture.md",
+    "sdk-vm.md": "exec.md",
+    "sdk-network.md": "network-access.md",
+    "sdk-storage.md": "vfs.md",
+}
+
 
 def esc(s: str) -> str:
     return html.escape(s, quote=True)
@@ -307,6 +316,9 @@ class Builder:
         title = next((n for lvl, _, n in flat if lvl == 1), None)
         if title is None:
             title = next(e.title for e in self.order if e.path == path)
+        # `\|` escapes pipes inside table cells (needed for GitHub's renderer);
+        # Python-Markdown keeps the backslash inside code spans.
+        body = re.sub(r"<code>[^<]*</code>", lambda m: m.group(0).replace("\\|", "|"), body)
         # Wide tables scroll inside their wrapper instead of widening the column.
         body = body.replace("<table>", '<div class="table-scroll"><table>').replace(
             "</table>", "</table></div>"
@@ -325,6 +337,13 @@ class Builder:
             dest = self.out / page_file(page.path)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(self.template(page, i))
+        for old, new in REDIRECTS.items():
+            if new not in self.pages:
+                self.warnings.append(f"redirect target {new} of {old} is not a page")
+                continue
+            dest = self.out / page_file(old)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(redirect_page(rel_url(page_url(new), page_url(old)), SITE_URL + page_url(new)))
         (self.out / "404.html").write_text(self.not_found())
         (self.out / "search.json").write_text(search_index(rendered))
         (self.out / "sitemap.xml").write_text(self.sitemap())
@@ -427,6 +446,18 @@ class Builder:
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>\n'
         )
+
+
+def redirect_page(target: str, canonical: str) -> str:
+    """A page that forwards to `target` (relative URL)."""
+    t = esc(target)
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f'<title>Moved · {SITE_NAME}</title>'
+        f'<link rel="canonical" href="{esc(canonical)}">'
+        f'<meta http-equiv="refresh" content="0; url={t}">'
+        f'</head><body><p>This page moved to <a href="{t}">{t}</a>.</p></body></html>\n'
+    )
 
 
 def icon(name: str, cls: str) -> str:

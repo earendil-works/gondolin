@@ -16,15 +16,15 @@ The primary workload Gondolin targets is an agent that:
 Most agent turns produce artifacts on disk (code, config files, logs) and
 little in-memory state worth keeping.  Gondolin leans into this: disk
 snapshots are supported, but full VM save/restore (RAM + process state) is
-not.  See [Snapshots](./snapshots.md) for details.
+not.  See [Persistence and Snapshots](./snapshots.md) for details.
 
 ## Treat VMs as Disposable
 
 Design your workloads so that throwing away a VM is always safe.  This means:
 
 - **Write durable state to VFS mounts.**  The root filesystem is ephemeral by
-  default.  Use a [VFS provider](./vfs.md) (e.g. `MemoryProvider`,
-  `RealFSProvider`) mounted at a known path like `/workspace` to store files
+  default.  Use a [mount](./vfs.md) (e.g. `RealFSProvider`,
+  `MemoryProvider`) mounted at a known path like `/workspace` to store files
   you care about.
 - **Don't rely on long-running background processes.**  There is no mechanism
   to reconnect to a process inside a discarded VM.
@@ -57,7 +57,7 @@ in keeping a VM alive across long idle periods:
 
 - **Cold starts are fast.**  Gondolin VMs boot in under a second, so
   recreating a VM is cheap.
-- **Idle VMs waste resources.**  A parked QEMU process still holds memory.
+- **Idle VMs waste resources.**  A parked VM still holds host memory.
 - **LLM context resets anyway.**  If your model's context window or cache
   has gone cold (e.g. after minutes of inactivity), you are effectively
   starting fresh regardless.  Aligning VM lifecycle with context lifecycle

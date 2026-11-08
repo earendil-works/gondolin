@@ -52,7 +52,7 @@ test("remote configure carries no controller-local paths", () => {
         { rootDiskPath: "/tmp/disk.qcow2" },
         { remote: true },
       ),
-    /not supported with a remote native daemon: sandbox.rootDiskPath/,
+    /not supported with a remote daemon: sandbox.rootDiskPath/,
   );
   assert.throws(
     () =>

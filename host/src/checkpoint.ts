@@ -451,7 +451,7 @@ export class VmCheckpoint {
       );
     }
 
-    // A remote native daemon boots the checkpoint itself: upload it and let
+    // A remote daemon boots the checkpoint itself: upload it and let
     // the daemon resolve the image by build id.
     const native = resolveNativeEngineOptions(mergedForResume.native);
     resolveVmEngine(mergedForResume.engine, native);

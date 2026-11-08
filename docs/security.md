@@ -61,7 +61,11 @@ the trust is divided.
 
 ### Trust Assumptions
 - The host processes (your Node runtime + Gondolin library, and the
-  `gondolind` daemon of the native engine) are trusted.
+  `gondolind` daemon) are trusted.
+- With a [daemon on another machine](./remote.md), that machine is trusted
+  too: the daemon receives the real secret values (it substitutes them), SSH
+  egress credentials and its own TLS interception CA, and it serves any
+  directory mounted with `nativeMounts.host()`.
 - The guest image is trusted *to the extent you trust its supply chain*.
 - The VM boundary provided by the VMM (libkrun in the `gondolin-krun-runner`
   process, or QEMU) is trusted.
@@ -72,14 +76,15 @@ This is a rough overview of the system today.
 
 ### High-Level Components
 
-- **Host controller (TypeScript)**: the `VM` API, policy, secrets, hooks and
-  VFS providers (based on NodeJS's upcoming VFS)
-- **Host engine** (see [Native Engine](./native.md)): `gondolind` (Rust,
-  `native/`) spawns and manages the VMM (QEMU or the krun runner), implements
+- **Host controller (TypeScript)**: your Node.js process with the `VM` API,
+  policy, secrets, hooks and VFS providers (based on NodeJS's upcoming VFS)
+- **Gondolin daemon** (see [Architecture](./architecture.md)): `gondolind`
+  (Rust, `native/`) spawns and manages the VMM (QEMU or the krun runner), implements
   the virtio-serial control plane, the guest filesystem server
   (`gondolin-vfs`, optionally over virtio-fs), the network stack
   (`gondolin-netstack`), HTTP/TLS mediation, optional SSH egress proxying and
-  optional explicit mapped TCP egress (`gondolin-egress`, `gondolin-sshproxy`)
+  optional explicit mapped TCP egress (`gondolin-egress`, `gondolin-sshproxy`),
+  and sandboxed tier-2 hook policies (`gondolin-hooks-djs`)
 
 - **Guest (Zig + init scripts)**
     - `sandboxd` executes commands requested by the host over virtio-serial
@@ -98,7 +103,7 @@ This is a rough overview of the system today.
 |   - secrets (real values)                                               |
 |   - VFS providers (host/virtual FS access)                              |
 |                                                                         |
-|   +---------------------- QEMU process boundary ---------------------+  |
+|   +------------- VMM process boundary (QEMU or krun runner) ---------+  |
 |   |  Guest Linux VM (untrusted code)                                 |  |
 |   |  - sees eth0, but traffic is intercepted by host                 |  |
 |   |  - sees /data (FUSE/virtio-fs), ops are served by host providers |  |
@@ -189,6 +194,7 @@ Key enforcement points:
             - IPv6: loopback, link-local, ULA, and IPv4-mapped variants
         - It can also require that the request hostname matches a configured allowlist (with `*` wildcards).
         - If `httpHooks.isIpAllowed` is not provided at all (including when no `httpHooks` are configured), the network backend falls back to a default policy that blocks the same internal ranges.
+        - Programmable hooks fail closed: a hook that throws (or a [tier-2 policy](./hooks.md) that exceeds its fuel, memory or time budget) denies the request instead of letting it through.
 
 5. **DNS rebinding protection**
     Gondolin checks policy in *two* places:
@@ -283,25 +289,29 @@ The programmable filesystem path is:
 
 Host directory mounts never resolve outside their directory: escaping or
 dangling symlinks behave as missing and setuid/setgid bits are dropped on
-`chmod` (the native engine resolves paths with `openat2(RESOLVE_BENEATH)` on
-Linux and a component-wise `O_NOFOLLOW` walk elsewhere).
+`chmod` (the daemon resolves paths with `openat2(RESOLVE_BENEATH)` on Linux and
+a component-wise `O_NOFOLLOW` walk elsewhere).
 
-The RPC server enforces basic protocol invariants:
+The filesystem servers (sandboxfs RPC and virtio-fs) enforce basic protocol
+invariants:
 
 - File names are single components (no `/` or NUL)
 - Paths are normalized to absolute POSIX paths
-- Read/write payloads are capped (`MAX_RPC_DATA = 60 KiB`) to keep framing bounded
+- sandboxfs RPC read/write payloads are capped (`MAX_RPC_DATA = 60 KiB`) to
+  keep framing bounded
 
 **Guarantee:** the guest cannot access host files unless you mount them through
 a provider.
 
 ### Controlled "Backchannels"
 
-The engine's `openTcpStream()` (used by `vm.enableSsh()`) opens a TCP stream to
-a service inside the guest using a dedicated virtio-serial port
-(`virtio-ssh`).
+`vm.enableSsh()` opens TCP streams to a service inside the guest through a
+dedicated virtio-serial port (`virtio-ssh`); `vm.enableIngress()` does the
+same for inbound HTTP through `virtio-ingress`. The listeners run in your
+process (see [SSH](./ssh.md) and [Ingress](./ingress.md)); the daemon only
+tunnels the streams.
 
-On the guest, `sandboxssh` enforces:
+On the guest, `sandboxssh` and `sandboxingress` enforce:
 - **Only loopback targets are allowed** (`127.0.0.1` / `localhost`)
 
 This is intentionally outside the guest's network policy because it is a
@@ -460,10 +470,16 @@ Guidance:
   or QEMU).
 
 ### Local Host Attacker
-- Virtio Unix sockets are created in a temp directory (`gondolind` uses a
-  private `0700` directory).  A local attacker with the same user privileges
-  can typically interfere.
+- `gondolind` creates the VMM's Unix sockets in a private `0700` temp
+  directory.  A local attacker with the same user privileges can typically
+  interfere anyway (and read the cached MITM CA key).
+
+### Remote Daemons
+- A [daemon on another machine](./remote.md) holds the real secret values,
+  SSH egress credentials and its own MITM CA key. Its machine (and the
+  account it runs as) must be as trusted as your own.
 
 ### DoS
 - There are explicit buffer caps (e.g. HTTP header/body limits, virtio pending
-  queues), but no full resource governance.
+  queues) and per-call budgets for tier-2 hooks, but no full resource
+  governance.

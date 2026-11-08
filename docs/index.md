@@ -9,8 +9,8 @@ and to control persistence.
 
 Gondolin gives you that. Lightweight micro-VMs (libkrun where available,
 QEMU otherwise) boot in under a second on your Mac or Linux machine. The
-network stack and virtual filesystem run on the host (in a native daemon by
-default) and are programmable from JavaScript, giving you complete control
+network stack and virtual filesystem run on the host, in a small daemon, and
+are programmable from JavaScript, giving you complete control
 over what the sandbox can access and what secrets it can use.
 
 This documentation helps you get started with it. We also welcome your feedback
@@ -61,34 +61,39 @@ console.log("stderr:\n", result.stderr);
 await vm.close();
 ```
 
-## Using Gondolin
+## Where to Start
 
-- [Workloads](./workloads.md): typical workloads and lifecycles
-- [CLI](./cli.md): run shells/commands, list sessions, and attach to running VMs
-- [Secrets Handling](./secrets.md): placeholder-based secret injection and host allowlists
+- [Installation](./install.md): requirements and installing the npm package or the static CLI
+- [Quick Start](./quickstart.md): a first shell, a first SDK program
+- [Workloads and Lifecycle](./workloads.md): how to use VMs for agent workloads
+- [Upgrading](./upgrading.md): what changed between releases and what to do about it
+
+## Guides
+
+- [Running Commands](./exec.md): creating VMs, `vm.exec()`, streaming, shells and sessions
+- [Network Access](./network-access.md): what the guest can reach, host allowlists, DNS, mapped TCP, TLS
+- [HTTP Hooks and Policies](./hooks.md): declarative policy, policies that run in the daemon, and JavaScript hooks
+- [Secrets](./secrets.md): placeholder-based secret injection
+- [Files and Mounts](./vfs.md): mounting host directories, in-memory and programmable filesystems, `vm.fs`
+- [Persistence and Snapshots](./snapshots.md): rootfs modes, disk size and checkpoints
 - [Ingress](./ingress.md): expose guest HTTP servers on the host
-- [SSH](./ssh.md): enable SSH access to the guest with safe defaults
-- [Debug Logging](./debug.md): how to enable and interpret debug logging
-- [Native Engine](./native.md): the host engine (`gondolind`), remote daemons, and migrating from the removed node engine
+- [SSH](./ssh.md): SSH into the guest, and SSH from the guest to allowed upstreams
+- [Images](./images.md): selecting, downloading and managing guest images
+- [Building Custom Images](./custom-images.md): build images with your own packages and init scripts
+- [Remote Machines](./remote.md): run the VM on another machine while policy stays local
+- [Debugging and Troubleshooting](./debug.md): debug logging and common errors
 
-## SDK
+## Reference
 
-- [SDK Overview](./sdk.md): entry point and API map
-- [VM Lifecycle & Command Execution](./sdk-vm.md): VM lifecycle, `vm.exec()`, streaming, and host-driven file I/O
-- [Networking, Ingress, and SSH](./sdk-network.md): `createHttpHooks()`, ingress hooks, `vm.enableSsh()`, SSH egress policy, and mapped TCP rules
-- [Filesystem, Guest Assets, and Snapshots](./sdk-storage.md): VFS, image management, and qcow2 checkpoints
-
-## Images & Filesystem
-
-- [VFS Providers](./vfs.md): configure host-provided mounts and filesystem policies
-- [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)
-- [Custom Images](./custom-images.md): build custom guest images (kernel/initramfs/rootfs) and configure packages/init scripts
+- [CLI](./cli.md): every command and option
+- [SDK](./sdk.md): `VMOptions`, the `VM` API and the other exports
+- [Environment Variables](./environment.md): every variable Gondolin reads
+- [VM Backends](./backends.md): krun and QEMU, how the default is chosen, feature parity
 
 ## Design & Internals
 
-- [Architecture Overview](./architecture.md): high-level component overview and data flow
-- [Security Design](./security.md): threat model, guarantees, and safe operating envelope
-- [Network Stack](./network.md): HTTP/TLS mediation, optional mapped TCP/SSH egress, policy enforcement, DNS, and DNS rebinding protection
-- [VM Backends (QEMU vs krun)](./backends.md): backend capability matrix and constraints
+- [Architecture](./architecture.md): components, processes and data flow
+- [Security Design](./security.md): threat model, guarantees and safe operating envelope
+- [Network Stack](./network.md): how traffic is classified, mediated and enforced
 - [QEMU Backend](./qemu.md): QEMU integration and macOS/Linux parity
 - [Limitations](./limitations.md): current limitations and missing features

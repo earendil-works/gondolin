@@ -1,18 +1,18 @@
-# QEMU
+# QEMU Backend
 
 This document explains how Gondolin uses QEMU, why it is operated this way, and
 how we keep behavior consistent across macOS and Linux.
 
 Gondolin runs untrusted code inside a real Linux VM. QEMU is one of the two VM
-engines that provide the hardware boundary and the virtio devices that Gondolin
+backends that provide the hardware boundary and the virtio devices that Gondolin
 uses for I/O mediation: the default where the `krun` backend cannot run (hosts
 without libkrun support or KVM, no krun runner installed, images without krun
 boot assets, guests of another architecture), and whenever it is selected
 explicitly (`sandbox.vmm: "qemu"`, `--vmm qemu`, `GONDOLIN_VMM=qemu`) or a
 qemu-only option is set.
 
-For backend capability differences (`qemu` vs `krun`), see
-[VM Backends (QEMU vs krun)](./backends.md).
+For backend selection and capability differences (`qemu` vs `krun`), see
+[VM Backends](./backends.md).
 
 ## Why QEMU
 
@@ -44,10 +44,11 @@ works without custom kernels or unusual userspace stacks.
 
 ## How Gondolin Connects to QEMU
 
-Gondolin runs QEMU as a child process and connects to it over local transports
-(Unix domain sockets).  QEMU is a child of `gondolind`, which listens on the
-sockets in a private directory (mode `0700`) and also talks QMP to QEMU (to
-pause an idle VM, for example).  The host side is responsible for:
+QEMU runs as a child process of the Gondolin daemon (`gondolind`, see
+[Architecture](./architecture.md#process-model)), which connects to it over
+Unix domain sockets in a private directory (mode `0700`) and also talks QMP to
+QEMU (to [pause an idle VM](#idle-pause), for example).  The daemon is
+responsible for:
 
 - Launching and shutting down the VM process
 - Wiring up virtio channels used for exec control and filesystem RPC
@@ -153,8 +154,9 @@ much slower and is not the recommended mode for regular use.
 
 QEMU has different machine models depending on architecture and platform.
 Gondolin selects machine types and CPU models that are supported by the host
-QEMU build and that work well with virtio devices. To override the selected CPU
-model, set `sandbox.cpu` or the `GONDOLIN_CPU` environment variable:
+QEMU build and that work well with virtio devices. The CPU model is `host`
+when the VM is accelerated (KVM or HVF) and `max` under TCG. To override it,
+set `sandbox.cpu` or the `GONDOLIN_CPU` environment variable:
 
 ```bash
 GONDOLIN_CPU=cortex-a72 gondolin bash
@@ -173,16 +175,29 @@ Both platforms use local IPC primitives to connect to QEMU.  The details differ:
 - Linux: Unix sockets are common and predictable.
 - macOS: Unix sockets are also available, but filesystem and sandboxing rules can differ.
 
-Gondolin treats these as implementation details and keeps them behind the host
-controller abstraction.
+Gondolin treats these as implementation details: the daemon owns the socket
+directory, and the socket paths are not configurable.
+
+## Idle Pause
+
+On macOS with HVF, an idle QEMU process still costs host CPU, so the daemon
+pauses the VM (QMP `stop`) after 30 seconds without guest activity: no
+running or queued command, no file operation or filesystem request, and no
+open TCP connection (guest egress, SSH or ingress). The next interaction resumes it (QMP
+`cont`) and resynchronizes the guest clock before it proceeds, so a paused VM
+is transparent to callers apart from the resume latency.
+
+`sandbox.qemuIdlePauseMs` sets the timeout in `ms` (`0` disables it) and also
+enables idle pause on other hosts; the option is QEMU-only and is rejected
+with `vmm: "krun"`. For a daemon on another machine only an explicit value
+applies.
 
 ## virtio-fs and vhost-user
 
-The native engine can serve the guest's programmable filesystem over
-virtio-fs instead of sandboxfs (FUSE over virtio-serial), which is much faster
-(see [Native Engine](./native.md#filesystem)).
-`gondolind` implements the vhost-user-fs device itself; QEMU only needs to
-support vhost-user:
+The daemon can serve the guest's programmable filesystem over virtio-fs
+instead of sandboxfs (FUSE over virtio-serial), which is much faster (see
+[Files and Mounts](./vfs.md)).  `gondolind` implements the vhost-user-fs
+device itself; QEMU only needs to support vhost-user:
 
 - a `vhost-user-fs-pci` device (`vhost-user-fs-device` on `microvm`), and
 - a shared memory backend for guest RAM (`memory-backend-memfd` on Linux,
@@ -195,6 +210,20 @@ When either is missing, the guest uses sandboxfs; so do guest images whose
 vhost-user; Homebrew's QEMU on macOS does not (see
 [`native/docs/qemu-macos-vhost-user.md`](https://github.com/earendil-works/gondolin/blob/main/native/docs/qemu-macos-vhost-user.md)
 for building one).  `GONDOLIN_VIRTIOFS=0` forces sandboxfs,
-`GONDOLIN_VIRTIOFS=1` logs a warning when virtio-fs is unavailable.  The node
-engine always uses sandboxfs; the krun backend serves virtio-fs through its
-runner instead (see [Native Engine](./native.md)).
+`GONDOLIN_VIRTIOFS=1` logs a warning when virtio-fs is unavailable.  The krun
+backend serves virtio-fs through its runner instead (see
+[VM Backends](./backends.md#runtime-caveats)).
+
+## Inspecting the Command Line
+
+The daemon can print the QEMU command line it would use for a configuration
+(the daemon's configuration payload as JSON on stdin), without starting a VM:
+
+```bash
+echo '{"vm": {"qemu_path": "qemu-system-aarch64", "kernel_path": "/k", "initrd_path": "/i", "memory": "1G", "cpus": 2}}' \
+  | gondolind --qemu-args
+```
+
+With the `protocol` debug flag (`GONDOLIN_DEBUG=protocol`), QEMU's own output
+is forwarded to your debug callback (see
+[Debugging and Troubleshooting](./debug.md)).

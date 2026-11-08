@@ -66,7 +66,7 @@ export function createMitmCaProvider(mitmCertDir?: string): VirtualProvider {
   };
   write(ca.certPem);
   const provider = new ReadonlyProvider(memory);
-  // a remote native daemon terminates TLS with its own CA (`mitm_ca`)
+  // a remote daemon terminates TLS with its own CA (`mitm_ca`)
   Object.defineProperty(provider, MITM_CA_SETTER, {
     value: write,
     enumerable: false,

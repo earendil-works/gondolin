@@ -8,61 +8,24 @@ access goes through the host, and this TypeScript SDK gives you complete
 programmatic control over what the sandbox can access and what secrets it can
 use.
 
-The host side runs in the native engine, `gondolind` (Rust), which ships as an
-optional platform package (`@earendil-works/gondolin-native-*` for macOS
-arm64/x64 and Linux arm64/x64) installed with this package; elsewhere, or when
-optional dependencies are skipped, point `GONDOLIN_NATIVE_BIN` at a binary.
-The earlier in-process TypeScript engine (`node`) has been removed. See
-[Native Engine](https://earendil-works.github.io/gondolin/native/).
-
 ## Requirements
 
 - Node.js >= 22.19.0
-- QEMU: the VM backend where `krun` is not available, and `qemu-img` (part of
-  QEMU) creates the root disk overlays on both backends:
+- QEMU (`qemu-img` is used on both VM backends; QEMU runs the VM where libkrun
+  cannot):
 
-| macOS               | Linux (Debian/Ubuntu)                                                 |
-| ------------------- | --------------------------------------------------------------------- |
-| `brew install qemu` | `sudo apt install qemu-system-arm` (arm64) or `qemu-system-x86` (x64) |
+| macOS               | Linux (Debian/Ubuntu)                                                              |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| `brew install qemu` | `sudo apt install qemu-system-arm qemu-utils` (arm64) or `qemu-system-x86 qemu-utils` (x64) |
 
-The native engine serves guest files over virtio-fs on krun and on a QEMU
-with vhost-user. Homebrew's QEMU lacks vhost-user, so QEMU on macOS uses the
-slower sandboxfs.
-
-The `krun` backend (`libkrun` via `gondolin-krun-runner`) is the default
-wherever it can run, QEMU everywhere else:
-
-- `@earendil-works/gondolin` installs the runner as an optional platform
-  package on macOS arm64 and Linux x86_64 (`@earendil-works/gondolin-krun-runner-{darwin-arm64,linux-x64}`)
-- `make krun-runner` from the repo root stages dependencies locally and builds
-  the runner (also for Linux arm64)
-  - on macOS, it also ad-hoc signs the runner with `com.apple.security.hypervisor`
-  - Gondolin auto-detects this local runner
-- Linux needs read/write access to `/dev/kvm`; macOS needs Apple silicon
-- krun boot assets are provided by image manifests (`assets.krunKernel` / `assets.krunInitrd`) produced by `gondolin build` and published image releases
-- without a runner, KVM, or krun boot assets, or with a qemu-only option
-  (`sandbox.qemuPath`, `machineType`, `accel`, `cpu`, `qemuIdlePauseMs`),
-  Gondolin uses QEMU
-- `gondolin bash --vmm qemu|krun`, `sandbox.vmm` or `GONDOLIN_VMM=qemu|krun`
-  pins a backend
-- selection rules and the backend parity matrix: [docs/backends.md](../docs/backends.md)
-
-Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
-
-```bash
-sudo apt install \
-  build-essential curl git make pkg-config clang lld xz-utils \
-  libclang-dev llvm-dev libcap-ng-dev
-
-# libkrun needs current stable Rust (edition2024 crates)
-curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
-. "$HOME/.cargo/env"
-
-# install Zig 0.17.0 for your Linux architecture
-```
-
-> **Note:** Runtime validation is currently strongest on ARM64 (Apple Silicon, Linux aarch64).
-> Linux x86_64 is currently smoke-tested for `make krun-runner` in CI.
+Installing this package also installs, as optional platform packages, the
+Gondolin daemon (`gondolind`, `@earendil-works/gondolin-native-*` for macOS
+and Linux on arm64 and x64) and, on macOS arm64 and Linux x86_64, the krun
+runner. VMs use libkrun where it can run (Apple silicon, Linux with
+read/write `/dev/kvm`) and QEMU otherwise. See
+[Installation](https://earendil-works.github.io/gondolin/install/) for
+details, installs without optional dependencies (`GONDOLIN_NATIVE_BIN`), Linux
+arm64 krun, and building from a checkout.
 
 ## Installation
 
@@ -93,7 +56,7 @@ npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
 The same commands (except `build` and `tools`) are also available without
-Node.js in the static `gondolin` binary of the native platform packages; see
+Node.js in the static `gondolin` binary of the platform packages; see
 [CLI: Static CLI](https://earendil-works.github.io/gondolin/cli/#static-cli-no-nodejs).
 
 Guest images (~200MB) are automatically resolved on first run via

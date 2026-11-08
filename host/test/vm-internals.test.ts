@@ -729,7 +729,7 @@ test("vm internals: file helpers short-circuit VFS mounts", async () => {
   });
 
   try {
-    (vm as any).start = async () => {
+    (vm as any).startImplicitly = async () => {
       throw new Error("start should not be called for VFS shortcut");
     };
 
@@ -812,7 +812,7 @@ test("vm internals: file helpers still use VM path for non-VFS files", async () 
   });
 
   try {
-    (vm as any).start = async () => {
+    (vm as any).startImplicitly = async () => {
       throw new Error("start called");
     };
 
