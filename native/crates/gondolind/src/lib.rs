@@ -7,7 +7,7 @@
 //! - `exec`, `files`, `idle`: exec handling, guest file operations, idle pause
 //! - [`guest`], [`guestmsg`], [`vfs_port`]: guest channels and messages
 //! - [`qemu`], [`vmm`], [`qmp`]: QEMU command line, process, monitor
-//! - [`subsystem`], [`vfs_proxy`]: VFS/network integration points
+//! - [`subsystem`]: VFS/network integration points
 //! - [`net`]: native network (netstack + egress + SSH proxy, tier-3 hooks)
 
 pub mod bootcfg;
@@ -24,7 +24,6 @@ pub mod image;
 pub mod krun;
 pub mod mitm_ca;
 pub mod net;
-pub mod net_relay;
 mod netlog;
 pub(crate) mod ordmap;
 pub mod panics;
@@ -38,7 +37,6 @@ pub mod tcpfwd;
 pub mod util;
 pub mod vfs;
 pub mod vfs_port;
-pub mod vfs_proxy;
 pub mod vmm;
 
 #[cfg(test)]

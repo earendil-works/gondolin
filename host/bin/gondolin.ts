@@ -26,7 +26,7 @@ import {
   createDjsHooks,
   djsHooksOptionsFromFile,
 } from "../src/http/djs-hooks.ts";
-import type { HttpHooks } from "../src/qemu/contracts.ts";
+import type { HttpHooks } from "../src/net/types.ts";
 import { suggestHostsForSecret } from "../src/secret-host-suggestions.ts";
 import {
   ensureTrufflehogBinary,
@@ -246,13 +246,13 @@ function usage() {
   );
   console.log("\nEngine options (before the command):");
   console.log(
-    "  --engine node|native|auto  Host engine (default: $GONDOLIN_ENGINE, else auto = native when a working gondolind is available, else node; node is deprecated)",
+    "  --engine native|auto     Host engine; both select the native engine (gondolind), kept for compatibility",
   );
   console.log(
-    "  --native-command CMD     Start gondolind with CMD (e.g. 'ssh host gondolind'); implies native",
+    "  --native-command CMD     Start gondolind with CMD (e.g. 'ssh host gondolind')",
   );
   console.log(
-    "  --remote                 gondolind runs on another machine (no shared files); implies native",
+    "  --remote                 gondolind runs on another machine (no shared files)",
   );
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
@@ -3546,7 +3546,7 @@ async function runImage(argv: string[]) {
 }
 
 /**
- * Global engine flags (before the command): `--engine node|native`,
+ * Global engine flags (before the command): `--engine native|auto`,
  * `--native-command CMD`, `--remote`. They are applied through the
  * environment (`GONDOLIN_ENGINE`, `GONDOLIN_NATIVE_COMMAND`,
  * `GONDOLIN_NATIVE_REMOTE`) so every VM the command creates (including
@@ -3575,16 +3575,19 @@ function applyGlobalEngineFlags(argv: string[]): string[] {
     };
     if (name === "--engine") {
       const engine = takeValue().trim().toLowerCase();
-      if (engine !== "node" && engine !== "native" && engine !== "auto") {
-        fail(`invalid --engine: ${engine} (expected node, native or auto)`);
+      if (engine === "node") {
+        fail(
+          "--engine node: the node engine has been removed; Gondolin always uses the native engine",
+        );
+      }
+      if (engine !== "native" && engine !== "auto") {
+        fail(`invalid --engine: ${engine} (expected native or auto)`);
       }
       process.env.GONDOLIN_ENGINE = engine;
     } else if (name === "--native-command") {
       process.env.GONDOLIN_NATIVE_COMMAND = takeValue();
-      process.env.GONDOLIN_ENGINE ??= "native";
     } else if (name === "--remote") {
       process.env.GONDOLIN_NATIVE_REMOTE = "1";
-      process.env.GONDOLIN_ENGINE ??= "native";
     } else {
       break;
     }

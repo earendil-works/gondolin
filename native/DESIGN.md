@@ -1,18 +1,18 @@
 # gondolind: native host engine
 
 Status: design for the native host engine (written September 2026, kept up to
-date). The native engine is the default (`auto`); the node engine is
-deprecated. `PLAN.md` tracks the milestones and their state. This document is
-normative for the interfaces between the pieces; change it together with the
+date). The native engine is Gondolin's only host engine; the in-process
+TypeScript ("node") engine was removed. `PLAN.md` tracks the milestones and
+their state. This document is normative for the interfaces between the pieces; change it together with the
 code.
 
 ## Why
 
 Gondolin's host side (VM lifecycle, guest protocols, userspace network stack,
-HTTP/TLS mediation, VFS) is ~42k lines of TypeScript that need Node. We want to
-run Gondolin on machines without Node, most importantly remote machines bootstrapped
+HTTP/TLS mediation, VFS) was ~42k lines of TypeScript that needed Node. We wanted
+to run Gondolin on machines without Node, most importantly remote machines bootstrapped
 by pi-env (`pi-mono/packages/env`) over SSH, where the agent's controller,
-credentials and storage stay local. We also want the hot paths (packets, TLS,
+credentials and storage stay local. We also wanted the hot paths (packets, TLS,
 file operations) out of JavaScript.
 
 ## Shape
@@ -40,10 +40,11 @@ file operations) out of JavaScript.
   existing guest protocols exactly as specified in `guest/ARCHITECTURE.md`
   (sandboxd control port, sandboxfs RPC, TCP forwarders) and of QEMU's stream
   netdev.
-- **The TypeScript in-process engine is deprecated.** It stays available as
-  `engine: "node"` (one-time `DeprecationWarning`, code `GONDOLIN_NODE_ENGINE`)
-  until it is removed; the default is `auto` (see "Flipping the default
-  engine"). Both engines run the same test suite (`GONDOLIN_ENGINE=native`).
+- **The in-process TypeScript engine is gone.** The removed node engine
+  implemented the same guest protocols, network stack and VFS inside the SDK
+  process; the daemon was ported from it and replaced it. Where this document
+  mentions node behaviour, it is the compatibility the daemon kept (error
+  messages, defaults, on-disk formats shared with the SDK).
 - **Configure once, little code per byte.** Network policy and VFS mounts are
   declarative data compiled by the controller and evaluated natively. Programmable
   JS hooks remain available but are called only when registered, only for the
@@ -51,9 +52,12 @@ file operations) out of JavaScript.
 
 ## Engine selection (TypeScript side)
 
-- `VMOptions.engine?: "node" | "native" | "auto"`; default from
-  `GONDOLIN_ENGINE`, else `"auto"` (`DEFAULT_SANDBOX_ENGINE`). An explicit
-  `node` warns once (`warnNodeEngineDeprecated`).
+- `VMOptions.engine?: "native" | "auto"` (default from `GONDOLIN_ENGINE`):
+  both select the native engine, `auto` is kept for compatibility; `node`
+  throws ("the node engine has been removed"), anything else is invalid
+  (`resolveSandboxEngine` in `host/src/native/config.ts`). There is no
+  fallback: without a usable `gondolind` binary VM start fails
+  (`resolveNativeBinary` names the package to install).
 - Binary resolution (`host/src/native/binary.ts`): the packages ship one
   multi-call binary, `gondolin` (static CLI; `gondolin daemon` or argv[0]
   `gondolind*` is the daemon; the packages' npm `bin` alias `gondolind`
@@ -78,10 +82,10 @@ file operations) out of JavaScript.
   managers only install the host's optional dependency. Both return
   `{ path, args }` (the daemon command), so a remote machine needs one file.
 - `host/src/native/` contains the native engine client:
-  - `server.ts`: `NativeSandboxServer`, implementing the surface `VM` uses from
-    `SandboxServer` (`start`, `close`, `connect`, `getState`, `openTcpStream`,
-    events `debug`/`log`/`state`/`exit`/`error`, `getVmmBackend`, `getVmmPath`,
-    `getHostPid`). `vm/core.ts` picks the class by engine.
+  - `server.ts`: `NativeSandboxServer`, the sandbox server `VM` drives
+    (`start`, `close`, `connect`, `getState`, `openTcpStream`, events
+    `debug`/`log`/`state`/`exit`/`error`, `getVmmBackend`, `getVmmPath`,
+    `getHostPid`; internal, not exported).
   - `transport.ts`: process spawning, framing, request/response correlation,
     a handler registry keyed by message type.
   - `config.ts`: turns resolved options into the `configure` message.
@@ -92,8 +96,9 @@ file operations) out of JavaScript.
   `sandbox.virtio*SocketPath`: the daemon owns its private socket directory).
   Both VM backends (`qemu`, `krun`) are supported.
 - `host/scripts/test-native.sh` (`pnpm test:native`) builds `gondolind` and
-  `gondolin-cli`, points `GONDOLIN_NATIVE_BIN` at the multi-call `gondolin` and
-  runs the host tests on the native engine (`all` runs the whole suite).
+  `gondolin-cli` from the checkout, points `GONDOLIN_NATIVE_BIN` at the
+  multi-call `gondolin` and runs a subset of the host tests (`all` runs the
+  whole suite); `pnpm test` uses whatever binary `resolveNativeBinary` finds.
 
 ### Remote sessions
 
@@ -101,8 +106,7 @@ file operations) out of JavaScript.
 the daemon: the local binary by default, `command` (e.g. `["ssh", host,
 "gondolind"]`), or `connect()` returning a `NativeConnection` (`write`,
 `onStdout`, `onStderr?`, `close`, `exited`, optionally `kill`/`waitDrain`;
-pi-env's `openProcess` has this shape). Giving `command`, `connect` or
-`remote` selects the native engine. Environment: `GONDOLIN_NATIVE_COMMAND`
+pi-env's `openProcess` has this shape). Environment: `GONDOLIN_NATIVE_COMMAND`
 (JSON array or words), `GONDOLIN_NATIVE_REMOTE=1`, `GONDOLIN_NATIVE_IMAGE`.
 
 With `remote: true` the controller never sends paths of its own machine
@@ -118,20 +122,17 @@ controller's temp, cache, home and working directories):
   (`getVmmPid()` has the daemon-side pid);
 - the network is served by the daemon (`net: { mode: "native" }`) and MITM
   terminates with the daemon's own CA (`mitm_ca`), which the controller
-  installs in the guest; the internal, deprecated fallback
-  `GONDOLIN_NATIVE_NET=relay` relays the netdev stream over the connection to
-  the node network stack in the controller (`net: { mode: "relay" }`, credit
-  window 1 MiB towards QEMU);
+  installs in the guest;
 - controller-local providers (`RealFSProvider`, ...) can never become native
   `host` mounts when remote: they become object-tier mounts served by the
   controller (`vfs_call`); `nativeMounts.host(dir)` names a directory on the
   daemon's machine;
 - SSH and ingress keys and listeners stay in the controller (they serve the
   controller's user), streams use `fwd_*`;
-- checkpoints stay controller-side files in node's format (qcow2 + JSON
+- checkpoints stay controller-side files in the SDK's format (qcow2 + JSON
   trailer): `vm.checkpoint()` asks the daemon to stop the VM and stream its
   overlay (`checkpoint_export`) and appends the trailer locally (build id from
-  `configure_result.image`); `VmCheckpoint.resume()` on a remote engine uploads
+  `configure_result.image`); `VmCheckpoint.resume()` on a remote daemon uploads
   the file before boot (`checkpoint_import`, `root_disk.mode = "checkpoint"`),
   the daemon rebases it onto its copy of the image (resolved by build id; the
   daemon's local default image counts when its build id matches) and boots it
@@ -148,58 +149,27 @@ SSH, ingress, clock-sync and backend-parity (qemu + krun) tests run against it.
 
 ### CLI
 
-`gondolin [--engine node|native|auto] [--native-command CMD] [--remote] <command>`:
+`gondolin [--engine native|auto] [--native-command CMD] [--remote] <command>`:
 the global flags set `GONDOLIN_ENGINE`, `GONDOLIN_NATIVE_COMMAND` and
 `GONDOLIN_NATIVE_REMOTE` for the process, so every command (`exec`, `bash`
 incl. `--listen`/`--ssh`/`--resume`, `snapshot`, and `list`/`attach`/
-`exec --sock` through the session registry) uses the selected engine;
-`--native-command`/`--remote` imply `native`. `test/cli-vm.test.ts` runs the
-CLI against real VMs on whichever engine is selected (part of
-`test-native.sh` and `test-native-remote.sh`).
+`exec --sock` through the session registry) reaches the daemon the same way;
+`--engine node` fails with the removal message. `test/cli-vm.test.ts` runs the
+CLI against real VMs (part of `test-native.sh` and `test-native-remote.sh`).
 
-### Flipping the default engine
+### Process model and diagnostics
 
-The default is `DEFAULT_SANDBOX_ENGINE` in `host/src/native/config.ts`
-(`GONDOLIN_ENGINE`/`VMOptions.engine` override it). It is now `"auto"`:
-native when `resolveNativeBinary()` finds a binary and `gondolind --version`
-runs, else node (a broken binary falls back with a `GONDOLIN_DEBUG` log line);
-`GONDOLIN_ENGINE=node` restores the old default (deprecated, warns once).
-The list below was written before the flip; items 1–3 are resolved.
-`pnpm test:both`
-(`host/scripts/test-both.sh`) runs the whole host suite on both engines; at the
-time of writing both passed 701/712 with the same 11 skips. What differed
-or needed a decision before the flip:
+What changed for SDK users when the native engine replaced the node engine:
 
-1. VFS (resolved: the native mount table is the default, the controller
-   path is an internal fallback, see "Fallback modes"): the native engine
-   forwarded every sandboxfs op to the controller (`vfs_rpc`, one pipe round
-   trip per FUSE op); functionally identical (same `FsRpcService`), slower
-   for metadata-heavy workloads.
-2. Network (resolved: native egress is the default): served by the node
-   network stack in the controller (`external` socket locally, `relay`
-   remotely); identical behaviour, one more process hop.
-3. Binary availability (resolved: `DEFAULT_SANDBOX_ENGINE = "auto"`): the
-   native engine needs a `gondolind` for the platform (dev build or
-   `@earendil-works/gondolin-native-*`); `auto` means "native when
-   `resolveNativeBinary()` succeeds and the binary runs, else node", so
-   platforms without a package keep working.
-4. `SandboxServer` stays the node engine for users who construct it directly;
-   `NativeSandboxServer` is not exported yet (export it, or keep the server
-   classes internal, with the flip).
-5. Explicit `sandbox.virtio*SocketPath` options are rejected by the native
-   engine (the daemon owns its private socket directory); they are internal
-   knobs, deprecate them with the flip.
-6. Diagnostics: debug output is equivalent but not byte-identical (daemon
-   stderr lines arrive as `error` debug events; `log` events of QEMU and the
-   protocol are ported); error messages surfaced to callers are identical.
-7. Process model: the VMM is a grandchild (controller → gondolind → QEMU). The
-   daemon kills QEMU when its stdin closes (controller exit or crash), via
-   `PR_SET_PDEATHSIG` on Linux and the watchdog on macOS if the daemon dies;
-   startup costs one process spawn and handshake (a few ms).
-8. The krun Hypervisor entitlement check and `qemu-img` overlays still run in
-   the controller for local sessions (remote sessions do both daemon-side).
-9. Benchmarks for both engines live in `host/bench/results/`; the flip should
-   wait for the native VFS/egress numbers.
+- Process model: the VMM is a grandchild (controller → gondolind → VMM). The
+  daemon kills the VMM when its stdin closes (controller exit or crash), via
+  `PR_SET_PDEATHSIG` on Linux and the watchdog on macOS if the daemon dies;
+  startup costs one process spawn and handshake (a few ms).
+- Diagnostics: debug output was ported but is not byte-identical (daemon
+  stderr lines arrive as `error` debug events; `log` events of QEMU and the
+  protocol are ported); error messages surfaced to callers kept their text.
+- The krun Hypervisor entitlement check and `qemu-img` overlays run in the
+  controller for local sessions (remote sessions do both daemon-side).
 
 ## Rust workspace (`native/`)
 
@@ -234,8 +204,8 @@ Static builds: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
 use `zig cc` (zig 0.17) as C compiler and linker via the wrappers in
 `native/scripts/` and are checked to be fully static. `make native-test-linux`
 (`native/scripts/test-linux.sh`) cross-compiles the workspace tests for the
-host architecture's musl target and runs them inside a Gondolin VM (default
-engine, repository mounted read-only at its host path), so Linux-only code
+host architecture's musl target and runs them inside a Gondolin VM
+(repository mounted read-only at its host path), so Linux-only code
 paths are tested on macOS; `native/scripts/test-linux.skip` lists tests that
 cannot run there. `make native-test-docker` (`native/scripts/test-linux-docker.sh`)
 runs the workspace tests on linux/arm64 and emulated linux/amd64 and boots
@@ -280,11 +250,11 @@ lowered whenever the count drops. Conventions for new code:
 
 `gondolind` is a library plus a thin binary. One session actor task
 (`session.rs`, with `exec.rs`, `files.rs`, `idle.rs`) owns all session state and
-is a port of `SandboxServer` + `SandboxController`; helper tasks (guest channel
-readers/writers, the QEMU process, QMP commands, timers) only post events to it,
-which preserves the node engine's ordering. Guest channels (`guest.rs`) have
-`VirtioBridge` semantics: whole-frame outbox with a size limit, "writable"
-notifications, a new connection replaces the old one, oversized/undecodable
+was ported from the removed node engine's `SandboxServer` + `SandboxController`;
+helper tasks (guest channel readers/writers, the QEMU process, QMP commands,
+timers) only post events to it, which preserved that engine's ordering. Guest
+channels (`guest.rs`) have `VirtioBridge` semantics: whole-frame outbox with a
+size limit, "writable" notifications, a new connection replaces the old one, oversized/undecodable
 frames disconnect. Producers towards the controller wait for the controller
 queue to drain below 8 MiB before reading more guest input (no unbounded
 buffers between guest and controller).
@@ -292,18 +262,20 @@ buffers between guest and controller).
 Integration points for the VFS and network subsystems (`subsystem.rs`):
 
 - `configure.vfs` / `configure.net` are opaque CBOR values; `build_vfs()` /
-  `build_net()` turn them into backends, dispatching on `mode`. Subsystems add
-  their native modes there.
+  `build_net()` turn them into backends, dispatching on `mode`. The only mode
+  of both is `native`; any other is rejected (`unsupported vfs mode`,
+  `unsupported net mode`), absent or `null` disables the subsystem.
 - `trait VfsBackend { async fn handle(&self, op: &str, req: Value) -> FsReply;
   async fn close(&self); fn virtio_fs(&self) -> Option<Arc<dyn VirtioFsService>> }`
   (async methods return `BoxFuture`): the core owns the `virtio-fs` channel and the
   framing, answers the boot-configuration op `mounts` itself, resumes an
   idle-paused VM and accounts the request as guest activity; every other
   sandboxfs op goes to the backend (one request at a time per connection).
-  No backend: `ENOSYS` (node engine with `vfs: null`). `virtio_fs()` offers
+  No backend (`vfs: null`): `ENOSYS`. `virtio_fs()` offers
   the same filesystem as a vhost-user-fs device (see "Filesystem tiers").
 - `trait NetBackend { async fn serve(&self, stream: UnixStream); async fn close(&self) }`
-  (`NetSetup::Native`): the core listens on `net.sock` in the private socket
+  (`NetSetup::Native`; `NetSetup::None` without a network device): the core
+  listens on `net.sock` in the private socket
   directory, QEMU's stream netdev connects there and each connection is served
   by `serve` (a reconnect aborts the previous call).
 - `SubsystemContext { ctl, dispatcher, activity, debug }`: `ctl.request(t, p)`
@@ -319,24 +291,12 @@ requests (`<t>_result` is sent from the handler's result or exception),
 `request(t, p, { onEvent })` correlates controller requests including events
 sent with the same id before the result.
 
-Fallback modes (from before the native subsystems landed; internal and
-deprecated, removed together with the node engine; the defaults are
-`vfs: { mode: "native" }` and `net: { mode: "native" }`):
-
-- `vfs: { mode: "controller" }` (`GONDOLIN_NATIVE_VFS=controller`):
-  sandboxfs requests are forwarded as
-  `vfs_rpc { op, req }` → `vfs_rpc_result { ok, err, res?, message? }` and
-  served by the node engine's `FsRpcService` over the JS providers, so all
-  VFS features keep working (one pipe round trip per FUSE op).
-- `net: { mode: "external", socket_path }` (`GONDOLIN_NATIVE_NET=external`,
-  local sessions only): QEMU's netdev connects to a socket
-  served by the node engine's `QemuNetworkBackend` in the controller; the
-  controller reports its flows as `activity { source: "net", active }`.
-- `net: { mode: "relay" }` (`GONDOLIN_NATIVE_NET=relay`, remote sessions):
-  the netdev stream is relayed over the connection (`netdev_*` messages,
-  `net_relay.rs`) to the same node network stack in the controller.
-
-`VMOptions.fetch` no longer selects a fallback (it is for asset downloads).
+Before the native subsystems landed, interim modes served the guest with the
+node engine's JavaScript implementations in the controller: `vfs: { mode:
+"controller" }` forwarded every sandboxfs op as `vfs_rpc` (one pipe round trip
+per FUSE op) and `net: { mode: "external" | "relay" }` connected or relayed
+(`netdev_*`) QEMU's netdev to the controller. They were removed with the node
+engine. `VMOptions.fetch` (the node engine's egress client) is ignored.
 
 ### Panics
 
@@ -395,7 +355,7 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
     after the guest's handshake completes. `TcpFlow { meta: FlowMeta, stream,
     control: FlowControl }`: `stream` is `AsyncRead + AsyncWrite`, `meta` has
     `id`, guest `src`, `dst` and `synthetic_hostname` (per-host mapping),
-    `control.abort()` resets the guest connection (node `abortTcpSession`).
+    `control.abort()` resets the guest connection.
     Backpressure flows through the TCP window; nothing to pause or resume.
   - DNS modes are implemented here (`synthetic`, `trusted`, `open`), including the
     synthetic-IP ⇄ hostname table (`NetStack::synthetic_hosts()`,
@@ -407,7 +367,8 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
     `is_ip_allowed`, `on_request`, `on_response`), with lazy body streams.
 - `gondolin-sshproxy`:
   - `SshProxy::new(&SshEgressConfig, Arc<dyn SshHooks>) -> Result` (config is
-    `configure.net.ssh`, validated with the node engine's error messages;
+    `configure.net.ssh`, validated with the removed node engine's error
+    messages;
     `check_dns(&netstack DnsConfig)` enforces synthetic + per-host DNS).
   - Egress: `proxy.sniff_ports()` for banner sniffing; on an SSH banner
     `proxy.target_for(&meta)` (allowlisted synthetic hostname + port with a
@@ -430,7 +391,8 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
     GCM when passphrase protected), PEM PKCS#1/SEC1 (with OpenSSL's legacy
     AES-CBC encryption) and PKCS#8 — the formats ssh2 reads, minus DSA/PuTTY.
     Interop is tested against OpenSSH's `ssh` and `sshd` (`tests/openssh.rs`)
-    and node's ssh2 upstream (host `ssh-egress` test); `ssh_transport` and
+    and an ssh2 (npm) upstream server (host `ssh-egress` test, ssh2 is a dev
+    dependency only); `ssh_transport` and
     `ssh_keys` fuzz the parsers.
   - Flow control: each exec bridges a guest-facing server channel to an
     upstream client channel. Both sessions advertise SSH window only as the
@@ -445,8 +407,9 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
 ## Guest images (`gondolin-assets`)
 
 So the daemon can boot images on machines without Node, it resolves image
-selectors itself, with the node engine's semantics and on-disk layout (both
-engines share `~/.cache/gondolin/images`):
+selectors itself, with the SDK's semantics and on-disk layout (the SDK's
+`host/src/images.ts`, which resolves images for local sessions, and the daemon
+share `~/.cache/gondolin/images`):
 
 - `Assets::from_env()` reads `GONDOLIN_IMAGE_STORE` / `XDG_CACHE_HOME`,
   `GONDOLIN_IMAGE_REGISTRY_URL`, `GONDOLIN_DEFAULT_IMAGE`
@@ -461,17 +424,17 @@ engines share `~/.cache/gondolin/images`):
 - `ResolvedImage { source, selector, asset_dir, build_id, arch, kernel, initrd,
   rootfs, rootfs_format, krun_kernel, krun_initrd, rootfs_mode, manifest }`;
   `rootfs_mode` is `manifest.runtimeDefaults.rootfsMode`.
-- Downloads: rustls (ring) trusting what the node engine's `fetch` trusts:
+- Downloads: rustls (ring) trusting what Node's `fetch` trusts in the SDK:
   the Mozilla CA list (`webpki-roots`, the list Node bundles) plus
   `$NODE_EXTRA_CA_CERTS`; the OS trust store is not used (Node only does with
   `--use-system-ca`), which also keeps `rustls-native-certs` out of assets.
   Archive `sha256` from the
   registry, extraction into scratch space inside the store, every asset checked
   against the manifest checksums, import by rename into `objects/<build-id>`
-  (temp dir + rename, as the node engine), ref symlinks replaced atomically.
+  (temp dir + rename, as the SDK), ref symlinks replaced atomically.
   Concurrent installs of one build are serialized with a lock file
-  (`.locks/<build-id>.lock`); the node engine does not lock but its atomic
-  renames stay compatible.
+  (`.locks/<build-id>.lock`); the SDK does not lock but its atomic renames
+  stay compatible.
 - Sandbox helper binaries (`builtin-sandbox-helper-registry.json`) are only used
   by `gondolin build`; published images contain them, so the daemon does not
   need that registry to boot.
@@ -486,9 +449,9 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
 
 - **L2/L3**: ARP replies for the gateway; IPv4 with header checksums verified,
   fragments dropped, TTL 64 on everything we emit; ICMP echo answered for any
-  destination; DHCP (DISCOVER→OFFER, REQUEST→ACK, one-day lease, same options as
-  the node engine; DNS server = gateway in `synthetic`/`trusted`, the host's
-  guest-reachable IPv4 resolvers or `8.8.8.8` in `open`). TCP, ICMP and DNS are
+  destination; DHCP (DISCOVER→OFFER, REQUEST→ACK, one-day lease, the options
+  of the removed node engine; DNS server = gateway in `synthetic`/`trusted`,
+  the host's guest-reachable IPv4 resolvers or `8.8.8.8` in `open`). TCP, ICMP and DNS are
   only accepted from the configured guest IP. UDP other than DHCP and port 53 is
   dropped.
 - **DNS**: `synthetic` answers locally (A/AAAA for class IN, empty NOERROR for
@@ -505,11 +468,11 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
   ours (smoltcp sees IP packets). Each flow has a fixed receive and send buffer
   (`limits.tcp_rx_buffer_bytes`/`tcp_tx_buffer_bytes`, 256 KiB by default, pages
   touched lazily), which are the only TCP buffering in the stack.
-- **Why smoltcp, not a port of `network-stack.ts`**: the node engine's TCP is a
-  minimal relay (fixed 65535 window, no window scaling, no retransmission — a
-  dropped segment tears the flow down —, a 48 KiB in-flight cap with 16 KiB
-  bursts per tick, unbounded acceptance of guest data with QEMU-rx pausing as
-  backpressure). Porting it would mean building a real TCP anyway to get
+- **Why smoltcp, not a port of `network-stack.ts`**: the removed node engine's
+  TCP was a minimal relay (fixed 65535 window, no window scaling, no
+  retransmission, so a dropped segment tore the flow down; a 48 KiB in-flight
+  cap with 16 KiB bursts per tick, unbounded acceptance of guest data with
+  QEMU-rx pausing as backpressure). Porting it would mean building a real TCP anyway to get
   bounded memory plus throughput. smoltcp is a mature, allocation-controlled,
   sans-IO TCP with the features we need, and the same approach is used by other
   VM sandboxes. smoltcp walks all sockets of a `SocketSet` per packet and per
@@ -523,8 +486,8 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
   --ignored --nocapture throughput`). Against a real Alpine guest under QEMU/HVF
   (`crates/gondolin-netstack/examples/linux-guest/run.sh`, raw stack without
   egress, M-series Mac): 230–300 MB/s upload (dd | nc), 310–530 MB/s download
-  (curl), 0 guest retransmissions, ~10 MiB RSS; the same harness on the node
-  engine's `NetworkStack` gave 169 MB/s upload, 349 MB/s download. Both are
+  (curl), 0 guest retransmissions, ~10 MiB RSS; the same harness on the removed
+  node engine's `NetworkStack` gave 169 MB/s upload, 349 MB/s download. Both are
   QEMU-bound at that point; the native stack uses a fraction of a core.
 - **Read coalescing**: guest data reaches the flow's stream at a PSH (Linux sets
   it at the end of every write and every half window), FIN or RST, or once 64
@@ -554,7 +517,7 @@ its length as a `u32` big endian. `NetStack::serve(stream)` owns that stream:
   `guest_ip`, `prefix_len`, `gateway_mac`, `guest_mac`, `mtu`, `dns { mode,
   trusted_servers, synthetic_ipv4, synthetic_ipv6, synthetic_ttl_seconds,
   synthetic_host_mapping }`, `limits { ... }`. Addresses are strings; every field
-  has the node engine's default. The controller resolves the node engine's
+  kept the removed node engine's default. The controller resolves the
   automatic `per-host` mapping (SSH or mapped TCP enabled) before sending.
 
 gondolind wiring: bind the unix socket before starting QEMU, accept the
@@ -586,11 +549,11 @@ Envelope: `{ v: 1, t: <type>, id?: <u64>, p: <payload map> }`.
 |---|---|---|
 | d→c | `hello` | `{ protocol: 1, version, features: [..], pid }` first frame |
 | c→d | `configure` | full session configuration (below); answered by `configure_result` |
-| c→d | `start` | create the private socket directory (0700), listen on the four guest channels (and the netdev socket for native networking, the vhost-user-fs socket for virtio-fs); `start_result { socket_dir }`. The VM itself is booted by a client `boot` (as with `SandboxServer.start()` + `boot`) |
-| d→c | `status` | `{ state: "starting"\|"running"\|"stopped", vmm_pid? }`; `running` once QEMU was spawned (guest readiness is checked by the SDK with an exec, like the node engine) |
-| d→c | `log` | `{ component, message }` (the `debug` events of `SandboxServer`) |
+| c→d | `start` | create the private socket directory (0700), listen on the four guest channels (and the netdev socket for native networking, the vhost-user-fs socket for virtio-fs); `start_result { socket_dir }`. The VM itself is booted by a client `boot` |
+| d→c | `status` | `{ state: "starting"\|"running"\|"stopped", vmm_pid? }`; `running` once QEMU was spawned (guest readiness is checked by the SDK with an exec) |
+| d→c | `log` | `{ component, message }` (the `debug` events of `NativeSandboxServer`) |
 | d→c | `exit` | `{ code?, signal?, error? }` QEMU exited (`signal` as a name, `error` when it could not be spawned); the exit diagnostics with the QEMU log hint go to inflight execs/file operations |
-| d→c | `error` | `{ code, message, type? }`: asynchronous errors (`SandboxServer` `error` events) and answers to unknown unsolicited messages (`code: "unsupported"`) |
+| d→c | `error` | `{ code, message, type? }`: asynchronous errors (`NativeSandboxServer` `error` events) and answers to unknown unsolicited messages (`code: "unsupported"`) |
 | c→d | `activity` | `{ source, active }`: guest activity observed by the controller (idle pause) |
 | c→d | `shutdown` | stop the VM, answer `shutdown_result`, exit |
 
@@ -607,20 +570,20 @@ EOF on a pipe from the daemon). `configure` carries:
   `append_extra: [..]` (e.g. `gondolin.tmpfs=`), `mac?`, `auto_restart`,
   `idle_pause_ms?` (qemu only). QEMU arguments, accelerator/machine/cpu
   selection and the default console are computed by the daemon for its own
-  host (`gondolind --qemu-args` prints them for a JSON config; a host test
-  compares them with `buildQemuArgs`). `krun` writes the
+  host (`gondolind --qemu-args` prints them for a JSON config). `krun` writes the
   `gondolin-krun-runner` JSON config into the socket directory (empty initrd
   generated when needed).
 - Paths or selector: `vm.image` (`name:tag`, build id, directory; empty string
   = default image) is resolved by the daemon with `gondolin-assets` (shared
-  cache with the node engine, downloads from the builtin registry; progress as
+  cache with the SDK, downloads from the builtin registry; progress as
   `log { component: "assets", message: <ProgressEvent JSON> }`) and fills
   empty `qemu_path`/`kernel_path`/`initrd_path`/`root_disk.path`/`format`
   (krun: the image's krun kernel/initrd). `configure_result.image` describes
   the resolved image (build id, arch, paths, rootfs mode) so the controller can
   apply manifest defaults. Explicit paths always win.
 - `limits`: `max_stdin_bytes`, `max_queued_stdin_bytes`,
-  `max_total_queued_stdin_bytes`, `max_queued_execs` (node defaults when absent).
+  `max_total_queued_stdin_bytes`, `max_queued_execs` (the SDK's defaults when
+  absent).
 - `debug`: enabled debug components.
 - `vfs`, `net`: subsystem configuration (see above), absent = disabled.
 
@@ -634,8 +597,8 @@ client }`. Client messages keep the types and fields of `control-protocol.ts`
 plus `client`: `boot { fuseMount?, fuseBinds? }`, `exec`, `stdin` (data as a
 byte string), `pty_resize`, `exec_window`, `lifecycle`; other client message
 types are sent as `client_unknown { client, type }`. The daemon validates them
-exactly like `SandboxServer` (uint32 exec ids, global across clients) and
-implements its queueing and credit rules: exec admission limit, execs queued
+exactly like the removed node engine's `SandboxServer` did (uint32 exec ids,
+global across clients) and implements its queueing and credit rules: exec admission limit, execs queued
 while a file operation runs, stdin queued against guest-granted credit with
 per-exec/total caps, pty resizes and output windows retried when the guest
 channel is full, disconnect semantics (a disconnected client's guest execs keep
@@ -656,9 +619,9 @@ unchanged.
 MITM CA in the daemon (default `<cache>/gondolin/ssl`, same layout and
 certificate profile as `host/src/mitm.ts`: `ca.key`, `ca.crt`; the daemon
 creates ECDSA P-256 CAs (PKCS#8, ring cannot generate RSA keys) and loads the
-node engine's RSA 2048 PKCS#1 ones, and the node engine signs with either, so
-either engine accepts the other's CA; `gondolind --mitm-ca [dir]` prints
-it). The key never leaves the daemon; `gondolind::mitm_ca::load_or_create` is
+RSA 2048 PKCS#1 ones the SDK creates, and native egress signs leaves with
+either, so the SDK and the daemon can share one CA directory;
+`gondolind --mitm-ca [dir]` prints it). The key never leaves the daemon; `gondolind::mitm_ca::load_or_create` is
 what native egress uses when the controller passes no CA.
 
 ### Guest TCP streams (`vm.enableSsh()`, ingress)
@@ -673,8 +636,7 @@ message? }`, `fwd_data { data }` both ways, `fwd_eof`, `fwd_close { message?
 (256 KiB unacknowledged per stream, returned by the controller as its readable
 side drains; above 1 MiB queued per channel the daemon stops reading the
 guest channel); controller→guest data honours the pipe's backpressure and the
-64 MiB channel queue (a stream that does not fit is closed, like the node
-engine).
+64 MiB channel queue (a stream that does not fit is closed).
 
 ### Guest file operations
 
@@ -691,11 +653,7 @@ While the guest channel is full, the daemon stops reading controller messages
 
 ### VFS
 
-Schema: `gondolin-proto/src/vfs.rs`. `configure.vfs` is dispatched on `mode`:
-`controller` (internal, deprecated fallback: every sandboxfs request is
-forwarded as `vfs_rpc` to the node engine's `FsRpcService`;
-`GONDOLIN_NATIVE_VFS=controller` selects it) or
-`native` (`VfsConfig`, the default for the native engine):
+Schema: `gondolin-proto/src/vfs.rs`. `configure.vfs` is a `VfsConfig`:
 `{ mode: "native", fuse_mount, binds, mounts: [...], hooks: { before?, events? },
 transport? }` (`transport`: see "Filesystem tiers").
 
@@ -754,15 +712,15 @@ pushes `vfs_invalidate { mount_id, path? }` (answered by
 
 Hooks: when `hooks.before` is set the daemon sends a blocking
 `vfs_hook { op, path?, old_path?, new_path?, flags?, mode?, offset?, length?,
-size? }` before each hooked operation (the ops and contexts of the node
-engine's `SandboxVfsProvider`; `flags` as node strings) and fails the operation
+size? }` before each hooked operation (the ops and contexts of
+`SandboxVfsProvider`; `flags` as Node strings) and fails the operation
 with the returned errno. With `hooks.events` it sends `vfs_event` (same fields
 plus `error?`, `bytes?`) after it, asynchronously through a bounded queue.
 Neither is sent when the controller registered no hooks.
 
 Readdir offsets are indices into a listing snapshot; continuations keep their
 snapshot across mutations and skip removed names, so `rm -rf` works while
-deleting (the node engine had the same bug and the same fix).
+deleting (the removed node engine had the same bug and the same fix).
 
 Controller fs API (c→d): `fs_call { op, ... }` (`stat { follow }`, `readdir`,
 `access`, `mkdir`, `rmdir`, `unlink`, `rename`, `chmod`, `truncate`,
@@ -773,8 +731,7 @@ providers with a cache) and the JS providers directly otherwise.
 
 ### Network
 
-`configure.net` with `mode: "native"` (the default for the native engine) is
-served in the daemon by `gondolind/src/net.rs`: `gondolin-netstack` on the
+`configure.net` (`mode: "native"`, the only mode) is served in the daemon by `gondolind/src/net.rs`: `gondolin-netstack` on the
 netdev socket, `gondolin-egress` for flows, `gondolin-sshproxy` for SSH egress.
 Open guest flows are reported as session activity (no idle pause while
 connected). With the `net` debug flag, `gondolin-log` records of the network crates
@@ -792,7 +749,7 @@ omitted). `configure.net` (`NetConfig`) carries:
   revoked_values, hosts, deleted }]`, `replace_secrets_in_query`,
   `placeholder_mode`, `marker`) and `allow_websockets`. Without `rules` only the
   built-in internal-range policy applies (unless an `is_ip_allowed` hook is
-  registered, which then fully replaces it, as in the node engine).
+  registered, which then fully replaces it).
 - `hooks` (`HookRegistrations`): `is_request_allowed`, `is_ip_allowed`,
   `on_request?: { body }`, `on_response?: { body }`.
 - `djs_hooks?` (`DjsHooksConfig`, tier 2): `source`, `filename?`, `kind`
@@ -806,7 +763,7 @@ omitted). `configure.net` (`NetConfig`) carries:
   policy to a daemon without it (an older daemon would ignore the field).
 - `limits`: body limits, max concurrent requests (128), WebSocket connect/header
   timeouts, MITM leaf cache size/ttl, `guest_keep_alive` (default false: one
-  request per guest connection with `connection: close`, as the node engine).
+  request per guest connection with `connection: close`).
 - `mitm?: { cert_pem, key_pem }`: the controller's cached CA (`host/src/mitm.ts`,
   PKCS#1 RSA keys accepted), sent by local controllers only. Without it the
   daemon uses its own cache (`mitm_ca::load_or_create`, optional `mitm_dir`),
@@ -822,18 +779,18 @@ omitted). `configure.net` (`NetConfig`) carries:
   carry partial TCP/UDP checksums; `gondolin-netstack/src/config.rs`). gondolind composes both
   halves (`gondolind/src/net.rs`, `ConfigureNet`: egress fields flattened at the
   top level, `stack`, `system_resolvers`).
-- DNS options are resolved by the controller exactly like the node engine
+- DNS options are resolved by the controller
   (`host/src/native/net.ts`, `compileNetworkOptions`): validation of
   SSH/mapped TCP vs DNS mode, the automatic `per-host` synthetic mapping when
   SSH egress or `tcp.hosts` are enabled, and trusted resolvers. When the daemon
   runs locally the controller sends `dns.getServers()` (IPv4) as
-  `system_resolvers` (and as the `trusted` default, failing fast like node when
+  `system_resolvers` (and as the `trusted` default, failing fast when
   empty); a remote daemon gets only explicitly configured servers and falls back
   to its own `/etc/resolv.conf`, since the controller's resolvers may not be
   reachable from there.
 - Upstream trust: the controller sends `tls.getCACertificates("default")` as
   `upstream_ca_pems` with the built-in root sets disabled, so the native engine
-  trusts exactly what node's fetch would (incl. `NODE_EXTRA_CA_CERTS` and
+  trusts exactly what Node's fetch would (incl. `NODE_EXTRA_CA_CERTS` and
   `tls.setDefaultCACertificates`). The static CLI has no Node.js CA store and
   sets `use_webpki_roots` + `use_system_roots`: system roots are PEM files
   (`gondolin_egress::system_roots`, no `rustls-native-certs`):
@@ -868,8 +825,7 @@ the declarative allowlist admits it (used only if the hook keeps the host). The 
 limit), so a decision that keeps the `original` body replays them and forwards
 the rest natively; a body that is never pulled is never buffered or sent.
 
-Evaluation order matches the node engine (`host/src/http/hooks.ts`,
-`host/src/qemu/http.ts`): head validation → request + ip policy precheck
+Evaluation order: head validation → request + ip policy precheck
 (only when no `on_request` hook is registered, i.e. `ON_REQUEST_EARLY_POLICY_SAFE`)
 → per hop: `on_request` → secrets substitution → request/ip policy again unless
 prechecked and the head is unchanged → upstream connect with a connect-time ip
@@ -903,7 +859,7 @@ the same protocol as the TypeScript controller). Modules:
   `etc_mount` from memory).
 - `vm`, `session`: boot and readiness (`ensureRunning`, rootfs resize, mount
   checks), clients and execs with output windows and stdin acks, checkpoints
-  (`checkpoint`, node's qcow2 + trailer format), registry entry and IPC
+  (`checkpoint`, the SDK's qcow2 + trailer format), registry entry and IPC
   socket (`registry`, the `SessionIpcServer` protocol with id remapping).
 - `ssh`, `ingress`, `fwd`: `--ssh` and `--listen` over the `ssh`/`ingress`
   forwarder channels (`gondolin-http` for the gateway, WebSocket upgrades tunneled).
@@ -977,18 +933,18 @@ Translation of existing providers (`host/src/native/vfs.ts`):
   (`commit: write`, metadata cached 1 s, contents revalidated on every open;
   `MemoryProvider` files up to 64 KiB are inlined with their stat) through an
   adapter onto the `VirtualProvider`, so the JS object stays the source of
-  truth with node-engine consistency.
+  truth.
   `/etc/gondolin` is an object mount with a 64 KiB file limit that reloads the
   ingress listeners when `/listeners` changes.
 - New exports: `ObjectProvider` (whole-file interface; elwing's
   `nativeProvider.ts` shape) with `createObjectMount(provider, options)` /
-  `nativeMounts.object(...)` (`ObjectVirtualProvider` serves it on the node
-  engine), `nativeMounts.memory()` and `nativeMounts.host(dir, { readonly,
+  `nativeMounts.object(...)` (returns an `ObjectVirtualProvider` carrying the
+  mount mark, for host-side access), `nativeMounts.memory()` and `nativeMounts.host(dir, { readonly,
   hide })` (a daemon-side path, also for remote daemons).
 
 Guest transports (`configure.vfs.transport`: `auto`, `sandboxfs`, `virtiofs`;
 `GONDOLIN_VIRTIOFS=0|1` on the controller):
-- **virtio-fs** (QEMU only, chosen when the binary offers `vhost-user-fs-pci`
+- **virtio-fs on QEMU** (chosen when the binary offers `vhost-user-fs-pci`
   / `vhost-user-fs-device` and a shared RAM backend; probed once per binary
   with `-device help`/`-object help`, cached in memory and in
   `<cache>/gondolin/qemu-virtiofs.json`; QEMU needs vhost-user, which
@@ -1010,13 +966,17 @@ Guest transports (`configure.vfs.transport`: `auto`, `sandboxfs`, `virtiofs`;
   request as a frame over a Unix socket; gondolind serves it with the same
   `FuseServer` (`gondolin-virtiofs/src/socket.rs`). The runner advertises it
   with `--capabilities` (`virtiofs-socket`); older runners keep sandboxfs.
-- **sandboxfs RPC** (fallback, node engine, old runners and images): unchanged.
+- **sandboxfs RPC** (fallback: QEMU without vhost-user, krun runners without
+  `virtiofs-socket`, images without `--virtiofs`): unchanged.
 
 ## Benchmarks
 
-`host/bench/` runs the same workloads against both engines
-(`GONDOLIN_ENGINE=node|native`) and writes JSON results plus a markdown summary
-to `host/bench/results/`. Workloads: boot to first exec, exec round trip,
+`host/bench/` runs workloads against variants of the native engine (`native`,
+`native-virtiofs`, and `native-prev`/`native-prev-virtiofs` for an earlier
+build in `GONDOLIN_BENCH_PREV_BIN`; `--interleave` alternates them) and writes
+JSON results plus a markdown summary with variant/native ratios to
+`host/bench/results/` (the node engine's results are in git history).
+Workloads: boot to first exec, exec round trip,
 exec stdout throughput, VFS small-file metadata and I/O, VFS large-file
 throughput per mount kind, HTTP/HTTPS request latency and throughput through the
 MITM (local upstream allowed via `allowedInternalHosts`), hook round-trip cost,

@@ -20,8 +20,7 @@
 #    npm yet), then runs `gondolin --version`, `gondolind --version` (the
 #    platform package's npm bin alias of the multi-call binary), the static
 #    CLI's `--version`, `gondolin-krun-runner --version` and boots a VM with the
-#    node and the native engine and with the static CLI from the installed
-#    packages.
+#    Node CLI and with the static CLI from the installed packages.
 #
 # Nothing is published, tagged or pushed. Needs the release toolchain (Rust
 # with the four targets, Zig 0.17, pnpm, npm) and network access for npm
@@ -285,15 +284,13 @@ if [ "$SKIP_VM" = 0 ]; then
   VMMS=qemu
   [ -n "$KRUN_HOST" ] && VMMS="qemu krun"
   for vmm in $VMMS; do
-    for engine in node native; do
-      if out=$(cd "$OUT/scratch" && "$SCRATCH_BIN/gondolin" --engine "$engine" exec --vmm "$vmm" -- /bin/sh -c 'echo gondolin-smoke-$(uname -m)' 2>&1); then
-        echo "$out" | grep -q gondolin-smoke- && ok "$engine engine, $vmm: $(echo "$out" | grep gondolin-smoke- | head -1)" \
-          || fail "$engine engine, $vmm: unexpected output: $out"
-      else
-        echo "$out" | tail -20 | sed 's/^/        /'
-        fail "$engine engine, $vmm: VM boot"
-      fi
-    done
+    if out=$(cd "$OUT/scratch" && "$SCRATCH_BIN/gondolin" exec --vmm "$vmm" -- /bin/sh -c 'echo gondolin-smoke-$(uname -m)' 2>&1); then
+      echo "$out" | grep -q gondolin-smoke- && ok "node CLI, $vmm: $(echo "$out" | grep gondolin-smoke- | head -1)" \
+        || fail "node CLI, $vmm: unexpected output: $out"
+    else
+      echo "$out" | tail -20 | sed 's/^/        /'
+      fail "node CLI, $vmm: VM boot"
+    fi
     if [ "$HOST_KEY" != unsupported ]; then
       if out=$(cd "$OUT/scratch" && "$static_cli" exec --vmm "$vmm" -- /bin/sh -c 'echo gondolin-smoke-$(uname -m)' 2>&1); then
         echo "$out" | grep -q gondolin-smoke- && ok "static CLI, $vmm: $(echo "$out" | grep gondolin-smoke- | head -1)" \

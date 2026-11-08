@@ -69,7 +69,7 @@ await vm.close();
 - [Ingress](./ingress.md): expose guest HTTP servers on the host
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
-- [Native Engine](./native.md): the default host engine (`gondolind`), remote daemons, and differences from the deprecated node engine
+- [Native Engine](./native.md): the host engine (`gondolind`), remote daemons, and migrating from the removed node engine
 
 ## SDK
 

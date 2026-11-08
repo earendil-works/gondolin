@@ -1,5 +1,4 @@
-//! Minimal QMP client for the idle pause (`executeQmpCommand` in
-//! `host/src/sandbox/controller.ts`): one connection per command, a 2 s
+//! Minimal QMP client for the idle pause: one connection per command, a 2 s
 //! timeout, and enough error detail to tell whether the command may have run.
 
 use std::path::Path;

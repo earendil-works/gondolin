@@ -17,21 +17,17 @@ import {
 } from "../http/hooks.ts";
 import { djsHooksOf, type DjsHooksWire } from "../http/djs-hooks.ts";
 import { HttpRequestBlockedError } from "../http/utils.ts";
-import type {
-  DnsOptions,
-  HttpHooks,
-  HttpIpAllowInfo,
-} from "../qemu/contracts.ts";
-import type { SshExecPolicy, SshOptions } from "../qemu/ssh.ts";
+import type { DnsOptions, HttpHooks, HttpIpAllowInfo } from "../net/types.ts";
+import type { SshExecPolicy, SshOptions } from "../net/ssh.ts";
 import {
   normalizeSshAllowedTargets,
   normalizeSshKnownHostsFiles,
 } from "../ssh/utils.ts";
 import {
   assertTcpDnsConfig,
-  createQemuTcpInternals,
+  createTcpMappings,
   type TcpOptions,
-} from "../qemu/tcp.ts";
+} from "../net/tcp.ts";
 import { normalizeIpv4Servers } from "../utils/dns.ts";
 
 /** `configure.net.policy` */
@@ -388,7 +384,7 @@ export type CompileNetworkOptions = {
   checksumOffload?: boolean;
   /**
    * whether gondolind runs on this machine: then this process' resolvers
-   * (`dns.getServers()`) are used like the node engine does; a remote daemon
+   * (`dns.getServers()`) are used; a remote daemon
    * uses its own host's resolvers unless servers are configured explicitly
    */
   daemonIsLocal: boolean;
@@ -407,9 +403,9 @@ export type CompiledNetwork = {
 };
 
 /**
- * Resolves the DNS/SSH/mapped-TCP options exactly like the node engine's
- * `QemuNetworkBackend` (validation, per-host mapping auto default, trusted
- * resolvers with the same fail-fast) into the stack part of `configure.net`.
+ * Resolves the DNS/SSH/mapped-TCP options (validation, per-host mapping auto
+ * default, trusted resolvers with fail-fast) into the stack part of
+ * `configure.net`.
  */
 export function compileNetworkOptions(
   options: CompileNetworkOptions,
@@ -423,7 +419,7 @@ export function compileNetworkOptions(
     enabled: sshTargets.length > 0,
     sniffPorts: Array.from(new Set(sshTargets.map((t) => t.port))),
   };
-  const tcp = createQemuTcpInternals(options.tcp);
+  const tcp = createTcpMappings(options.tcp);
   const syntheticHostMapping =
     dns?.syntheticHostMapping ??
     (ssh.enabled || tcp.enabled ? "per-host" : "single");
@@ -495,14 +491,14 @@ function bytesToString(value: string | Buffer): string {
 /**
  * Maps `VMOptions.ssh` onto `configure.net.ssh`. Paths are paths on the
  * daemon's machine; for a local daemon the controller resolves the default
- * known_hosts files like the node engine does.
+ * known_hosts files.
  */
 export function compileSshConfig(
   ssh: SshOptions,
   ports: number[],
   daemonIsLocal: boolean,
 ): SshEgressConfigWire {
-  // known_hosts like the node engine: the given files, else the defaults; a
+  // known_hosts: the given files, else the defaults; a
   // local daemon reads the same paths, a remote one gets their contents
   const knownHostsPaths = normalizeSshKnownHostsFiles(ssh.knownHostsFile);
   let knownHostsFiles: string[] = [];
@@ -514,7 +510,7 @@ export function compileSshConfig(
       try {
         knownHosts.push(fs.readFileSync(file, "utf8"));
       } catch {
-        // missing files are skipped like the node engine does
+        // missing files are skipped
       }
     }
     if (knownHosts.length === 0) {
@@ -877,8 +873,8 @@ function decoderFor(encoding: string | null): DecodeFormat | null {
 }
 
 /**
- * Serves `hook_call`s with the tier-3 callbacks (port of `applyRequestHooks` /
- * `applyResponseHooks` of the node engine).
+ * Serves `hook_call`s with the tier-3 callbacks (`onRequest`, `onResponse`,
+ * `isRequestAllowed`, `isIpAllowed`).
  */
 export class NativeHookService {
   private readonly hooks: TierThreeHooks;
@@ -1153,7 +1149,7 @@ export class NativeHookService {
       if (bodyId !== undefined) this.transport.release(bodyId);
     };
 
-    // Like the node engine (fetch decodes), hooks see decoded bodies without
+    // Hooks see decoded bodies (like `fetch` responses) without
     // content-encoding/content-length.
     const headers = new Headers();
     for (const [k, v] of head.headers) headers.append(k, v);
@@ -1268,7 +1264,7 @@ export type NativeNetTransport = {
 
 export type NativeNetworkOptions = CompileNetOptions &
   Omit<CompileNetworkOptions, "daemonIsLocal"> & {
-    /** MITM CA directory (node engine cache) */
+    /** MITM CA directory (shared cache, `GONDOLIN_MITM_CERT_DIR`) */
     mitmCertDir?: string;
     /** default: true */
     daemonIsLocal?: boolean;
@@ -1278,7 +1274,7 @@ export type NativeNetworkOptions = CompileNetOptions &
  * The native engine's network: `configure.net` (`mode: "native"`) and the
  * controller side of hooks (`hook_call`, `body_pull`, `body_release`,
  * `ssh_hook_call`, `policy_update`). Option validation errors are thrown by
- * the constructor, like the node engine's `QemuNetworkBackend`.
+ * the constructor.
  */
 export class NativeNetwork {
   private readonly options: NativeNetworkOptions;

@@ -25,16 +25,15 @@ console.log("stderr:\n", result.stderr);
 await vm.close();
 ```
 
-## Engines
+## Engine
 
-VMs run on the [native engine](./native.md) by default: `engine: "auto"`
-uses the `gondolind` daemon when a working binary is found (the installed
-`@earendil-works/gondolin-native-*` package, a source checkout's build, or
-`GONDOLIN_NATIVE_BIN`) and falls back to the in-process node engine otherwise.
-`engine: "native" | "node"` (or `GONDOLIN_ENGINE`) forces one. The node engine
-is deprecated; choosing it explicitly emits a one-time `DeprecationWarning`
-(code `GONDOLIN_NODE_ENGINE`). The API is the same on both; see
-[Native Engine](./native.md) for the differences.
+VMs run on the [native engine](./native.md): the `gondolind` daemon, from the
+installed `@earendil-works/gondolin-native-*` package, a source checkout's
+build, or `GONDOLIN_NATIVE_BIN`. Without a binary, starting a VM fails. The
+in-process node engine was removed; `engine: "node"` (or
+`GONDOLIN_ENGINE=node`) throws, `engine: "native"` and `"auto"` are accepted
+for compatibility. See
+[Migrating from the node engine](./native.md#migrating-from-the-node-engine).
 
 ## Typical SDK Flow
 

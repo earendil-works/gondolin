@@ -3,8 +3,6 @@
  * built from resolved sandbox options.
  */
 
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,10 +10,8 @@ import type {
   ResolvedSandboxServerOptions,
   SandboxServerOptions,
 } from "../sandbox/server-options.ts";
-import { defaultDebugLog, parseDebugEnv } from "../debug.ts";
 import { buildTmpfsAppend } from "../sandbox/tmpfs.ts";
 import { gondolinCacheDir } from "../cache.ts";
-import { nativeDaemonCommand, resolveNativeBinary } from "./binary.ts";
 import type { NativeConnection } from "./transport.ts";
 
 /**
@@ -66,124 +62,44 @@ export function resolveNativeEngineOptions(
   return resolved;
 }
 
-/** Host engine implementation */
-export type SandboxEngine = "node" | "native";
+/** Host engine implementation (only `native` remains) */
+export type SandboxEngine = "native";
 
 /**
- * Engine used when neither `VMOptions.engine` nor `GONDOLIN_ENGINE` choose
- * one: `auto` is the native engine when a usable gondolind binary is
- * available, else node (`GONDOLIN_ENGINE=node` restores the old default; see
- * "Flipping the default engine" in `native/DESIGN.md`).
+ * Resolve the engine: explicit option, else `GONDOLIN_ENGINE`. `native` and
+ * `auto` (kept for compatibility) both select the native engine; the node
+ * engine was removed.
  */
-export const DEFAULT_SANDBOX_ENGINE: SandboxEngine | "auto" = "auto";
-
-/** `gondolind --version` results per binary (path, size, mtime) */
-const usableBinaries = new Map<string, string | null>();
-
-/**
- * Whether `binary` runs on this machine: `gondolind --version` succeeds and
- * identifies the daemon. Returns the reason otherwise. Cached per file state.
- */
-export function checkNativeBinary(binary: string): string | null {
-  let key = binary;
-  try {
-    const st = fs.statSync(binary);
-    key = `${binary}\0${st.size}\0${st.mtimeMs}`;
-  } catch (err) {
-    return `cannot stat ${binary}: ${(err as Error).message}`;
-  }
-  const cached = usableBinaries.get(key);
-  if (cached !== undefined) return cached;
-  let problem: string | null = null;
-  try {
-    const [file, ...args] = nativeDaemonCommand(binary);
-    const out = execFileSync(file!, [...args, "--version"], {
-      encoding: "utf8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    if (!out.startsWith("gondolind ")) {
-      problem = `${binary} --version did not identify gondolind`;
-    }
-  } catch (err) {
-    problem = `${binary} --version failed: ${(err as Error).message}`;
-  }
-  usableBinaries.set(key, problem);
-  return problem;
-}
-
-/** `auto`: the native engine when a usable gondolind binary resolves, else node */
-function autoEngine(env: NodeJS.ProcessEnv): SandboxEngine {
-  let binary: string;
-  try {
-    binary = resolveNativeBinary(env);
-  } catch {
-    return "node";
-  }
-  const problem = checkNativeBinary(binary);
-  if (problem) {
-    if (parseDebugEnv(env.GONDOLIN_DEBUG).size > 0) {
-      defaultDebugLog(
-        "error",
-        `engine auto: using the node engine, gondolind is unusable (${problem})`,
-      );
-    }
-    return "node";
-  }
-  return "native";
-}
-
-let nodeEngineWarned = false;
-
-/**
- * Warns once per process that the node engine was chosen explicitly
- * (deprecated; it keeps working). A `DeprecationWarning`, so
- * `--no-deprecation` silences it.
- */
-export function warnNodeEngineDeprecated(): void {
-  if (nodeEngineWarned) return;
-  nodeEngineWarned = true;
-  process.emitWarning(
-    'The node engine (GONDOLIN_ENGINE=node, engine: "node", --engine node) is deprecated and will be removed; the native engine is the default. See docs/native.md.',
-    { type: "DeprecationWarning", code: "GONDOLIN_NODE_ENGINE" },
-  );
-}
-
-/** Resolve the engine: explicit option, else `GONDOLIN_ENGINE`, else {@link DEFAULT_SANDBOX_ENGINE} */
 export function resolveSandboxEngine(
   value: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): SandboxEngine {
   const raw = value ?? env.GONDOLIN_ENGINE?.trim() ?? "";
   const normalized = raw.trim().toLowerCase();
-  if (normalized === "") {
-    return DEFAULT_SANDBOX_ENGINE === "auto"
-      ? autoEngine(env)
-      : DEFAULT_SANDBOX_ENGINE;
+  if (normalized === "" || normalized === "auto" || normalized === "native") {
+    return "native";
   }
-  if (normalized === "auto") return autoEngine(env);
   if (normalized === "node") {
-    warnNodeEngineDeprecated();
-    return "node";
+    throw new Error(
+      "the node engine has been removed; Gondolin always uses the native engine (gondolind). " +
+        'Drop engine: "node" / GONDOLIN_ENGINE=node / --engine node.',
+    );
   }
-  if (normalized === "native") return "native";
   throw new Error(
-    `invalid sandbox engine: ${raw} (expected "node", "native" or "auto")`,
+    `invalid sandbox engine: ${raw} (expected "native" or "auto")`,
   );
 }
 
 /**
- * The engine of a VM: explicit `engine`, else `native` when native options
- * name a daemon (`command`, `connect`, `remote`), else `GONDOLIN_ENGINE`.
+ * The engine of a VM: explicit `engine`, else `GONDOLIN_ENGINE` (validated;
+ * always `native`).
  */
 export function resolveVmEngine(
   engine: string | undefined,
-  native: NativeEngineOptions,
+  _native: NativeEngineOptions,
   env: NodeJS.ProcessEnv = process.env,
 ): SandboxEngine {
-  if (engine !== undefined) return resolveSandboxEngine(engine, env);
-  if (native.connect || native.command || native.remote) return "native";
-  return resolveSandboxEngine(undefined, env);
+  return resolveSandboxEngine(engine, env);
 }
 
 /** Error for options the native engine cannot honour yet */
@@ -216,18 +132,12 @@ export function assertNativeSupported(
   }
 }
 
-/** Interim subsystem modes (see `native/DESIGN.md`) */
+/** Subsystem configuration of a session */
 export type NativeSubsystems = {
-  /** serve the guest filesystem from the controller (`vfs_rpc`) */
-  vfsController: boolean;
-  /** native VFS configuration (`mode: "native"`, takes precedence) */
+  /** native VFS configuration (`configure.vfs`, `mode: "native"`) */
   vfs?: Record<string, unknown>;
-  /** network socket served by the controller's node network stack */
-  netSocketPath: string | null;
   /** native network configuration (`configure.net`, `mode: "native"`) */
   netNative?: Record<string, unknown> | null;
-  /** relay the netdev stream to the controller's node network stack (remote) */
-  netRelay?: boolean;
 };
 
 /** Remote session settings for {@link buildNativeConfigure} */
@@ -313,16 +223,8 @@ export function buildNativeConfigure(
       max_queued_execs: options.maxQueuedExecs,
     },
     debug: options.debug ?? [],
-    vfs:
-      subsystems.vfs ??
-      (subsystems.vfsController ? { mode: "controller" } : undefined),
-    net: subsystems.netNative
-      ? subsystems.netNative
-      : subsystems.netRelay
-        ? { mode: "relay" }
-        : subsystems.netSocketPath
-          ? { mode: "external", socket_path: subsystems.netSocketPath }
-          : undefined,
+    vfs: subsystems.vfs,
+    net: subsystems.netNative ?? undefined,
   };
 }
 

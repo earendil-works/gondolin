@@ -1,5 +1,4 @@
-//! Classification of the first bytes of a guest TCP flow (port of
-//! `classifyTcpFlow` in `host/src/qemu/network-stack.ts`).
+//! Classification of the first bytes of a guest TCP flow.
 
 /// Max bytes buffered before a flow must be classified (`MAX_FLOW_SNIFF`).
 pub const MAX_FLOW_SNIFF: usize = 8 * 1024;

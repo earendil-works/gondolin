@@ -1,6 +1,5 @@
-//! QEMU command line (port of `buildQemuArgs` and friends in
-//! `host/src/sandbox/controller.ts`), kernel command line pieces, and the
-//! QEMU log tail used for exit diagnostics (`SandboxServer`).
+//! QEMU command line, kernel command line pieces, and the QEMU log tail used
+//! for exit diagnostics.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;

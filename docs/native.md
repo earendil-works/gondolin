@@ -1,52 +1,28 @@
 # Native Engine
 
-Gondolin has two host engines that run the same guests with the same SDK and
-CLI:
+The VM is driven by `gondolind`, a small static Rust daemon (the *native
+engine*). Your Node.js process (the *controller*) spawns it and talks to it
+over its stdin/stdout. The daemon starts QEMU (or the krun runner), speaks the
+guest protocols, runs the network stack and the HTTP/TLS mediation, serves the
+guest filesystem from its own mount table, and calls back into the controller
+only for the things that must stay in JavaScript (your hooks, custom VFS
+providers).
 
-- **`native`** (the default when a `gondolind` binary is available): the VM
-  is driven by `gondolind`, a small static Rust daemon.
-  Your Node.js process (the *controller*) spawns it and talks to it over its
-  stdin/stdout. The daemon starts QEMU (or the krun runner), speaks the guest
-  protocols, runs the network stack and the HTTP/TLS mediation natively, and
-  serves the guest filesystem from its own mount table, and calls back into
-  the controller only for the things that must stay in JavaScript (your hooks,
-  custom VFS providers).
-- **`node`** (deprecated): the VM is driven from inside your Node.js process
-  (QEMU child process, guest protocols, network stack, VFS). Used when no
-  usable `gondolind` is available, or when selected with
-  `GONDOLIN_ENGINE=node`. Selecting it explicitly prints a one-time
-  `DeprecationWarning` (code `GONDOLIN_NODE_ENGINE`; `node --no-deprecation`
-  silences it). It keeps working for now and will be removed in a later
-  release.
-
-The native engine exists for two reasons:
+The design has two goals:
 
 - **Remote machines.** `gondolind` needs neither Node.js nor any other
   runtime, so it can run on another machine (for example over SSH) while your
   policy, credentials, hooks and file providers stay in the local controller.
-- **Speed.** Packets, TLS and protocol handling move out of JavaScript.
+- **Speed.** Packets, TLS and protocol handling stay out of JavaScript.
 
-> The default engine is `auto`: `native` when a working `gondolind` binary is
-> available for this machine, else `node`. `GONDOLIN_ENGINE=node` (or
-> `--engine node`, `VMOptions.engine: "node"`) still selects the node engine,
-> but it is deprecated.
-> The differences that remain are listed
-> [below](#differences-from-the-node-engine).
+> Earlier releases also had an in-process TypeScript engine (`node`). It was
+> removed: `VMOptions.engine: "node"`, `GONDOLIN_ENGINE=node` and
+> `--engine node` now fail with an error, and there is no fallback when no
+> `gondolind` binary is found. `engine: "native"` and `"auto"` are still
+> accepted (both mean the native engine). See [below](#migrating-from-the-node-engine)
+> for what changed for users of the node engine.
 
-## Selecting the Engine
-
-```ts
-import { VM } from "@earendil-works/gondolin";
-
-const vm = await VM.create({ engine: "native" });
-```
-
-| Setting | Effect |
-| --- | --- |
-| `VMOptions.engine: "node" \| "native" \| "auto"` | engine for this VM (`node` is deprecated) |
-| `GONDOLIN_ENGINE=node\|native\|auto` | default when `engine` is not given (unset: `auto`; `node` is deprecated) |
-| `auto` | `native` when a native engine binary is available for this machine and runs (`gondolin daemon --version`), else `node` (with `GONDOLIN_DEBUG` set, the reason is logged) |
-| `VMOptions.native` with `command`, `connect` or `remote` | implies `native` |
+## The Daemon Binary
 
 The native engine ships as one multi-call binary, `gondolin`: the
 [static CLI](./cli.md#static-cli-no-nodejs), and the daemon when started as
@@ -62,9 +38,13 @@ SDK starts the daemon from whichever binary it finds, in this order:
    installed automatically with `@earendil-works/gondolin` where supported;
    its npm `bin` links the binary as `gondolind`
 
+When none is found, starting a VM fails. Installs that skip optional
+dependencies (`npm install --omit=optional`, `--no-optional`) need
+`GONDOLIN_NATIVE_BIN` or the platform package installed explicitly.
+
 QEMU or the krun runner (whichever backend is selected, see
 [VM Backends](./backends.md#default-backend-selection)) is still needed on the
-machine the daemon runs on, exactly as for the node engine.
+machine the daemon runs on.
 
 ### CLI
 
@@ -72,22 +52,20 @@ The engine options go before the command and apply to everything the command
 starts (including `bash --resume`, `--listen` and `--ssh`):
 
 ```bash
-gondolin --engine native bash
-gondolin --engine auto exec -- uname -a
 gondolin --native-command "ssh build-box gondolind" --remote bash
 ```
 
 | Flag | Meaning |
 | --- | --- |
-| `--engine node\|native\|auto` | host engine (default: `$GONDOLIN_ENGINE`, else `auto`; `node` is deprecated) |
-| `--native-command CMD` | start the daemon with `CMD` (words, or a JSON array); implies `native` |
-| `--remote` | the daemon runs on another machine (see below); implies `native` |
+| `--native-command CMD` | start the daemon with `CMD` (words, or a JSON array) |
+| `--remote` | the daemon runs on another machine (see below) |
+| `--engine native\|auto` | accepted for compatibility (both select the native engine); `--engine node` is an error |
 
 `gondolind` is the npm `bin` name the platform package installs; where only
 the binary was copied, start it as `gondolin daemon` (for example
 `--native-command "ssh build-box ~/bin/gondolin daemon"`).
 
-`gondolin list`, `attach` and `exec --sock` work for sessions of either engine:
+`gondolin list`, `attach` and `exec --sock` work for sessions of either CLI:
 the session registry lives in the controller.
 
 ## Remote Daemons
@@ -229,16 +207,13 @@ gondolin daemon assets pull alpine-base:latest
 gondolin daemon assets resolve --json
 ```
 
-## Differences from the Node Engine
-
-Behaviour visible to guests and SDK users is the same unless listed here.
+## How the Engine Serves the VM
 
 ### Network
 
 - Compressed upstream responses (`Content-Encoding: gzip`, ...) are forwarded
-  to the guest unchanged. The node engine decodes them (it uses `fetch`) and
-  sends the decoded body without `Content-Encoding`. Hooks see decoded bodies
-  on both engines.
+  to the guest unchanged. Hooks see decoded bodies (without
+  `Content-Encoding`), like `fetch` responses.
 - The `Host` header is kept consistent with the request URL: for absolute-form
   request targets the URL wins over the guest's `Host` header, and redirects
   re-target `Host`.
@@ -250,18 +225,13 @@ Behaviour visible to guests and SDK users is the same unless listed here.
   (allowlists, internal ranges, secrets) is evaluated in the daemon, and
   `createDjsHooks()` policies run in the daemon too (see
   [Tier-2 Hooks](#tier-2-hooks)).
-- `VMOptions.fetch` is for asset downloads, as documented. The native engine
-  never uses it for guest HTTP traffic (egress is always handled by the
-  daemon); the node engine used it as its upstream client. Earlier versions
-  switched the native engine to the node network stack when a custom `fetch`
-  was given; they no longer do (behaviour change). To intercept or replace
+- Guest HTTP egress is always handled by the daemon; there is no pluggable
+  upstream client (`VMOptions.fetch` is ignored). To intercept or replace
   upstream requests, use `httpHooks` (`onRequest` may return a `Response`).
-- `GONDOLIN_NATIVE_NET=external|relay` (internal, deprecated): runs the node
-  network stack in the controller instead of the daemon's. For debugging
-  only; it will be removed with the node engine.
+  Upstream HTTP proxies (`HTTP_PROXY`/`HTTPS_PROXY`) are not supported.
 - Upstream TLS certificates are verified against the controller's Node.js
-  default CA store (including `NODE_EXTRA_CA_CERTS`), like the node engine's
-  `fetch`; this also holds for remote daemons. The static `gondolin` CLI
+  default CA store (including `NODE_EXTRA_CA_CERTS`); this also holds for
+  remote daemons. The static `gondolin` CLI
   trusts the Mozilla CA list plus the system's PEM roots (`SSL_CERT_FILE` /
   `SSL_CERT_DIR`, the distribution bundle on Linux, `/etc/ssl/cert.pem` on
   macOS) and `NODE_EXTRA_CA_CERTS`. It does not read the macOS keychain: roots
@@ -314,10 +284,9 @@ provider with whole-file operations (`stat`, `readDir`, `readFile` ranges,
 (a `MemoryProvider` you also use from the host, custom providers) every guest
 write is forwarded before the write returns, metadata is cached for 1 s (as
 the guest kernel does anyway) and contents are revalidated on every open, so
-changes made on the host are seen like on the node engine. Each uncached
-operation is one round trip to the controller, so metadata-heavy work on such
-mounts is slower than on the node engine; prefer native mounts for scratch
-space.
+changes made on the host are seen by the guest. Each uncached operation is
+one round trip to the controller, so metadata-heavy work on such mounts is
+slower than on native mounts; prefer native mounts for scratch space.
 
 For providers that naturally work on whole files (APIs, object stores),
 implement `ObjectProvider` and mount it with `createObjectMount()`:
@@ -334,7 +303,6 @@ const notes: ObjectProvider = {
 };
 
 const vm = await VM.create({
-  engine: "native",
   vfs: {
     mounts: {
       "/notes": createObjectMount(notes, { cacheTtlMs: 5000, commit: "close" }),
@@ -350,22 +318,21 @@ Options: `writable` (default: when `writeFile` exists), `enumeration`
 `commit` (`"close"`: the whole file is written when the guest closes it, the
 default; `"write"`: every write is forwarded), `cacheTtlMs`,
 `revalidateOnOpen`, `maxCacheBytes` and `maxFileBytes`. Large files are read
-lazily in 1 MiB ranges and written back in 1 MiB chunks of one `writeFile`. On
-the node engine the same mount works through `ObjectVirtualProvider` (files
-are read on open and written back on close).
+lazily in 1 MiB ranges and written back in 1 MiB chunks of one `writeFile`.
+On the host side (`vm.fs`, or using the returned provider directly) the mount
+is an `ObjectVirtualProvider`: files are read on open and written back on
+close.
 
 `vm.fs` reads and writes daemon-only mounts (`nativeMounts.memory()`,
 daemon-side host directories, object mounts) through the daemon; this starts
-the VM if it is not running. Other paths use your JS providers directly, as on
-the node engine.
+the VM if it is not running. Other paths use your JS providers directly.
 
-Differences from the node engine:
+Behaviour notes:
 
-- **VFS hooks** (`vfs.hooks`): `before` hooks run as on the node engine but
-  cost a round trip per hooked operation (only when you register one); `after`
-  hooks are called asynchronously, after the guest got its reply, and their
-  `result` is the error or the transferred byte count instead of the node
-  objects.
+- **VFS hooks** (`vfs.hooks`): `before` hooks cost a round trip per hooked
+  operation (only when you register one); `after` hooks are called
+  asynchronously, after the guest got its reply, and their `result` is the
+  error or the transferred byte count.
 - **Close errors**: with `commit: "close"` over virtio-fs, a failing
   `writeFile` is the error of the guest's `close()` or `fsync()`. Over
   sandboxfs (no vhost-user QEMU, an older krun runner) it cannot be: the guest's FUSE helper
@@ -376,10 +343,6 @@ Differences from the node engine:
   a read-only `MemoryProvider` translated to a static mount rejects every
   write, and in-memory renames follow POSIX rules (a file cannot replace a
   directory and so on).
-- `GONDOLIN_NATIVE_VFS=controller` (internal, deprecated) forwards every
-  guest filesystem operation to the controller's JS providers as the node
-  engine serves them. For debugging only; it will be removed with the node
-  engine.
 
 ### Errors and diagnostics
 
@@ -388,14 +351,12 @@ Differences from the node engine:
   example SSH credential files, a missing QEMU binary, an unknown image).
 - Explicit `sandbox.virtio*SocketPath` options are rejected (the daemon owns
   its private socket directory).
-- Error messages surfaced to callers are the same; debug output is equivalent
-  but not byte-identical.
 
 ### Process model
 
-- The VMM runs under the daemon (controller → `gondolind` → QEMU). Starting a
-  VM costs one extra process spawn and handshake (a few milliseconds).
-- `SandboxServer`, if you construct it directly, is always the node engine.
+- The VMM runs under the daemon (controller → `gondolind` → QEMU or the krun
+  runner). Starting a VM costs one process spawn and handshake for the daemon
+  (a few milliseconds).
 
 ## Tier-2 Hooks
 
@@ -464,7 +425,7 @@ The environment offers `Request`, `Response`, `Headers`, `URL`,
 `atob`/`btoa`, `console` (written to the daemon log, visible with the `net`
 debug flag) and the standard JavaScript built-ins. Bodies stay in the daemon
 until the policy reads them (`text()`, `json()`, `bytes()`, `arrayBuffer()`);
-an unread body costs nothing and is streamed through. As on the node engine,
+an unread body costs nothing and is streamed through. As with tier-3 hooks,
 forwarding a request whose body the hook consumed is refused (`400`): read
 from `request.clone()`. Compressed responses (`gzip`, `deflate`) are decoded
 for `onResponse`, as on tier 3.
@@ -474,7 +435,7 @@ for `onResponse`, as on tier 3.
 | option | meaning |
 |---|---|
 | `source` | the policy (or pass the source string directly) |
-| `kind` | `"script"` (default), `"module"` or `"typescript"` (an ES module whose types are erased, not checked); modules need the native engine |
+| `kind` | `"script"` (default), `"module"` or `"typescript"` (an ES module whose types are erased, not checked) |
 | `filename` | name in stack traces, the module's key (default `policy.js` / `policy.mjs` / `policy.ts`) |
 | `modules` | `{ key: source }` a module policy can import (`./lib.js` resolves against `filename`); the key's extension picks the language: `.ts`/`.mts`/`.cts` TypeScript, `.json` a JSON module (`import deny from "./deny.json" with { type: "json" }`), else JavaScript. There is no file or network access: anything else must be bundled into the policy |
 | `limits` | `{ fuel, memoryBytes, timeoutMs }` per call (defaults 50M fuel ≈ 0.2 s of interpretation, 64 MiB heap, 30 s wall clock including body reads) |
@@ -517,15 +478,16 @@ rewritten request.
 - `instanceof` checks against Node's own classes do not apply; `URL`,
   `Headers` and friends are the daemon's implementations (URLs parse exactly
   as egress parses them).
-- On the node engine a script policy runs in a `node:vm` context with Node's
-  own fetch classes (the same contract; globals persist between calls there);
-  module policies need the native engine. A daemon without tier-2 support
-  (older releases, or built without the `djs-hooks` feature) refuses such a
-  configuration instead of ignoring it.
+- Calling the returned functions directly in your process (outside a VM) runs
+  a script policy in a `node:vm` context with Node's own fetch classes
+  (globals persist between calls there); module policies only run in the
+  daemon and throw. A daemon without tier-2 support (older releases, or built
+  without the `djs-hooks` feature) refuses such a configuration instead of
+  ignoring it.
 
 Typical cost on an Apple M5 Max (shared machine; `host/bench`, guest-measured
 per request): a no-op `onRequest`/`onResponse` pair adds about 0.23 ms per
-request as tier 2 against 0.29 ms as tier 3 (0.58 ms on the node engine), a
+request as tier 2 against 0.29 ms as tier 3, a
 policy reading 32 MiB bodies keeps ~415 MB/s downloads (tier 3: ~325 MB/s).
 In process, an empty call is ~8 µs and a header allowlist policy ~38 µs
 (`cargo run --release -p gondolin-hooks-djs --example bench`); research notes
@@ -535,9 +497,11 @@ and engine details are in `native/docs/djs-hooks.md`.
 
 **`native engine binary not found`**: build it in a checkout (`make native`,
 or `cargo build --release -p gondolin-cli` in `native/`), install the platform
-package, or set `GONDOLIN_NATIVE_BIN`. The
-default (`auto`) falls back to the node engine on machines without a usable
-binary; this error only appears when `native` is selected explicitly.
+package, or set `GONDOLIN_NATIVE_BIN`.
+
+**`the node engine has been removed`**: drop `engine: "node"`,
+`GONDOLIN_ENGINE=node` or `--engine node` (see
+[Migrating from the node engine](#migrating-from-the-node-engine)).
 
 **`not supported by the native engine yet: ...`** or **`not supported with a
 remote native daemon: ...`**: the option cannot be honoured; the message names
@@ -548,8 +512,8 @@ mode something resolved to a path on the controller (typically
 `sandbox.imagePath` pointing at a local directory). Use an image selector the
 daemon can resolve, or the daemon's own default image.
 
-**Debug output**: `GONDOLIN_DEBUG` (or `VMOptions.sandbox.debug`) works as for
-the node engine (`net`, `exec`, `vfs`, `protocol`, `all`, see
+**Debug output**: `GONDOLIN_DEBUG` (or `VMOptions.sandbox.debug`) takes the
+flags `net`, `exec`, `vfs`, `protocol`, `all` (see
 [Debug Logging](./debug.md)). The flags are passed to the daemon, which
 forwards its events (QEMU output with `protocol`, network tracing with `net`)
 to your debug callback. Lines the daemon writes to its stderr arrive as the
@@ -565,6 +529,29 @@ echo '{"vm": {"qemu_path": "qemu-system-aarch64", "kernel_path": "/k", "initrd_p
 # load or create the MITM CA in a directory and print its certificate
 gondolind --mitm-ca ~/.cache/gondolin/ssl
 ```
+
+## Migrating from the Node Engine
+
+The in-process TypeScript engine was removed. What changes for code that used
+it (`engine: "node"`, `GONDOLIN_ENGINE=node`, or the old automatic fallback
+when no `gondolind` was found):
+
+- Remove the engine selection. `engine: "node"` throws; make sure the
+  platform package (`@earendil-works/gondolin-native-*`) is installed, or set
+  `GONDOLIN_NATIVE_BIN`.
+- `SandboxServer` and `FsRpcService` are no longer exported; use `VM`.
+- `VMOptions.fetch` is ignored: it was the node engine's upstream client.
+  Intercept or replace upstream requests with `httpHooks.onRequest` (it may
+  return a `Response`). There is no upstream HTTP proxy support.
+- Custom JS `VirtualProvider` mounts (`MemoryProvider`, your own providers)
+  are reached through the object tier (see [Filesystem](#filesystem)): each
+  uncached operation is a round trip to your process. Prefer native mounts
+  (`RealFSProvider`, `nativeMounts.memory()`, `nativeMounts.host()`) or
+  `createObjectMount()` where you can.
+- Compressed upstream responses reach the guest compressed (hooks still see
+  decoded bodies), VFS `after` hooks run asynchronously and get an error or
+  byte count, and the internal debugging switches `GONDOLIN_NATIVE_NET` and
+  `GONDOLIN_NATIVE_VFS` are gone.
 
 For the protocol between controller and daemon and the internals, see
 [`native/DESIGN.md`](https://github.com/earendil-works/gondolin/blob/main/native/DESIGN.md).

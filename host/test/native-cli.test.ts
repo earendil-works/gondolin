@@ -34,8 +34,6 @@ const env: NodeJS.ProcessEnv = {
   GONDOLIN_GUEST_DIR: guestDir ?? "",
   GONDOLIN_SESSIONS_DIR: path.join(scratch, "sessions"),
   GONDOLIN_CHECKPOINT_DIR: path.join(scratch, "checkpoints"),
-  // the node CLI on the native engine, so both sides use gondolind
-  GONDOLIN_ENGINE: process.env.GONDOLIN_ENGINE ?? "node",
 };
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
@@ -323,7 +321,7 @@ for (const [owner, client] of [
         assert.doesNotMatch(resumed.stdout, /^x\r?$/m);
       }
     } finally {
-      // SIGTERM so the owner stops its VM (the node engine has no watchdog)
+      // SIGTERM so the owner stops its VM
       session.proc.kill("SIGTERM");
       const stopped = await Promise.race([
         session.done.then(() => true),

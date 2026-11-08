@@ -1,4 +1,4 @@
-import type { SshExecRequest } from "../qemu/ssh.ts";
+import type { SshExecRequest } from "../net/ssh.ts";
 
 export type GitSshExecInfo = {
   /** git service name (for example "git-upload-pack") */

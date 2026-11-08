@@ -10,8 +10,7 @@ import { VM } from "../src/vm/core.ts";
 import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture.ts";
 
 /**
- * The CLI with real VMs, on the engine selected by `GONDOLIN_ENGINE` (run via
- * `scripts/test-native.sh` for the native engine).
+ * The CLI with real VMs.
  */
 
 const hostDir = path.join(import.meta.dirname, "..");
@@ -94,7 +93,10 @@ test("cli: bash --listen enables ingress", { skip, timeout }, async () => {
   assert.match(result.stdout, /LISTEN-OK/);
 });
 
-test("cli: --engine selects the engine", { skip, timeout }, async () => {
+test("cli: --native-command selects the daemon", {
+  skip,
+  timeout,
+}, async () => {
   const result = await runCli([
     "--native-command",
     "/nonexistent/gondolind",

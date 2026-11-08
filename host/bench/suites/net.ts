@@ -179,8 +179,7 @@ function variants(): Variant[] {
         },
       }).httpHooks,
     },
-    // tier 2: the same hooks as a createDjsHooks() policy (inside gondolind on
-    // the native engine, node:vm on the node engine)
+    // tier 2: the same hooks as a createDjsHooks() policy (inside gondolind)
     {
       name: "policy-noop-djs",
       description:

@@ -276,8 +276,7 @@ gondolin_wire::wire_struct! {
 gondolin_wire::wire_struct! {
     /// SSH egress configuration (`VMOptions.ssh`, served by `gondolin-sshproxy`).
     ///
-    /// Defaults match `host/src/qemu/ssh.ts`. Paths are paths on the daemon's
-    /// machine.
+    /// Paths are paths on the daemon's machine.
     #[derive(Debug, Clone, PartialEq)]
     pub struct SshEgressConfig {
         /// destination ports on which `SSH-` banners are recognized (the ports of

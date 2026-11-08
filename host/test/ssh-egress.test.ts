@@ -96,8 +96,8 @@ function upstream(): Promise<Upstream | null> {
             const stream = acceptExec();
             execs.push(info.command);
             // answer immediately: output, exit status and close arrive in
-            // the same tick as the exec reply (regression: the node engine
-            // used to attach its listeners after an await and lose them)
+            // the same tick as the exec reply (regression: listeners
+            // attached after an await lost them)
             stream.write(`upstream:${info.command}\n`);
             stream.exit(0);
             stream.end();

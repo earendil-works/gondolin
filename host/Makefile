@@ -7,7 +7,7 @@ BIOME ?= ../node_modules/.bin/biome
 TSC ?= ./node_modules/.bin/tsc
 
 # Host fuzzer target name (see host/fuzz/targets)
-TARGET ?= virtio
+TARGET ?= tar
 
 build:
 	@$(PNPM) run build

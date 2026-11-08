@@ -19,33 +19,23 @@ const NODE_CLI = path.join(
 type Cli = { label: string; command: string[]; env: Record<string, string> };
 
 /**
- * `gondolin exec -- true` wall time per CLI. Under the node engine: the node
- * CLI on the node engine. Under the native engine: the static CLI
- * (`GONDOLIN_NATIVE_BIN`, the multi-call binary) and the node CLI on the
- * native engine. Cold runs use a fresh `XDG_CACHE_HOME` (MITM CA, QEMU probe
+ * `gondolin exec -- true` wall time per CLI: the static CLI
+ * (`GONDOLIN_NATIVE_BIN`, the multi-call binary) and the node CLI. Cold runs
+ * use a fresh `XDG_CACHE_HOME` (MITM CA, QEMU probe
  * cache, sessions); warm runs share one after a warmup. The guest image comes
  * from `GONDOLIN_GUEST_DIR` either way, so nothing is downloaded.
  */
 export async function cliSuite(bench: Bench) {
   const engine = getEngine();
   if (isVirtiofsEngine(engine)) return;
-  const clis: Cli[] =
-    engine === "node"
-      ? [
-          {
-            label: "exec-true",
-            command: [process.execPath, NODE_CLI],
-            env: { GONDOLIN_ENGINE: "node" },
-          },
-        ]
-      : [
-          { label: "exec-true", command: [staticCli()], env: {} },
-          {
-            label: "node-cli-exec-true",
-            command: [process.execPath, NODE_CLI],
-            env: { GONDOLIN_ENGINE: "native" },
-          },
-        ];
+  const clis: Cli[] = [
+    { label: "exec-true", command: [staticCli()], env: {} },
+    {
+      label: "node-cli-exec-true",
+      command: [process.execPath, NODE_CLI],
+      env: {},
+    },
+  ];
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-bench-cli-"));
   try {
     for (const cli of clis) {

@@ -1,8 +1,8 @@
 import type { DebugLogFn } from "../debug.ts";
 import type { NativeEngineOptions } from "../native/config.ts";
-import type { DnsOptions, HttpFetch, HttpHooks } from "../qemu/contracts.ts";
-import type { SshOptions } from "../qemu/ssh.ts";
-import type { TcpOptions } from "../qemu/tcp.ts";
+import type { DnsOptions, HttpFetch, HttpHooks } from "../net/types.ts";
+import type { SshOptions } from "../net/ssh.ts";
+import type { TcpOptions } from "../net/tcp.ts";
 import type { RootfsMode } from "../build/config.ts";
 import type { SandboxServerOptions } from "../sandbox/server-options.ts";
 import type { GuestTmpfsMounts } from "../sandbox/tmpfs.ts";
@@ -30,15 +30,20 @@ export type VmRootfsOptions = {
 export type VMOptions = {
   /** how to reach gondolind (native engine): local binary, a command, a connection, remote mode */
   native?: NativeEngineOptions;
-  /** host engine: the `gondolind` daemon (`native`), in-process TypeScript (`node`, deprecated) or `auto` (native when a working gondolind is available, else node); default `GONDOLIN_ENGINE`, else `auto` */
-  engine?: "node" | "native" | "auto";
+  /** host engine: `native` (the `gondolind` daemon, the only engine) or `auto` (the same; kept for compatibility); `"node"` was removed and throws */
+  engine?: "native" | "auto";
   /** sandbox controller options */
   sandbox?: SandboxServerOptions;
   /** rootfs mode override */
   rootfs?: VmRootfsOptions;
   /** whether to boot the vm immediately (default: true) */
   autoStart?: boolean;
-  /** http fetch implementation for asset downloads (the deprecated node engine also uses it for guest HTTP egress; the native engine does not) */
+  /**
+   * Ignored: was the guest HTTP egress client of the removed node engine.
+   * Use `httpHooks.onRequest` (it may return a `Response`) to intercept or
+   * replace upstream requests.
+   * @deprecated
+   */
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;

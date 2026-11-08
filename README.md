@@ -81,11 +81,10 @@ root disk overlays on both backends):
 
 Node.js 22.19 or newer is required for the SDK and the npm CLI.
 
-By default the VM is run by the [native engine](docs/native.md): `gondolind`,
-a static Rust daemon shipped with the optional platform packages
-(`@earendil-works/gondolin-native-*`, macOS and Linux on arm64 and x64). Where
-no usable binary is found, the deprecated in-process node engine is used
-(`GONDOLIN_ENGINE=node` / `--engine node` forces it). The daemon can run on
+The VM is run by the [native engine](docs/native.md): `gondolind`, a static
+Rust daemon shipped with the optional platform packages
+(`@earendil-works/gondolin-native-*`, macOS and Linux on arm64 and x64; without
+one, set `GONDOLIN_NATIVE_BIN` to a binary). The daemon can run on
 another machine (`--native-command "ssh host gondolind" --remote`): that
 machine only needs QEMU (or the krun runner, selected explicitly for remote
 daemons) and the binary, no Node.js; policy, hooks, credentials

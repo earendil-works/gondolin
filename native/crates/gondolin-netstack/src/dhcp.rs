@@ -1,5 +1,4 @@
-//! Minimal DHCP server (port of `handleDHCP`/`sendDHCPReply` in
-//! `host/src/qemu/network-stack.ts`): DISCOVER → OFFER, REQUEST → ACK, always
+//! Minimal DHCP server: DISCOVER → OFFER, REQUEST → ACK, always
 //! leasing the configured guest address for a day.
 
 use std::net::Ipv4Addr;

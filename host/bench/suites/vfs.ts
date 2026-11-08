@@ -269,8 +269,7 @@ export async function vfsSuite(bench: Bench) {
         kind: "native-memory",
         guestPath: "/mnt/native-memory",
         readonly: false,
-        description:
-          "nativeMounts.memory() (daemon memory fs on native, MemoryProvider on node)",
+        description: "nativeMounts.memory() (daemon memory fs)",
         largeBytes: memoryLargeBytes,
       },
       {

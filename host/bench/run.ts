@@ -1,7 +1,7 @@
 /**
  * Gondolin engine benchmarks.
  *
- *   node bench/run.ts [--engine auto|node|native|... | --interleave node,native] [--suite boot,exec,vfs,net]
+ *   node bench/run.ts [--engine native|native-virtiofs|... | --interleave native-prev,native] [--suite boot,exec,vfs,net]
  *                     [--quick] [--iterations N] [--filter regex]
  *                     [--out dir] [--note text] [--no-save] [--summary-only]
  *
@@ -28,8 +28,7 @@ function engineEnvInfo(engine: EngineName) {
     qemu: qemuVersion(),
     qemuPath: qemuPath(),
     virtiofsEnv: process.env.GONDOLIN_VIRTIOFS ?? null,
-    nativeBin:
-      engine === "node" ? null : (process.env.GONDOLIN_NATIVE_BIN ?? null),
+    nativeBin: process.env.GONDOLIN_NATIVE_BIN ?? null,
   };
 }
 import { Bench } from "./lib/harness.ts";
@@ -172,9 +171,11 @@ for (const suite of suites) {
       complete,
       filter: values.filter ?? null,
       interleaved: engines.length > 1 ? engines : null,
-      // Notes describe caveats of the engine under test, never the node baseline.
+      // Notes describe caveats of the variant under test, never the native baseline.
       note:
-        engine === "node" && engines.length > 1 ? null : (values.note ?? null),
+        engine === "native" && engines.length > 1
+          ? null
+          : (values.note ?? null),
       iterations: values.iterations ? Number(values.iterations) : null,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),

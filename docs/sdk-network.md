@@ -7,8 +7,7 @@ See also: [SDK Overview](./sdk.md), [Network Stack](./network.md), [Ingress](./i
 The network stack mediates HTTP and TLS traffic by default. TCP flows are
 classified and non-HTTP/TLS traffic is dropped unless explicitly enabled via
 SSH egress or host-mapped TCP rules. HTTP requests are intercepted and replayed
-by the host (the native engine's daemon; the deprecated node engine uses
-`fetch`), enabling:
+by the host (the native engine's daemon), enabling:
 
 - Host allowlists with wildcard support
 - Request/response hooks for logging and modification
@@ -73,9 +72,7 @@ onRequest: async (request) => {
 
 Hook policies written as self-contained JavaScript can run inside the native
 engine's daemon instead of your Node process: no round trip per request, and
-they work with remote daemons and the CLIs (`--hooks-script FILE`). On the
-deprecated node engine a script policy runs in a `node:vm` context instead.
-Spread them into `createHttpHooks()` to combine them with allowlists and
+they work with remote daemons and the CLIs (`--hooks-script FILE`). Spread them into `createHttpHooks()` to combine them with allowlists and
 secrets:
 
 ```ts

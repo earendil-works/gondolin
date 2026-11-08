@@ -6,7 +6,7 @@ Gondolin is not a single binary. It is a small system made of:
 
 - **A host-side library + CLI**: for TypeScript / Node.js, also called the control plane
 - **A host engine**: `gondolind`, a static Rust daemon that runs the VM and
-  mediates its I/O (the deprecated `node` engine does this in-process)
+  mediates its I/O
 - **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
 - **VM backend**: `libkrun` (default where it can run) or QEMU
 
@@ -65,20 +65,15 @@ Guest daemons/components:
 - `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
 - `/init`: mounts tmpfs, brings up networking, starts services
 
-### Host engines (native or node)
+### Host engine (native)
 
-The host side comes in two engines with the same SDK and CLI:
-
-- **`native`** (the default when a working `gondolind` binary is found):
-  `gondolind`, a static Rust daemon, runs the VM, the guest protocols, the
-  network stack, the HTTP/TLS mediation and the guest filesystem server. Your
-  Node.js process stays the *controller*: it owns the configuration, your
-  hooks and VFS providers, and talks to the daemon over its stdin/stdout.
-  Because the daemon needs no runtime, it can also run on another machine (for
-  example over SSH) while the controller, credentials and providers stay
-  local. The static `gondolin` CLI runs the same daemon code without Node.js.
-- **`node`** (deprecated): everything above runs inside your Node.js process.
-  Used when no usable `gondolind` is found, or with `GONDOLIN_ENGINE=node`.
+`gondolind`, a static Rust daemon, runs the VM, the guest protocols, the
+network stack, the HTTP/TLS mediation and the guest filesystem server. Your
+Node.js process stays the *controller*: it owns the configuration, your hooks
+and VFS providers, and talks to the daemon over its stdin/stdout. Because the
+daemon needs no runtime, it can also run on another machine (for example over
+SSH) while the controller, credentials and providers stay local. The static
+`gondolin` CLI runs the same daemon code without Node.js.
 
 See [Native Engine](./native.md).
 
@@ -119,11 +114,9 @@ See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
 The important architectural choice: **the host is the enforcement point** for
 both networking and persistence.
 
-With the native engine the right-hand side of this diagram (sandbox server,
-network backend, VFS server, forwarders) lives in `gondolind`; the controller is
-reached over the daemon's stdin/stdout for hooks, VFS providers and the
-`vm.exec`/`vm.fs` API (with the node engine it all runs in your Node.js
-process):
+The right-hand side of this diagram (sandbox server, network backend, VFS
+server, forwarders) lives in `gondolind`; the controller is reached over the
+daemon's stdin/stdout for hooks, VFS providers and the `vm.exec`/`vm.fs` API:
 
 ```
  Node.js controller  <-- stdio (local child, or SSH) -->  gondolind  <-- virtio -->  guest
@@ -175,8 +168,8 @@ On the host side, Gondolin does **not** provide a generic NAT. Instead:
 4. If a mapped TCP rule matches, the host connects to the explicit mapped
    upstream `HOST:PORT` and forwards bytes.
 5. For HTTP requests, data is parsed, checked against policy, optionally transformed
-   (hooks), and replayed by the host's own HTTP client (`fetch` on the node
-   engine).
+   (hooks), and replayed by the host's own HTTP client (`gondolin-http` in
+   the daemon).
 6. For TLS flows, the host performs a controlled MITM so it can see the HTTP
    request inside TLS and apply the same policy/hook pipeline.
 7. For SSH egress flows, the host runs the SSH proxy path (allowlist + host-key
@@ -202,14 +195,13 @@ The guest has two kinds of storage:
 
 For a programmable mount (e.g. `/workspace` or `/data`):
 
-1. In the guest, the mountpoint is served by `sandboxfs` (FUSE), or mounted as
-   virtio-fs when the host's QEMU supports vhost-user (native engine only, not
-   on krun).
+1. In the guest, the mountpoint is mounted as virtio-fs when the VMM offers it
+   (a QEMU with vhost-user, or the bundled krun runner), else served by
+   `sandboxfs` (FUSE).
 2. Each file operation becomes an RPC message over virtio-serial (or a FUSE
    request on a virtio-fs queue).
-3. The host dispatches it to the configured provider(s): `gondolind`'s mount
-   table on the native engine (native mounts directly, JS providers through
-   the controller), `FsRpcService` on the node engine.
+3. The host dispatches it to the configured provider(s) through `gondolind`'s
+   mount table (native mounts directly, JS providers through the controller).
 
 Providers can implement very different semantics (in-memory, read-only host
 directories, remote-backed content, policy wrappers, etc.) while the guest still

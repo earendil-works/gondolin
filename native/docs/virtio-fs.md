@@ -1,7 +1,8 @@
 # virtio-fs for gondolind (M7)
 
 Status: implemented (November 2026). `gondolind` serves the VFS over
-virtio-fs whenever the QEMU binary supports vhost-user-fs, and falls back to
+virtio-fs whenever the QEMU binary supports vhost-user-fs or the krun runner
+has gondolin's libkrun patch (`krun_add_virtiofs_socket`), and falls back to
 sandboxfs otherwise (see "Implementation" below). Sections 1–7 are the
 original feasibility study of the prototype in
 `native/crates/gondolin-virtiofs`.
@@ -298,8 +299,9 @@ Guest: 2 vCPUs, 2 GiB. The guest timed itself, with workloads mirroring
 
 The prototype ran with 1 s entry/attribute TTLs and negative lookup caching,
 and the share was a host temporary directory on APFS. Prototype figures are
-the range over 3 runs; node figures are medians from
-`host/bench/results/SUMMARY.md` (realfs provider).
+the range over 3 runs; node figures are medians of the since-removed node
+engine from `host/bench/results/SUMMARY.md` at the time (realfs provider; the
+result files are in git history).
 
 | workload | node engine (sandboxfs, realfs) | prototype virtio-fs | speedup | guest tmpfs |
 |---|---|---|---|---|

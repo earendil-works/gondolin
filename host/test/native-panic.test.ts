@@ -17,7 +17,6 @@ import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture.ts";
 process.env.GONDOLIND_TEST_PANICS = "1";
 
 async function skipReason(): Promise<string | false> {
-  if (process.env.GONDOLIN_ENGINE !== "native") return "native engine only";
   if (shouldSkipVmTests()) return "hardware virtualization unavailable";
   let binary: string;
   try {

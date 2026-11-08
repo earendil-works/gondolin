@@ -1,7 +1,6 @@
 /**
  * Hidden markers that let the native engine translate JS providers into
- * daemon-side mounts (`native/DESIGN.md`, "Filesystem tiers"). The node engine
- * ignores them.
+ * daemon-side mounts (`native/DESIGN.md`, "Filesystem tiers").
  */
 
 /** Marker of providers with a native counterpart */

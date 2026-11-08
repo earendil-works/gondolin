@@ -417,7 +417,7 @@ fn parse_ssh_target(raw: &str) -> Option<(String, u16)> {
     Some((pattern, port as u16))
 }
 
-/// `normalizeHost` of `host/src/qemu/tcp.ts`.
+/// `normalizeHost` of `host/src/net/tcp.ts`.
 fn normalize_tcp_host(host: &str) -> String {
     let trimmed = host.trim();
     if trimmed.is_empty() {
@@ -429,7 +429,7 @@ fn normalize_tcp_host(host: &str) -> String {
     trimmed.to_lowercase().trim_end_matches('.').to_string()
 }
 
-/// `parseHostPort` of `host/src/qemu/tcp.ts`.
+/// `parseHostPort` of `host/src/net/tcp.ts`.
 fn parse_host_port(
     raw: &str,
     require_port: bool,

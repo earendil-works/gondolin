@@ -5,8 +5,8 @@ Gondolin supports two VM backends:
 - `krun` (default where it can run; uses `libkrun` via the `gondolin-krun-runner` helper)
 - `qemu` (the fallback everywhere else, broader feature support and tuning knobs)
 
-Both backends work with both host engines (`native`, the default, and the
-deprecated `node`; see [Native Engine](./native.md)).
+Both backends are driven by the native engine (`gondolind`; see
+[Native Engine](./native.md)).
 
 This page is the authoritative backend-parity reference for SDK/CLI behavior.
 

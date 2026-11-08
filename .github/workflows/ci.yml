@@ -381,13 +381,13 @@ jobs:
           GONDOLIN_REQUIRE_KRUN: "0"
 
   test:
-    name: Test (node engine, deprecated)
-    needs: [check, build-guest]
+    name: Test
+    needs: [check, build-guest, native]
     runs-on: ubuntu-latest
     env:
       # krun is the default where a runner is installed (the npm runner
-      # package is), but it is best-effort on shared runners and these jobs
-      # cover the QEMU paths (virtio-fs, sandboxfs); see backend-parity
+      # package is), but it is best-effort on shared runners and this job
+      # covers the QEMU paths (virtio-fs, sandboxfs); see backend-parity
       GONDOLIN_VMM: qemu
     steps:
       - uses: actions/checkout@v7
@@ -418,71 +418,6 @@ jobs:
       - name: Install Zig
         run: scripts/install-zig.sh 0.17.0
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 lz4
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Enable KVM
-        run: sudo chown "$(id -u)" /dev/kvm
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Build
-        run: pnpm run build
-
-      - name: Run tests
-        # Run guest + host tests sequentially to avoid running multiple QEMU instances
-        # concurrently (which can hang/time out on some CI runners).
-        timeout-minutes: 20
-        run: |
-          NODE_BIN="$(node -p 'process.execPath')"
-          make -C guest test NODE="$NODE_BIN"
-          make -C host test NODE="$NODE_BIN"
-        env:
-          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
-          WS_TIMEOUT: "120000"
-          # Enable VM/QEMU logs to help diagnose boot/hang issues in CI.
-          GONDOLIN_DEBUG: "net"
-          # Keep covering the deprecated node engine while it exists.
-          GONDOLIN_ENGINE: node
-
-  test-native:
-    name: Test (native engine)
-    needs: [check, build-guest, native]
-    runs-on: ubuntu-latest
-    env:
-      # krun is the default where a runner is installed (the npm runner
-      # package is), but it is best-effort on shared runners and these jobs
-      # cover the QEMU paths (virtio-fs, sandboxfs); see backend-parity
-      GONDOLIN_VMM: qemu
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/setup@v3
-        with:
-          install: false
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'pnpm'
-
-      - name: Download guest assets
-        uses: actions/download-artifact@v8
-        with:
-          name: gondolin-guest-x64
-          path: .
-
-      - name: Extract guest assets
-        run: |
-          mkdir -p guest/image/out
-          tar -xzvf gondolin-guest-x64.tar.gz -C guest/image/out
-          touch guest/image/out/*
-
       - name: Download native binaries
         uses: actions/download-artifact@v8
         with:
@@ -501,12 +436,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 lz4
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Enable KVM
         run: sudo chown "$(id -u)" /dev/kvm
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Run guest tests
+        timeout-minutes: 10
+        run: make -C guest test NODE="$(node -p 'process.execPath')"
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
 
       - name: Check the guest mounts the VFS over virtio-fs
         timeout-minutes: 5
@@ -516,11 +462,10 @@ jobs:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           GONDOLIN_VIRTIOFS: "1"
 
-      - name: Run host tests (native engine, virtio-fs)
+      - name: Run host tests (virtio-fs)
         timeout-minutes: 25
         run: make -C host test NODE="$(node -p 'process.execPath')"
         env:
-          GONDOLIN_ENGINE: native
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
 
@@ -530,7 +475,6 @@ jobs:
         working-directory: host
         run: node --test test/vfs.test.ts test/native-vfs.test.ts test/vfs-many-mounts.test.ts
         env:
-          GONDOLIN_ENGINE: native
           GONDOLIN_VIRTIOFS: "0"
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"

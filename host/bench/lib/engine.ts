@@ -3,25 +3,22 @@ import fs from "node:fs";
 import os from "node:os";
 
 import { VM, type VMOptions } from "../../src/index.ts";
-import { resolveSandboxEngine } from "../../src/native/config.ts";
 import { nsToMs, processTree, readProcess } from "./harness.ts";
 
 /**
- * Engine under test. `native-virtiofs` is the native engine with
+ * Engine variant under test (all run the native engine). `native-virtiofs` is the native engine with
  * `GONDOLIN_VIRTIOFS=1` and a vhost-user capable QEMU first on `PATH`
  * (`GONDOLIN_BENCH_VIRTIOFS_QEMU_DIR`, default `/tmp/qemu-vu/qemu-10.2.1/build`).
  * `native-prev*` run the binary in `GONDOLIN_BENCH_PREV_BIN` (an earlier
  * build) instead of `GONDOLIN_NATIVE_BIN`, to compare builds side by side.
  */
 export type EngineName =
-  | "node"
   | "native"
   | "native-virtiofs"
   | "native-prev"
   | "native-prev-virtiofs";
 
 const ENGINE_NAMES: EngineName[] = [
-  "node",
   "native",
   "native-virtiofs",
   "native-prev",
@@ -34,15 +31,12 @@ export function isVirtiofsEngine(engine: EngineName): boolean {
 }
 
 /**
- * Engine from `--engine` (or one `--interleave` entry), else
- * `GONDOLIN_ENGINE`, else `auto`. `auto` follows the SDK default: `native`
- * when a working native binary is found, else `node`; it is resolved here so
- * results are labelled with the engine that actually ran.
+ * Engine variant from `--engine` (or one `--interleave` entry), else
+ * `native` (`auto` is accepted as an alias, like in the SDK).
  */
 export function resolveEngine(flag: string | undefined): EngineName {
-  const raw = (flag ?? process.env.GONDOLIN_ENGINE ?? "").trim();
-  const value =
-    raw === "" || raw === "auto" ? resolveSandboxEngine("auto") : raw;
+  const raw = (flag ?? "").trim();
+  const value = raw === "" || raw === "auto" ? "native" : raw;
   if (!ENGINE_NAMES.includes(value as EngineName)) {
     throw new Error(
       `unknown engine '${value}' (expected auto, ${ENGINE_NAMES.join(", ")})`,
@@ -51,7 +45,7 @@ export function resolveEngine(flag: string | undefined): EngineName {
   return value as EngineName;
 }
 
-let currentEngine: EngineName = "node";
+let currentEngine: EngineName = "native";
 const baseEnv = {
   PATH: process.env.PATH,
   GONDOLIN_VIRTIOFS: process.env.GONDOLIN_VIRTIOFS,
@@ -113,24 +107,18 @@ export async function guestVfsTransport(vm: VM): Promise<string> {
   return "unknown";
 }
 
-/**
- * Create a VM for the selected engine. The engine is always passed explicitly:
- * the default (`auto`) would pick the native engine when it is available.
- */
+/** Create a VM for the selected engine variant */
 export async function createVm(options: VMOptions = {}): Promise<VM> {
-  const engine = currentEngine === "node" ? "node" : "native";
   const opts: VMOptions = {
     ...options,
     sandbox: { console: "none", ...options.sandbox },
-    engine,
   };
-  if (engine === "node") return VM.create(opts);
   const vm = await VM.create(opts);
   await assertNativeEngine(vm);
   return vm;
 }
 
-/** `gondolind` pid of a native-engine VM (`SandboxServer` has no daemon) */
+/** `gondolind` pid of a VM */
 function daemonPid(vm: VM): number | null {
   const server = (
     vm as unknown as { server?: { getDaemonPid?: () => number | null } }
@@ -139,8 +127,8 @@ function daemonPid(vm: VM): number | null {
 }
 
 /**
- * Guard against silently benchmarking the node engine: the VM must report
- * `engine === "native"` and its daemon pid must be a `gondolind` process.
+ * Guard against benchmarking something else than gondolind (e.g. a wrong
+ * `GONDOLIN_NATIVE_BIN`): the VM's daemon pid must be a `gondolind` process.
  */
 let nativeEngineChecked = false;
 
@@ -154,13 +142,12 @@ async function assertNativeEngine(vm: VM) {
     return;
   try {
     await vm.start();
-    const engine = (vm as unknown as { engine?: string }).engine;
     const pid = daemonPid(vm);
     const info = pid ? await readProcess(pid) : null;
     // the daemon is `gondolind` or the multi-call `gondolin daemon`
-    if (engine !== "native" || !info?.comm.includes("gondolin")) {
+    if (!info?.comm.includes("gondolin")) {
       throw new Error(
-        `engine=native but VM engine is '${engine}' and daemon pid ${pid} is '${info?.comm ?? "?"}' (set GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1 to bypass)`,
+        `daemon pid ${pid} is '${info?.comm ?? "?"}', not gondolind (set GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1 to bypass)`,
       );
     }
     nativeEngineChecked = true;
@@ -172,7 +159,7 @@ async function assertNativeEngine(vm: VM) {
 
 /**
  * Engine-side processes of a VM for resource accounting: the `gondolind`
- * daemon (native engine) and `VM.getHostPid()` (QEMU on both engines), each
+ * daemon and `VM.getHostPid()` (QEMU or the krun runner), each
  * with its descendants. A `getEnginePids()` method on the VM, if present,
  * wins so engines can report exactly what they own.
  */

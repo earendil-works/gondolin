@@ -56,41 +56,29 @@ test("stripUndefined drops undefined keys but keeps buffers", () => {
   );
 });
 
-test("resolveSandboxEngine honours option and env", () => {
-  assert.equal(
-    resolveSandboxEngine(undefined, {
-      GONDOLIN_NATIVE_BIN: "/nonexistent/gondolind",
-    }),
-    "node",
-  );
-  assert.equal(resolveSandboxEngine("node", {}), "node");
+test("resolveSandboxEngine: native and auto select native, node throws", () => {
+  assert.equal(resolveSandboxEngine(undefined, {}), "native");
+  assert.equal(resolveSandboxEngine("auto", {}), "native");
   assert.equal(
     resolveSandboxEngine(undefined, { GONDOLIN_ENGINE: "native" }),
     "native",
   );
   assert.equal(
-    resolveSandboxEngine("node", { GONDOLIN_ENGINE: "native" }),
-    "node",
+    resolveSandboxEngine("native", { GONDOLIN_ENGINE: "auto" }),
+    "native",
+  );
+  assert.throws(
+    () => resolveSandboxEngine("node", {}),
+    /the node engine has been removed/,
+  );
+  assert.throws(
+    () => resolveSandboxEngine(undefined, { GONDOLIN_ENGINE: "node" }),
+    /the node engine has been removed/,
   );
   assert.throws(
     () => resolveSandboxEngine("rust", {}),
     /invalid sandbox engine/,
   );
-  // a binary that is present but not a working gondolind falls back to node
-  assert.equal(
-    resolveSandboxEngine("auto", { GONDOLIN_NATIVE_BIN: "/bin/sh" }),
-    "node",
-  );
-  if (binary) {
-    assert.equal(
-      resolveSandboxEngine("auto", { GONDOLIN_NATIVE_BIN: binary }),
-      "native",
-    );
-    assert.equal(
-      resolveSandboxEngine(undefined, { GONDOLIN_NATIVE_BIN: binary }),
-      "native",
-    );
-  }
 });
 
 test("gondolind handshake, validation and shutdown", {

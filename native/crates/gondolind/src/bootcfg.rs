@@ -1,5 +1,4 @@
-//! Guest boot configuration (port of `host/src/sandbox/server-boot-config.ts`):
-//! the sandboxfs mount point and bind list, how they reach the guest (kernel
+//! Guest boot configuration: the sandboxfs mount point and bind list, how they reach the guest (kernel
 //! cmdline for old guests, the sandboxfs `mounts` RPC for current ones).
 
 /// Normalized sandboxfs configuration from a client `boot` message.

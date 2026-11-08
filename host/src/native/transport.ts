@@ -19,9 +19,8 @@ import { EventEmitter } from "node:events";
 
 import { TypeEncoderMap, decode, encode } from "cbor2";
 
-import { normalize } from "../sandbox/virtio-protocol.ts";
 import { nativeDaemonCommand } from "./binary.ts";
-import { fastDecode, fastEncode } from "./cbor.ts";
+import { fastDecode, fastEncode, normalize } from "./cbor.ts";
 
 /** Maximum frame payload in `bytes` (same as the guest protocols) */
 export const NATIVE_MAX_FRAME = 4 * 1024 * 1024;

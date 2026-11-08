@@ -1,8 +1,6 @@
 /**
- * Tier-2 hooks (`createDjsHooks`) end to end: on the native engine the policy
- * runs inside gondolind on djs, on the node engine in `node:vm` (the same
- * script, so the expectations are shared). Plus the static CLI's
- * `--hooks-script` (native only).
+ * Tier-2 hooks (`createDjsHooks`) end to end: the policy runs inside
+ * gondolind on djs. Plus the static CLI's `--hooks-script`.
  *
  * The guest reaches the host's loopback upstream by connecting to a public
  * address with `Host: localhost:PORT` (as network-egress.test.ts).
@@ -32,10 +30,9 @@ import {
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
 const PUBLIC_IP = "203.0.113.5";
-const native = (process.env.GONDOLIN_ENGINE ?? "native") === "native";
 
 const POLICY = `
-// tier-2 policy shared by both engines
+// tier-2 policy shared by the SDK and the static CLI tests
 const SECRET_HOSTS = ["localhost"];
 
 async function onRequest(req) {
@@ -205,7 +202,6 @@ const guestDir = process.env.GONDOLIN_GUEST_DIR ?? checkoutGuestDir();
 test("tier-2 hooks: static CLI --hooks-script", {
   skip:
     skipVmTests ||
-    (!native && "native engine only") ||
     (!cli && "static gondolin CLI not built") ||
     (!guestDir && "no local guest assets"),
   timeout: timeoutMs,

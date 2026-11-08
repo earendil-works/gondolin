@@ -3,13 +3,12 @@ import test from "node:test";
 
 import { TypeEncoderMap, decode, encode as cbor2Encode } from "cbor2";
 
-import { fastDecode, fastEncode } from "../src/native/cbor.ts";
+import { fastDecode, fastEncode, normalize } from "../src/native/cbor.ts";
 import {
   decodeNativeFrame,
   encodeNativeFrame,
   stripUndefined,
 } from "../src/native/transport.ts";
-import { normalize } from "../src/sandbox/virtio-protocol.ts";
 
 // same Buffer handling as the transport
 const types = new TypeEncoderMap();

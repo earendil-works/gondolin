@@ -1,4 +1,4 @@
-//! libkrun backend (port of `host/src/sandbox/krun-controller.ts`): the
+//! libkrun backend: the
 //! `gondolin-krun-runner` helper boots the VM from a JSON config file and,
 //! like QEMU, connects to the guest channel sockets.
 

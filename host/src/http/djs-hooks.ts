@@ -4,10 +4,10 @@
  * trip, also for remote daemons and the static CLI). See docs/native.md,
  * "Tier-2 hooks".
  *
- * `createDjsHooks()` returns ordinary {@link HttpHooks}: on the node engine a
- * script policy runs in a `node:vm` context with node's own fetch classes, so
- * the same policy works on both engines. Each returned function carries a
- * hidden tag; the native engine sends tagged functions as
+ * `createDjsHooks()` returns ordinary {@link HttpHooks}; called directly, a
+ * script policy runs in a `node:vm` context with node's own fetch classes.
+ * Each returned function carries a hidden tag; the native engine sends tagged
+ * functions as
  * `configure.net.djs_hooks` instead of calling them, also when they are
  * spread into `createHttpHooks({ ..., ...createDjsHooks(source) })`.
  */
@@ -16,11 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 
-import type { HttpHooks } from "../qemu/contracts.ts";
-import {
-  NATIVE_HTTP_POLICY,
-  type NativeHttpPolicyDescriptor,
-} from "./hooks.ts";
+import type { HttpHooks } from "../net/types.ts";
 import { HttpRequestBlockedError } from "./utils.ts";
 
 /**
@@ -171,9 +167,9 @@ function evaluateScript(config: DjsHooksWire): Partial<Record<Phase, HookFn>> {
   return bound;
 }
 
-function moduleOnNode(): never {
+function moduleOutsideDaemon(): never {
   throw new Error(
-    'createDjsHooks: module policies (kind: "module" | "typescript") need the native engine',
+    'createDjsHooks: module policies (kind: "module" | "typescript") only run inside gondolind',
   );
 }
 
@@ -183,11 +179,12 @@ function moduleOnNode(): never {
  * The policy defines any of `isRequestAllowed(request)`,
  * `isIpAllowed(info)`, `onRequest(request)` and `onResponse(response,
  * request)` with the {@link HttpHooks} contract; only those phases are
- * registered. On the native engine it runs inside gondolind (a fresh state
- * per call, budgets from `limits`, any failure denies the request with 502)
- * with a restricted `Request`/`Response`/`Headers`/`URL` environment and no
- * I/O; see docs/native.md for the restrictions. On the node engine a script
- * policy runs in a `node:vm` context (globals persist between calls there).
+ * registered. It runs inside gondolind (a fresh state per call, budgets
+ * from `limits`, any failure denies the request with 502) with a restricted
+ * `Request`/`Response`/`Headers`/`URL` environment and no I/O; see
+ * docs/native.md for the restrictions. The returned functions can also be
+ * called directly: a script policy then runs in a `node:vm` context (globals
+ * persist between calls there), a module policy throws.
  */
 export function createDjsHooks(
   sourceOrOptions: string | DjsHooksOptions,
@@ -208,10 +205,10 @@ export function createDjsHooks(
     return fn;
   };
   if (config.kind !== "script") {
-    // phases are only known to the daemon; on node every call fails closed
+    // phases are only known to the daemon; direct calls fail closed
     for (const phase of PHASES) {
       (hooks as Record<string, HookFn>)[phase] = tag(async () =>
-        moduleOnNode(),
+        moduleOutsideDaemon(),
       );
     }
   } else {
@@ -238,25 +235,6 @@ export function djsHooksOf(fn: unknown): DjsHooksDescriptor | undefined {
   return (fn as unknown as Record<symbol, DjsHooksDescriptor | undefined>)[
     NATIVE_DJS_HOOKS
   ];
-}
-
-/**
- * Throws when `hooks` contains a module policy, which only the native
- * engine can run (called by the node engine at startup).
- */
-export function assertNodeEngineDjsHooks(hooks: HttpHooks | undefined): void {
-  if (!hooks) return;
-  const user = (
-    (hooks as Record<symbol, unknown>)[NATIVE_HTTP_POLICY] as
-      | NativeHttpPolicyDescriptor
-      | undefined
-  )?.user;
-  for (const phase of PHASES) {
-    for (const fn of [hooks[phase], user?.[phase]]) {
-      const kind = djsHooksOf(fn)?.config.kind;
-      if (kind !== undefined && kind !== "script") moduleOnNode();
-    }
-  }
 }
 
 /** Most modules {@link djsHooksOptionsFromFile} pulls in */

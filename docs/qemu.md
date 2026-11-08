@@ -45,10 +45,9 @@ works without custom kernels or unusual userspace stacks.
 ## How Gondolin Connects to QEMU
 
 Gondolin runs QEMU as a child process and connects to it over local transports
-(Unix domain sockets).  On the native engine QEMU is a child of `gondolind`,
-which listens on the sockets in a private directory (mode `0700`) and also
-talks QMP to QEMU (to pause an idle VM, for example); on the node engine it is
-a child of your Node.js process.  The host side is responsible for:
+(Unix domain sockets).  QEMU is a child of `gondolind`, which listens on the
+sockets in a private directory (mode `0700`) and also talks QMP to QEMU (to
+pause an idle VM, for example).  The host side is responsible for:
 
 - Launching and shutting down the VM process
 - Wiring up virtio channels used for exec control and filesystem RPC

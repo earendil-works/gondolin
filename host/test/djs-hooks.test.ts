@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  assertNodeEngineDjsHooks,
   createDjsHooks,
   djsHooksOptionsFromFile,
   importSpecifiers,
@@ -78,7 +77,7 @@ test("createDjsHooks composes with createHttpHooks and tier 3", () => {
   );
 });
 
-test("createDjsHooks: node engine runs script policies with node's fetch classes", async () => {
+test("createDjsHooks: direct calls run script policies with node's fetch classes", async () => {
   const hooks = createDjsHooks(POLICY);
   assert.equal(
     await hooks.isRequestAllowed!(new Request("http://a.test/ok")),
@@ -104,7 +103,7 @@ test("createDjsHooks: node engine runs script policies with node's fetch classes
   );
 });
 
-test("createDjsHooks: module policies and option validation", () => {
+test("createDjsHooks: module policies and option validation", async () => {
   const mod = createDjsHooks({
     source: "import { x } from './lib.js'; export function onRequest() {}",
     kind: "module",
@@ -115,12 +114,11 @@ test("createDjsHooks: module policies and option validation", () => {
   assert.deepEqual(compiled.config.djs_hooks?.modules, {
     "lib.js": "export const x = 1;",
   });
-  assert.throws(() => assertNodeEngineDjsHooks(mod), /need the native engine/);
-  assert.throws(
-    () => assertNodeEngineDjsHooks(createHttpHooks({ ...mod }).httpHooks),
-    /need the native engine/,
+  // module policies only run inside gondolind: direct calls fail closed
+  await assert.rejects(
+    async () => mod.onRequest!(new Request("http://a.test/")),
+    /only run inside gondolind/,
   );
-  assertNodeEngineDjsHooks(createDjsHooks(POLICY));
 
   assert.throws(
     () => createDjsHooks("function ("),
@@ -172,10 +170,6 @@ test("djsHooksOptionsFromFile: kinds and relative imports from disk", () => {
       filename: "p.js",
       kind: "script",
     });
-    assert.throws(
-      () => assertNodeEngineDjsHooks(createDjsHooks(options)),
-      /need the native engine/,
-    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

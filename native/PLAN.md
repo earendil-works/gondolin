@@ -1,8 +1,10 @@
 # gondolind: plan and status
 
 See `DESIGN.md` for the architecture. Status markers: `[ ]` todo, `[~]` in
-progress, `[x]` done. Every milestone ends with tests passing on both engines
-for what it covers and a benchmark run recorded in `host/bench/results/`.
+progress, `[x]` done. Every milestone ends with the host tests passing for what it
+covers (on both engines while the node engine existed) and a benchmark run
+recorded in `host/bench/results/`. The node engine is removed; items that
+mention it are history.
 
 Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 `native/<agent>` and is merged into `main` by the coordinator. The first team
@@ -14,13 +16,15 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Design and plan (`native/DESIGN.md`, `native/PLAN.md`)
 - [x] Cargo workspace scaffold with crate seams (`native/`)
 - [x] Benchmark harness (`host/bench/`), engine switch via `GONDOLIN_ENGINE`
-- [x] Baseline numbers for the node engine (`host/bench/results/SUMMARY.md`)
+- [x] Baseline numbers for the node engine (`host/bench/results/SUMMARY.md`;
+      the node result files are in git history since the removal)
 
 ## M1: core daemon (exec) — done (merged)
 
 - [x] `gondolin-wire`: framing + CBOR, async reader/writer, tests
 - [x] `gondolin-proto`: session + exec + file-op messages
-- [x] `gondolind`: session, QEMU args (parity test vs `buildQemuArgs`), private
+- [x] `gondolind`: session, QEMU args (parity test vs `buildQemuArgs`, removed
+      with the node engine), private
       socket dir, chardev/netdev listeners, log tail + exit hints, idle pause
       via QMP + clock sync
 - [x] Guest control channel: boot config, time sync, exec/stdin/pty/windows,
@@ -49,8 +53,9 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Full host suite on both engines: 748 tests, 0 failures
 - [ ] Commit errors cannot surface at `close()`/`fsync()` over sandboxfs (no
       FLUSH/FSYNC forwarded); fixed by virtio-fs (M7)
-- [ ] Benchmarks on a quiet machine (object tier vs node for user-visible
-      `MemoryProvider` is expected to be slower on small-file metadata)
+- [ ] Benchmarks on a quiet machine (the object tier behind user-visible
+      `MemoryProvider` was expected to be slower than the node engine on
+      small-file metadata)
 
 ## M3: network — done (merged)
 
@@ -88,8 +93,10 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] CLI on the native engine (`--engine`, `--native-command`, `--remote`),
       VM-level CLI tests on both engines
 - [x] `pnpm test:both`; `engine: "auto"`; `DEFAULT_SANDBOX_ENGINE` constant
-- [x] Default engine is `auto` (native when a working gondolind is found,
-      else node); `GONDOLIN_ENGINE=node` restores the old behaviour
+      (all superseded by the retirement step 2: `test:both` and the constant
+      are gone, `auto` = native)
+- [x] Default engine was `auto` (native when a working gondolind was found,
+      else node); `GONDOLIN_ENGINE=node` now throws
 
 ## M5: remote and packaging
 
@@ -98,7 +105,8 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] MITM CA generation in the daemon (node-compatible cache)
 - [x] Remote-clean daemon: daemon-side image/rootfs overlay, `native.connect`
       over any duplex (pi-env `openProcess` shape), `assertRemoteConfigure`,
-      relay network mode; `host/scripts/test-native-remote.sh` (54/54)
+      relay network mode (removed with the node engine);
+      `host/scripts/test-native-remote.sh` (54/54)
 - [x] Remote checkpoints (daemon-side overlay export/import, node file format)
 - [x] Static release builds (musl via zig cc + darwin): `make native-release`
 - [x] Linux test runner inside a Gondolin VM: `make native-test-linux`
@@ -171,15 +179,23 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 
 - [x] Step 1: `engine: "node"` deprecated (one-time warning), `fetch` narrowed
       (no longer switches native egress to JS), interim fallbacks internal
-- [x] CI: `native` job (check, tests, release build) and `test-native` job
-      (full host suite on native + virtio-fs check + sandboxfs fallback run on
-      stock Ubuntu QEMU/KVM); node-engine job kept, marked deprecated
+- [x] CI: `native` job (check, tests, release build) and one `test` job
+      (guest tests, virtio-fs check, full host suite on the native engine
+      with `GONDOLIN_VMM=qemu`, sandboxfs fallback run on stock Ubuntu
+      QEMU/KVM); the deprecated node-engine job is gone
 - [x] x86_64 `microvm` (MMIO vhost-user-fs, memory-backend) and q35 + virtio-fs
       boot and pass under TCG on QEMU 8.2.2 (GitHub's) and 10.0 (`make
       native-test-docker PHASES=vm-x64`)
 - [ ] First real CI run with KVM (not pushed yet)
-- [ ] Step 2 (after a release in the field): delete the node engine and the
-      fallback modes; `auto` = native or a clear error; drop test-both
+- [x] Step 2: the node engine and the fallback modes are removed; `auto` =
+      native; test-both dropped. The SDK's in-process sandbox server,
+      network stack and `FsRpcService` are deleted (`SandboxServer` and
+      `FsRpcService` are no longer exported), the daemon accepts only
+      `vfs`/`net` mode `native` (`vfs_proxy.rs`, `net_relay.rs`, `vfs_rpc`,
+      `netdev_*` deleted), `engine: "node"` throws, a missing `gondolind` is
+      an error instead of a fallback, `VMOptions.fetch` is ignored; the TS
+      fuzz targets for DNS, network and virtio went with the code (the Rust
+      side is fuzzed by `native/fuzz`); bench variants are native-only
 
 ## M8: dependency diet — done (249 → 26 runtime crates)
 

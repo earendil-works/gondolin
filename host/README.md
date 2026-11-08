@@ -10,11 +10,9 @@ use.
 
 The host side runs in the native engine, `gondolind` (Rust), which ships as an
 optional platform package (`@earendil-works/gondolin-native-*` for macOS
-arm64/x64 and Linux arm64/x64) installed with this package. The default
-engine `auto` uses it when a working binary is found and otherwise falls back
-to the in-process TypeScript engine (`node`), which is deprecated
-(`GONDOLIN_ENGINE=node` or `engine: "node"` selects it explicitly and prints a
-one-time `DeprecationWarning`). See
+arm64/x64 and Linux arm64/x64) installed with this package; elsewhere, or when
+optional dependencies are skipped, point `GONDOLIN_NATIVE_BIN` at a binary.
+The earlier in-process TypeScript engine (`node`) has been removed. See
 [Native Engine](https://earendil-works.github.io/gondolin/native/).
 
 ## Requirements

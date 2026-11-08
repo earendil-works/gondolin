@@ -207,12 +207,6 @@ importers:
       cbor2:
         specifier: ^2.3.0
         version: 2.3.0
-      ssh2:
-        specifier: ^1.17.0
-        version: 1.17.0
-      undici:
-        specifier: ^6.29.0
-        version: 6.29.0
     devDependencies:
       '@types/node':
         specifier: 22.19.21
@@ -220,9 +214,15 @@ importers:
       '@types/ssh2':
         specifier: 1.15.6
         version: 1.15.6
+      ssh2:
+        specifier: ^1.17.0
+        version: 1.17.0
       typescript:
         specifier: 7.0.2
         version: 7.0.2
+      undici:
+        specifier: ^6.29.0
+        version: 6.29.0
     optionalDependencies:
       '@earendil-works/gondolin-krun-runner-darwin-arm64':
         specifier: 0.14.0

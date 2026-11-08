@@ -13,9 +13,9 @@ Commands:
   version      Print the version (also --version, -V)
 
 Engine options (before the command):
-  --engine native|auto  Accepted for compatibility with the Node CLI; this CLI
-                        always uses the native engine (--engine node,
-                        --native-command and --remote need the Node CLI)
+  --engine native|auto  Accepted for compatibility; there is only the native
+                        engine (--native-command and --remote need the Node
+                        CLI)
 
 This is the static gondolin CLI (native engine, no Node.js). `build` and
 `tools` need the Node CLI: npx @earendil-works/gondolin.

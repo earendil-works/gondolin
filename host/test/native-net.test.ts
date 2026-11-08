@@ -317,7 +317,7 @@ test("native net: onResponse returning the same response keeps the original body
   assert.deepEqual(pulls, []);
 });
 
-test("native net: network options resolve like the node engine", () => {
+test("native net: network options resolve to the stack configuration", () => {
   const plain = compileNetworkOptions({ daemonIsLocal: false });
   assert.deepEqual(plain.stack.dns, {
     mode: "synthetic",

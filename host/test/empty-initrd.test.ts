@@ -1,14 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 
-import {
-  createEmptyInitrd,
-  resolveUsableKrunInitrd,
-} from "../src/utils/empty-initrd.ts";
+import { createEmptyInitrd } from "../src/utils/empty-initrd.ts";
 
 test("createEmptyInitrd is a non-empty newc archive with only a trailer", (t) => {
   const initrd = createEmptyInitrd();
@@ -27,19 +21,4 @@ test("createEmptyInitrd is a non-empty newc archive with only a trailer", (t) =>
     return;
   }
   assert.equal(listing.trim(), "");
-});
-
-test("resolveUsableKrunInitrd replaces 0-byte initrds", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-initrd-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-
-  const good = path.join(dir, "good");
-  fs.writeFileSync(good, "x");
-  assert.equal(resolveUsableKrunInitrd(good), good);
-
-  const empty = path.join(dir, "empty");
-  fs.writeFileSync(empty, "");
-  const replaced = resolveUsableKrunInitrd(empty);
-  assert.notEqual(replaced, empty);
-  assert.ok(fs.readFileSync(replaced).equals(createEmptyInitrd()));
 });

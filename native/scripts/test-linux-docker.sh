@@ -11,7 +11,7 @@
 #   vm          native engine end to end with QEMU TCG: memfd RAM + virtio-fs,
 #               openat2 host mounts, resolv.conf, PR_SET_PDEATHSIG
 #               (docker/linux-smoke.mts)
-#   host-tests  host tests with GONDOLIN_ENGINE=native under TCG: HOST_TESTS
+#   host-tests  host tests under TCG: HOST_TESTS
 #               (default: exec vfs native-vfs network-egress cli-vm; `all`:
 #               every host test but krun and container-build, ~4 min)
 #

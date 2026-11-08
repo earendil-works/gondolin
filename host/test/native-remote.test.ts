@@ -26,7 +26,7 @@ test("remote configure carries no controller-local paths", () => {
   const payload = buildNativeConfigure(
     resolved,
     {},
-    { vfsController: true, netSocketPath: null, netRelay: true },
+    {},
     {
       image,
       rootfsMode: "auto",
@@ -35,12 +35,12 @@ test("remote configure carries no controller-local paths", () => {
   assertRemoteConfigure(payload);
   assert.equal(payload.vm.image, "alpine-base:latest");
   assert.equal(payload.vm.kernel_path, "");
-  assert.deepEqual(payload.net, { mode: "relay" });
+  assert.equal(payload.net, undefined);
 
   const local = buildNativeConfigure(
     { ...resolved, kernelPath: "/tmp/vmlinuz" },
     {},
-    { vfsController: false, netSocketPath: null },
+    {},
   );
   assert.throws(
     () => assertRemoteConfigure(local),

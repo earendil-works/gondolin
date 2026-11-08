@@ -42,10 +42,8 @@ Conceptually:
 On the native engine (the default) all of this runs in `gondolind`:
 `gondolin-netstack` (a userspace stack built on smoltcp) terminates the
 guest's traffic and `gondolin-egress` classifies flows and mediates HTTP/TLS;
-only hooks registered in your program run in the Node.js controller. The
-deprecated node engine implements the same pipeline in TypeScript
-(`host/src/qemu/`). Both behave the same apart from the differences listed
-in [Native Engine](./native.md#differences-from-the-node-engine).
+only hooks registered in your program run in the Node.js controller. See
+[Native Engine](./native.md#how-the-engine-serves-the-vm) for details.
 
 ## Addressing and "LAN" Model
 
@@ -233,7 +231,7 @@ For connections classified as HTTP:
 1. The host parses the request line and headers.
 2. The host applies the configured request hooks and policy checks.
 3. The host performs the actual upstream request using a host HTTP client
-   (`gondolin-http` on the native engine, `fetch` on the node engine).
+   (`gondolin-http` in the daemon).
 4. The host streams (or buffers, depending on hooks) the response back to the
    guest as an HTTP/1.x response.
 

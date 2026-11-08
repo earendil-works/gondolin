@@ -3,14 +3,13 @@
  * with vhost-user-fs, e.g. Linux distribution builds). Exits non-zero when
  * the guest fell back to sandboxfs.
  *
- * Usage: GONDOLIN_ENGINE=native node scripts/check-virtiofs.ts
+ * Usage: node scripts/check-virtiofs.ts
  */
 
 import { VM } from "../src/index.ts";
 import { MemoryProvider } from "../src/vfs/node/index.ts";
 
 const vm = await VM.create({
-  engine: "native",
   sandbox: { console: "none" },
   vfs: { mounts: { "/": new MemoryProvider() } },
 });

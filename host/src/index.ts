@@ -31,8 +31,7 @@ export {
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
 export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
 
-// Server for running the sandbox
-export { SandboxServer } from "./sandbox/server.ts";
+// Guest tmpfs mounts
 export {
   DEFAULT_GUEST_TMPFS,
   type GuestTmpfsMountOptions,
@@ -84,11 +83,6 @@ export {
   createVirtualDirStats,
   formatVirtualEntries,
 } from "./vfs/utils.ts";
-export {
-  FsRpcService,
-  type FsRpcMetrics,
-  MAX_RPC_DATA,
-} from "./vfs/rpc-service.ts";
 
 // HTTP hooks for network policy
 export {
@@ -127,15 +121,15 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
-  TcpOptions,
-} from "./qemu/net.ts";
+} from "./net/types.ts";
+export type { TcpOptions } from "./net/tcp.ts";
 export type {
   SshOptions,
   SshCredential,
   SshExecRequest,
   SshExecDecision,
   SshExecPolicy,
-} from "./qemu/ssh.ts";
+} from "./net/ssh.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
 export {
   suggestHostsForSecret,

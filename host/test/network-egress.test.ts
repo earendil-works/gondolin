@@ -1,5 +1,5 @@
 /**
- * Guest network egress end to end (runs on both engines, `GONDOLIN_ENGINE`):
+ * Guest network egress end to end:
  * HTTP/HTTPS mediation to local upstreams, policy, secrets, hooks,
  * WebSockets, DNS and mapped TCP.
  *
@@ -334,8 +334,6 @@ test("network: dns per-host mapping and mapped tcp", vmTest, async () => {
   });
 });
 
-// (127.0.0.1: the node engine pins the tunnel to the first allowed address of
-// `localhost`, which is ::1 on macOS where the upstream does not listen)
 test("network: websocket upgrades are tunneled", vmTest, async () => {
   const ups = await upstreams();
   await withVm("net-policy", await policyVmOptions(), async (vm) => {

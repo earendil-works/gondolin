@@ -114,8 +114,7 @@ How it works:
 
 - The guest connects to `HOST:PORT` as usual (default `22`; non-standard ports are enabled by allowlisting `HOST:PORT`)
 - The host intercepts that TCP flow (SSH is only allowed when explicitly
-  configured) and terminates it in a host-side SSH server (in `gondolind` on
-  the native engine, in-process on the node engine).
+  configured) and terminates it in a host-side SSH server (in `gondolind`).
 - For each guest `exec` request, the host opens an upstream SSH connection to
   the real destination using either:
     - a host ssh-agent, or

@@ -105,9 +105,6 @@ pub trait NetBackend: Send + Sync + 'static {
 pub enum NetSetup {
     /// no network device
     None,
-    /// QEMU connects to a socket served by someone else (interim: the node
-    /// network stack in the controller; local sessions only)
-    External { socket_path: String },
     /// served in the daemon
     Native(Arc<dyn NetBackend>),
 }
@@ -130,10 +127,7 @@ impl SubsystemContext {
 /// Builds the VFS backend for `configure.vfs`.
 ///
 /// Modes:
-/// - absent/`null`: no backend (requests fail with `ENOSYS`, like the node
-///   engine with `vfs: null`)
-/// - `{ mode: "controller" }`: interim proxy, every request is forwarded to the
-///   controller as `vfs_rpc` and served by the node VFS implementation
+/// - absent/`null`: no backend (requests fail with `ENOSYS`, `vfs: null`)
 /// - `{ mode: "native", fuse_mount, binds, mounts, hooks }`: the mount table of
 ///   `gondolin-vfs` ([`gondolin_proto::vfs::VfsConfig`], `crate::vfs`)
 pub fn build_vfs(
@@ -144,9 +138,6 @@ pub fn build_vfs(
         return Ok(None);
     };
     match Fields::of(config).text("mode") {
-        Some("controller") => {
-            Ok(Some(Arc::new(crate::vfs_proxy::ControllerVfs::new(ctx.ctl.clone()))))
-        }
         Some("native") => crate::vfs::build(config, ctx).map(Some),
         Some(other) => Err(format!("unsupported vfs mode: {other}")),
         None => Err("vfs configuration requires a mode".into()),
@@ -157,29 +148,13 @@ pub fn build_vfs(
 ///
 /// Modes:
 /// - absent/`null`: no network device
-/// - `{ mode: "external", socket_path }`: QEMU connects to `socket_path`
 /// - `{ mode: "native", ... }`: served in the daemon ([`crate::net`])
-/// - `{ mode: "relay" }`: fallback for remote sessions, the netdev stream is
-///   relayed to the controller (`net_relay.rs`)
 pub fn build_net(config: Option<&Value>, ctx: &SubsystemContext) -> Result<NetSetup, String> {
     let Some(config) = config.filter(|v| !v.is_null()) else {
         return Ok(NetSetup::None);
     };
-    let f = Fields::of(config);
-    match f.text("mode") {
-        Some("external") => {
-            let path = f.text("socket_path").ok_or("net.socket_path is required")?;
-            if path.is_empty() {
-                return Err("net.socket_path must not be empty".into());
-            }
-            Ok(NetSetup::External { socket_path: path.to_string() })
-        }
+    match Fields::of(config).text("mode") {
         Some("native") => crate::net::build_native(config, ctx),
-        Some("relay") => {
-            let relay = crate::net_relay::NetRelay::new(ctx.ctl.clone());
-            ctx.dispatcher.register(crate::net_relay::NETDEV_DATA, relay.clone());
-            Ok(NetSetup::Native(relay))
-        }
         Some(other) => Err(format!("unsupported net mode: {other}")),
         None => Err("net configuration requires a mode".into()),
     }

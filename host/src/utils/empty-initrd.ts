@@ -56,20 +56,3 @@ export function ensureEmptyInitrdFile(initrdPath: string): boolean {
     return false;
   }
 }
-
-/**
- * Return an initrd path libkrun can load.  Images built before this fix ship
- * a 0-byte `krun-empty-initrd`, which is replaced with the generated one.
- */
-export function resolveUsableKrunInitrd(initrdPath: string): string {
-  try {
-    if (fs.statSync(initrdPath).size > 0) return initrdPath;
-  } catch {
-    return initrdPath;
-  }
-  const fallback = getDefaultKrunInitrdPath();
-  if (!ensureEmptyInitrdFile(fallback)) {
-    throw new Error(`failed to create default krun initrd at ${fallback}`);
-  }
-  return fallback;
-}

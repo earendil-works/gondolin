@@ -1,6 +1,4 @@
-//! HTTP/1.x bridging: the guest-facing server and the request pipeline
-//! (port of `handleHttpDataWithWriter` and `fetchHookRequestAndRespond` in
-//! `host/src/qemu/http.ts`).
+//! HTTP/1.x bridging: the guest-facing server and the request pipeline.
 //!
 //! Order per request: head validation → request + ip policy precheck (when no
 //! `on_request` hook can rewrite the request) → for each hop: `on_request`

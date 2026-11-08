@@ -3,8 +3,7 @@
 # scripts/gondolind-remote-sim.sh (own HOME/XDG_CACHE_HOME/TMPDIR/cwd, empty
 # environment) in remote mode, where the controller refuses to send paths of
 # its own machine (assertRemoteConfigure) and the daemon resolves the image,
-# prepares the root disk and serves the network natively
-# (GONDOLIN_NATIVE_NET=relay: relayed to the controller's node stack).
+# prepares the root disk and serves the network.
 #
 # Usage: scripts/test-native-remote.sh [--release] [test files...]
 set -euo pipefail
@@ -22,7 +21,6 @@ fi
 
 (cd "$native" && cargo build -p gondolind ${cargo_flags[@]+"${cargo_flags[@]}"})
 export GONDOLIN_REMOTE_BIN="$native/target/$profile/gondolind"
-export GONDOLIN_ENGINE=native
 export GONDOLIN_NATIVE_REMOTE=1
 export GONDOLIN_NATIVE_COMMAND="$here/scripts/gondolind-remote-sim.sh"
 export GONDOLIN_BACKEND_PARITY_INGRESS=1

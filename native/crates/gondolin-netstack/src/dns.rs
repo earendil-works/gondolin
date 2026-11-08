@@ -1,6 +1,5 @@
 //! DNS helpers: query validation, synthetic answers and the per-host synthetic
-//! address table (port of `host/src/qemu/dns.ts` and `SyntheticDnsHostMap` in
-//! `host/src/utils/dns.ts`).
+//! address table.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

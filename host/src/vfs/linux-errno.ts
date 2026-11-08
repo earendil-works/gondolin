@@ -100,21 +100,3 @@ export const LINUX_ERRNO: Readonly<Record<string, number>> = Object.freeze({
   ERFKILL: 132,
   EHWPOISON: 133,
 });
-
-export function toLinuxErrno(
-  error: Pick<NodeJS.ErrnoException, "code" | "errno">,
-  fallback = LINUX_ERRNO.EIO,
-): number {
-  if (typeof error.code === "string") {
-    const mapped = LINUX_ERRNO[error.code];
-    if (mapped !== undefined) {
-      return mapped;
-    }
-  }
-
-  if (typeof error.errno === "number" && Number.isFinite(error.errno)) {
-    return Math.abs(Math.trunc(error.errno));
-  }
-
-  return fallback;
-}

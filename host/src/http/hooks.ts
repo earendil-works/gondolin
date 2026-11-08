@@ -1,9 +1,6 @@
 import crypto from "node:crypto";
 
-import {
-  ON_REQUEST_EARLY_POLICY_SAFE,
-  type HttpHooks,
-} from "../qemu/contracts.ts";
+import { ON_REQUEST_EARLY_POLICY_SAFE, type HttpHooks } from "../net/types.ts";
 import { HttpRequestBlockedError } from "./utils.ts";
 import { isInternalIpAddress } from "../utils/ip.ts";
 import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns.ts";

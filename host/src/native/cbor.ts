@@ -332,3 +332,32 @@ class Reader {
     }
   }
 }
+
+/** Generic CBOR values as plain JSON-like objects: maps become objects (own `__proto__` keys stay data), byte strings `Buffer`s */
+export function normalize(value: unknown): unknown {
+  if (value instanceof Map) {
+    const obj: Record<string, unknown> = {};
+    for (const [key, entry] of value.entries()) {
+      const name = String(key);
+      if (name === "__proto__") {
+        // an own property, never the object's prototype (untrusted peers)
+        Object.defineProperty(obj, name, {
+          value: normalize(entry),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } else {
+        obj[name] = normalize(entry);
+      }
+    }
+    return obj;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalize(entry));
+  }
+  if (value instanceof Uint8Array && !Buffer.isBuffer(value)) {
+    return Buffer.from(value);
+  }
+  return value;
+}

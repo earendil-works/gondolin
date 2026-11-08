@@ -41,19 +41,15 @@ the machine `gondolind` runs on, and Node.js only where the CLI runs.
 These go before the command and apply to every VM the command starts:
 
 ```bash
-gondolin [--engine node|native|auto] [--native-command CMD] [--remote] <command> ...
+gondolin [--native-command CMD] [--remote] <command> ...
 ```
 
-- `--engine node|native|auto` -- host engine (default: `$GONDOLIN_ENGINE`, else
-  `auto`, which picks `native` when a working `gondolind` binary is available
-  and `node` otherwise; `--engine node` / `GONDOLIN_ENGINE=node` selects the
-  node engine, which is deprecated and prints a warning)
 - `--native-command CMD` -- start `gondolind` with `CMD`, e.g.
-  `"ssh build-box gondolind"` (implies `native`; same as
-  `GONDOLIN_NATIVE_COMMAND`)
+  `"ssh build-box gondolind"` (same as `GONDOLIN_NATIVE_COMMAND`)
 - `--remote` -- the daemon runs on another machine; images, disks and the MITM
-  CA are handled on its side (implies `native`; same as
-  `GONDOLIN_NATIVE_REMOTE=1`)
+  CA are handled on its side (same as `GONDOLIN_NATIVE_REMOTE=1`)
+- `--engine native|auto` -- accepted for compatibility; both select the native
+  engine. `--engine node` is an error (the node engine was removed)
 
 The flags also accept the `--flag=VALUE` form.
 
@@ -112,8 +108,8 @@ Differences:
   (`npx @earendil-works/gondolin build`); `image build` says so;
 - `--host-secret NAME` without `@HOST` (host suggestions via trufflehog) is not
   supported: list the hosts (`--host-secret NAME@HOST[,HOST...]`);
-- there is only the native engine: `--engine native|auto` is accepted,
-  `--engine node`, `--native-command` and `--remote` are not;
+- `--native-command` and `--remote` are not supported (the daemon runs
+  in-process);
 - upstream TLS for mediated HTTPS trusts the system and webpki root stores
   (`SSL_CERT_FILE`/`SSL_CERT_DIR` replace the system bundle,
   `NODE_EXTRA_CA_CERTS` is added; the Node CLI uses Node's CA store), and DNS
@@ -203,9 +199,7 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
       global functions
     - Files a module imports with relative specifiers (`./lib/x.ts`,
       `./data.json`) are read from next to it and sent along
-    - On the native engine it runs inside the daemon (also in the static
-      CLI); on the deprecated node engine a script runs in a `node:vm`
-      context and a module policy is refused at startup; see
+    - It runs inside the daemon (also in the static CLI); see
       [Native Engine: Tier-2 Hooks](./native.md#tier-2-hooks)
     - Combines with `--allow-host`/`--host-secret` (declarative policy runs
       first, secrets are substituted after the hook)
@@ -689,8 +683,8 @@ gondolin tools trufflehog --json
 Node CLI only:
 
 - `GONDOLIN_ENGINE`
-    - Host engine when `--engine` is not given: `native`, `node` (deprecated)
-      or `auto` (default)
+    - Accepted for compatibility: `native` or `auto` (both the native engine);
+      `node` is an error
 
 - `GONDOLIN_NATIVE_BIN`
     - Native engine binary to use instead of the one from the

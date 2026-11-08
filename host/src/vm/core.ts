@@ -35,7 +35,6 @@ import {
   decodeOutputFrame,
   type ClientMessage,
 } from "../sandbox/control-protocol.ts";
-import { SandboxServer } from "../sandbox/server.ts";
 import { NativeSandboxServer } from "../native/server.ts";
 import { NativeFsClient, type NativeVfsSpec } from "../native/vfs.ts";
 import {
@@ -44,7 +43,7 @@ import {
   resolveVmEngine,
 } from "../native/config.ts";
 import { resolveRemoteSandboxOptions } from "../native/remote.ts";
-import { assertMacHypervisorEntitlement } from "../sandbox/krun-controller.ts";
+import { assertMacHypervisorEntitlement } from "../utils/krun-entitlement.ts";
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
@@ -53,7 +52,7 @@ import {
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
 import type { SandboxConnection } from "../sandbox/client.ts";
-import type { SandboxState } from "../sandbox/controller.ts";
+import type { SandboxState } from "../sandbox/control-protocol.ts";
 import {
   SessionIpcServer,
   gcSessions,
@@ -253,7 +252,7 @@ export class VM {
   private readonly autoStart: boolean;
   private readonly startTimeoutMs: number;
   private readonly sessionLabel: string | undefined;
-  private server: SandboxServer | NativeSandboxServer | null;
+  private server: NativeSandboxServer | null;
   /** host engine implementation */
   readonly engine: SandboxEngine;
   /** gondolind runs on another machine (no shared filesystem) */
@@ -317,9 +316,6 @@ export class VM {
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
 
     // Build the combined sandbox options
-    if (options.fetch && sandboxOptions.fetch === undefined) {
-      sandboxOptions.fetch = options.fetch;
-    }
     if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
       sandboxOptions.httpHooks = options.httpHooks;
     }
@@ -363,7 +359,8 @@ export class VM {
 
     // A remote daemon resolves (and downloads) its own image
     const native = resolveNativeEngineOptions(options.native);
-    if (resolveVmEngine(options.engine, native) === "native" && native.remote) {
+    resolveVmEngine(options.engine, native);
+    if (native.remote) {
       return new VM(options);
     }
 
@@ -392,7 +389,7 @@ export class VM {
     this.id = randomUUID();
     const native = resolveNativeEngineOptions(options.native);
     this.engine = resolveVmEngine(options.engine, native);
-    this.remote = this.engine === "native" && Boolean(native.remote);
+    this.remote = Boolean(native.remote);
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
@@ -476,25 +473,21 @@ export class VM {
     this.shortcutBindMounts = this.fuseBinds
       .filter((mountPath) => mountPath !== this.fuseMount)
       .sort((a, b) => b.length - a.length);
-    const nativeVfs: NativeVfsSpec | undefined =
-      this.engine === "native" && this.vfs
-        ? {
-            mounts: fuseMounts,
-            hooks: sandboxOptions.vfsProvider ? undefined : options.vfs?.hooks,
-            fuseMount: this.fuseMount,
-            fuseBinds: this.fuseBinds,
-            gondolinEtc: this.gondolinEtc
-              ? {
-                  provider: this.gondolinEtc.provider,
-                  listeners: this.gondolinEtc.listeners,
-                }
-              : undefined,
-          }
-        : undefined;
+    const nativeVfs: NativeVfsSpec | undefined = this.vfs
+      ? {
+          mounts: fuseMounts,
+          hooks: sandboxOptions.vfsProvider ? undefined : options.vfs?.hooks,
+          fuseMount: this.fuseMount,
+          fuseBinds: this.fuseBinds,
+          gondolinEtc: this.gondolinEtc
+            ? {
+                provider: this.gondolinEtc.provider,
+                listeners: this.gondolinEtc.listeners,
+              }
+            : undefined,
+        }
+      : undefined;
 
-    if (options.fetch && sandboxOptions.fetch === undefined) {
-      sandboxOptions.fetch = options.fetch;
-    }
     if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
       sandboxOptions.httpHooks = options.httpHooks;
     }
@@ -632,17 +625,11 @@ export class VM {
         : undefined,
     };
     try {
-      this.server =
-        this.engine === "native"
-          ? new NativeSandboxServer(
-              resolved,
-              serverInternalOptions,
-              options.sandbox,
-            )
-          : new SandboxServer(resolved, {
-              qemuRootDiskVolatileMode:
-                serverInternalOptions.qemuRootDiskVolatileMode,
-            });
+      this.server = new NativeSandboxServer(
+        resolved,
+        serverInternalOptions,
+        options.sandbox,
+      );
     } catch (err) {
       this.cleanupRootDiskSync();
       throw err;
@@ -720,8 +707,8 @@ export class VM {
     configure: Record<string, unknown>;
     env: string[];
   }> {
-    if (!(this.server instanceof NativeSandboxServer)) {
-      throw new Error("--print-configure requires the native engine");
+    if (!this.server) {
+      throw new Error("sandbox server is not available");
     }
     return {
       configure: (await this.server.buildConfigure()) as Record<

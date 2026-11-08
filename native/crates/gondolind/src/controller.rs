@@ -463,12 +463,12 @@ mod tests {
             // daemon -> controller request, answered by the controller
             let req = {
                 let ctl = ctl.clone();
-                tokio::spawn(async move { ctl.request("vfs_rpc", &Value::Map(vec![])).await })
+                tokio::spawn(async move { ctl.request("vfs_call", &Value::Map(vec![])).await })
             };
             let msg = cr.read_envelope().await.unwrap().unwrap();
-            assert_eq!(msg.t, "vfs_rpc");
+            assert_eq!(msg.t, "vfs_call");
             let answer = Envelope::new(
-                "vfs_rpc_result",
+                "vfs_call_result",
                 msg.id,
                 Value::Map(vec![
                     (Value::Text("ok".into()), Value::Bool(false)),

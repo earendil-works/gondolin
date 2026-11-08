@@ -66,7 +66,7 @@ const kStaticFiles = Symbol("staticFiles");
 /**
  * Cache of `VirtualProvider` adapters: metadata for 1 s (what the guest
  * kernel caches anyway), contents revalidated on every open, so host-side
- * changes are seen like on the node engine.
+ * changes are seen.
  */
 const ADAPTER_CACHE = { cacheTtlMs: 1000, revalidateOnOpen: true };
 
@@ -860,8 +860,8 @@ export type NativeHostMountOptions = {
 
 export const nativeMounts = {
   /**
-   * A memory filesystem kept in the daemon on the native engine (reach it with
-   * `vm.fs`; the returned provider is a stand-in that only the node engine uses).
+   * A memory filesystem kept in the daemon (reach it with `vm.fs`; the
+   * returned provider is only a stand-in carrying the mount mark).
    */
   memory(): VirtualProvider {
     return markNativeMount(new MemoryProvider(), { kind: "memory" });
@@ -974,7 +974,7 @@ export class NativeFsClient {
   /**
    * `vm.fs` provider for a VM: paths of daemon-owned mounts go through
    * `fs_call`, everything else through the JS providers (no VM start needed,
-   * VFS hooks run in-process as on the node engine).
+   * VFS hooks run in-process).
    */
   static forVm(
     vfs: NativeVfs,

@@ -1,6 +1,11 @@
+/**
+ * `tcp.hosts` mappings: validation and normalization of guest host[:port] ->
+ * upstream host:port rules (served by the daemon).
+ */
+
 import net from "node:net";
 
-import type { DnsMode, SyntheticDnsHostMappingMode } from "./contracts.ts";
+import type { DnsMode, SyntheticDnsHostMappingMode } from "./types.ts";
 
 export type TcpOptions = {
   /** guest host[:port] -> upstream host:port mappings */
@@ -19,7 +24,7 @@ export type TcpMappedTarget = {
 };
 
 /** @internal */
-export type QemuTcpInternals = {
+export type TcpMappings = {
   /** whether mapped tcp egress is enabled */
   enabled: boolean;
   /** normalized mapping rules */
@@ -138,7 +143,7 @@ function parseMappingTarget(raw: string): ParsedHostPort {
 }
 
 /** @internal */
-export function createQemuTcpInternals(options?: TcpOptions): QemuTcpInternals {
+export function createTcpMappings(options?: TcpOptions): TcpMappings {
   const byHostPort = new Map<string, TcpMappedTarget>();
   const byHost = new Map<string, TcpMappedTarget>();
   const rules: TcpMappedTarget[] = [];
@@ -182,7 +187,7 @@ export function createQemuTcpInternals(options?: TcpOptions): QemuTcpInternals {
 
 /** @internal */
 export function assertTcpDnsConfig(options: {
-  tcp: QemuTcpInternals;
+  tcp: TcpMappings;
   dnsMode: DnsMode;
   syntheticHostMapping: SyntheticDnsHostMappingMode;
 }) {
@@ -198,21 +203,4 @@ export function assertTcpDnsConfig(options: {
       "tcp host mapping requires dns syntheticHostMapping='per-host'",
     );
   }
-}
-
-/** @internal */
-export function resolveMappedTcpTarget(
-  tcp: QemuTcpInternals,
-  hostname: string | null,
-  dstPort: number,
-): TcpMappedTarget | null {
-  if (!tcp.enabled || !hostname) return null;
-
-  const normalizedHost = normalizeHost(hostname);
-  if (!normalizedHost) return null;
-
-  const exact = tcp.byHostPort.get(`${normalizedHost}:${dstPort}`);
-  if (exact) return exact;
-
-  return tcp.byHost.get(normalizedHost) ?? null;
 }

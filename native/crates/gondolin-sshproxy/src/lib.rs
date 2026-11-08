@@ -1,4 +1,4 @@
-//! Exec-only SSH egress proxy (port of `host/src/qemu/ssh.ts`).
+//! Exec-only SSH egress proxy.
 //!
 //! A guest TCP flow that egress classified as SSH (an `SSH-` banner to an
 //! allowlisted synthetic hostname and port) is terminated by an in-process SSH

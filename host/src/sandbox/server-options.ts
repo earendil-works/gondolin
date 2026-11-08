@@ -26,11 +26,10 @@ import {
   DEFAULT_MAX_HTTP_BODY_BYTES,
   DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
   type DnsOptions,
-  type HttpFetch,
   type HttpHooks,
-} from "../qemu/net.ts";
-import type { SshOptions } from "../qemu/ssh.ts";
-import type { TcpOptions } from "../qemu/tcp.ts";
+} from "../net/types.ts";
+import type { SshOptions } from "../net/ssh.ts";
+import type { TcpOptions } from "../net/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
 import {
   ensureEmptyInitrdFile,
@@ -157,8 +156,6 @@ export type SandboxServerOptions = {
   maxTotalQueuedStdinBytes?: number;
   /** max total exec pressure (running + queued-to-start) */
   maxQueuedExecs?: number;
-  /** http fetch implementation for asset downloads */
-  fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
 
@@ -255,8 +252,6 @@ export type ResolvedSandboxServerOptions = {
   maxHttpBodyBytes: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes: number;
-  /** http fetch implementation for asset downloads */
-  fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
 
@@ -1029,7 +1024,7 @@ export function resolveSandboxServerOptions(
     throw new Error(
       "Guest assets not found. Either:\n" +
         "  1. Run from the gondolin repository with built guest images\n" +
-        "  2. Use SandboxServer.create() to auto-download assets\n" +
+        "  2. Use VM.create() to auto-download assets\n" +
         "  3. Provide imagePath option (asset directory, image selector, or explicit paths)\n" +
         "  4. Set GONDOLIN_GUEST_DIR to a directory containing the assets",
     );
@@ -1134,7 +1129,6 @@ export function resolveSandboxServerOptions(
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
-    fetch: options.fetch,
     httpHooks: options.httpHooks,
     dns: options.dns,
     ssh: options.ssh,

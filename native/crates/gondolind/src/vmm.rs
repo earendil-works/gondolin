@@ -1,5 +1,5 @@
-//! The QEMU child process: spawning, log forwarding, termination
-//! (`terminateChild` in `host/src/sandbox/child-process.ts`).
+//! The VMM child process (QEMU or the krun runner): spawning, log forwarding,
+//! termination.
 
 use std::io::Read;
 use std::process::{Command, Stdio};

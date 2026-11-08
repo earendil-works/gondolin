@@ -51,7 +51,7 @@ gondolin_wire::wire_struct! {
         pub limits: Limits = Default::default(),
         /// enabled debug components (`exec`, `protocol`, `vfs`, `net`)
         pub debug: Vec<String> = Default::default(),
-        /// VFS configuration (a native mount table, `{ mode: "native", ... }`; or the deprecated `{ mode: "controller" }`)
+        /// VFS configuration (a native mount table, `{ mode: "native", ... }`)
         pub vfs: Option<Value>,
         /// network configuration (`{ mode: "native", ... }`; or the deprecated `external`/`relay` fallbacks)
         pub net: Option<Value>,

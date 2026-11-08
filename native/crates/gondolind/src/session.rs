@@ -1,6 +1,5 @@
-//! The session actor: one task owning all session state, a port of
-//! `SandboxServer` (`host/src/sandbox/server.ts`, `server-ops.ts`) and
-//! `SandboxController` (`host/src/sandbox/controller.ts`).
+//! The session actor: one task owning all session state (originally a port of
+//! the removed node engine's `SandboxServer` and `SandboxController`).
 //!
 //! Everything that changes state runs on this task, in the order events
 //! arrive, which gives the same ordering guarantees as the single-threaded
@@ -1232,7 +1231,6 @@ impl Session {
         let rt = self.runtime.as_ref().unwrap();
         let net_socket = match &self.net {
             NetSetup::None => None,
-            NetSetup::External { socket_path } => Some(socket_path.clone()),
             NetSetup::Native(_) => rt.netdev_path.as_ref().map(|p| p.display().to_string()),
         };
         let qmp = rt.qmp_path.as_ref().map(|p| p.display().to_string());

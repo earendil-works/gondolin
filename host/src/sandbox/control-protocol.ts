@@ -26,6 +26,10 @@
  * +---------+-----------+-------------------+
  * tag = 1 stdout, tag = 2 stderr, id big-endian.
  */
+
+/** VM lifecycle state */
+export type SandboxState = "starting" | "running" | "stopped";
+
 export type ExecCommandMessage = {
   type: "exec";
   /** request id */
@@ -155,7 +159,7 @@ export type SnapshotResponseMessage = {
 export type StatusMessage = {
   type: "status";
   /** sandbox state */
-  state: "starting" | "running" | "stopped";
+  state: SandboxState;
 };
 
 export type ServerMessage =

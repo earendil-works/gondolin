@@ -9,7 +9,8 @@
 > binary has 26 third-party runtime crates; the budget is
 > `native/deps-budget` (`make -C native deps`). Counts and tables below are
 > from before the diet. Conventions for new code: `native/DESIGN.md`,
-> "Dependency diet conventions".
+> "Dependency diet conventions". The `net_relay` module in the inventory
+> below was removed later, together with the node engine.
 
 Research note for the dependency diet (owner target: fewer than 30 runtime
 crates; today 249 on macOS, 248 on Linux for `gondolin-cli`, which links the
@@ -107,7 +108,7 @@ traits, `split`, `copy`, `copy_bidirectional`, `BufReader` (QMP), `duplex`
 (cli), async `Mutex` (egress `PullableBody`, vfs), `Semaphore` (egress flow
 cap); `process::Command`/`Child` (QEMU, watchdog, piped stdout/stderr);
 `signal::unix` (cli); `fs::File` (assets download); `select!` (biased, in the
-session actor, vmm, guest, net_relay, cli), `join!`/`try_join!`.
+session actor, vmm, guest, net_relay (since removed), cli), `join!`/`try_join!`.
 
 ### Async seams (traits at crate boundaries)
 

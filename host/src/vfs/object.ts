@@ -1,13 +1,12 @@
 /**
  * Whole-file ("object") providers: the interface of the native engine's
  * object tier (`native/DESIGN.md`, "Filesystem tiers"), plus a
- * `VirtualProvider` view of such a provider so the same mount works on the
- * node engine.
+ * `VirtualProvider` view of such a provider for host-side use.
  *
- * On the native engine `gondolind` serves every per-operation semantic
- * (handles, offsets, attributes) from its own cache and only calls these
- * whole-file operations. On the node engine {@link ObjectVirtualProvider}
- * buffers each open file and writes it back on close.
+ * `gondolind` serves every per-operation semantic (handles, offsets,
+ * attributes) from its own cache and only calls these whole-file
+ * operations. {@link ObjectVirtualProvider} buffers each open file and writes
+ * it back on close.
  */
 
 import fs from "node:fs";
@@ -215,7 +214,7 @@ function isNoEntry(err: unknown) {
 }
 
 /**
- * `VirtualProvider` view of an {@link ObjectProvider} (node engine): files are
+ * `VirtualProvider` view of an {@link ObjectProvider} (host-side use): files are
  * read whole on open and written back whole on close when modified.
  */
 export class ObjectVirtualProvider
@@ -548,8 +547,8 @@ export class ObjectVirtualProvider
 
 /**
  * Mount an {@link ObjectProvider}: served by the native engine's object tier
- * (with a daemon-side cache), or by {@link ObjectVirtualProvider} on the node
- * engine.
+ * (with a daemon-side cache); the returned {@link ObjectVirtualProvider}
+ * carries the mount mark and serves host-side access.
  */
 export function createObjectMount(
   provider: ObjectProvider,

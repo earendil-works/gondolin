@@ -1,7 +1,6 @@
 //! Network configuration (`configure.net` in the controller protocol).
 //!
-//! Defaults match the node engine (`host/src/qemu/net.ts`,
-//! `host/src/qemu/network-stack.ts`). Addresses are encoded as strings so the
+//! Addresses are encoded as strings so the
 //! CBOR form is readable from TypeScript (`"192.168.127.1"`, `"5a:94:ef:e4:0c:dd"`).
 
 use std::fmt;

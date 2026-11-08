@@ -1,34 +1,24 @@
 /**
- * `NativeSandboxServer`: the surface `VM` uses from `SandboxServer`, backed by
- * the native `gondolind` daemon.
+ * `NativeSandboxServer`: the sandbox `VM` drives, backed by the native
+ * `gondolind` daemon.
  *
  * Sandbox clients (`connect()`) are multiplexed over the daemon connection as
  * numbered clients; the daemon implements the exec, queueing and credit rules
- * of `SandboxServer` and this class translates between the in-process client
- * API (JSON messages + binary output frames) and the daemon protocol.
+ * and this class translates between the in-process client API (JSON messages
+ * + binary output frames) and the daemon protocol.
  *
  * Subsystems (see `native/DESIGN.md`):
  * - VFS: served by the daemon's mount table (`NativeVfs`, `vfs.ts`); JS providers
- *   are reached through the object tier (`vfs_call`). Internal, deprecated
- *   fallback (`GONDOLIN_NATIVE_VFS=controller`): the daemon forwards sandboxfs
- *   requests (`vfs_rpc`) and this class serves them with `FsRpcService`;
+ *   are reached through the object tier (`vfs_call`);
  * - network: served by the daemon (`NativeNetwork`: netstack, egress, SSH
- *   proxy; JS hooks are called back over the pipe). Internal, deprecated
- *   fallback (`GONDOLIN_NATIVE_NET=external|relay`): the node network stack
- *   (`QemuNetworkBackend`) on a local socket QEMU connects to, or relayed
- *   over the connection for remote daemons.
+ *   proxy; JS hooks are called back over the pipe).
  */
 
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { type Duplex, PassThrough, type Readable } from "node:stream";
 
-import {
-  stripTrailingNewline,
-  type DebugComponent,
-  type DebugFlag,
-} from "../debug.ts";
-import { QemuNetworkBackend } from "../qemu/net.ts";
+import { stripTrailingNewline, type DebugComponent } from "../debug.ts";
 import {
   type ClientMessage,
   type ServerMessage,
@@ -39,7 +29,7 @@ import {
   type SandboxClient,
   type SandboxConnection,
 } from "../sandbox/client.ts";
-import type { SandboxState } from "../sandbox/controller.ts";
+import type { SandboxState } from "../sandbox/control-protocol.ts";
 import type {
   GuestFileDeleteOptions,
   GuestFileReadOptions,
@@ -47,13 +37,10 @@ import type {
   ResolvedSandboxServerOptions,
   SandboxServerOptions,
 } from "../sandbox/server-options.ts";
-import { parseMac } from "../sandbox/server-transport.ts";
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import { AsyncSingleflight } from "../utils/async.ts";
 import { errorMessage } from "../utils/error.ts";
-import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
 import { SandboxVfsProvider } from "../vfs/provider.ts";
-import { FsRpcService } from "../vfs/rpc-service.ts";
 import {
   type NativeEngineOptions,
   type NativeRemoteConfig,
@@ -62,8 +49,6 @@ import {
   buildNativeConfigure,
 } from "./config.ts";
 import { NativeNetwork } from "./net.ts";
-import { attachNetdevRelay } from "./netdev-relay.ts";
-import { assertNodeEngineDjsHooks } from "../http/djs-hooks.ts";
 import { NativeVfs, type NativeVfsSpec } from "./vfs.ts";
 import { NativeTcpChannelState } from "./tcp.ts";
 import {
@@ -106,12 +91,9 @@ type NativeSandboxServerInternalOptions = {
 export class NativeSandboxServer extends EventEmitter {
   private readonly options: ResolvedSandboxServerOptions;
   private readonly internalOptions: NativeSandboxServerInternalOptions;
-  private readonly debugFlags: ReadonlySet<DebugFlag>;
   private readonly vfsProvider: SandboxVfsProvider | null;
-  private readonly fsService: FsRpcService | null;
-  /** native VFS (daemon-side mount table), replaces `fsService` */
+  /** native VFS (daemon-side mount table) */
   private readonly nativeVfs: NativeVfs | null;
-  private readonly network: QemuNetworkBackend | null;
   private readonly nativeNetwork: NativeNetwork | null;
   private transport: NativeTransport | null = null;
   private readonly startSingleflight = new AsyncSingleflight<void>();
@@ -135,7 +117,6 @@ export class NativeSandboxServer extends EventEmitter {
     assertNativeSupported(options, rawOptions);
     this.options = options;
     this.internalOptions = internalOptions;
-    this.debugFlags = new Set(options.debug ?? []);
 
     this.on("error", (err) => {
       this.emitDebug("error", errorMessage(err));
@@ -147,78 +128,27 @@ export class NativeSandboxServer extends EventEmitter {
         : new SandboxVfsProvider(options.vfsProvider)
       : null;
     this.nativeVfs =
-      this.vfsProvider &&
-      internalOptions.nativeVfs &&
-      process.env.GONDOLIN_NATIVE_VFS !== "controller"
+      this.vfsProvider && internalOptions.nativeVfs
         ? new NativeVfs(internalOptions.nativeVfs, {
             remote: Boolean(internalOptions.remote),
           })
         : null;
-    this.fsService =
-      this.vfsProvider && !this.nativeVfs
-        ? new FsRpcService(this.vfsProvider, {
-            logger: this.debugFlags.has("vfs")
-              ? (message) => this.emitDebug("vfs", message)
-              : undefined,
-          })
-        : null;
 
-    const mac =
-      parseMac(options.netMac) ??
-      Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    // node network stack in the controller (internal, deprecated debugging
-    // fallback): `external` socket locally, the netdev relay for remote
-    // daemons. `VMOptions.fetch` is for asset downloads only and no longer
-    // selects it.
-    const netMode = process.env.GONDOLIN_NATIVE_NET?.trim().toLowerCase();
-    const externalNet = netMode === "external" || netMode === "relay";
-    this.nativeNetwork =
-      options.netEnabled && !externalNet
-        ? new NativeNetwork({
-            httpHooks: options.httpHooks,
-            allowWebSockets: options.allowWebSockets,
-            maxHttpBodyBytes: options.maxHttpBodyBytes,
-            maxHttpResponseBodyBytes: options.maxHttpResponseBodyBytes,
-            dns: options.dns,
-            ssh: options.ssh,
-            tcp: options.tcp,
-            netMac: options.netMac,
-            checksumOffload: options.vmm === "krun",
-            mitmCertDir: options.mitmCertDir,
-            daemonIsLocal: !internalOptions.remote,
-          })
-        : null;
-    if (options.netEnabled && externalNet) {
-      assertNodeEngineDjsHooks(options.httpHooks);
-    }
-    this.network =
-      options.netEnabled && externalNet
-        ? new QemuNetworkBackend({
-            socketPath: options.netSocketPath,
-            vmMac: mac,
-            debug: this.debugFlags.has("net"),
-            fetch: options.fetch,
-            httpHooks: options.httpHooks,
-            dns: options.dns,
-            ssh: options.ssh,
-            tcp: options.tcp,
-            mitmCertDir: options.mitmCertDir,
-            maxHttpBodyBytes: options.maxHttpBodyBytes,
-            maxHttpResponseBodyBytes: options.maxHttpResponseBodyBytes,
-            allowWebSockets: options.allowWebSockets,
-          })
-        : null;
-    if (this.network) {
-      this.network.on("debug", (component: DebugComponent, message: string) => {
-        this.emitDebug(component, message);
-      });
-      this.network.on("error", (err) => {
-        this.emit("error", err);
-      });
-      this.network.on("guest-activity-change", (active: boolean) => {
-        this.transport?.send("activity", { source: "net", active });
-      });
-    }
+    this.nativeNetwork = options.netEnabled
+      ? new NativeNetwork({
+          httpHooks: options.httpHooks,
+          allowWebSockets: options.allowWebSockets,
+          maxHttpBodyBytes: options.maxHttpBodyBytes,
+          maxHttpResponseBodyBytes: options.maxHttpResponseBodyBytes,
+          dns: options.dns,
+          ssh: options.ssh,
+          tcp: options.tcp,
+          netMac: options.netMac,
+          checksumOffload: options.vmm === "krun",
+          mitmCertDir: options.mitmCertDir,
+          daemonIsLocal: !internalOptions.remote,
+        })
+      : null;
   }
 
   private emitDebug(component: DebugComponent, message: string) {
@@ -283,10 +213,6 @@ export class NativeSandboxServer extends EventEmitter {
     return this.vfsProvider;
   }
 
-  getFsMetrics() {
-    return this.fsService?.metrics ?? null;
-  }
-
   async start(): Promise<void> {
     return this.startSingleflight.run(() => this.startInternal());
   }
@@ -318,11 +244,7 @@ export class NativeSandboxServer extends EventEmitter {
       this.options,
       this.internalOptions,
       {
-        vfsController: this.fsService !== null,
         vfs: this.nativeVfs?.config,
-        netSocketPath:
-          this.network && !remote ? this.options.netSocketPath : null,
-        netRelay: Boolean(this.network && remote),
         netNative: this.nativeNetwork
           ? await this.nativeNetwork.configure()
           : null,
@@ -380,16 +302,11 @@ export class NativeSandboxServer extends EventEmitter {
       if (remote?.checkpointPath) {
         await this.importCheckpoint(transport, remote.checkpointPath);
       }
-      if (this.network) {
-        if (remote) attachNetdevRelay(transport, this.network);
-        else this.network.start();
-      }
       await transport.request("start");
       this.started = true;
     } catch (err) {
       this.transport = null;
       await transport.close(1000);
-      await this.network?.close();
       throw err;
     }
   }
@@ -456,7 +373,6 @@ export class NativeSandboxServer extends EventEmitter {
     transport.onMessage("error", (p) => {
       this.emit("error", new Error(String(p.message ?? "gondolind error")));
     });
-    transport.handleRequest("vfs_rpc", (p) => this.handleVfsRpc(p));
     this.nativeVfs?.install(transport, (err) => this.emit("error", err));
     this.nativeNetwork?.install(transport);
     const channel = (p: any) =>
@@ -493,33 +409,6 @@ export class NativeSandboxServer extends EventEmitter {
       mount_id: mountId,
       path: entryPath,
     });
-  }
-
-  private async handleVfsRpc(p: any): Promise<Record<string, unknown>> {
-    const op = String(p.op ?? "");
-    if (!this.fsService) {
-      return {
-        err: LINUX_ERRNO.ENOSYS,
-        message: "filesystem service unavailable",
-      };
-    }
-    try {
-      const response = await this.fsService.handleRequest({
-        v: 1,
-        t: "fs_request",
-        id: 0,
-        p: { op, req: p.req ?? {} },
-      });
-      return {
-        err: response.p.err,
-        ...(response.p.res ? { res: response.p.res } : {}),
-        ...(response.p.message ? { message: response.p.message } : {}),
-      };
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : "fs handler error";
-      this.emit("error", err instanceof Error ? err : new Error(detail));
-      return { err: LINUX_ERRNO.EIO, message: detail };
-    }
   }
 
   /** The daemon went away without `shutdown` */
@@ -582,9 +471,7 @@ export class NativeSandboxServer extends EventEmitter {
         await transport.close(3000);
         this.transport = null;
       }
-      await this.network?.close();
       this.nativeNetwork?.close();
-      await this.fsService?.close();
       if (this.status !== "stopped") {
         this.status = "stopped";
         this.emit("state", this.status);

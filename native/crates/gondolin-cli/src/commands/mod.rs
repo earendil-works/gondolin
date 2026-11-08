@@ -60,10 +60,11 @@ fn engine_flags(args: &mut Vec<String>) -> Result<(), String> {
                         args.remove(1)
                     }
                 };
+                if value == "node" {
+                    return Err("--engine node: the node engine has been removed; Gondolin always uses the native engine".into());
+                }
                 if !matches!(value.as_str(), "native" | "auto") {
-                    return Err(format!(
-                        "the static gondolin CLI only has the native engine (got --engine {value}); use the Node CLI for --engine node"
-                    ));
+                    return Err(format!("invalid --engine: {value} (expected native or auto)"));
                 }
                 args.remove(0);
             }

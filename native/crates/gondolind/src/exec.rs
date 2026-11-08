@@ -1,6 +1,4 @@
-//! Exec handling: a port of the exec parts of `SandboxServer`
-//! (`host/src/sandbox/server-ops.ts` and the control channel handler in
-//! `server.ts`): admission limits, queueing while a file operation runs,
+//! Exec handling: admission limits, queueing while a file operation runs,
 //! stdin queueing against guest-granted credit, pty resize and output window
 //! forwarding with retries when the guest channel is full.
 

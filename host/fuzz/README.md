@@ -2,28 +2,29 @@
 
 This directory contains lightweight, deterministic fuzzers for the TypeScript host.
 
-These fuzzers are meant to cover **host-side parsers/state machines that consume untrusted guest input**
-(e.g. virtio framing, ethernet/IP/TCP parsing, DNS query parsing, tar parsing).
+These fuzzers cover **host-side TypeScript parsers that consume untrusted input**
+(tar parsing, SSH exec request parsing). The guest protocol, network stack and
+DNS parsing live in the native engine and are fuzzed with cargo-fuzz
+(`make native-fuzz`, `native/fuzz`).
 
 ## Run
 
 From the repo root:
 
 ```bash
-make fuzz-host                           # default target (virtio), runs forever
-make fuzz-host HOST_FUZZ_TARGET=dns      # a single target, runs forever
+make fuzz-host                           # default target (tar), runs forever
+make fuzz-host HOST_FUZZ_TARGET=ssh-exec # a single target, runs forever
 ```
 
 Or directly:
 
 ```bash
 cd host
-pnpm run fuzz -- dns
-pnpm run fuzz -- virtio
-pnpm run fuzz -- net
+pnpm run fuzz -- tar
+pnpm run fuzz -- ssh-exec
 
 # bounded run
-pnpm run fuzz -- virtio --iters 50000
+pnpm run fuzz -- tar --iters 50000
 ```
 
 ## Repro

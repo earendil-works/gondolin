@@ -27,9 +27,9 @@ await vm.close();
 
 ## Engine and Remote Daemons
 
-`engine` selects the host engine (default: `GONDOLIN_ENGINE`, else `"auto"`,
-which is the native engine when a working `gondolind` binary is found and the
-deprecated node engine otherwise; see [SDK Overview](./sdk.md#engines)).
+`engine` is accepted for compatibility: `"native"` and `"auto"` both select
+the native engine, `"node"` throws (the node engine was removed; see
+[SDK Overview](./sdk.md#engine)).
 
 `native` tells the native engine how to reach its daemon; setting `command`,
 `connect` or `remote` implies `engine: "native"`:

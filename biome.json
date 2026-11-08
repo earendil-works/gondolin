@@ -61,18 +61,6 @@
   "overrides": [
     {
       "includes": [
-        "host/src/sandbox/server.ts"
-      ],
-      "linter": {
-        "rules": {
-          "correctness": {
-            "noUnusedPrivateClassMembers": "off"
-          }
-        }
-      }
-    },
-    {
-      "includes": [
         "host/test/**"
       ],
       "linter": {

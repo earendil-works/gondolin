@@ -76,34 +76,6 @@ function expandIpv6Parts(parts: string[]): number[] | null {
   return expanded;
 }
 
-function ipv6HextetsToBytes(hextets: number[]): Buffer | null {
-  if (hextets.length !== 8) return null;
-  const buf = Buffer.alloc(16);
-  for (let i = 0; i < 8; i++) {
-    buf.writeUInt16BE(hextets[i]!, i * 2);
-  }
-  return buf;
-}
-
-export function parseIPv6Bytes(ip: string): Buffer | null {
-  const hextets = parseIPv6Hextets(ip);
-  if (!hextets) return null;
-  return ipv6HextetsToBytes(hextets);
-}
-
-/** Extract an IPv4 address from an IPv4-mapped IPv6 address (e.g. ::ffff:1.2.3.4) */
-export function extractIPv4Mapped(hextets: number[]): string | null {
-  if (hextets.length !== 8) return null;
-  const prefixZero = hextets.slice(0, 5).every((value) => value === 0);
-  if (!prefixZero || hextets[5] !== 0xffff) return null;
-
-  const a = hextets[6]! >> 8;
-  const b = hextets[6]! & 0xff;
-  const c = hextets[7]! >> 8;
-  const d = hextets[7]! & 0xff;
-  return `${a}.${b}.${c}.${d}`;
-}
-
 /** Whether an ip address is in a loopback, private, link-local or otherwise internal range */
 export function isInternalIpAddress(ip: string): boolean {
   const family = net.isIP(ip);

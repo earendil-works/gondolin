@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build gondolind and run host tests on the native engine.
+# Build gondolind and the static CLI from this checkout and run host tests
+# against them (instead of a released native package).
 #
 # Usage: scripts/test-native.sh [--release] [test files...]
 # Without test files, the tests listed below run. Pass `all` to run every
-# host test with GONDOLIN_ENGINE=native.
+# host test.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,16 +22,13 @@ fi
 # the multi-call binary as the platform packages ship it (`gondolin daemon`)
 export GONDOLIN_NATIVE_BIN="$native/target/$profile/gondolin"
 export GONDOLIN_CLI_BIN="$native/target/$profile/gondolin"
-export GONDOLIN_ENGINE=native
 
-# Tests covering what the native engine implements (exec, file operations,
-# VFS via the controller, native network (egress, hooks, SSH egress), lifecycle, SSH/ingress
-# streams, krun).
+# A quick subset: exec, file operations, VFS, network (egress, hooks, SSH
+# egress), lifecycle, SSH/ingress streams, krun, the CLIs.
 default_tests=(
   test/native-transport.test.ts
   test/native-cli.test.ts
   test/cli-configure-parity.test.ts
-  test/native-qemu-args.test.ts
   test/native-mitm-ca.test.ts
   test/native-panic.test.ts
   test/ssh.test.ts
@@ -52,11 +50,9 @@ default_tests=(
   test/vfs.test.ts
   test/vfs-many-mounts.test.ts
   test/native-vfs.test.ts
-  test/fs-rpc.test.ts
   test/checkpoint.test.ts
   test/vm-internals.test.ts
   test/sandbox-stdin-limits.test.ts
-  test/sandbox-file-ops.test.ts
   test/cli-*.test.ts
 )
 

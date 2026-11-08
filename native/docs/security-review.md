@@ -15,6 +15,12 @@ phase 2 merge (November 2026).
 > after this review; they and the newer fuzz targets `wire_cbor`,
 > `wire_json`, `assets_tar`, `assets_gzip` and `hooks_djs` are not in the
 > tables below (`native/fuzz/fuzz_targets/` has the full list).
+>
+> The node engine, the behavioural baseline of this review, has since been
+> removed; the "node" comparisons describe it as it was at review time. With
+> it went `vfs_rpc` (finding 8) and the TypeScript network stack in the table
+> "Guarantees checked"; the daemon→controller requests are now `hook_call`,
+> `body_pull`, `ssh_hook_call`, `vfs_call` and `vfs_hook`.
 
 ## Summary
 
@@ -27,7 +33,7 @@ phase 2 merge (November 2026).
 | 5 | Body retention for body-reading hooks: up to `max_*_body_bytes` per request × 128 concurrent requests | low (same as node, which buffers whole bodies) | documented |
 | 6 | MITM leaf generation per new SNI costs CPU (ECDSA keygen + CA signature) | low (DoS) | documented; node is slower (RSA keygen) |
 | 7 | Internal-range check did not treat NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4 (`2002::/16`), Teredo (`2001::/32`) or IPv4-compatible IPv6 as their embedded IPv4 | low (inherited from node) | fixed in both engines: the embedded IPv4 (Teredo: server and client; local-use NAT64: every RFC 6052 position, failing closed) is checked |
-| 8 | A remote daemon can issue unbounded concurrent requests to the controller (`hook_call`, `vfs_rpc`, `body_pull`) | low (remote daemon is semi-trusted; frames are capped at 4 MiB) | documented |
+| 8 | A remote daemon can issue unbounded concurrent requests to the controller (`hook_call`, `vfs_rpc` (since removed), `body_pull`) | low (remote daemon is semi-trusted; frames are capped at 4 MiB) | documented |
 | 9 | `net` debug logs include request URLs after secret substitution when `replaceSecretsInQuery` is on | info (same as node; debug only, local) | documented |
 
 No finding allows a guest to read secrets, reach non-allowlisted or internal
@@ -65,7 +71,9 @@ so non-ASCII bytes are multi-byte in Rust strings.
 
 ## Guarantees checked (native vs node)
 
-| property | node engine | native engine |
+The node column is the removed node engine at review time.
+
+| property | node engine (removed) | native engine |
 |---|---|---|
 | only HTTP/1.x, TLS (MITM), allowlisted SSH, mapped TCP leave the VM | classification in `network-stack.ts` | `classify.rs` (same rules, 8 KiB sniff limit, CONNECT/unknown reset), fuzzed |
 | policy on the request host, host-side resolution | `resolveHostname` + undici lookup guard | `PolicyEngine::resolve_allowed` + `GuardedConnector` (every new upstream connection), tested with rebinding |

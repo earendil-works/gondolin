@@ -219,7 +219,7 @@ fuzz:
 	@$(MAKE) -C guest fuzz
 
 # Host-side fuzzing
-HOST_FUZZ_TARGET ?= virtio
+HOST_FUZZ_TARGET ?= tar
 fuzz-host:
 	@$(MAKE) -C host fuzz TARGET="$(HOST_FUZZ_TARGET)"
 

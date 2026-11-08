@@ -74,16 +74,12 @@ This is a rough overview of the system today.
 
 - **Host controller (TypeScript)**: the `VM` API, policy, secrets, hooks and
   VFS providers (based on NodeJS's upcoming VFS)
-- **Host engine**, one of:
-    - **native** (default, see [Native Engine](./native.md)): `gondolind`
-      (Rust, `native/`) spawns and manages QEMU, implements the virtio-serial
-      control plane, the guest filesystem server (`gondolin-vfs`, optionally
-      over virtio-fs), the network stack (`gondolin-netstack`), HTTP/TLS
-      mediation, optional SSH egress proxying and optional explicit mapped TCP
-      egress (`gondolin-egress`, `gondolin-sshproxy`)
-    - **node** (deprecated, in-process): `SandboxController` spawns and manages
-      QEMU, `SandboxServer` implements the control plane and VFS RPC service,
-      and `QemuNetworkBackend` the network stack and egress paths
+- **Host engine** (see [Native Engine](./native.md)): `gondolind` (Rust,
+  `native/`) spawns and manages the VMM (QEMU or the krun runner), implements
+  the virtio-serial control plane, the guest filesystem server
+  (`gondolin-vfs`, optionally over virtio-fs), the network stack
+  (`gondolin-netstack`), HTTP/TLS mediation, optional SSH egress proxying and
+  optional explicit mapped TCP egress (`gondolin-egress`, `gondolin-sshproxy`)
 
 - **Guest (Zig + init scripts)**
     - `sandboxd` executes commands requested by the host over virtio-serial
@@ -128,13 +124,12 @@ This is what Gondolin actually enforces.
   serial ports, a virtio-net NIC backed by the host's network stack socket, a
   virtio-blk root disk); libkrun implements them inside the runner process.
 - The QEMU invocation is intentionally minimal (see
-  `native/crates/gondolind/src/qemu.rs`; node engine:
-  `host/src/sandbox/controller.ts`):
+  `native/crates/gondolind/src/qemu.rs`):
 
     - `-nodefaults` (avoid unexpected devices)
     - `-no-reboot`, `-nographic`
     - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng,
-      and `vhost-user-fs` when the native engine serves the VFS over virtio-fs;
+      and `vhost-user-fs` when the daemon serves the VFS over virtio-fs;
       guest RAM then lives in a shared memory backend that the daemon maps)
     - the root filesystem is attached as a copy-on-write disk (qcow2 overlay, or QEMU's snapshot mode) so writes do not persist to the base image
 
@@ -148,9 +143,8 @@ This is what Gondolin actually enforces.
 Gondolin does *not* provide the guest with a raw NAT to the host network.
 
 Instead, the host implements its own network stack and a backend that attaches
-to QEMU's `-netdev stream` Unix socket: on the native engine
-`gondolin-netstack` (smoltcp-based) and `gondolin-egress` in `gondolind`, on
-the node engine `host/src/qemu/network-stack.ts` and `host/src/qemu/net.ts`.
+to the VMM's stream netdev Unix socket: `gondolin-netstack` (smoltcp-based)
+and `gondolin-egress` in `gondolind`.
 
 Key enforcement points:
 
@@ -182,12 +176,12 @@ Key enforcement points:
 
 3. **HTTP/HTTPS is bridged by the host**
 
-        - For `http` flows, the host parses the request and replays it with its own HTTP/1.1 client (`gondolin-http` over rustls on the native engine, `fetch` (undici) on the node engine).
+        - For `http` flows, the host parses the request and replays it with its own HTTP/1.1 client (`gondolin-http` over rustls).
         - For `tls` flows, the host performs a **TLS MITM** (see below) to recover the HTTP request, then replays it the same way.
 
 4. **Host allowlist and internal-range blocking**
 
-        - `createHttpHooks()` (see `host/src/http/hooks.ts`; the native engine evaluates its options in the daemon) produces separate policy hooks:
+        - `createHttpHooks()` (see `host/src/http/hooks.ts`; the daemon evaluates its options) produces separate policy hooks:
             - `httpHooks.isRequestAllowed(request)` for request-content policy
             - `httpHooks.isIpAllowed({ hostname, ip, family, port, protocol })` for destination IP policy
         - By default, `isIpAllowed` blocks internal ranges (`blockInternalRanges: true`), including:
@@ -200,7 +194,7 @@ Key enforcement points:
     Gondolin checks policy in *two* places:
 
         - Before each outbound request, Gondolin evaluates request policy (`isRequestAllowed`) and hostname->IP policy (`isIpAllowed`) after resolving the hostname.
-        - The upstream connector re-checks `isIpAllowed()` against the IPs selected during connection establishment (native engine: in `gondolin-egress`; node engine: a custom undici dispatcher with a guarded `lookup()`, `createLookupGuard()`).
+        - The upstream connector re-checks `isIpAllowed()` against the IPs selected during connection establishment (in `gondolin-egress`).
         - With pooled keep-alive connections, this connect-time IP check runs when a new upstream connection is opened, and reused connections do not trigger a fresh connect-time check.
 
 6. **Redirect policy is enforced by the host**
@@ -274,13 +268,13 @@ By default the VM gets:
 The programmable filesystem path is:
 
 - Guest `sandboxfs` (FUSE) translates Linux VFS operations into RPC requests
-  (`fs_request`) over a virtio-serial port. With virtio-fs (native engine,
-  QEMU with vhost-user) the guest kernel sends FUSE requests to the daemon's
-  vhost-user-fs device instead.
-- The host validates and dispatches operations: on the native engine
-  `gondolind`'s mount table (`gondolin-vfs`), which serves native mounts
-  itself and forwards other providers to the controller; on the node engine
-  `FsRpcService` (`host/src/vfs/rpc-service.ts`) and a `VirtualProvider`.
+  (`fs_request`) over a virtio-serial port. With virtio-fs (QEMU with
+  vhost-user, or the krun runner) the guest kernel sends FUSE requests to the
+  daemon instead (through the vhost-user-fs device, or forwarded by the krun
+  runner over a socket).
+- The host validates and dispatches operations: `gondolind`'s mount table
+  (`gondolin-vfs`), which serves native mounts itself and forwards other
+  providers to the controller.
 - Providers can be:
 
     - in-memory (`MemoryProvider`, `nativeMounts.memory()`)

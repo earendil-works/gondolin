@@ -15,10 +15,10 @@
 #   image      build the guest image there with source-built helpers
 #   test [suite...]
 #              create the VM if needed, sync, build the guest image once, then
-#              run suites (default: cargo host-both host-native
+#              run suites (default: cargo host host-native
 #              virtiofs bench):
 #                cargo        cargo test --workspace (native/)
-#                host-both    host/scripts/test-both.sh (node + native engine)
+#                host         the whole host suite (host/scripts/test-native.sh all)
 #                host-native  host/scripts/test-native.sh
 #                virtiofs     host/scripts/check-virtiofs.ts (stock QEMU)
 #                bench        boot/exec timings (host/bench/run.ts)
@@ -134,9 +134,9 @@ run_suite() {
   echo "=== $suite"
   case "$suite" in
     cargo) in_vm "cd $WORK/native && cargo test --workspace" ;;
-    host-both) in_vm "$SLOW_ENV cd $WORK/host && ./scripts/test-both.sh" ;;
+    host) in_vm "$SLOW_ENV cd $WORK/host && ./scripts/test-native.sh --release all" ;;
     host-native) in_vm "$SLOW_ENV cd $WORK/host && ./scripts/test-native.sh --release" ;;
-    virtiofs) in_vm "cd $WORK/host && GONDOLIN_ENGINE=native node scripts/check-virtiofs.ts" ;;
+    virtiofs) in_vm "cd $WORK/host && GONDOLIN_VMM=qemu node scripts/check-virtiofs.ts" ;;
     bench) in_vm "cd $WORK/host && GONDOLIN_BENCH_SKIP_ENGINE_CHECK=1 \
       GONDOLIN_NATIVE_BIN=$WORK/native/target/release/gondolin node bench/run.ts \
       ${BENCH_ARGS:---engine native --suite boot,exec --quick --no-save}" ;;
@@ -155,7 +155,7 @@ case "$cmd" in
     sync_repo
     in_vm "test -f $WORK/guest/image/out/manifest.json" || image
     suites=("$@")
-    [ ${#suites[@]} -gt 0 ] || suites=(cargo host-both host-native virtiofs bench)
+    [ ${#suites[@]} -gt 0 ] || suites=(cargo host host-native virtiofs bench)
     failed=()
     for s in "${suites[@]}"; do run_suite "$s" || failed+=("$s"); done
     if [ ${#failed[@]} -gt 0 ]; then echo "failed: ${failed[*]}" >&2; exit 1; fi

@@ -454,10 +454,8 @@ export class VmCheckpoint {
     // A remote native daemon boots the checkpoint itself: upload it and let
     // the daemon resolve the image by build id.
     const native = resolveNativeEngineOptions(mergedForResume.native);
-    if (
-      resolveVmEngine(mergedForResume.engine, native) === "native" &&
-      native.remote
-    ) {
+    resolveVmEngine(mergedForResume.engine, native);
+    if (native.remote) {
       if (!fs.existsSync(this.diskPath)) {
         throw new Error(`checkpoint disk not found: ${this.diskPath}`);
       }
