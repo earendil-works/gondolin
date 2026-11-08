@@ -1361,7 +1361,7 @@ test("http hooks accept undici.Request from onRequest", async () => {
     onRequest: (req) =>
       new UndiciRequest("https://example.com/rewrite", {
         method: req.method,
-        headers: req.headers,
+        headers: [...req.headers],
       }),
   });
 

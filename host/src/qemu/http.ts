@@ -8,6 +8,7 @@ import {
   isGuestClosedError,
 } from "./contracts.ts";
 import type {
+  HttpFetch,
   HttpIpAllowInfo,
   QemuNetworkBackend,
   TcpSession,
@@ -81,7 +82,7 @@ const WEBSOCKET_UPGRADE_HEADER_NAMES = [
   "sec-websocket-extensions",
 ] as const;
 
-type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
+type FetchResponse = Awaited<ReturnType<HttpFetch>>;
 
 export type HttpSession = {
   buffer: HttpReceiveBuffer;

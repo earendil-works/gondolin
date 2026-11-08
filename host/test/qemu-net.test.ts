@@ -9,7 +9,11 @@ import net from "node:net";
 import type dns from "node:dns";
 import http from "node:http";
 
-import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
+import {
+  Request as UndiciRequest,
+  type RequestInit,
+  Response as UndiciResponse,
+} from "undici";
 
 import { QemuNetworkBackend } from "../src/qemu/net.ts";
 import {

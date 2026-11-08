@@ -3,7 +3,9 @@ import type net from "node:net";
 import type tls from "node:tls";
 import type { Agent, fetch as undiciFetch } from "undici";
 
-export type HttpFetch = typeof undiciFetch;
+export type HttpFetch = (
+  ...args: Parameters<typeof undiciFetch>
+) => Promise<Awaited<ReturnType<typeof undiciFetch>> | Response>;
 
 /** internal marker for onRequest hooks safe for pre-body policy precheck */
 export const ON_REQUEST_EARLY_POLICY_SAFE = Symbol.for(

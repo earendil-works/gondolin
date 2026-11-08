@@ -4,6 +4,7 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Fix zstd responses reaching the guest compressed but without `Content-Encoding`: undici is updated to 7, whose `fetch` decodes zstd.
 - Rework the guest helpers (`sandboxd`, `sandboxfs`, `sandboxssh`, `sandboxingress`) as static, libc-free, single-threaded binaries.  `sandboxd` is now a single `poll(2)` event loop (virtio port, a `SIGCHLD` signalfd and every exec session's stdio) instead of a thread per exec session with a shared blocking writer; all output goes through one bounded queue, so a slow host backs up into the child's pipes instead of guest memory.  All helpers share one framing/CBOR/protocol layer and binaries are 75-85% smaller.  The wire protocol is unchanged; `guest/ARCHITECTURE.md` is the full specification.
 - Fix zombie processes accumulating in the guest: `sandboxd` (PID 1) now reaps orphaned children.
 - Fix `sandboxfs` exiting (breaking the VFS mount with `ENOTCONN`) when a directory listing with long file names overflowed the kernel's readdir buffer, when a request was interrupted, or when the host sent a malformed response.  Such failures now return `EIO` for the affected request.
