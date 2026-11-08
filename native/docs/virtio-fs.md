@@ -22,8 +22,8 @@ original feasibility study of the prototype in
   (`-machine none -device help` for `vhost-user-fs-pci`/`vhost-user-fs-device`,
   `-object help` for `memory-backend-memfd` on Linux or `memory-backend-shm`
   elsewhere). The probe runs once per binary (path, size, mtime) and is cached
-  in memory and in `<cache>/gondolin/qemu-virtiofs.json`. krun keeps
-  sandboxfs.
+  in memory and in `<cache>/gondolin/qemu-virtiofs.json`. krun: see
+  "krun" below.
 - **QEMU.** `-object <backend>,id=mem,size=<memory>,share=on`,
   `-machine <type>,memory-backend=mem`, `-chardev socket,id=vhostfs0,...` and
   `-device vhost-user-fs-pci` (`vhost-user-fs-device` on microvm) with tag
@@ -244,6 +244,23 @@ Work left for production:
 - the QEMU arguments in gondolind, plus the guest mount switch.
 
 ## 4. krun
+
+> Implemented (gondolin's libkrun patch, `host/krun-runner/patches`): a
+> fourth virtio-fs server in libkrun's worker, next to the passthrough,
+> read-only and null servers, forwards each request over a Unix socket
+> (`krun_add_virtiofs_socket(ctx, tag, fd)`; frames: `u32 len, u32 queue,
+> u32 reply_capacity` + FUSE request, answered by `u32 len` + FUSE reply).
+> gondolind serves it with the same `FuseServer`
+> (`gondolin-virtiofs/src/socket.rs`), so mount rules and hardening are those
+> of the QEMU path. It needs no shared guest memory, so it works on macOS.
+> The runner reports it with `--capabilities` (`virtiofs-socket`); without
+> it the daemon keeps sandboxfs. M5 Max, krun, `host/bench` vfs (quick,
+> `realfs`), sandboxfs → virtio-fs: small-create 123 → 68 ms, small-stat
+> 21 → 11 ms, tree find 162 → 58 ms, untar 763 → 380 ms, 256 MiB write
+> 275 → 878 MB/s, read 290 → 1,037 MB/s. Requests are handled one at a time
+> and copied through the runner; zero-copy and pipelining are open.
+>
+> The study below predates it.
 
 - **Built-in virtio-fs:** libkrun has its own in-process virtio-fs.
   - The new API offers `krun_fs_device_new(tag, host_path)`, a read-only

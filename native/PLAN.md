@@ -162,7 +162,10 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       object reads 3 MiB ranges + opt-in `inlineMaxBytes`
 - [ ] Released sandbox helpers with `--virtiofs` (needs a helper release)
 - [ ] macOS: a QEMU with vhost-user (Homebrew lacks it; build fix upstream)
-- [ ] virtio-fs on krun (libkrun has no pluggable backend)
+- [x] virtio-fs on krun: patched libkrun forwards FUSE over a socket
+      (`krun_add_virtiofs_socket`); 1.8–3.5× faster than sandboxfs on macOS
+- [ ] krun virtio-fs: zero-copy (read/write guest memory from the socket),
+      pipelined requests, upstream the libkrun patch
 
 ## Node engine retirement
 

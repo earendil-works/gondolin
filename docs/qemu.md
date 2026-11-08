@@ -197,4 +197,5 @@ vhost-user; Homebrew's QEMU on macOS does not (see
 [`native/docs/qemu-macos-vhost-user.md`](https://github.com/earendil-works/gondolin/blob/main/native/docs/qemu-macos-vhost-user.md)
 for building one).  `GONDOLIN_VIRTIOFS=0` forces sandboxfs,
 `GONDOLIN_VIRTIOFS=1` logs a warning when virtio-fs is unavailable.  The node
-engine and the krun backend always use sandboxfs.
+engine always uses sandboxfs; the krun backend serves virtio-fs through its
+runner instead (see [Native Engine](./native.md)).

@@ -2,12 +2,16 @@
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
-LIBKRUN_VERSION ?= v1.17.4
+LIBKRUN_VERSION ?= v1.19.8
 LIBKRUN_FULL_VERSION ?= $(patsubst v%,%,$(LIBKRUN_VERSION))
 LIBKRUN_REPO ?= https://github.com/containers/libkrun.git
 LIBKRUN_SRC_DIR ?= .cache/libkrun-$(LIBKRUN_VERSION)
 LIBKRUN_BUILD_FLAGS ?= BLK=1 NET=1
 LIBKRUN_PREFIX ?= $(CURDIR)/.cache/libkrun-install/$(LIBKRUN_VERSION)
+# gondolin's patches on top of the libkrun release (applied in order; the
+# checkout is reset and re-patched when they change)
+LIBKRUN_PATCHES := $(sort $(wildcard host/krun-runner/patches/*.patch))
+LIBKRUN_PATCH_STAMP := $(shell cat $(LIBKRUN_PATCHES) /dev/null | cksum | cut -d' ' -f1)
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -132,6 +136,15 @@ libkrun:
 		echo "Cloning libkrun $(LIBKRUN_VERSION) into $(LIBKRUN_SRC_DIR)"; \
 		git clone --depth 1 --branch "$(LIBKRUN_VERSION)" "$(LIBKRUN_REPO)" "$(LIBKRUN_SRC_DIR)"; \
 	fi
+	@stamp="$(LIBKRUN_SRC_DIR)/.git/gondolin-patches"; \
+	if [ "$$(cat "$$stamp" 2>/dev/null)" != "$(LIBKRUN_PATCH_STAMP)" ]; then \
+		echo "Applying gondolin patches to libkrun"; \
+		git -C "$(LIBKRUN_SRC_DIR)" checkout -q -- . && git -C "$(LIBKRUN_SRC_DIR)" clean -fdq -- src include || exit 1; \
+		for p in $(LIBKRUN_PATCHES); do \
+			echo "  $$p"; git -C "$(LIBKRUN_SRC_DIR)" apply "$(CURDIR)/$$p" || exit 1; \
+		done; \
+		echo "$(LIBKRUN_PATCH_STAMP)" > "$$stamp"; \
+	fi
 	@echo "Building libkrun ($(LIBKRUN_BUILD_FLAGS))"
 	@env $(LIBKRUN_BUILD_ENV) $(MAKE) -C "$(LIBKRUN_SRC_DIR)" $(LIBKRUN_MAKE_ARGS)
 	@rm -rf "$(LIBKRUN_PREFIX)"
@@ -168,6 +181,7 @@ krun-runner: libkrun
 			LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib64:$(LIBKRUN_PREFIX)/lib:$$LIBRARY_PATH" \
 			zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix="$(LIBKRUN_PREFIX)"; \
 		fi
+	@rm -rf host/krun-runner/zig-out/lib
 	@mkdir -p host/krun-runner/zig-out/lib
 	@set -eu; \
 		copied=0; \

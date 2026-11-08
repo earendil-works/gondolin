@@ -290,7 +290,12 @@ metadata operations about 2–4× and large reads and writes 10–15× faster th
 sandboxfs (FUSE in the guest, forwarded over a virtio-serial port). Linux
 distribution QEMU builds support it; Homebrew's QEMU on macOS does not
 (`native/crates/gondolin-virtiofs/examples/linux-guest/build-qemu-macos.sh`
-builds one). Without it, and with krun, the guest uses sandboxfs as before.
+builds one). With krun, the runner's libkrun (gondolin's patched build,
+runner capability `virtiofs-socket`) provides the virtio-fs device and
+forwards each FUSE request to the daemon over a socket: no shared memory, so
+it works on macOS too; large I/O is slower than vhost-user (one request at a
+time, copied through the runner) but several times faster than sandboxfs.
+Without either, the guest uses sandboxfs as before.
 `GONDOLIN_VIRTIOFS=0` forces sandboxfs, `GONDOLIN_VIRTIOFS=1` asks for
 virtio-fs and logs a warning when it is unavailable. Guest images whose
 `sandboxfs` has no `--virtiofs` option (built before this release) always use
@@ -363,7 +368,7 @@ Differences from the node engine:
   objects.
 - **Close errors**: with `commit: "close"` over virtio-fs, a failing
   `writeFile` is the error of the guest's `close()` or `fsync()`. Over
-  sandboxfs (no vhost-user QEMU, krun) it cannot be: the guest's FUSE helper
+  sandboxfs (no vhost-user QEMU, an older krun runner) it cannot be: the guest's FUSE helper
   does not forward those calls. The data then stays cached and is written
   again when the next writer closes the file; the failure is reported as an
   error of the `release` operation (debug output and `after` hooks).

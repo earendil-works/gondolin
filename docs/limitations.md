@@ -61,8 +61,9 @@ Notable gaps today:
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun` (or on `qemu` when
   combined with `rootfs.size`); it is implemented as a temporary qcow2 overlay
   file on disk that is deleted on close
-- `krun` has no virtio-fs: guest mounts always use the slower sandboxfs
-  transport (pin `vmm: "qemu"` on Linux for virtio-fs)
+- `krun`'s virtio-fs is served through the runner process over a socket, one
+  request at a time: large reads and writes are slower than with QEMU's
+  vhost-user virtio-fs (pin `vmm: "qemu"` on Linux for the fastest mounts)
 
 See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
 

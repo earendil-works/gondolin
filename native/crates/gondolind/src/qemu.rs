@@ -239,7 +239,7 @@ pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
     support
 }
 
-fn which(program: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn which(program: &str) -> Option<std::path::PathBuf> {
     if program.contains('/') {
         return Some(std::path::PathBuf::from(program));
     }

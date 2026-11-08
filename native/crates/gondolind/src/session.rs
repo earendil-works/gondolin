@@ -126,7 +126,7 @@ struct Runtime {
     dir: SocketDir,
 }
 
-/// The vhost-user-fs socket and its accept thread.
+/// The virtio-fs socket and its accept thread.
 struct VirtioFsRuntime {
     path: PathBuf,
     queues: usize,
@@ -140,11 +140,13 @@ impl Drop for VirtioFsRuntime {
     }
 }
 
-/// Listens for QEMU's vhost-user connection (one at a time; a restarted QEMU
-/// reconnects) and serves it on a dedicated thread.
+/// Listens for the VMM's virtio-fs connection (one at a time; a restarted
+/// VMM reconnects) and serves it on a dedicated thread: vhost-user for QEMU,
+/// FUSE over the socket (`fuse_socket`) for krun.
 fn spawn_virtiofs(
     path: &std::path::Path,
     service: Arc<dyn crate::subsystem::VirtioFsService>,
+    fuse_socket: bool,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     let listener = std::os::unix::net::UnixListener::bind(path)?;
@@ -155,7 +157,11 @@ fn spawn_virtiofs(
             match listener.accept() {
                 Ok((conn, _)) => {
                     let _ = conn.set_nonblocking(false);
-                    service.serve(conn);
+                    if fuse_socket {
+                        service.serve_socket(conn);
+                    } else {
+                        service.serve(conn);
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -778,10 +784,33 @@ impl Session {
         };
         let Some(cfg) = self.configured.as_ref() else { return Ok(None) };
         if qemu::is_krun(&cfg.vm) {
-            if service.required() {
-                self.emit_debug("vfs", "virtio-fs is not available with krun; using sandboxfs");
+            let runner = crate::krun::runner_path(&cfg.vm);
+            if !crate::krun::runner_capabilities(&runner)
+                .iter()
+                .any(|c| c == crate::krun::CAP_VIRTIOFS_SOCKET)
+            {
+                let message = format!(
+                    "virtio-fs unavailable ({runner} lacks the virtiofs-socket capability); using sandboxfs"
+                );
+                if service.required() {
+                    gondolin_log::warn!("{message}");
+                    let log = gondolin_proto::session::Log { component: "vfs".into(), message };
+                    self.ctl.send(gondolin_proto::session::LOG, 0, &log);
+                } else {
+                    self.emit_debug("vfs", message);
+                }
+                return Ok(None);
             }
-            return Ok(None);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            spawn_virtiofs(sock, service.clone(), true, stop.clone())
+                .map_err(|e| format!("cannot listen on the virtio-fs socket: {e}"))?;
+            self.emit_debug("vfs", "serving the VFS over virtio-fs (krun)");
+            return Ok(Some(VirtioFsRuntime {
+                path: sock.to_path_buf(),
+                queues: 1,
+                memory_backend: "",
+                stop,
+            }));
         }
         let vm = &cfg.vm;
         let target_arch = qemu::detect_target_arch(&vm.qemu_path, &self.host);
@@ -808,7 +837,7 @@ impl Session {
             return Ok(None);
         }
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        spawn_virtiofs(sock, service.clone(), stop.clone())
+        spawn_virtiofs(sock, service.clone(), false, stop.clone())
             .map_err(|e| format!("cannot listen on the virtio-fs socket: {e}"))?;
         self.emit_debug("vfs", "serving the VFS over virtio-fs");
         Ok(Some(VirtioFsRuntime {
@@ -1210,12 +1239,22 @@ impl Session {
         if let Some(q) = &rt.qmp_path {
             let _ = std::fs::remove_file(q);
         }
+        // tells the guest's init to mount the virtio-fs tag (older images ignore it)
+        let virtiofs_append = |append: &str| match &rt.virtiofs {
+            Some(_) => format!("{append} sandboxfs.virtiofs={}", qemu::VIRTIOFS_TAG),
+            None => append.to_string(),
+        };
         let (qemu_path, args) = if qemu::is_krun(&cfg.vm) {
+            let virtio_fs = rt.virtiofs.as_ref().map(|v| crate::krun::VirtioFsDevice {
+                socket: v.path.to_str().unwrap_or_default(),
+                tag: qemu::VIRTIOFS_TAG,
+            });
             let runner = crate::krun::runner_config(
                 &cfg.vm,
-                &self.vm.append,
+                &virtiofs_append(&self.vm.append),
                 &rt.chardevs,
                 net_socket.as_deref(),
+                virtio_fs,
                 &rt.dir.0,
             )
             .map_err(StartError::Fatal)?;
@@ -1231,11 +1270,7 @@ impl Session {
                 queues: v.queues,
                 memory_backend: v.memory_backend,
             });
-            // tells the guest's init to mount the virtio-fs tag (older images ignore it)
-            let append = match &virtiofs {
-                Some(_) => format!("{} sandboxfs.virtiofs={}", self.vm.append, qemu::VIRTIOFS_TAG),
-                None => self.vm.append.clone(),
-            };
+            let append = virtiofs_append(&self.vm.append);
             let args = qemu::build_qemu_args(&QemuArgs {
                 vm: &cfg.vm,
                 append: &append,

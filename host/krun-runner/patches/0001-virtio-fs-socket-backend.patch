@@ -1,0 +1,341 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index e6d44ba..4809915 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -386,6 +386,28 @@ int32_t krun_add_virtiofs4(uint32_t ctx_id, const char *c_tag,
+                            const char *c_path, uint64_t shm_size,
+                            bool read_only, uint32_t semantics);
+ 
++/**
++ * Adds a virtio-fs device whose FUSE requests are served by an external
++ * process over a connected stream socket instead of a host directory.
++ *
++ * Every request is sent as a frame of little-endian u32 fields
++ * `len` (bytes after this field), `queue` (0: high priority, 1: requests) and
++ * `reply_capacity` (device-writable bytes of the descriptor chain), followed
++ * by the request bytes (FUSE in header and body). The server answers each
++ * frame, in order, with a u32 `len` (at most `reply_capacity`) and the reply
++ * bytes (FUSE out header and body; 0 bytes for requests without a reply,
++ * e.g. FORGET). On a socket error requests fail with ENOTCONN.
++ *
++ * Arguments:
++ *  "ctx_id"    - the configuration context ID.
++ *  "c_tag"     - tag to identify the filesystem in the guest (1-36 bytes).
++ *  "socket_fd" - connected stream socket; libkrun takes ownership of it.
++ *
++ * Returns:
++ *  Zero on success or a negative error number on failure.
++ */
++int32_t krun_add_virtiofs_socket(uint32_t ctx_id, const char *c_tag, int socket_fd);
++
+ /* Send the VFKIT magic after establishing the connection,
+    as required by gvproxy in vfkit mode. */
+ #define NET_FLAG_VFKIT (1 << 0)
+diff --git a/src/devices/src/virtio/fs/device.rs b/src/devices/src/virtio/fs/device.rs
+index ae504cd..648c5ff 100644
+--- a/src/devices/src/virtio/fs/device.rs
++++ b/src/devices/src/virtio/fs/device.rs
+@@ -53,6 +53,7 @@ pub struct Fs {
+     passthrough_cfg: Option<passthrough::Config>,
+     read_only: bool,
+     virtual_entries: Vec<VirtualDirEntry>,
++    remote_fd: Option<std::os::fd::RawFd>,
+     worker_thread: Option<JoinHandle<()>>,
+     worker_stopfd: EventFd,
+     exit_code: Arc<AtomicI32>,
+@@ -68,6 +69,7 @@ impl Fs {
+         exit_code: Arc<AtomicI32>,
+         read_only: bool,
+         virtual_entries: Vec<VirtualDirEntry>,
++        remote_fd: Option<std::os::fd::RawFd>,
+     ) -> super::Result<Fs> {
+         let avail_features = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
+ 
+@@ -103,6 +105,7 @@ impl Fs {
+             passthrough_cfg: fs_cfg,
+             read_only,
+             virtual_entries,
++            remote_fd,
+             worker_thread: None,
+             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
+             exit_code,
+@@ -216,6 +219,7 @@ impl VirtioDevice for Fs {
+             self.passthrough_cfg.clone(),
+             self.read_only,
+             virtual_entries,
++            self.remote_fd,
+             self.worker_stopfd.try_clone().unwrap(),
+             self.exit_code.clone(),
+             #[cfg(target_os = "macos")]
+diff --git a/src/devices/src/virtio/fs/mod.rs b/src/devices/src/virtio/fs/mod.rs
+index f8ef632..73e9628 100644
+--- a/src/devices/src/virtio/fs/mod.rs
++++ b/src/devices/src/virtio/fs/mod.rs
+@@ -8,6 +8,7 @@ mod inode_alloc;
+ mod multikey;
+ mod null_fs;
+ mod read_only;
++mod remote;
+ mod server;
+ pub mod virtual_entry;
+ mod worker;
+diff --git a/src/devices/src/virtio/fs/remote.rs b/src/devices/src/virtio/fs/remote.rs
+new file mode 100644
+index 0000000..194755b
+--- /dev/null
++++ b/src/devices/src/virtio/fs/remote.rs
+@@ -0,0 +1,102 @@
++//! virtio-fs requests served by an external process (`krun_add_virtiofs_socket`).
++//!
++//! Each request is forwarded as one frame over a connected stream socket and
++//! answered, in order, by one reply frame (see `include/libkrun.h`). The FUSE
++//! protocol itself is the server's business: this device only moves bytes
++//! between the descriptor chains and the socket.
++
++use std::io::{self, Read, Write};
++use std::os::fd::{FromRawFd, RawFd};
++use std::os::unix::net::UnixStream;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++use super::descriptor_utils::{Reader, Writer};
++
++/// Size of a FUSE out header (`len`, `error`, `unique`).
++const OUT_HEADER: usize = 16;
++/// Largest request or reply accepted, in `bytes` (FUSE max pages plus headers).
++const MAX_FRAME: usize = 64 << 20;
++
++pub struct RemoteFs {
++    sock: UnixStream,
++    /// a failed exchange leaves the stream out of sync: fail from then on
++    broken: AtomicBool,
++}
++
++impl RemoteFs {
++    pub fn new(fd: RawFd) -> RemoteFs {
++        // SAFETY: the caller hands over ownership of a connected stream socket.
++        RemoteFs {
++            sock: unsafe { UnixStream::from_raw_fd(fd) },
++            broken: AtomicBool::new(false),
++        }
++    }
++
++    /// Forwards one request; returns the number of reply bytes written.
++    pub fn handle_message(&self, queue: usize, mut r: Reader, mut w: Writer) -> usize {
++        let mut request = vec![0u8; r.available_bytes()];
++        if let Err(e) = r.read_exact(&mut request) {
++            error!("virtio-fs remote: cannot read request: {e}");
++            return 0;
++        }
++        match self.round_trip(queue, &request, w.available_bytes()) {
++            Ok(reply) => match w.write_all(&reply) {
++                Ok(()) => reply.len(),
++                Err(e) => {
++                    error!("virtio-fs remote: cannot write reply: {e}");
++                    0
++                }
++            },
++            Err(e) => {
++                error!("virtio-fs remote: {e}");
++                // answer with ENOTCONN when the request expects a reply
++                if request.len() < 16 || w.available_bytes() < OUT_HEADER {
++                    return 0;
++                }
++                let mut header = [0u8; OUT_HEADER];
++                header[0..4].copy_from_slice(&(OUT_HEADER as u32).to_le_bytes());
++                header[4..8].copy_from_slice(&(-libc::ENOTCONN).to_le_bytes());
++                header[8..16].copy_from_slice(&request[8..16]);
++                match w.write_all(&header) {
++                    Ok(()) => OUT_HEADER,
++                    Err(_) => 0,
++                }
++            }
++        }
++    }
++
++    fn round_trip(&self, queue: usize, request: &[u8], capacity: usize) -> io::Result<Vec<u8>> {
++        if self.broken.load(Ordering::Relaxed) {
++            return Err(io::Error::from_raw_os_error(libc::ENOTCONN));
++        }
++        let result = self.exchange(queue, request, capacity);
++        if result.is_err() {
++            self.broken.store(true, Ordering::Relaxed);
++        }
++        result
++    }
++
++    fn exchange(&self, queue: usize, request: &[u8], capacity: usize) -> io::Result<Vec<u8>> {
++        if request.len() > MAX_FRAME {
++            return Err(io::Error::other("request too large"));
++        }
++        let mut sock = &self.sock;
++        let mut header = [0u8; 12];
++        header[0..4].copy_from_slice(&((8 + request.len()) as u32).to_le_bytes());
++        header[4..8].copy_from_slice(&(queue as u32).to_le_bytes());
++        header[8..12].copy_from_slice(&(capacity.min(MAX_FRAME) as u32).to_le_bytes());
++        sock.write_all(&header)?;
++        sock.write_all(request)?;
++        let mut len = [0u8; 4];
++        sock.read_exact(&mut len)?;
++        let len = u32::from_le_bytes(len) as usize;
++        if len > capacity {
++            return Err(io::Error::other(format!(
++                "reply of {len} bytes exceeds the {capacity} byte buffer"
++            )));
++        }
++        let mut reply = vec![0u8; len];
++        sock.read_exact(&mut reply)?;
++        Ok(reply)
++    }
++}
+diff --git a/src/devices/src/virtio/fs/worker.rs b/src/devices/src/virtio/fs/worker.rs
+index 9fc288f..e689a44 100644
+--- a/src/devices/src/virtio/fs/worker.rs
++++ b/src/devices/src/virtio/fs/worker.rs
+@@ -21,6 +21,7 @@ use super::inode_alloc::InodeAllocator;
+ use super::null_fs::NullFs;
+ use super::passthrough::{self, PassthroughFs};
+ use super::read_only::PassthroughFsRo;
++use super::remote::RemoteFs;
+ use super::server::Server;
+ use super::virtual_entry::VirtualDirEntry;
+ use crate::virtio::{InterruptTransport, VirtioShmRegion};
+@@ -29,11 +30,13 @@ enum FsServer {
+     ReadWrite(Server<AugmentFs<PassthroughFs>>),
+     ReadOnly(Server<AugmentFs<PassthroughFsRo>>),
+     Null(Server<AugmentFs<NullFs>>),
++    Remote(RemoteFs),
+ }
+ 
+ impl FsServer {
+     fn handle_message(
+         &self,
++        queue_index: usize,
+         r: Reader,
+         w: Writer,
+         allow_idmap: bool,
+@@ -69,6 +72,7 @@ impl FsServer {
+                 #[cfg(target_os = "macos")]
+                 map_sender,
+             ),
++            FsServer::Remote(s) => Ok(s.handle_message(queue_index, r, w)),
+         }
+     }
+ }
+@@ -99,12 +103,14 @@ impl FsWorker {
+         passthrough_cfg: Option<passthrough::Config>,
+         read_only: bool,
+         virtual_entries: Vec<VirtualDirEntry>,
++        remote_fd: Option<std::os::fd::RawFd>,
+         stop_fd: EventFd,
+         exit_code: Arc<AtomicI32>,
+         #[cfg(target_os = "macos")] map_sender: Option<Sender<WorkerMessage>>,
+     ) -> Result<Self, io::Error> {
+         let inode_alloc = Arc::new(InodeAllocator::new());
+         let server = match passthrough_cfg {
++            _ if remote_fd.is_some() => FsServer::Remote(RemoteFs::new(remote_fd.unwrap())),
+             Some(cfg) if read_only => {
+                 let inner = PassthroughFsRo::new(cfg, inode_alloc.clone())?;
+                 FsServer::ReadOnly(Server::new(AugmentFs::new(
+@@ -239,6 +245,7 @@ impl FsWorker {
+                 .unwrap();
+ 
+             let len = match self.server.handle_message(
++                queue_index,
+                 reader,
+                 writer,
+                 self.allow_idmap,
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index cd98467..ae88021 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -623,6 +623,7 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char)
+                 // Default to a conservative 512 MB window.
+                 shm_size: Some(1 << 29),
+                 read_only: false,
++                remote_fd: None,
+                 virtual_entries: {
+                     #[allow(unused_mut)]
+                     let mut v = Vec::new();
+@@ -735,6 +736,7 @@ pub unsafe extern "C" fn krun_add_virtiofs4(
+                 semantics,
+                 shm_size: shm,
+                 read_only,
++                remote_fd: None,
+                 virtual_entries,
+             });
+         }
+@@ -744,6 +746,40 @@ pub unsafe extern "C" fn krun_add_virtiofs4(
+     KRUN_SUCCESS
+ }
+ 
++#[allow(clippy::missing_safety_doc)]
++#[unsafe(no_mangle)]
++#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
++pub unsafe extern "C" fn krun_add_virtiofs_socket(
++    ctx_id: u32,
++    c_tag: *const c_char,
++    socket_fd: c_int,
++) -> i32 {
++    if c_tag.is_null() || socket_fd < 0 {
++        return -libc::EINVAL;
++    }
++    let tag = match CStr::from_ptr(c_tag).to_str() {
++        Ok(tag) if !tag.is_empty() && tag.len() <= 36 => tag,
++        _ => return -libc::EINVAL,
++    };
++
++    match CTX_MAP.lock().unwrap().entry(ctx_id) {
++        Entry::Occupied(mut ctx_cfg) => {
++            ctx_cfg.get_mut().vmr.add_fs_device(FsDeviceConfig {
++                fs_id: tag.to_string(),
++                shared_dir: None,
++                semantics: PermissionSemantics::LinuxComplete,
++                shm_size: None,
++                read_only: false,
++                remote_fd: Some(socket_fd),
++                virtual_entries: Vec::new(),
++            });
++        }
++        Entry::Vacant(_) => return -libc::ENOENT,
++    }
++
++    KRUN_SUCCESS
++}
++
+ #[allow(clippy::missing_safety_doc)]
+ #[no_mangle]
+ #[cfg(not(feature = "tee"))]
+@@ -2491,6 +2527,7 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
+                 // Default to a conservative 512 MB window.
+                 shm_size: Some(1 << 29),
+                 read_only: false,
++                remote_fd: None,
+                 virtual_entries,
+             });
+ 
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 0281dd0..cf8a1aa 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -1982,6 +1982,7 @@ fn attach_fs_devices(
+                 exit_code.clone(),
+                 config.read_only,
+                 config.virtual_entries.clone(),
++                config.remote_fd,
+             )
+             .unwrap(),
+         ));
+diff --git a/src/vmm/src/vmm_config/fs.rs b/src/vmm/src/vmm_config/fs.rs
+index 9f29895..a5f0958 100644
+--- a/src/vmm/src/vmm_config/fs.rs
++++ b/src/vmm/src/vmm_config/fs.rs
+@@ -12,6 +12,9 @@ pub struct FsDeviceConfig {
+     pub semantics: PermissionSemantics,
+     pub shm_size: Option<usize>,
+     pub read_only: bool,
++    /// Connected stream socket of an external FUSE server; when set, requests
++    /// are forwarded to it instead of being served from `shared_dir`.
++    pub remote_fd: Option<std::os::fd::RawFd>,
+     #[cfg(not(feature = "aws-nitro"))]
+     pub virtual_entries: Vec<VirtualDirEntry>,
+ }

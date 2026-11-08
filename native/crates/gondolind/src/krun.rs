@@ -30,7 +30,57 @@ gondolin_wire::wire_encode! {
         pub console: String,
         pub net_socket_path: Option<String> as "netSocketPath",
         pub net_mac: Option<String> as "netMac",
+        /// FUSE server socket of a virtio-fs device (runner capability `virtiofs-socket`)
+        pub virtio_fs_device_socket_path: Option<String> as "virtioFsDeviceSocketPath",
+        pub virtio_fs_device_tag: Option<String> as "virtioFsDeviceTag",
     }
+}
+
+/// Runner capability: a virtio-fs device served over a socket
+/// (`krun_add_virtiofs_socket`, `host/krun-runner/patches`).
+pub const CAP_VIRTIOFS_SOCKET: &str = "virtiofs-socket";
+
+/// Optional features of the runner binary, one per line of
+/// `--capabilities` (none for runners without that option). Cached in memory
+/// per binary (path, size, mtime). Blocking.
+pub fn runner_capabilities(runner: &str) -> Vec<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+    let resolved = crate::qemu::which(runner).unwrap_or_else(|| PathBuf::from(runner));
+    let Ok(meta) = std::fs::metadata(&resolved) else { return Vec::new() };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = format!("{}|{}|{}", resolved.display(), meta.len(), mtime);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(caps) = cache.lock().unwrap().get(&key) {
+        return caps.clone();
+    }
+    let caps = std::process::Command::new(&resolved)
+        .arg("--capabilities")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_capabilities(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    cache.lock().unwrap().insert(key, caps.clone());
+    caps
+}
+
+fn parse_capabilities(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+/// A virtio-fs device served by the daemon over a socket.
+pub struct VirtioFsDevice<'a> {
+    pub socket: &'a str,
+    pub tag: &'a str,
 }
 
 /// `parseMemoryToMiB`: qemu-style sizes (`512`, `512M`, `1G`, ...) in MiB.
@@ -115,6 +165,7 @@ pub fn runner_config(
     append: &str,
     chardevs: &ChardevPaths,
     net_socket: Option<&str>,
+    virtio_fs: Option<VirtioFsDevice<'_>>,
     scratch_dir: &Path,
 ) -> Result<RunnerConfig, String> {
     validate(vm)?;
@@ -134,6 +185,8 @@ pub fn runner_config(
         console: vm.console.clone().unwrap_or_else(|| "none".into()),
         net_socket_path: net_socket.map(str::to_string),
         net_mac: vm.mac.clone(),
+        virtio_fs_device_socket_path: virtio_fs.as_ref().map(|d| d.socket.to_string()),
+        virtio_fs_device_tag: virtio_fs.map(|d| d.tag.to_string()),
     })
 }
 
@@ -150,6 +203,15 @@ mod tests {
         assert!(parse_memory_mib("1GB").is_err());
         assert!(parse_memory_mib("x").is_err());
         assert!(parse_memory_mib("8192T").is_err());
+    }
+
+    #[test]
+    fn capabilities() {
+        assert_eq!(
+            parse_capabilities("virtiofs-socket\n\n other \n"),
+            vec!["virtiofs-socket", "other"]
+        );
+        assert!(runner_capabilities("/nonexistent/gondolin-krun-runner").is_empty());
     }
 
     #[test]

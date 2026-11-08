@@ -457,8 +457,9 @@ test("native mounts: object commit errors and the guest transport", {
       "-c",
       "printf data | dd of=/objects/x.fail 2>&1; echo rc=$?",
     ]);
-    if (virtiofs && process.env.GONDOLIN_ENGINE === "native") {
-      // FLUSH reaches the daemon: close() reports the failed commit
+    if (virtiofs) {
+      // virtio-fs (native engine only): FLUSH reaches the daemon, close()
+      // reports the failed commit
       assert.match(r.stdout, /I\/O error/);
       assert.match(r.stdout, /rc=1/);
     } else {

@@ -71,11 +71,15 @@ pub trait VfsBackend: Send + Sync + 'static {
     }
 }
 
-/// A vhost-user-fs device backend.
+/// A virtio-fs device backend: vhost-user-fs (QEMU) or FUSE over a socket
+/// (libkrun with gondolin's patch).
 pub trait VirtioFsService: Send + Sync + 'static {
     /// Serves one vhost-user connection until the frontend disconnects
     /// (blocking; runs on its own thread).
     fn serve(&self, conn: std::os::unix::net::UnixStream);
+    /// Serves one FUSE-over-socket connection (`gondolin_virtiofs::socket`)
+    /// until the VMM disconnects (blocking; runs on its own thread).
+    fn serve_socket(&self, conn: std::os::unix::net::UnixStream);
     /// Number of request queues (the device also has a high-priority queue).
     fn request_queues(&self) -> usize;
     /// Whether the controller insists on virtio-fs (warn when unavailable).

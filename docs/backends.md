@@ -60,7 +60,7 @@ Two cases keep `qemu` as the default:
 | `rootfs.size`                                                   | ✓      | ✓      | Ensures the effective writable root disk is at least the requested size before boot and runs `resize2fs` in the guest; requires `resize2fs` in the image |
 | `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |
 | Exec/VFS/network mediation/SSH/ingress APIs                    | ✓      | ✓      | Same host-side control plane and policy stack                                                                                |
-| VFS over virtio-fs                                             | ✓      |        | Native engine with a QEMU that has vhost-user (`vhost-user-fs-pci`/`-device`); otherwise, and always on krun, sandboxfs (FUSE over virtio-serial) |
+| VFS over virtio-fs                                             | ✓      | ✓      | Native engine only. QEMU: a build with vhost-user (`vhost-user-fs-pci`/`-device`). krun: a runner with the `virtiofs-socket` capability (this release's runner; libkrun forwards FUSE requests to the daemon over a socket). Otherwise sandboxfs (FUSE over virtio-serial) |
 
 ## Architecture and Kernel Constraints
 
@@ -99,14 +99,14 @@ from its `PATH`.
 - `krun` has less runtime parity coverage than `qemu`
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
 - Some krun networking edge cases are still under investigation
-- Guest filesystem mounts always use sandboxfs on krun (libkrun has no pluggable virtio-fs backend), so they are slower than on QEMU with virtio-fs and `close()`/`fsync()` cannot report object-tier commit errors
+- krun's virtio-fs forwards every request through the runner to the daemon over a socket, one at a time: faster than sandboxfs, but slower than QEMU's vhost-user (shared guest memory, several queues) for large I/O; older runners (no `virtiofs-socket` capability) fall back to sandboxfs
 - Host CA trust configuration can cause guest-visible HTTP `502` errors on both backends when upstream TLS validation fails
 
 ## Recommendation
 
 Use the default unless you need something only one backend offers: `qemu` for
-virtio-fs (faster guest mounts with a vhost-user QEMU, e.g. Linux distribution
-builds), QEMU tuning knobs, or guests for another architecture. When the backend
+the fastest guest mounts (vhost-user virtio-fs with a Linux distribution QEMU),
+QEMU tuning knobs, or guests for another architecture. When the backend
 matters, pin it explicitly (`sandbox.vmm`, `--vmm`, `GONDOLIN_VMM`) rather than
 relying on detection. If you expose backend knobs in higher-level tooling, gate
 them by backend and fail fast on unsupported combinations.

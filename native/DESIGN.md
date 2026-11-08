@@ -1005,7 +1005,12 @@ Guest transports (`configure.vfs.transport`: `auto`, `sandboxfs`, `virtiofs`;
   the tag and exits. FLUSH and FSYNC reach the backend, so object-tier commit
   errors become the guest's `close()`/`fsync()` errors. Directory handles
   keep a listing snapshot; FORGET drops inodes.
-- **sandboxfs RPC** (fallback, krun, old images): unchanged.
+- **virtio-fs on krun**: libkrun's virtio-fs device with gondolin's patch
+  (`host/krun-runner/patches`, `krun_add_virtiofs_socket`) forwards each FUSE
+  request as a frame over a Unix socket; gondolind serves it with the same
+  `FuseServer` (`gondolin-virtiofs/src/socket.rs`). The runner advertises it
+  with `--capabilities` (`virtiofs-socket`); older runners keep sandboxfs.
+- **sandboxfs RPC** (fallback, node engine, old runners and images): unchanged.
 
 ## Benchmarks
 

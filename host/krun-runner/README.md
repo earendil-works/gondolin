@@ -1,6 +1,6 @@
 # gondolin-krun-runner
 
-Small host-side helper binary used by Gondolin's experimental `krun` backend.
+Small host-side helper binary used by Gondolin's `krun` backend (the default VM backend where it can run).
 
 ## Distribution status
 
@@ -22,7 +22,9 @@ make krun-runner
 
 This will:
 
-- build and stage `libkrun` under `.cache/libkrun-install/<version>`
+- clone `libkrun` (`LIBKRUN_VERSION` in the top-level `Makefile`), apply
+  gondolin's patches from `patches/` and build and stage it under
+  `.cache/libkrun-install/<version>`
 - build `host/krun-runner`
 - bundle `libkrun` shared libraries under `host/krun-runner/zig-out/lib/`
 - on macOS, ad-hoc sign the runner with `com.apple.security.hypervisor`
@@ -48,6 +50,33 @@ cd host/krun-runner
 zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix=/path/to/libkrun/prefix
 ```
 
+The libkrun under the prefix must carry the patches in `patches/` (the runner
+calls `krun_add_virtiofs_socket`).
+
+## libkrun patches
+
+- `0001-virtio-fs-socket-backend.patch`: `krun_add_virtiofs_socket(ctx, tag,
+  fd)` adds a virtio-fs device whose FUSE requests are forwarded over a
+  connected stream socket instead of being served from a host directory
+  (framing in the patch's `include/libkrun.h`). `gondolind` serves the guest
+  VFS through it (`native/crates/gondolin-virtiofs/src/socket.rs`).
+
+To change a patch: `make libkrun` applies the patches to
+`.cache/libkrun-<version>`; edit there, then regenerate with
+`git -C .cache/libkrun-<version> add -N . && git -C .cache/libkrun-<version> diff > host/krun-runner/patches/<name>.patch`
+(and `git reset`). The checkout is reset and re-patched whenever the patch
+files change.
+
+## Interface
+
+- `gondolin-krun-runner --config <path>`: boot a VM from a JSON config
+  (`KrunRunnerConfig` in `native/crates/gondolind/src/krun.rs`); unknown fields
+  are ignored.
+- `--version`: `gondolin-krun-runner X.Y.Z`.
+- `--capabilities`: optional features, one per line; hosts check them before
+  using the matching config fields. `virtiofs-socket`:
+  `virtioFsDeviceSocketPath` / `virtioFsDeviceTag`.
+
 Binary output:
 
 - `zig-out/bin/gondolin-krun-runner`
@@ -69,4 +98,4 @@ SDK:
 
 - Runner is linked against `libkrun` and uses rpath to prefer bundled libs
 - `vmm=krun` requires image manifest krun assets (`assets.krunKernel`, optional `assets.krunInitrd`)
-- Backend is experimental and has lower parity than QEMU
+- Backend has lower parity coverage than QEMU (see `docs/backends.md`)

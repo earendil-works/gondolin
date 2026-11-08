@@ -78,6 +78,12 @@ impl VirtioFsService for VirtioFsDevice {
         }
     }
 
+    fn serve_socket(&self, conn: std::os::unix::net::UnixStream) {
+        if let Err(e) = gondolin_virtiofs::socket::serve(&*self.server, conn) {
+            gondolin_log::debug!("virtio-fs: socket connection ended: {e}");
+        }
+    }
+
     fn request_queues(&self) -> usize {
         self.queues
     }

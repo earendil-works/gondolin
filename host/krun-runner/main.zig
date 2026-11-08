@@ -19,6 +19,17 @@ const Config = struct {
     console: ConsoleMode = .none,
     netSocketPath: ?[]const u8 = null,
     netMac: ?[]const u8 = null,
+    /// socket of the daemon's FUSE server for a virtio-fs device (`virtiofs-socket` capability)
+    virtioFsDeviceSocketPath: ?[]const u8 = null,
+    /// virtio-fs tag of that device
+    virtioFsDeviceTag: ?[]const u8 = null,
+};
+
+/// Optional features of this runner, one per line on `--capabilities`.
+/// Hosts check them before using the matching config fields: unknown config
+/// fields are ignored, so an older runner would silently drop them.
+const capabilities = [_][]const u8{
+    "virtiofs-socket",
 };
 
 const DiskFormat = enum {
@@ -65,7 +76,15 @@ fn mainInner(init: std.process.Init) !void {
 
 fn parseArgs(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !CliConfig {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        try std.Io.File.stdout().writeStreamingAll(io, "gondolin-krun-runner 0.1.0\n");
+        try std.Io.File.stdout().writeStreamingAll(io, "gondolin-krun-runner 0.2.0\n");
+        std.process.exit(0);
+    }
+
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--capabilities")) {
+        for (capabilities) |cap| {
+            try std.Io.File.stdout().writeStreamingAll(io, cap);
+            try std.Io.File.stdout().writeStreamingAll(io, "\n");
+        }
         std.process.exit(0);
     }
 
@@ -149,6 +168,16 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
             0,
         );
         if (net_rc < 0) return krunError("krun_add_net_unixstream", net_rc);
+    }
+
+    if (cfg.virtioFsDeviceSocketPath) |fs_socket_path| {
+        const tag_z = try c_allocator.dupeSentinel(u8, cfg.virtioFsDeviceTag orelse "gondolin", 0);
+        const fd = try connectUnixStream(fs_socket_path);
+        const fs_rc = krun.krun_add_virtiofs_socket(ctx, tag_z.ptr, fd);
+        if (fs_rc < 0) {
+            _ = c.close(fd);
+            return krunError("krun_add_virtiofs_socket", fs_rc);
+        }
     }
 
     const console_id_raw = krun.krun_add_virtio_console_multiport(ctx);

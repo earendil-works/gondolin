@@ -93,8 +93,9 @@ and file providers stay with your local Node.js process. The same binary is
 also a [static `gondolin` CLI](docs/cli.md#static-cli-no-nodejs) without
 Node.js.
 
-Homebrew's QEMU lacks vhost-user, so on macOS guest file access uses the
-slower sandboxfs transport instead of virtio-fs (see [QEMU](docs/qemu.md#virtio-fs-and-vhost-user)).
+The native engine serves guest file access over virtio-fs on krun and on a
+QEMU with vhost-user. Homebrew's QEMU lacks vhost-user, so QEMU on macOS uses
+the slower sandboxfs transport (see [QEMU](docs/qemu.md#virtio-fs-and-vhost-user)).
 
 ### VM backend
 

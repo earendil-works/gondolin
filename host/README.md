@@ -27,8 +27,9 @@ one-time `DeprecationWarning`). See
 | ------------------- | --------------------------------------------------------------------- |
 | `brew install qemu` | `sudo apt install qemu-system-arm` (arm64) or `qemu-system-x86` (x64) |
 
-Homebrew's QEMU lacks vhost-user, so on macOS the native engine serves guest
-files over sandboxfs instead of the faster virtio-fs.
+The native engine serves guest files over virtio-fs on krun and on a QEMU
+with vhost-user. Homebrew's QEMU lacks vhost-user, so QEMU on macOS uses the
+slower sandboxfs.
 
 The `krun` backend (`libkrun` via `gondolin-krun-runner`) is the default
 wherever it can run, QEMU everywhere else:

@@ -50,6 +50,12 @@ pub extern fn krun_add_disk2(
     disk_format: u32,
     read_only: bool,
 ) i32;
+/// gondolin patch (`host/krun-runner/patches`): virtio-fs served over a socket
+pub extern fn krun_add_virtiofs_socket(
+    ctx_id: u32,
+    tag: [*:0]const u8,
+    socket_fd: c_int,
+) i32;
 pub extern fn krun_add_net_unixstream(
     ctx_id: u32,
     c_path: ?[*:0]const u8,
