@@ -18,7 +18,10 @@ import { MapObjectProvider } from "../lib/map-object-provider.ts";
 import {
   createVm,
   enginePids,
+  getEngine,
   guestRmTree,
+  guestVfsTransport,
+  isVirtiofsEngine,
   guestTime,
   installGuestTools,
   sh,
@@ -136,7 +139,23 @@ const VFS_WORKLOADS = [
   "large-read",
 ];
 
+/** Mount kinds of the suite (see `kinds` below) */
+const KIND_NAMES = [
+  "guest-tmpfs",
+  "memory",
+  "realfs",
+  "shadow",
+  "readonly",
+  "js-wrapper",
+  "native-memory",
+  "object-mount",
+];
+
 export async function vfsSuite(bench: Bench) {
+  const wanted = KIND_NAMES.some((kind) =>
+    VFS_WORKLOADS.some((w) => bench.matches(`vfs.${w}.${kind}`)),
+  );
+  if (!wanted) return;
   const smallCount = bench.q(1000, 200);
   const smallSize = 4096;
   const bigDirCount = bench.q(5000, 500);
@@ -195,6 +214,11 @@ export async function vfsSuite(bench: Bench) {
     });
     const guest = vm;
     await installGuestTools(guest);
+    const transport = await guestVfsTransport(guest);
+    if (isVirtiofsEngine(getEngine()) && transport !== "virtiofs") {
+      throw new Error(`expected a virtio-fs guest mount, got ${transport}`);
+    }
+    bench.options.log(`  guest vfs transport: ${transport}`);
     await sh(
       guest,
       "tar -cf /tmp/src.tar -C /mnt/readonly tree && mkdir -p /tmp/tmpfs-ref",
@@ -269,7 +293,7 @@ export async function vfsSuite(bench: Bench) {
       const base = mount.readonly
         ? mount.guestPath
         : `${mount.guestPath}/bench`;
-      const params = { mount: mount.description, guestPath: base };
+      const params = { mount: mount.description, guestPath: base, transport };
       const largeBytes = mount.largeBytes ?? defaultLargeBytes;
       try {
         if (!mount.readonly) {

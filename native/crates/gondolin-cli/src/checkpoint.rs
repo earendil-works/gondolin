@@ -6,26 +6,24 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use gondolin_wire::{FromValue, ToValue};
 
 const MAGIC: &[u8; 8] = b"GONDCPT1";
 const TRAILER_SIZE: u64 = 16;
 
-/// `VmCheckpointData`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckpointData {
-    pub version: u32,
-    pub name: String,
-    pub created_at: String,
-    pub disk_file: String,
-    pub guest_asset_build_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_with_vmm: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compatible_vmm: Option<Vec<String>>,
+gondolin_wire::wire_struct! {
+    /// `VmCheckpointData`
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CheckpointData {
+        pub version: u32,
+        pub name: String,
+        pub created_at: String as "createdAt",
+        pub disk_file: String as "diskFile",
+        pub guest_asset_build_id: String as "guestAssetBuildId",
+        pub snapshot_kind: Option<String> as "snapshotKind",
+        pub created_with_vmm: Option<String> as "createdWithVmm",
+        pub compatible_vmm: Option<Vec<String>> as "compatibleVmm",
+    }
 }
 
 impl CheckpointData {
@@ -116,7 +114,7 @@ pub fn parse_iso_millis(s: &str) -> Option<i64> {
 
 /// Appends the trailer (`writeCheckpointTrailer`).
 pub fn write_trailer(path: &Path, data: &CheckpointData) -> Result<(), String> {
-    let mut json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    let mut json = gondolin_wire::json::to_string_pretty(&data.to_value());
     json.push('\n');
     let mut f = std::fs::OpenOptions::new()
         .append(true)
@@ -150,7 +148,9 @@ pub fn read_trailer(path: &Path) -> Result<CheckpointData, String> {
     let mut json = vec![0u8; len as usize];
     f.seek(SeekFrom::Start(size - TRAILER_SIZE - len)).map_err(|e| e.to_string())?;
     f.read_exact(&mut json).map_err(|e| e.to_string())?;
-    let data: CheckpointData = serde_json::from_slice(&json)
+    let data = gondolin_wire::json::parse(&String::from_utf8_lossy(&json))
+        .map_err(|e| e.to_string())
+        .and_then(|v| CheckpointData::from_value(&v).map_err(|e| e.to_string()))
         .map_err(|e| format!("invalid checkpoint metadata in {}: {e}", path.display()))?;
     if data.version != 1 {
         return Err(format!("unsupported checkpoint version: {}", data.version));
@@ -244,7 +244,8 @@ pub fn backing_file(qemu_img: &Path, disk: &Path) -> Result<Option<PathBuf>, Str
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    let json = gondolin_wire::json::parse(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| e.to_string())?;
     let backing = json["full-backing-filename"].as_str().or(json["backing-filename"].as_str());
     Ok(backing.map(|b| {
         let p = PathBuf::from(b);

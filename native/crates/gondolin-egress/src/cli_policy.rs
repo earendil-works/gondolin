@@ -20,83 +20,88 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
+use gondolin_wire::{Value, value};
 use ring::rand::SecureRandom;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
 
 use crate::patterns::unique_hosts;
 
 /// Default HTTP body limits in `bytes` (`DEFAULT_MAX_HTTP_BODY_BYTES`)
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
+gondolin_wire::wire_struct! {
 /// `--host-secret`: value already resolved (from the environment or the flag).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SecretFlag {
-    pub name: String,
+    pub name: String = Default::default(),
     /// host patterns (may be empty: the secret is then substituted nowhere)
-    pub hosts: Vec<String>,
-    pub value: String,
+    pub hosts: Vec<String> = Default::default(),
+    pub value: String = Default::default(),
+}
 }
 
+gondolin_wire::wire_struct! {
 /// `--dns`, `--dns-trusted-server`, `--dns-synthetic-host-mapping`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DnsFlags {
     /// `synthetic`, `trusted` or `open`
-    pub mode: Option<String>,
-    pub trusted_servers: Vec<String>,
+    pub mode: Option<String> = Default::default(),
+    pub trusted_servers: Vec<String> = Default::default(),
     /// `single` or `per-host`
-    pub synthetic_host_mapping: Option<String>,
+    pub synthetic_host_mapping: Option<String> = Default::default(),
+}
 }
 
+gondolin_wire::wire_struct! {
 /// `--ssh-credential HOST[:PORT]=USER@KEYFILE[:PASSPHRASE]` with the key read.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SshCredentialFlag {
-    pub host: String,
-    pub username: Option<String>,
-    pub private_key_pem: String,
-    pub passphrase: Option<String>,
+    pub host: String = Default::default(),
+    pub username: Option<String> = Default::default(),
+    pub private_key_pem: String = Default::default(),
+    pub passphrase: Option<String> = Default::default(),
+}
 }
 
+gondolin_wire::wire_struct! {
 /// `--ssh-allow-host`, `--ssh-agent`, `--ssh-known-hosts`, `--ssh-credential`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SshFlags {
-    pub allow_hosts: Vec<String>,
+    pub allow_hosts: Vec<String> = Default::default(),
     /// agent socket (`--ssh-agent [SOCK]`, `$SSH_AUTH_SOCK` already applied)
-    pub agent: Option<String>,
-    pub known_hosts_files: Vec<PathBuf>,
-    pub credentials: Vec<SshCredentialFlag>,
+    pub agent: Option<String> = Default::default(),
+    pub known_hosts_files: Vec<PathBuf> = Default::default(),
+    pub credentials: Vec<SshCredentialFlag> = Default::default(),
+}
 }
 
+gondolin_wire::wire_struct! {
 /// The network flags of a CLI command.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NetFlags {
     /// `--allow-host`
-    pub allow_hosts: Vec<String>,
+    pub allow_hosts: Vec<String> = Default::default(),
     /// `--host-secret`
-    pub secrets: Vec<SecretFlag>,
+    pub secrets: Vec<SecretFlag> = Default::default(),
     /// `--disable-websockets`
-    pub disable_websockets: bool,
-    pub dns: Option<DnsFlags>,
+    pub disable_websockets: bool = Default::default(),
+    pub dns: Option<DnsFlags> = Default::default(),
     /// `--tcp-map GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT` (as split by `parseTcpMapSpec`)
-    pub tcp_maps: Vec<(String, String)>,
-    pub ssh: Option<SshFlags>,
+    pub tcp_maps: Vec<(String, String)> = Default::default(),
+    pub ssh: Option<SshFlags> = Default::default(),
+}
 }
 
+gondolin_wire::wire_struct! {
 /// Session facts the compiler needs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompileCtx {
     /// MITM CA `(cert_pem, key_pem)`; absent: the daemon uses its own cache
-    pub mitm_ca: Option<(String, String)>,
+    pub mitm_ca: Option<(String, String)> = Default::default(),
     /// guest MAC (`aa:bb:cc:dd:ee:ff`)
-    pub mac: Option<String>,
+    pub mac: Option<String> = Default::default(),
     /// krun's virtio-net offloads checksums (`vmm: krun`)
-    pub checksum_offload: bool,
+    pub checksum_offload: bool = Default::default(),
+}
 }
 
 /// Result of [`compile_cli_net`].
@@ -221,40 +226,40 @@ pub fn compile_cli_net(flags: &NetFlags, ctx: &CompileCtx) -> Result<CompiledNet
         }
     }
 
-    let mut dns_json = Map::new();
-    dns_json.insert("mode".into(), json!(mode));
+    let mut dns_json = Value::map();
+    dns_json.insert("mode", value!(mode));
     if !trusted.is_empty() {
-        dns_json.insert("trusted_servers".into(), json!(trusted));
+        dns_json.insert("trusted_servers", value!(trusted));
     }
-    dns_json.insert("synthetic_host_mapping".into(), json!(mapping));
-    let mut stack = Map::new();
+    dns_json.insert("synthetic_host_mapping", value!(mapping));
+    let mut stack = Value::map();
     if let Some(mac) = &ctx.mac {
-        stack.insert("guest_mac".into(), json!(mac));
+        stack.insert("guest_mac", value!(mac));
     }
     if ctx.checksum_offload {
-        stack.insert("checksum_offload".into(), json!(true));
+        stack.insert("checksum_offload", value!(true));
     }
-    stack.insert("dns".into(), Value::Object(dns_json));
+    stack.insert("dns", dns_json);
 
     // --- NativeNetwork.configure()
-    let mut policy = Map::new();
+    let mut policy = Value::map();
     if let Some(rules) = rules {
-        policy.insert("rules".into(), rules);
+        policy.insert("rules", rules);
     }
-    policy.insert("allow_websockets".into(), json!(!flags.disable_websockets));
-    let mut net = Map::new();
-    net.insert("mode".into(), json!("native"));
-    net.insert("policy".into(), Value::Object(policy));
-    net.insert("hooks".into(), json!({ "is_request_allowed": false, "is_ip_allowed": false }));
+    policy.insert("allow_websockets", value!(!flags.disable_websockets));
+    let mut net = Value::map();
+    net.insert("mode", value!("native"));
+    net.insert("policy", policy);
+    net.insert("hooks", value!({ "is_request_allowed": false, "is_ip_allowed": false }));
     net.insert(
-        "limits".into(),
-        json!({ "max_request_body_bytes": MAX_BODY_BYTES, "max_response_body_bytes": MAX_BODY_BYTES }),
+        "limits",
+        value!({ "max_request_body_bytes": MAX_BODY_BYTES, "max_response_body_bytes": MAX_BODY_BYTES }),
     );
     if let Some((cert, key)) = &ctx.mitm_ca {
-        net.insert("mitm".into(), json!({ "cert_pem": cert, "key_pem": key }));
+        net.insert("mitm", value!({ "cert_pem": cert, "key_pem": key }));
     }
     if !tcp_rules.is_empty() {
-        net.insert("tcp_hosts".into(), Value::Array(tcp_rules));
+        net.insert("tcp_hosts", Value::Array(tcp_rules));
     }
     if !ssh_targets.is_empty() {
         let mut ports: Vec<u16> = Vec::new();
@@ -263,13 +268,13 @@ pub fn compile_cli_net(flags: &NetFlags, ctx: &CompileCtx) -> Result<CompiledNet
                 ports.push(*port);
             }
         }
-        net.insert("ssh".into(), ssh_config(&ssh, &ssh_allow, &ports));
+        net.insert("ssh", ssh_config(&ssh, &ssh_allow, &ports));
     }
-    net.insert("stack".into(), Value::Object(stack));
-    net.insert("use_system_roots".into(), json!(true));
-    net.insert("use_webpki_roots".into(), json!(true));
+    net.insert("stack", stack);
+    net.insert("use_system_roots", value!(true));
+    net.insert("use_webpki_roots", value!(true));
 
-    Ok(CompiledNet { net: Value::Object(net), guest_env })
+    Ok(CompiledNet { net, guest_env })
 }
 
 /// `createHttpHooks({ allowedHosts, secrets })` in its `rules()` form.
@@ -299,7 +304,7 @@ fn http_rules(flags: &NetFlags, env: &mut BTreeMap<String, String>) -> Result<Va
         .map(|(identifier, secret)| {
             let placeholder = format!("{marker}.{identifier}");
             env.insert(secret.name.clone(), placeholder.clone());
-            json!({
+            value!({
                 "name": secret.name,
                 "identifier": identifier,
                 "placeholder": placeholder,
@@ -317,7 +322,7 @@ fn http_rules(flags: &NetFlags, env: &mut BTreeMap<String, String>) -> Result<Va
     };
     let allowed =
         if configured.iter().any(|h| h == "*") { vec!["*".to_string()] } else { configured };
-    Ok(json!({
+    Ok(value!({
         "allowed_hosts": allowed,
         "allowed_internal_hosts": [],
         "block_internal_ranges": true,
@@ -502,14 +507,14 @@ fn tcp_mapping_rules(maps: &[(String, String)]) -> Result<Vec<Value>, String> {
                 seen_host.push(host.clone());
             }
         }
-        let mut entry = Map::new();
-        entry.insert("host".into(), json!(host));
+        let mut entry = Value::map();
+        entry.insert("host", value!(host));
         if let Some(p) = port {
-            entry.insert("port".into(), json!(p));
+            entry.insert("port", value!(p));
         }
-        entry.insert("upstream_host".into(), json!(upstream_host));
-        entry.insert("upstream_port".into(), json!(upstream_port.expect("required")));
-        out.push(Value::Object(entry));
+        entry.insert("upstream_host", value!(upstream_host));
+        entry.insert("upstream_port", value!(upstream_port.expect("required")));
+        out.push(entry);
     }
     Ok(out)
 }
@@ -545,29 +550,29 @@ fn ssh_config(ssh: &SshFlags, allow: &[String], ports: &[u16]) -> Value {
     let credentials: Vec<Value> = credentials
         .iter()
         .map(|c| {
-            let mut entry = Map::new();
-            entry.insert("host".into(), json!(c.host));
+            let mut entry = Value::map();
+            entry.insert("host", value!(c.host));
             if let Some(user) = &c.username {
-                entry.insert("username".into(), json!(user));
+                entry.insert("username", value!(user));
             }
-            entry.insert("private_key".into(), json!(c.private_key_pem));
+            entry.insert("private_key", value!(c.private_key_pem));
             if let Some(pass) = &c.passphrase {
-                entry.insert("passphrase".into(), json!(pass));
+                entry.insert("passphrase", value!(pass));
             }
-            Value::Object(entry)
+            entry
         })
         .collect();
-    let mut out = Map::new();
-    out.insert("ports".into(), json!(ports));
-    out.insert("allowed_hosts".into(), json!(allow));
-    out.insert("credentials".into(), Value::Array(credentials));
+    let mut out = Value::map();
+    out.insert("ports", value!(ports));
+    out.insert("allowed_hosts", value!(allow));
+    out.insert("credentials", Value::Array(credentials));
     if let Some(agent) = &ssh.agent {
-        out.insert("agent".into(), json!(agent));
+        out.insert("agent", value!(agent));
     }
-    out.insert("known_hosts_files".into(), json!(known_hosts));
-    out.insert("host_verifier_hook".into(), json!(false));
-    out.insert("exec_policy_hook".into(), json!(false));
-    Value::Object(out)
+    out.insert("known_hosts_files", value!(known_hosts));
+    out.insert("host_verifier_hook", value!(false));
+    out.insert("exec_policy_hook", value!(false));
+    out
 }
 
 #[cfg(test)]

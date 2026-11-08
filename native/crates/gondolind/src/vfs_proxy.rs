@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use gondolin_wire::Value;
-use serde::Serialize;
 
 use crate::controller::{CallError, Controller};
 use crate::fields::Fields;
@@ -26,27 +24,30 @@ impl ControllerVfs {
     }
 }
 
-#[derive(Serialize)]
-struct VfsRpc<'a> {
-    op: &'a str,
-    req: Value,
+gondolin_wire::wire_encode! {
+    struct VfsRpc<'a> {
+        op: &'a str,
+        req: Value,
+    }
 }
 
-#[async_trait]
 impl VfsBackend for ControllerVfs {
-    async fn handle(&self, op: &str, req: Value) -> FsReply {
-        match self.ctl.request(VFS_RPC, &VfsRpc { op, req }).await {
-            Ok(result) => {
-                let f = Fields::of(&result);
-                let err = f.int("err").and_then(|e| i64::try_from(e).ok()).unwrap_or(errno::EIO);
-                FsReply {
-                    err,
-                    res: f.get_some("res").cloned(),
-                    message: f.text("message").map(str::to_string),
+    fn handle<'a>(&'a self, op: &'a str, req: Value) -> crate::BoxFuture<'a, FsReply> {
+        Box::pin(async move {
+            match self.ctl.request(VFS_RPC, &VfsRpc { op, req }).await {
+                Ok(result) => {
+                    let f = Fields::of(&result);
+                    let err =
+                        f.int("err").and_then(|e| i64::try_from(e).ok()).unwrap_or(errno::EIO);
+                    FsReply {
+                        err,
+                        res: f.get_some("res").cloned(),
+                        message: f.text("message").map(str::to_string),
+                    }
                 }
+                Err(CallError::Remote(e)) => FsReply::error(errno::EIO, e.message),
+                Err(e) => FsReply::error(errno::EIO, e.to_string()),
             }
-            Err(CallError::Remote(e)) => FsReply::error(errno::EIO, e.message),
-            Err(e) => FsReply::error(errno::EIO, e.to_string()),
-        }
+        })
     }
 }

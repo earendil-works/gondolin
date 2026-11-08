@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "engine": "native",
+  "suite": "cli",
+  "quick": false,
+  "filter": null,
+  "interleaved": [
+    "node",
+    "native"
+  ],
+  "note": null,
+  "iterations": null,
+  "startedAt": "2026-11-06T22:51:46.126Z",
+  "finishedAt": "2026-11-06T22:54:06.439Z",
+  "machine": {
+    "hostname": "saratoga",
+    "platform": "darwin",
+    "osRelease": "25.6.0",
+    "osVersion": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050",
+    "productVersion": "26.6.2",
+    "arch": "arm64",
+    "cpuModel": "Apple M5 Max",
+    "cpuCount": 18,
+    "loadAvg": [
+      113.2,
+      65.3,
+      40.62
+    ],
+    "totalMemGB": 128,
+    "node": "v26.10.0",
+    "qemu": "QEMU emulator version 10.2.1",
+    "gitCommit": "510d126",
+    "gitDirty": false,
+    "image": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../guest/image/out (buildId 6701ac16-6084-5f65-adab-c949fa63ba62)",
+    "nativeBin": "/Users/mitsuhiko/Development/gondolin-wt/bench/host/../native/target/release/gondolin",
+    "qemuPath": "/opt/homebrew/bin/qemu-system-aarch64",
+    "virtiofsEnv": null,
+    "loadAvgEnd": [
+      63.58,
+      64.69,
+      44.26
+    ]
+  },
+  "workloads": [
+    {
+      "name": "cli.exec-true.cold",
+      "params": {
+        "cli": "gondolin",
+        "env": {},
+        "command": "gondolin exec -- true",
+        "cache": "fresh XDG_CACHE_HOME per run"
+      },
+      "warmup": 1,
+      "iterations": 10,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 1315.0316249999742,
+            "p95": 1678.1805463499995,
+            "min": 1092.4132499999832,
+            "max": 1863.9972089999937,
+            "mean": 1341.0385833999958
+          },
+          "samples": [
+            1144.067,
+            1246.603,
+            1451.071,
+            1282.672,
+            1347.391,
+            1404.555,
+            1409.923,
+            1863.997,
+            1167.694,
+            1092.413
+          ]
+        }
+      },
+      "totalMs": 14764.025709000009,
+      "loadAvg": 87.67
+    },
+    {
+      "name": "cli.exec-true.warm",
+      "params": {
+        "cli": "gondolin",
+        "env": {},
+        "command": "gondolin exec -- true",
+        "cache": "shared XDG_CACHE_HOME"
+      },
+      "warmup": 2,
+      "iterations": 20,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 20,
+            "median": 1089.6060000000289,
+            "p95": 2090.6325774000056,
+            "min": 886.3564589999733,
+            "max": 2296.60037499998,
+            "mean": 1264.1106584000022
+          },
+          "samples": [
+            1103.199,
+            1025.971,
+            989.983,
+            985.464,
+            1023.298,
+            943.022,
+            886.356,
+            1103.7,
+            970.688,
+            1061.729,
+            1076.013,
+            1036.965,
+            2079.792,
+            2296.6,
+            1602.757,
+            1544.092,
+            1266.402,
+            1353.765,
+            1460.564,
+            1471.854
+          ]
+        }
+      },
+      "totalMs": 27510.70870800002,
+      "loadAvg": 83.94
+    },
+    {
+      "name": "cli.node-cli-exec-true.cold",
+      "params": {
+        "cli": "node gondolin.ts",
+        "env": {
+          "GONDOLIN_ENGINE": "native"
+        },
+        "command": "gondolin exec -- true",
+        "cache": "fresh XDG_CACHE_HOME per run"
+      },
+      "warmup": 1,
+      "iterations": 10,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 10,
+            "median": 1739.5504585000162,
+            "p95": 2214.0223460500215,
+            "min": 1339.713374999992,
+            "max": 2287.651459000015,
+            "mean": 1780.2110416000128
+          },
+          "samples": [
+            1622.496,
+            2065.152,
+            2124.031,
+            2287.651,
+            1719.14,
+            1896.546,
+            1645.133,
+            1759.961,
+            1339.713,
+            1342.287
+          ]
+        }
+      },
+      "totalMs": 19634.304000000004,
+      "loadAvg": 76.75
+    },
+    {
+      "name": "cli.node-cli-exec-true.warm",
+      "params": {
+        "cli": "node gondolin.ts",
+        "env": {
+          "GONDOLIN_ENGINE": "native"
+        },
+        "command": "gondolin exec -- true",
+        "cache": "shared XDG_CACHE_HOME"
+      },
+      "warmup": 2,
+      "iterations": 20,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 20,
+            "median": 1368.0072714999842,
+            "p95": 1543.4472055999768,
+            "min": 1163.1281249999884,
+            "max": 1697.5522079999791,
+            "mean": 1368.0752041499945
+          },
+          "samples": [
+            1467.633,
+            1223.462,
+            1471.371,
+            1400.727,
+            1697.552,
+            1413.23,
+            1525.478,
+            1490.966,
+            1535.336,
+            1506.066,
+            1442.996,
+            1242.736,
+            1300.854,
+            1292.666,
+            1227.02,
+            1250.202,
+            1335.288,
+            1163.128,
+            1180.106,
+            1194.687
+          ]
+        }
+      },
+      "totalMs": 30206.954708000005,
+      "loadAvg": 76.49
+    }
+  ]
+}

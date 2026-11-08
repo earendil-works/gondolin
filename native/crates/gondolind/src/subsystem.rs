@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use gondolin_wire::Value;
 use tokio::net::UnixStream;
 
@@ -56,13 +55,14 @@ impl FsReply {
 }
 
 /// Host side of the guest filesystem.
-#[async_trait]
 pub trait VfsBackend: Send + Sync + 'static {
     /// Handles one sandboxfs request (`op` and its `req` map). Requests of one
     /// guest connection arrive one at a time.
-    async fn handle(&self, op: &str, req: Value) -> FsReply;
+    fn handle<'a>(&'a self, op: &'a str, req: Value) -> crate::BoxFuture<'a, FsReply>;
     /// Releases resources at session shutdown.
-    async fn close(&self) {}
+    fn close<'a>(&'a self) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {})
+    }
 
     /// The same filesystem over virtio-fs (vhost-user-fs), when the backend
     /// offers it; the session decides whether the VMM can use it.
@@ -85,14 +85,15 @@ pub trait VirtioFsService: Send + Sync + 'static {
 }
 
 /// Host side of the guest network.
-#[async_trait]
 pub trait NetBackend: Send + Sync + 'static {
     /// Serves one QEMU stream-netdev connection until it closes. A new
     /// connection (QEMU restart) is served by a new call; the previous one is
     /// dropped first.
-    async fn serve(&self, stream: UnixStream);
+    fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()>;
     /// Releases resources at session shutdown.
-    async fn close(&self) {}
+    fn close<'a>(&'a self) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {})
+    }
 }
 
 /// Network attachment of the VM.

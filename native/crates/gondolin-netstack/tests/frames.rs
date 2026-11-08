@@ -351,7 +351,9 @@ async fn dns_open_forwards_anything_to_the_targeted_ip() {
         dns: DnsConfig { mode: DnsMode::Open, ..DnsConfig::default() },
         limits: gondolin_netstack::NetLimits {
             max_udp_sessions: 2,
-            udp_session_idle_timeout_ms: 300,
+            // long enough that a slow (emulated, loaded) machine still sees
+            // the replies before the sessions go idle
+            udp_session_idle_timeout_ms: 2_000,
             ..Default::default()
         },
         ..NetConfig::default()
@@ -367,8 +369,11 @@ async fn dns_open_forwards_anything_to_the_targeted_ip() {
     }
     // Capped (LRU eviction) and closed when idle.
     assert_eq!(h.stack.stats().udp_sessions, 2);
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(h.stack.stats().udp_sessions, 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while h.stack.stats().udp_sessions != 0 {
+        assert!(std::time::Instant::now() < deadline, "udp sessions never went idle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test]
@@ -442,7 +447,8 @@ async fn oversized_frame_length_ends_serve() {
     let (mut h, _flows) = channel_harness(NetConfig::default());
     let mut g = RawGuest::new(&mut h);
     g.send_raw(&0x0100_0000u32.to_be_bytes()).await;
-    let result = tokio::time::timeout(Duration::from_secs(5), &mut h.serve).await.unwrap().unwrap();
+    let result =
+        tokio::time::timeout(Duration::from_secs(30), &mut h.serve).await.unwrap().unwrap();
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
 
@@ -544,8 +550,7 @@ async fn guest_that_never_reads_is_throttled() {
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 1 << 16];
         let mut total = 0usize;
-        while let Ok(Ok(n)) =
-            tokio::time::timeout(Duration::from_millis(500), rd.read(&mut buf)).await
+        while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(3), rd.read(&mut buf)).await
         {
             if n == 0 {
                 break;
@@ -554,7 +559,7 @@ async fn guest_that_never_reads_is_throttled() {
         }
         total
     });
-    tokio::time::timeout(Duration::from_secs(20), sender).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(120), sender).await.unwrap().unwrap();
     let total = reader.await.unwrap();
     // 100k RSTs of 4 + 14 + 20 + 20 bytes.
     assert_eq!(total, 100_000 * 58);

@@ -3,8 +3,7 @@
 
 use std::io::Write;
 
-use base64::Engine as _;
-use serde_json::json;
+use gondolind::util::{Either, select2};
 
 use super::tty::{self, Input, RawMode};
 use super::{parse_failure, render_error, usage};
@@ -45,7 +44,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
                 return 1;
             }
         };
-    let mut exec = json!({
+    let mut exec = gondolin_wire::value!({
         "type": "exec",
         "id": REQUEST_ID,
         "cmd": command[0],
@@ -56,12 +55,12 @@ pub async fn run(argv: Vec<String>) -> i32 {
         "stderr_window": 1024 * 1024,
     });
     if !args.env.is_empty() {
-        exec["env"] = json!(args.env);
+        exec["env"] = gondolin_wire::value!(args.env);
     }
     if let Some(cwd) = &args.cwd {
-        exec["cwd"] = json!(cwd);
+        exec["cwd"] = gondolin_wire::value!(cwd);
     }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<gondolin_wire::Value>();
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if registry::write_client_frame(&mut writer, &msg).await.is_err() {
@@ -73,15 +72,25 @@ pub async fn run(argv: Vec<String>) -> i32 {
     let mut raw = RawMode::enable();
     if let Some((rows, cols)) = tty::window_size() {
         let _ =
-            tx.send(json!({ "type": "pty_resize", "id": REQUEST_ID, "rows": rows, "cols": cols }));
+            tx.send(gondolin_wire::value!({ "type": "pty_resize", "id": REQUEST_ID, "rows": rows, "cols": cols }));
     }
-    let mut winch =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+    let mut winch = crate::signals::subscribe(&[libc::SIGWINCH]);
     let mut input = tty::stdin_reader();
     let mut input_open = true;
     let code = loop {
-        tokio::select! {
-            msg = next_message(&mut reader) => match msg {
+        let input_ready = input_open;
+        let next = select2(
+            next_message(&mut reader),
+            select2(
+                async {
+                    if input_ready { input.recv().await } else { std::future::pending().await }
+                },
+                winch.recv(),
+            ),
+        )
+        .await;
+        match next {
+            Either::Left(msg) => match msg {
                 Ok(Some(ServerMessage::Output { id, stdout, data })) if id == REQUEST_ID => {
                     if stdout {
                         let mut out = std::io::stdout().lock();
@@ -91,7 +100,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
                         let _ = err.write_all(&data).and_then(|_| err.flush());
                     }
                     let key = if stdout { "stdout" } else { "stderr" };
-                    let _ = tx.send(json!({ "type": "exec_window", "id": REQUEST_ID, key: data.len() }));
+                    let _ = tx.send(gondolin_wire::value!({ "type": "exec_window", "id": REQUEST_ID, (key): data.len() }));
                 }
                 Ok(Some(ServerMessage::Output { .. })) => {}
                 Ok(Some(ServerMessage::Json(v))) => match v["type"].as_str() {
@@ -108,11 +117,16 @@ pub async fn run(argv: Vec<String>) -> i32 {
                             continue;
                         }
                         let code = v["code"].as_str().unwrap_or("");
-                        if id.is_some() && matches!(code, "stdin_backpressure" | "stdin_chunk_too_large") {
+                        if id.is_some()
+                            && matches!(code, "stdin_backpressure" | "stdin_chunk_too_large")
+                        {
                             continue;
                         }
                         raw.restore();
-                        render_error(&format!("error {code}: {}", v["message"].as_str().unwrap_or("")));
+                        render_error(&format!(
+                            "error {code}: {}",
+                            v["message"].as_str().unwrap_or("")
+                        ));
                         break 1;
                     }
                     _ => {}
@@ -123,26 +137,28 @@ pub async fn run(argv: Vec<String>) -> i32 {
                     break 1;
                 }
             },
-            item = input.recv(), if input_open => match item {
-                Some(Input::Data(data)) => {
-                    for chunk in data.chunks(STDIN_CHUNK) {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
-                        let _ = tx.send(json!({ "type": "stdin", "id": REQUEST_ID, "data": b64 }));
+            Either::Right(Either::Left(item)) => {
+                match item {
+                    Some(Input::Data(data)) => {
+                        for chunk in data.chunks(STDIN_CHUNK) {
+                            let b64 = gondolin_wire::base64::encode(chunk);
+                            let _ = tx.send(gondolin_wire::value!({ "type": "stdin", "id": REQUEST_ID, "data": b64 }));
+                        }
+                    }
+                    Some(Input::Escape) => {
+                        raw.restore();
+                        eprintln!("\n[gondolin] detached (Ctrl-])");
+                        break 130;
+                    }
+                    Some(Input::Eof) | None => {
+                        input_open = false;
+                        let _ = tx.send(gondolin_wire::value!({ "type": "stdin", "id": REQUEST_ID, "eof": true }));
                     }
                 }
-                Some(Input::Escape) => {
-                    raw.restore();
-                    eprintln!("\n[gondolin] detached (Ctrl-])");
-                    break 130;
-                }
-                Some(Input::Eof) | None => {
-                    input_open = false;
-                    let _ = tx.send(json!({ "type": "stdin", "id": REQUEST_ID, "eof": true }));
-                }
-            },
-            _ = async { match winch.as_mut() { Some(w) => { w.recv().await; } None => std::future::pending().await } } => {
+            }
+            Either::Right(Either::Right(_)) => {
                 if let Some((rows, cols)) = tty::window_size() {
-                    let _ = tx.send(json!({ "type": "pty_resize", "id": REQUEST_ID, "rows": rows, "cols": cols }));
+                    let _ = tx.send(gondolin_wire::value!({ "type": "pty_resize", "id": REQUEST_ID, "rows": rows, "cols": cols }));
                 }
             }
         }

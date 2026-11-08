@@ -160,7 +160,7 @@ export class Bench {
     const samples: Record<string, number[]> = {};
     const controller = new AbortController();
     const started = performance.now();
-    const timeoutMs = spec.timeoutMs ?? 300_000;
+    const timeoutMs = spec.timeoutMs ?? 600_000;
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {

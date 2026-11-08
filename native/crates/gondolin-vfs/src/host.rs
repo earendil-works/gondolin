@@ -16,15 +16,17 @@
 //! dangling links; `lstat`, `readlink`, `unlink`, `rmdir`, `rename` and the
 //! `link` destination act on the link itself. `chmod` drops setuid/setgid.
 
+use crate::BoxFuture;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
-use rustix::io::Errno;
+use crate::sys::{self, Errno};
+use libc::{
+    O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+};
 
 use crate::error::{VfsError, VfsResult, errno};
 use crate::provider::{FileHandle, Handle, Provider};
@@ -130,14 +132,14 @@ impl Resolved {
     }
 }
 
-fn dir_flags() -> OFlags {
+fn dir_flags() -> libc::c_int {
     #[cfg(target_os = "linux")]
     {
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        libc::O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     }
     #[cfg(not(target_os = "linux"))]
     {
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     }
 }
 
@@ -149,27 +151,27 @@ fn ts_ms(sec: i64, nsec: i64) -> i64 {
     sec * 1000 + (nsec + 500_000) / 1_000_000
 }
 
-// field types differ between platforms and rustix backends
+// field types differ between platforms
 #[allow(clippy::unnecessary_cast)]
-fn stat_to_attr(st: &rustix::fs::Stat) -> Attr {
+fn stat_to_attr(st: &sys::Stat) -> Attr {
     Attr {
         mode: st.st_mode as u32,
         size: st.st_size as u64,
         nlink: st.st_nlink as u32,
-        uid: st.st_uid,
-        gid: st.st_gid,
+        uid: st.st_uid as u32,
+        gid: st.st_gid as u32,
         atime_ms: ts_ms(st.st_atime as i64, st.st_atime_nsec as i64),
         mtime_ms: ts_ms(st.st_mtime as i64, st.st_mtime_nsec as i64),
         ctime_ms: ts_ms(st.st_ctime as i64, st.st_ctime_nsec as i64),
     }
 }
 
-fn is_symlink(st: &rustix::fs::Stat) -> bool {
-    FileType::from_raw_mode(st.st_mode as _) == FileType::Symlink
+fn is_symlink(st: &sys::Stat) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
-fn is_dir(st: &rustix::fs::Stat) -> bool {
-    FileType::from_raw_mode(st.st_mode as _) == FileType::Directory
+fn is_dir(st: &sys::Stat) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFDIR
 }
 
 impl Root {
@@ -210,7 +212,7 @@ impl Root {
         }
         let name = vpath::basename(path).to_string();
         if follow {
-            match rustix::fs::statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            match sys::statat(&*dir, name.as_str(), true) {
                 Ok(st) if is_symlink(&st) => return None,
                 _ => {}
             }
@@ -219,31 +221,45 @@ impl Root {
     }
 
     /// Opens the symlink-free relative directory path `rest` below `base`
-    /// (at `prefix`), caching what it opens.
-    #[cfg(target_os = "linux")]
+    /// (at `prefix`), caching what it opens: one `openat2` on Linux, else
+    /// (and where openat2 is unavailable: kernels before 5.6, seccomp
+    /// filters, emulators) one `openat(O_NOFOLLOW)` per component.
     fn open_dirs(&self, base: &Fd, prefix: &str, rest: &str) -> Option<Fd> {
-        use rustix::fs::ResolveFlags;
-        let fd = rustix::fs::openat2(
-            base,
-            rest,
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-        )
-        .ok()?;
-        let fd = Arc::new(fd);
-        let key = if prefix == "/" { format!("/{rest}") } else { format!("{prefix}/{rest}") };
-        self.cache.lock().unwrap().insert(key, fd.clone());
-        Some(fd)
-    }
+        #[cfg(target_os = "linux")]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[cfg(not(target_os = "linux"))]
-    fn open_dirs(&self, base: &Fd, prefix: &str, rest: &str) -> Option<Fd> {
+            static NO_OPENAT2: AtomicBool = AtomicBool::new(false);
+            if !NO_OPENAT2.load(Ordering::Relaxed) {
+                match sys::openat2(
+                    &**base,
+                    rest,
+                    libc::O_PATH | O_DIRECTORY | O_CLOEXEC,
+                    0,
+                    libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS,
+                ) {
+                    Ok(fd) => {
+                        let fd = Arc::new(fd);
+                        let key = if prefix == "/" {
+                            format!("/{rest}")
+                        } else {
+                            format!("{prefix}/{rest}")
+                        };
+                        self.cache.lock().unwrap().insert(key, fd.clone());
+                        return Some(fd);
+                    }
+                    Err(Errno::NOSYS) | Err(Errno::PERM) => {
+                        NO_OPENAT2.store(true, Ordering::Relaxed);
+                    }
+                    Err(_) => return None,
+                }
+            }
+        }
         let mut dir = base.clone();
         let mut key = prefix.to_string();
         for comp in rest.split('/').filter(|c| !c.is_empty()) {
             // O_NOFOLLOW | O_DIRECTORY: a symlink fails (the walk handles it)
-            let fd = rustix::fs::openat(&dir, comp, dir_flags(), Mode::empty()).ok()?;
+            let fd = sys::openat(&*dir, comp, dir_flags(), 0).ok()?;
             dir = Arc::new(fd);
             key = vpath::join(&key, comp);
             self.cache.lock().unwrap().insert(key.clone(), dir.clone());
@@ -282,7 +298,7 @@ impl Root {
                 let vp = vpath::join(&format!("/{}", names.join("/")), &comp);
                 return Ok(Resolved { dir: stack.pop().unwrap(), name: Some(comp), vpath: vp });
             }
-            let st = match rustix::fs::statat(cur, comp.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            let st = match sys::statat(&**cur, comp.as_str(), true) {
                 Ok(st) => st,
                 Err(Errno::NOENT) if is_last => {
                     if via_final_link {
@@ -300,9 +316,9 @@ impl Root {
                 if links > MAX_SYMLINKS {
                     return Err(VfsError::op(errno::ELOOP, op, path));
                 }
-                let target = rustix::fs::readlinkat(cur, comp.as_str(), Vec::new())
-                    .map_err(|e| map_errno(e, op, path))?;
-                let target = target.to_string_lossy().into_owned();
+                let target =
+                    sys::readlinkat(&**cur, comp.as_str()).map_err(|e| map_errno(e, op, path))?;
+                let target = String::from_utf8_lossy(&target).into_owned();
                 if is_last {
                     via_final_link = true;
                 }
@@ -329,13 +345,11 @@ impl Root {
             if !is_dir(&st) {
                 return Err(VfsError::op(errno::ENOTDIR, op, path));
             }
-            let fd = rustix::fs::openat(cur, comp.as_str(), dir_flags(), Mode::empty()).map_err(
-                |e| match e {
-                    // swapped for a symlink since the stat
-                    Errno::LOOP | Errno::NOTDIR => enoent(),
-                    e => map_errno(e, op, path),
-                },
-            )?;
+            let fd = sys::openat(&**cur, comp.as_str(), dir_flags(), 0).map_err(|e| match e {
+                // swapped for a symlink since the stat
+                Errno::LOOP | Errno::NOTDIR => enoent(),
+                e => map_errno(e, op, path),
+            })?;
             stack.push(Arc::new(fd));
             names.push(comp);
         }
@@ -360,36 +374,25 @@ impl Root {
 }
 
 fn reopen_dir(dir: &OwnedFd, op: &str, path: &str) -> VfsResult<OwnedFd> {
-    rustix::fs::openat(
-        dir,
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| map_errno(e, op, path))
+    sys::openat(dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0).map_err(|e| map_errno(e, op, path))
 }
 
 /// Opens the resolved location itself (a file or directory) without following.
 fn open_target(
     r: &Resolved,
-    flags: OFlags,
-    mode: Mode,
+    flags: libc::c_int,
+    mode: libc::mode_t,
     op: &str,
     path: &str,
 ) -> VfsResult<OwnedFd> {
     match &r.name {
-        Some(name) => rustix::fs::openat(
-            &r.dir,
-            name.as_str(),
-            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            mode,
-        )
-        .map_err(|e| match e {
-            Errno::LOOP => VfsError::op(errno::ENOENT, op, path),
-            e => map_errno(e, op, path),
-        }),
+        Some(name) => sys::openat(&*r.dir, name.as_str(), flags | O_NOFOLLOW | O_CLOEXEC, mode)
+            .map_err(|e| match e {
+                Errno::LOOP => VfsError::op(errno::ENOENT, op, path),
+                e => map_errno(e, op, path),
+            }),
         None => {
-            if flags.intersects(OFlags::WRONLY | OFlags::RDWR) {
+            if flags & (O_WRONLY | O_RDWR) != 0 {
                 return Err(VfsError::op(errno::EISDIR, op, path));
             }
             reopen_dir(&r.dir, op, path)
@@ -397,10 +400,10 @@ fn open_target(
     }
 }
 
-fn lstat_resolved(r: &Resolved, op: &str, path: &str) -> VfsResult<rustix::fs::Stat> {
+fn lstat_resolved(r: &Resolved, op: &str, path: &str) -> VfsResult<sys::Stat> {
     match &r.name {
-        Some(name) => rustix::fs::statat(&r.dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW),
-        None => rustix::fs::fstat(&r.dir),
+        Some(name) => sys::statat(&*r.dir, name.as_str(), true),
+        None => sys::fstat(&*r.dir),
     }
     .map_err(|e| map_errno(e, op, path))
 }
@@ -439,12 +442,8 @@ impl HostProvider {
     pub fn new(root: &str) -> VfsResult<HostProvider> {
         let canonical =
             std::fs::canonicalize(root).map_err(|e| VfsError::from_io(&e, "open", root))?;
-        let fd = rustix::fs::open(
-            &canonical,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|e| map_errno(e, "open", root))?;
+        let fd = sys::open(&canonical, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)
+            .map_err(|e| map_errno(e, "open", root))?;
         let path = canonical.to_string_lossy().into_owned();
         Ok(HostProvider {
             root: Arc::new(Root { fd: Arc::new(fd), path, cache: Default::default() }),
@@ -464,325 +463,350 @@ impl HostProvider {
     }
 }
 
-#[async_trait]
 impl Provider for HostProvider {
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, false, "lstat")?;
-            Ok(stat_to_attr(&lstat_resolved(&r, "lstat", &path)?))
-        })
-        .await
-    }
-
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "stat")?;
-            Ok(stat_to_attr(&lstat_resolved(&r, "stat", &path)?))
-        })
-        .await
-    }
-
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "scandir")?;
-            let fd = open_target(
-                &r,
-                OFlags::RDONLY | OFlags::DIRECTORY,
-                Mode::empty(),
-                "scandir",
-                &path,
-            )?;
-            let mut dir = rustix::fs::Dir::new(fd).map_err(|e| map_errno(e, "scandir", &path))?;
-            let mut out = Vec::new();
-            while let Some(entry) = dir.read() {
-                let entry = entry.map_err(|e| map_errno(e, "scandir", &path))?;
-                let name = entry.file_name().to_bytes();
-                if name == b"." || name == b".." {
-                    continue;
-                }
-                let kind = match entry.file_type() {
-                    FileType::Directory => Some(EntryKind::Dir),
-                    FileType::Symlink => Some(EntryKind::Symlink),
-                    FileType::Unknown => None,
-                    _ => Some(EntryKind::File),
-                };
-                out.push(DirEntry { name: String::from_utf8_lossy(name).into_owned(), kind });
-            }
-            Ok(out)
-        })
-        .await
-    }
-
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        let path = path.to_string();
-        let file = self
-            .run(move |root| {
-                let r = root.resolve(&path, true, "open")?;
-                let mut oflags = match (flags.read, flags.write || flags.append) {
-                    (true, true) => OFlags::RDWR,
-                    (false, true) => OFlags::WRONLY,
-                    _ => OFlags::RDONLY,
-                };
-                if flags.create {
-                    oflags |= OFlags::CREATE;
-                }
-                if flags.truncate {
-                    oflags |= OFlags::TRUNC;
-                }
-                if flags.append {
-                    oflags |= OFlags::APPEND;
-                }
-                let fd = open_target(
-                    &r,
-                    oflags,
-                    Mode::from_raw_mode((mode & 0o777) as _),
-                    "open",
-                    &path,
-                )?;
-                Ok(File::from(fd))
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, false, "lstat")?;
+                Ok(stat_to_attr(&lstat_resolved(&r, "lstat", &path)?))
             })
-            .await?;
-        Ok(Arc::new(HostHandle { file: Arc::new(file), append: flags.append }))
+            .await
+        })
     }
 
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let mode = Mode::from_raw_mode((mode & 0o7777 & CHMOD_ALLOWED_BITS) as _);
-            if recursive {
-                let mut current = String::from("/");
-                for comp in vpath::components(&vpath::normalize(&path))
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-                {
-                    current = vpath::join(&current, &comp);
-                    let r = root.resolve(&current, true, "mkdir")?;
-                    if let Some(name) = &r.name {
-                        match rustix::fs::mkdirat(&r.dir, name.as_str(), mode) {
-                            Ok(()) => {}
-                            Err(Errno::EXIST) => {
-                                let st = rustix::fs::statat(
-                                    &r.dir,
-                                    name.as_str(),
-                                    AtFlags::SYMLINK_NOFOLLOW,
-                                )
-                                .map_err(|e| map_errno(e, "mkdir", &path))?;
-                                if !is_dir(&st) {
-                                    return Err(VfsError::op(errno::ENOTDIR, "mkdir", &path));
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "stat")?;
+                Ok(stat_to_attr(&lstat_resolved(&r, "stat", &path)?))
+            })
+            .await
+        })
+    }
+
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "scandir")?;
+                let fd = open_target(&r, O_RDONLY | O_DIRECTORY, 0, "scandir", &path)?;
+                let dir = sys::Dir::new(fd).map_err(|e| map_errno(e, "scandir", &path))?;
+                let mut out = Vec::new();
+                for entry in dir {
+                    let (name, kind) = entry.map_err(|e| map_errno(e, "scandir", &path))?;
+                    if name == b"." || name == b".." {
+                        continue;
+                    }
+                    let kind = match kind {
+                        sys::DirType::Dir => Some(EntryKind::Dir),
+                        sys::DirType::Symlink => Some(EntryKind::Symlink),
+                        sys::DirType::Unknown => None,
+                        sys::DirType::Other => Some(EntryKind::File),
+                    };
+                    out.push(DirEntry { name: String::from_utf8_lossy(&name).into_owned(), kind });
+                }
+                Ok(out)
+            })
+            .await
+        })
+    }
+
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            let file = self
+                .run(move |root| {
+                    let r = root.resolve(&path, true, "open")?;
+                    let mut oflags = match (flags.read, flags.write || flags.append) {
+                        (true, true) => O_RDWR,
+                        (false, true) => O_WRONLY,
+                        _ => O_RDONLY,
+                    };
+                    if flags.create {
+                        oflags |= O_CREAT;
+                    }
+                    if flags.truncate {
+                        oflags |= O_TRUNC;
+                    }
+                    if flags.append {
+                        oflags |= O_APPEND;
+                    }
+                    let fd =
+                        open_target(&r, oflags, (mode & 0o777) as libc::mode_t, "open", &path)?;
+                    Ok(File::from(fd))
+                })
+                .await?;
+            Ok::<Handle, VfsError>(Arc::new(HostHandle {
+                file: Arc::new(file),
+                append: flags.append,
+            }))
+        })
+    }
+
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let mode = (mode & 0o7777 & CHMOD_ALLOWED_BITS) as libc::mode_t;
+                if recursive {
+                    let mut current = String::from("/");
+                    for comp in vpath::components(&vpath::normalize(&path))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                    {
+                        current = vpath::join(&current, &comp);
+                        let r = root.resolve(&current, true, "mkdir")?;
+                        if let Some(name) = &r.name {
+                            match sys::mkdirat(&*r.dir, name.as_str(), mode) {
+                                Ok(()) => {}
+                                Err(Errno::EXIST) => {
+                                    let st = sys::statat(&*r.dir, name.as_str(), true)
+                                        .map_err(|e| map_errno(e, "mkdir", &path))?;
+                                    if !is_dir(&st) {
+                                        return Err(VfsError::op(errno::ENOTDIR, "mkdir", &path));
+                                    }
                                 }
+                                Err(e) => return Err(map_errno(e, "mkdir", &path)),
                             }
-                            Err(e) => return Err(map_errno(e, "mkdir", &path)),
                         }
                     }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            let r = root.resolve(&path, true, "mkdir")?;
-            let name = r.name_or(errno::EEXIST, "mkdir", &path)?;
-            rustix::fs::mkdirat(&r.dir, name, mode).map_err(|e| map_errno(e, "mkdir", &path))
+                let r = root.resolve(&path, true, "mkdir")?;
+                let name = r.name_or(errno::EEXIST, "mkdir", &path)?;
+                sys::mkdirat(&*r.dir, name, mode).map_err(|e| map_errno(e, "mkdir", &path))
+            })
+            .await
         })
-        .await
     }
 
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, false, "rmdir")?;
-            let name = r.name_or(errno::EBUSY, "rmdir", &path)?;
-            let result = rustix::fs::unlinkat(&r.dir, name, AtFlags::REMOVEDIR)
-                .map_err(|e| map_errno(e, "rmdir", &path));
-            root.invalidate(&path);
-            result
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, false, "rmdir")?;
+                let name = r.name_or(errno::EBUSY, "rmdir", &path)?;
+                let result =
+                    sys::unlinkat(&*r.dir, name, true).map_err(|e| map_errno(e, "rmdir", &path));
+                root.invalidate(&path);
+                result
+            })
+            .await
         })
-        .await
     }
 
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, false, "unlink")?;
-            let name = r.name_or(errno::EISDIR, "unlink", &path)?;
-            rustix::fs::unlinkat(&r.dir, name, AtFlags::empty())
-                .map_err(|e| map_errno(e, "unlink", &path))
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, false, "unlink")?;
+                let name = r.name_or(errno::EISDIR, "unlink", &path)?;
+                sys::unlinkat(&*r.dir, name, false).map_err(|e| map_errno(e, "unlink", &path))
+            })
+            .await
         })
-        .await
     }
 
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        let (from, to) = (from.to_string(), to.to_string());
-        self.run(move |root| {
-            let a = root.resolve(&from, false, "rename")?;
-            let b = root.resolve(&to, false, "rename")?;
-            let an = a.name_or(errno::EBUSY, "rename", &from)?;
-            let bn = b.name_or(errno::EBUSY, "rename", &to)?;
-            let result = rustix::fs::renameat(&a.dir, an, &b.dir, bn)
-                .map_err(|e| map_errno(e, "rename", &from));
-            root.invalidate(&from);
-            root.invalidate(&to);
-            result
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let (from, to) = (from.to_string(), to.to_string());
+            self.run(move |root| {
+                let a = root.resolve(&from, false, "rename")?;
+                let b = root.resolve(&to, false, "rename")?;
+                let an = a.name_or(errno::EBUSY, "rename", &from)?;
+                let bn = b.name_or(errno::EBUSY, "rename", &to)?;
+                let result = sys::renameat(&*a.dir, an, &*b.dir, bn)
+                    .map_err(|e| map_errno(e, "rename", &from));
+                root.invalidate(&from);
+                root.invalidate(&to);
+                result
+            })
+            .await
         })
-        .await
     }
 
-    async fn link(&self, from: &str, to: &str) -> VfsResult<()> {
-        let (from, to) = (from.to_string(), to.to_string());
-        self.run(move |root| {
-            let a = root.resolve(&from, true, "link")?;
-            let b = root.resolve(&to, false, "link")?;
-            let an = a.name_or(errno::EPERM, "link", &from)?;
-            let bn = b.name_or(errno::EEXIST, "link", &to)?;
-            rustix::fs::linkat(&a.dir, an, &b.dir, bn, AtFlags::empty())
-                .map_err(|e| map_errno(e, "link", &from))
+    fn link<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let (from, to) = (from.to_string(), to.to_string());
+            self.run(move |root| {
+                let a = root.resolve(&from, true, "link")?;
+                let b = root.resolve(&to, false, "link")?;
+                let an = a.name_or(errno::EPERM, "link", &from)?;
+                let bn = b.name_or(errno::EEXIST, "link", &to)?;
+                sys::linkat(&*a.dir, an, &*b.dir, bn).map_err(|e| map_errno(e, "link", &from))
+            })
+            .await
         })
-        .await
     }
 
-    async fn symlink(&self, target: &str, path: &str) -> VfsResult<()> {
-        let (target, path) = (target.to_string(), path.to_string());
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "symlink")?;
-            let name = r.name_or(errno::EEXIST, "symlink", &path)?;
-            rustix::fs::symlinkat(target.as_str(), &r.dir, name)
-                .map_err(|e| map_errno(e, "symlink", &path))
+    fn symlink<'a>(&'a self, target: &'a str, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let (target, path) = (target.to_string(), path.to_string());
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "symlink")?;
+                let name = r.name_or(errno::EEXIST, "symlink", &path)?;
+                sys::symlinkat(target.as_str(), &*r.dir, name)
+                    .map_err(|e| map_errno(e, "symlink", &path))
+            })
+            .await
         })
-        .await
     }
 
-    async fn readlink(&self, path: &str) -> VfsResult<String> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, false, "readlink")?;
-            let name = r.name_or(errno::EINVAL, "readlink", &path)?;
-            let target = rustix::fs::readlinkat(&r.dir, name, Vec::new())
-                .map_err(|e| map_errno(e, "readlink", &path))?;
-            Ok(target.to_string_lossy().into_owned())
+    fn readlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, false, "readlink")?;
+                let name = r.name_or(errno::EINVAL, "readlink", &path)?;
+                let target =
+                    sys::readlinkat(&*r.dir, name).map_err(|e| map_errno(e, "readlink", &path))?;
+                Ok(String::from_utf8_lossy(&target).into_owned())
+            })
+            .await
         })
-        .await
     }
 
-    async fn chmod(&self, path: &str, mode: u32) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "chmod")?;
-            let mode = Mode::from_raw_mode((mode & CHMOD_ALLOWED_BITS) as _);
-            match &r.name {
-                Some(name) => {
-                    let st = rustix::fs::statat(&r.dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-                        .map_err(|e| map_errno(e, "chmod", &path))?;
-                    if is_symlink(&st) {
-                        return Err(VfsError::op(errno::ENOENT, "chmod", &path));
+    fn chmod<'a>(&'a self, path: &'a str, mode: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "chmod")?;
+                let mode = (mode & CHMOD_ALLOWED_BITS) as libc::mode_t;
+                match &r.name {
+                    Some(name) => {
+                        let st = sys::statat(&*r.dir, name.as_str(), true)
+                            .map_err(|e| map_errno(e, "chmod", &path))?;
+                        if is_symlink(&st) {
+                            return Err(VfsError::op(errno::ENOENT, "chmod", &path));
+                        }
+                        sys::chmodat(&*r.dir, name.as_str(), mode)
+                            .map_err(|e| map_errno(e, "chmod", &path))
                     }
-                    rustix::fs::chmodat(&r.dir, name.as_str(), mode, AtFlags::empty())
-                        .map_err(|e| map_errno(e, "chmod", &path))
+                    None => {
+                        let fd = reopen_dir(&r.dir, "chmod", &path)?;
+                        sys::fchmod(&fd, mode).map_err(|e| map_errno(e, "chmod", &path))
+                    }
                 }
-                None => {
-                    let fd = reopen_dir(&r.dir, "chmod", &path)?;
-                    rustix::fs::fchmod(&fd, mode).map_err(|e| map_errno(e, "chmod", &path))
-                }
-            }
+            })
+            .await
         })
-        .await
     }
 
-    async fn utimes(
-        &self,
-        path: &str,
+    fn utimes<'a>(
+        &'a self,
+        path: &'a str,
         atime_ms: Option<Option<i64>>,
         mtime_ms: Option<Option<i64>>,
-    ) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "utimes")?;
-            let ts = |t: Option<Option<i64>>| match t {
-                None => rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_OMIT },
-                Some(None) => rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_NOW },
-                Some(Some(ms)) => rustix::fs::Timespec {
-                    tv_sec: ms.div_euclid(1000) as _,
-                    tv_nsec: (ms.rem_euclid(1000) * 1_000_000) as _,
-                },
-            };
-            let times = rustix::fs::Timestamps {
-                last_access: ts(atime_ms),
-                last_modification: ts(mtime_ms),
-            };
-            let name = r.name.clone().unwrap_or_else(|| ".".into());
-            rustix::fs::utimensat(&r.dir, name.as_str(), &times, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|e| map_errno(e, "utimes", &path))
-        })
-        .await
-    }
-
-    async fn truncate(&self, path: &str, size: u64) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "truncate")?;
-            let fd = open_target(&r, OFlags::WRONLY, Mode::empty(), "truncate", &path)?;
-            rustix::fs::ftruncate(&fd, size).map_err(|e| map_errno(e, "truncate", &path))
-        })
-        .await
-    }
-
-    async fn access(&self, path: &str, mask: u32) -> VfsResult<()> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "access")?;
-            let access = rustix::fs::Access::from_bits_truncate(mask as _);
-            let access = if access.is_empty() { rustix::fs::Access::EXISTS } else { access };
-            let name = r.name.clone().unwrap_or_else(|| ".".into());
-            rustix::fs::accessat(&r.dir, name.as_str(), access, AtFlags::empty())
-                .map_err(|e| map_errno(e, "access", &path))
-        })
-        .await
-    }
-
-    async fn statfs(&self, path: &str) -> VfsResult<StatFs> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let r = root.resolve(&path, true, "statfs")?;
-            let st = match &r.name {
-                Some(_) => {
-                    let fd = open_target(&r, OFlags::RDONLY, Mode::empty(), "statfs", &path)?;
-                    rustix::fs::fstatvfs(&fd)
-                }
-                None => rustix::fs::fstatvfs(&r.dir),
-            }
-            .map_err(|e| map_errno(e, "statfs", &path))?;
-            let frsize = if st.f_frsize > 0 { st.f_frsize } else { st.f_bsize };
-            Ok(StatFs {
-                blocks: st.f_blocks,
-                bfree: st.f_bfree,
-                bavail: st.f_bavail,
-                files: st.f_files,
-                ffree: st.f_ffree,
-                bsize: frsize,
-                frsize,
-                namelen: st.f_namemax,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "utimes")?;
+                let ts = |t: Option<Option<i64>>| match t {
+                    None => sys::Timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT as _ },
+                    Some(None) => sys::Timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW as _ },
+                    Some(Some(ms)) => sys::Timespec {
+                        tv_sec: ms.div_euclid(1000) as _,
+                        tv_nsec: (ms.rem_euclid(1000) * 1_000_000) as _,
+                    },
+                };
+                let times = [ts(atime_ms), ts(mtime_ms)];
+                let name = r.name.clone().unwrap_or_else(|| ".".into());
+                sys::utimensat_nofollow(&*r.dir, name.as_str(), &times)
+                    .map_err(|e| map_errno(e, "utimes", &path))
             })
+            .await
         })
-        .await
     }
 
-    async fn realpath(&self, path: &str) -> VfsResult<String> {
-        let path = path.to_string();
-        self.run(move |root| {
-            let normalized = vpath::normalize(&path);
-            // symlink-free paths (the common case, checked through the
-            // directory cache) are their own real path
-            if let Some(r) = root.resolve_fast(&normalized, true) {
-                lstat_resolved(&r, "realpath", &path)?;
-                return Ok(normalized);
-            }
-            let r = root.walk(&normalized, true, "realpath")?;
-            if r.name.is_some() {
-                // must exist
-                lstat_resolved(&r, "realpath", &path)?;
-            }
-            Ok(r.vpath)
+    fn truncate<'a>(&'a self, path: &'a str, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "truncate")?;
+                let fd = open_target(&r, O_WRONLY, 0, "truncate", &path)?;
+                sys::ftruncate(&fd, size).map_err(|e| map_errno(e, "truncate", &path))
+            })
+            .await
         })
-        .await
+    }
+
+    fn access<'a>(&'a self, path: &'a str, mask: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "access")?;
+                // R_OK | W_OK | X_OK (same values everywhere); none: F_OK
+                let access = (mask & 0o7) as libc::c_int;
+                let name = r.name.clone().unwrap_or_else(|| ".".into());
+                sys::accessat(&*r.dir, name.as_str(), access)
+                    .map_err(|e| map_errno(e, "access", &path))
+            })
+            .await
+        })
+    }
+
+    fn statfs<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<StatFs>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let r = root.resolve(&path, true, "statfs")?;
+                let st = match &r.name {
+                    Some(_) => {
+                        let fd = open_target(&r, O_RDONLY, 0, "statfs", &path)?;
+                        sys::fstatvfs(&fd)
+                    }
+                    None => sys::fstatvfs(&*r.dir),
+                }
+                .map_err(|e| map_errno(e, "statfs", &path))?;
+                let frsize = if st.f_frsize > 0 { st.f_frsize } else { st.f_bsize } as u64;
+                Ok(StatFs {
+                    blocks: st.f_blocks as u64,
+                    bfree: st.f_bfree as u64,
+                    bavail: st.f_bavail as u64,
+                    files: st.f_files as u64,
+                    ffree: st.f_ffree as u64,
+                    bsize: frsize,
+                    frsize,
+                    namelen: st.f_namemax as u64,
+                })
+            })
+            .await
+        })
+    }
+
+    fn realpath<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let path = path.to_string();
+            self.run(move |root| {
+                let normalized = vpath::normalize(&path);
+                // symlink-free paths (the common case, checked through the
+                // directory cache) are their own real path
+                if let Some(r) = root.resolve_fast(&normalized, true) {
+                    lstat_resolved(&r, "realpath", &path)?;
+                    return Ok(normalized);
+                }
+                let r = root.walk(&normalized, true, "realpath")?;
+                if r.name.is_some() {
+                    // must exist
+                    lstat_resolved(&r, "realpath", &path)?;
+                }
+                Ok(r.vpath)
+            })
+            .await
+        })
     }
 }
 
@@ -791,7 +815,7 @@ fn write_all(file: &File, append: bool, offset: u64, data: &[u8]) -> VfsResult<u
     let mut total = 0;
     while total < data.len() {
         let res = if append {
-            rustix::io::write(file_fd(file), &data[total..]).map_err(std::io::Error::from)
+            sys::write(file_fd(file), &data[total..]).map_err(std::io::Error::from)
         } else {
             file.write_at(&data[total..], offset + total as u64)
         };
@@ -814,32 +838,35 @@ fn file_fd(file: &File) -> BorrowedFd<'_> {
     file.as_fd()
 }
 
-#[async_trait]
 impl FileHandle for HostHandle {
-    async fn read(&self, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        let file = self.file.clone();
-        blocking(move || {
-            let mut buf = vec![0u8; len];
-            let mut total = 0;
-            while total < len {
-                match file.read_at(&mut buf[total..], offset + total as u64) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(VfsError::from_io(&e, "read", "")),
+    fn read<'a>(&'a self, offset: u64, len: usize) -> BoxFuture<'a, VfsResult<Vec<u8>>> {
+        Box::pin(async move {
+            let file = self.file.clone();
+            blocking(move || {
+                let mut buf = vec![0u8; len];
+                let mut total = 0;
+                while total < len {
+                    match file.read_at(&mut buf[total..], offset + total as u64) {
+                        Ok(0) => break,
+                        Ok(n) => total += n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(VfsError::from_io(&e, "read", "")),
+                    }
                 }
-            }
-            buf.truncate(total);
-            Ok(buf)
+                buf.truncate(total);
+                Ok(buf)
+            })
+            .await
         })
-        .await
     }
 
-    async fn write(&self, offset: u64, data: &[u8]) -> VfsResult<usize> {
-        let file = self.file.clone();
-        let data = data.to_vec();
-        let append = self.append;
-        blocking(move || write_all(&file, append, offset, &data)).await
+    fn write<'a>(&'a self, offset: u64, data: &'a [u8]) -> BoxFuture<'a, VfsResult<usize>> {
+        Box::pin(async move {
+            let file = self.file.clone();
+            let data = data.to_vec();
+            let append = self.append;
+            blocking(move || write_all(&file, append, offset, &data)).await
+        })
     }
 
     fn write_sync(&self, offset: u64, data: &[u8]) -> Option<VfsResult<usize>> {
@@ -864,7 +891,7 @@ impl FileHandle for HostHandle {
                     break;
                 }
             }
-            match rustix::io::preadv(file_fd(&self.file), &mut iov, offset + total as u64) {
+            match sys::preadv(file_fd(&self.file), &mut iov, offset + total as u64) {
                 Ok(0) => break,
                 Ok(n) => total += n,
                 Err(Errno::INTR) => continue,
@@ -874,32 +901,40 @@ impl FileHandle for HostHandle {
         Some(Ok(total))
     }
 
-    async fn stat(&self) -> VfsResult<Attr> {
-        let file = self.file.clone();
-        blocking(move || {
-            Ok(stat_to_attr(
-                &rustix::fs::fstat(file_fd(&file)).map_err(|e| map_errno(e, "fstat", ""))?,
-            ))
+    fn stat<'a>(&'a self) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let file = self.file.clone();
+            blocking(move || {
+                Ok(stat_to_attr(
+                    &sys::fstat(&file_fd(&file)).map_err(|e| map_errno(e, "fstat", ""))?,
+                ))
+            })
+            .await
         })
-        .await
     }
 
-    async fn truncate(&self, size: u64) -> VfsResult<()> {
-        let file = self.file.clone();
-        blocking(move || {
-            rustix::fs::ftruncate(file_fd(&file), size).map_err(|e| map_errno(e, "ftruncate", ""))
+    fn truncate<'a>(&'a self, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let file = self.file.clone();
+            blocking(move || {
+                sys::ftruncate(&file_fd(&file), size).map_err(|e| map_errno(e, "ftruncate", ""))
+            })
+            .await
         })
-        .await
     }
 
-    async fn sync(&self) -> VfsResult<()> {
-        let file = self.file.clone();
-        blocking(move || file.sync_data().map_err(|e| VfsError::from_io(&e, "fsync", ""))).await
+    fn sync<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let file = self.file.clone();
+            blocking(move || file.sync_data().map_err(|e| VfsError::from_io(&e, "fsync", ""))).await
+        })
     }
 
-    async fn close(&self) -> VfsResult<()> {
-        // the fd closes when the last reference drops
-        Ok(())
+    fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            // the fd closes when the last reference drops
+            Ok(())
+        })
     }
 }
 
@@ -1145,14 +1180,7 @@ mod tests {
         let r = root.resolve("/x/secret.txt", true, "open").unwrap();
         std::fs::rename(f.root.join("x"), f.root.join("x-old")).unwrap();
         symlink(&f.outside, f.root.join("x")).unwrap();
-        let fd = open_target(
-            &r,
-            OFlags::WRONLY | OFlags::CREATE,
-            Mode::from_raw_mode(0o644),
-            "open",
-            "/x",
-        )
-        .unwrap();
+        let fd = open_target(&r, O_WRONLY | O_CREAT, 0o644, "open", "/x").unwrap();
         drop(fd);
         assert!(f.root.join("x-old/secret.txt").exists());
         assert_eq!(std::fs::read_to_string(f.outside.join("secret.txt")).unwrap(), "secret");

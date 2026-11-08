@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::Value as Json;
+use gondolin_wire::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -20,14 +20,21 @@ pub enum QmpErrorReason {
     InvalidResponse,
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{message}")]
+#[derive(Debug, Clone)]
 pub struct QmpError {
     pub reason: QmpErrorReason,
     pub message: String,
     /// whether the command itself was sent (its outcome may be unknown)
     pub command_sent: bool,
 }
+
+impl std::fmt::Display for QmpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QmpError {}
 
 impl QmpError {
     /// `isUnknownQmpOutcome`: the command was sent but no definite answer came.
@@ -81,7 +88,7 @@ async fn run(socket: &Path, command: &str, sent: &mut bool) -> Result<Json, QmpE
         if raw.is_empty() {
             continue;
         }
-        let message: Json = serde_json::from_str(raw).map_err(|_| {
+        let message: Json = gondolin_wire::json::parse(raw).map_err(|_| {
             err(
                 QmpErrorReason::InvalidResponse,
                 format!("invalid qmp response for {command}"),
@@ -89,8 +96,8 @@ async fn run(socket: &Path, command: &str, sent: &mut bool) -> Result<Json, QmpE
             )
         })?;
         if let Some(error) = message.get("error") {
-            let desc = error.get("desc").and_then(Json::as_str).unwrap_or("unknown qmp error");
-            let text = match error.get("class").and_then(Json::as_str) {
+            let desc = error.get("desc").and_then(Json::as_text).unwrap_or("unknown qmp error");
+            let text = match error.get("class").and_then(Json::as_text) {
                 Some(class) => format!("qmp {command} failed ({class}): {desc}"),
                 None => format!("qmp {command} failed: {desc}"),
             };
@@ -130,7 +137,7 @@ pub fn running_from_status(result: &Json) -> Option<bool> {
     if let Some(running) = result.get("running").and_then(Json::as_bool) {
         return Some(running);
     }
-    match result.get("status").and_then(Json::as_str) {
+    match result.get("status").and_then(Json::as_text) {
         Some("running") => Some(true),
         Some("paused") => Some(false),
         _ => None,
@@ -138,7 +145,7 @@ pub fn running_from_status(result: &Json) -> Option<bool> {
 }
 
 async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, cmd: &str) -> std::io::Result<()> {
-    let line = format!("{}\r\n", serde_json::json!({ "execute": cmd }));
+    let line = format!("{}\r\n", gondolin_wire::value!({ "execute": cmd }));
     write.write_all(line.as_bytes()).await
 }
 

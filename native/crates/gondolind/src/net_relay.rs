@@ -18,9 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use gondolin_wire::RawEnvelope;
-use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -37,22 +35,24 @@ pub const NETDEV_CLOSE: &str = "netdev_close";
 /// Controller→QEMU bytes in flight (the controller honours this).
 pub const RELAY_WINDOW: usize = 1024 * 1024;
 
-#[derive(Serialize)]
-struct Conn {
-    conn: u32,
+gondolin_wire::wire_struct! {
+    struct Conn {
+        conn: u32,
+    }
 }
 
-#[derive(Serialize)]
-struct Data<'a> {
-    conn: u32,
-    #[serde(with = "serde_bytes")]
-    data: &'a [u8],
+gondolin_wire::wire_encode! {
+    struct Data<'a> {
+        conn: u32,
+        data: &'a [u8],
+    }
 }
 
-#[derive(Serialize)]
-struct Window {
-    conn: u32,
-    bytes: u64,
+gondolin_wire::wire_struct! {
+    struct Window {
+        conn: u32,
+        bytes: u64,
+    }
 }
 
 /// The relay backend; also handles `netdev_data` from the controller.
@@ -69,62 +69,66 @@ impl NetRelay {
     }
 }
 
-#[async_trait]
 impl NetBackend for NetRelay {
-    async fn serve(&self, stream: UnixStream) {
-        let conn = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        // bounded by the controller's credit window, not by this channel
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        *self.current.lock().unwrap() = Some((conn, tx));
-        self.ctl.send(NETDEV_OPEN, 0, &Conn { conn });
-        let (mut read, mut write) = stream.into_split();
-        let ctl = self.ctl.clone();
-        let reader = async {
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                ctl.wait_capacity().await;
-                match read.read(&mut buf).await {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => {
-                        ctl.send(NETDEV_DATA, 0, &Data { conn, data: &buf[..n] });
+    fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let conn = self.next_conn.fetch_add(1, Ordering::Relaxed);
+            // bounded by the controller's credit window, not by this channel
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            *self.current.lock().unwrap() = Some((conn, tx));
+            self.ctl.send(NETDEV_OPEN, 0, &Conn { conn });
+            let (mut read, mut write) = stream.into_split();
+            let ctl = self.ctl.clone();
+            let reader = async {
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    ctl.wait_capacity().await;
+                    match read.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            ctl.send(NETDEV_DATA, 0, &Data { conn, data: &buf[..n] });
+                        }
                     }
                 }
-            }
-        };
-        let writer = async {
-            while let Some(data) = rx.recv().await {
-                if write.write_all(&data).await.is_err() {
-                    return;
+            };
+            let writer = async {
+                while let Some(data) = rx.recv().await {
+                    if write.write_all(&data).await.is_err() {
+                        return;
+                    }
+                    ctl.send(NETDEV_WINDOW, 0, &Window { conn, bytes: data.len() as u64 });
                 }
-                ctl.send(NETDEV_WINDOW, 0, &Window { conn, bytes: data.len() as u64 });
+            };
+            crate::util::select2(reader, writer).await;
+            let mut current = self.current.lock().unwrap();
+            if current.as_ref().is_some_and(|(c, _)| *c == conn) {
+                *current = None;
             }
-        };
-        tokio::select! {
-            _ = reader => {}
-            _ = writer => {}
-        }
-        let mut current = self.current.lock().unwrap();
-        if current.as_ref().is_some_and(|(c, _)| *c == conn) {
-            *current = None;
-        }
-        drop(current);
-        self.ctl.send(NETDEV_CLOSE, 0, &Conn { conn });
+            drop(current);
+            self.ctl.send(NETDEV_CLOSE, 0, &Conn { conn });
+        })
     }
 }
 
-#[async_trait]
 impl ControllerHandler for NetRelay {
-    async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>) {
-        let f = Fields::of(&msg.p);
-        let (Some(conn), Some(data)) = (fields::request_id(f.get("conn")), f.bytes("data")) else {
-            ctl.error_event("invalid_request", "netdev_data needs conn and data", Some(&msg.t));
-            return;
-        };
-        let current = self.current.lock().unwrap();
-        if let Some((c, tx)) = current.as_ref()
-            && *c == conn
-        {
-            let _ = tx.send(data.to_vec());
-        }
+    fn handle<'a>(
+        &'a self,
+        msg: RawEnvelope,
+        ctl: &'a Arc<Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let f = Fields::of(&msg.p);
+            let (Some(conn), Some(data)) = (fields::request_id(f.get("conn")), f.bytes("data"))
+            else {
+                ctl.error_event("invalid_request", "netdev_data needs conn and data", Some(&msg.t));
+                return;
+            };
+            let current = self.current.lock().unwrap();
+            if let Some((c, tx)) = current.as_ref()
+                && *c == conn
+            {
+                let _ = tx.send(data.to_vec());
+            }
+        })
     }
 }

@@ -2,88 +2,91 @@
 //! (`guest/ARCHITECTURE.md` §4.1). Absent optional fields are omitted.
 
 use gondolin_wire::Envelope;
-use serde::Serialize;
+use gondolin_wire::ToValue;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ExecRequest {
-    pub cmd: String,
-    pub argv: Vec<String>,
-    pub env: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    pub stdin: bool,
-    pub pty: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdout_window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr_window: Option<u32>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExecRequest {
+        pub cmd: String,
+        pub argv: Vec<String>,
+        pub env: Vec<String>,
+        pub cwd: Option<String>,
+        pub stdin: bool,
+        pub pty: bool,
+        pub stdout_window: Option<u32>,
+        pub stderr_window: Option<u32>,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct StdinData<'a> {
-    #[serde(with = "serde_bytes")]
-    pub data: &'a [u8],
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub eof: bool,
+gondolin_wire::wire_encode! {
+    #[derive(Debug, Clone)]
+    pub struct StdinData<'a> {
+        pub data: &'a [u8],
+        pub eof: bool => skip_if std::ops::Not::not,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PtyResize {
-    pub rows: u32,
-    pub cols: u32,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct PtyResize {
+        pub rows: u32,
+        pub cols: u32,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ExecWindow {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<u32>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct ExecWindow {
+        pub stdout: Option<u32>,
+        pub stderr: Option<u32>,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FileReadRequest {
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_size: Option<u32>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct FileReadRequest {
+        pub path: String,
+        pub cwd: Option<String>,
+        pub chunk_size: Option<u32>,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FileWriteRequest {
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    pub truncate: bool,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct FileWriteRequest {
+        pub path: String,
+        pub cwd: Option<String>,
+        pub truncate: bool,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FileWriteData<'a> {
-    #[serde(with = "serde_bytes")]
-    pub data: &'a [u8],
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub eof: bool,
+gondolin_wire::wire_encode! {
+    #[derive(Debug, Clone)]
+    pub struct FileWriteData<'a> {
+        pub data: &'a [u8],
+        pub eof: bool => skip_if std::ops::Not::not,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FileDeleteRequest {
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recursive: Option<bool>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct FileDeleteRequest {
+        pub path: String,
+        pub cwd: Option<String>,
+        pub force: Option<bool>,
+        pub recursive: Option<bool>,
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TimeSync {
-    pub unix_ms: u64,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone)]
+    pub struct TimeSync {
+        pub unix_ms: u64,
+    }
 }
 
 /// Builds a guest envelope.
-pub fn envelope<P: Serialize>(t: &str, id: u32, p: P) -> Envelope<P> {
+pub fn envelope<P: ToValue>(t: &str, id: u32, p: P) -> Envelope<P> {
     Envelope::new(t, u64::from(id), p)
 }
 

@@ -247,7 +247,13 @@ Behaviour visible to guests and SDK users is the same unless listed here.
   only; it will be removed with the node engine.
 - Upstream TLS certificates are verified against the controller's Node.js
   default CA store (including `NODE_EXTRA_CA_CERTS`), like the node engine's
-  `fetch`; this also holds for remote daemons.
+  `fetch`; this also holds for remote daemons. The static `gondolin` CLI
+  trusts the Mozilla CA list plus the system's PEM roots (`SSL_CERT_FILE` /
+  `SSL_CERT_DIR`, the distribution bundle on Linux, `/etc/ssl/cert.pem` on
+  macOS) and `NODE_EXTRA_CA_CERTS`. It does not read the macOS keychain: roots
+  installed only there (e.g. a corporate TLS proxy's CA) need to be exported,
+  e.g. `security find-certificate -a -p -c "My Corp CA" > ca.pem` and
+  `NODE_EXTRA_CA_CERTS=ca.pem`.
 
 **Filesystem**
 

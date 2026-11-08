@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -63,7 +62,7 @@ impl Outbox {
     }
 
     /// Encodes and queues `value` as one frame.
-    pub fn send<T: serde::Serialize + ?Sized>(&self, value: &T) -> bool {
+    pub fn send<T: gondolin_wire::ToValue + ?Sized>(&self, value: &T) -> bool {
         match gondolin_wire::encode(value).and_then(|p| gondolin_wire::frame(&p)) {
             Ok(frame) => self.send_frame(frame),
             Err(err) => {
@@ -122,10 +121,9 @@ impl Outbox {
 }
 
 /// Receives what a guest channel delivers.
-#[async_trait]
 pub trait PortHandler: Send + Sync + 'static {
     /// One complete incoming frame. An error disconnects the channel.
-    async fn frame(&self, frame: Bytes) -> Result<(), String>;
+    fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>>;
     /// A framing or decoding error (the channel is disconnected afterwards).
     fn error(&self, message: String);
     /// The guest side connected (QEMU started).
@@ -238,15 +236,10 @@ async fn serve_connection(stream: UnixStream, outbox: Arc<Outbox>, handler: Arc<
         }
         Ok::<(), std::io::Error>(())
     };
-    tokio::select! {
-        _ = reader => {}
-        res = writer => {
-            if let Err(err) = res
-                && err.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                handler.error(err.to_string());
-            }
-        }
+    if let crate::util::Either::Right(Err(err)) = crate::util::select2(reader, writer).await
+        && err.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        handler.error(err.to_string());
     }
     handler.disconnected();
 }
@@ -277,10 +270,9 @@ async fn read_guest_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Byte
 /// host side is not implemented yet; QEMU needs someone to connect to).
 pub struct DiscardHandler;
 
-#[async_trait]
 impl PortHandler for DiscardHandler {
-    async fn frame(&self, _frame: Bytes) -> Result<(), String> {
-        Ok(())
+    fn frame<'a>(&'a self, _frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move { Ok(()) })
     }
     fn error(&self, _message: String) {}
 }
@@ -293,11 +285,12 @@ mod tests {
 
     struct Collect(mpsc::UnboundedSender<Result<Bytes, String>>);
 
-    #[async_trait]
     impl PortHandler for Collect {
-        async fn frame(&self, frame: Bytes) -> Result<(), String> {
-            let _ = self.0.send(Ok(frame));
-            Ok(())
+        fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                let _ = self.0.send(Ok(frame));
+                Ok(())
+            })
         }
         fn error(&self, message: String) {
             let _ = self.0.send(Err(message));

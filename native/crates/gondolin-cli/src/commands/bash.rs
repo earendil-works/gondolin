@@ -2,6 +2,8 @@
 
 use std::io::Write;
 
+use gondolind::util::{Either, select2};
+
 use super::tty::{self, Input, RawMode};
 use super::{host_env, parse_failure, render_error, usage};
 use crate::args::parse_bash;
@@ -128,13 +130,23 @@ async fn interactive(session: &Session, req: ExecRequest) -> i32 {
     if let Some((rows, cols)) = tty::window_size() {
         proc.resize(rows, cols).await;
     }
-    let mut winch =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+    let mut winch = crate::signals::subscribe(&[libc::SIGWINCH]);
     let mut input = tty::stdin_reader();
     let mut input_open = true;
     loop {
-        tokio::select! {
-            ev = proc.next() => match ev {
+        let input_ready = input_open && !proc.stdin_full();
+        let next = select2(
+            proc.next(),
+            select2(
+                async {
+                    if input_ready { input.recv().await } else { std::future::pending().await }
+                },
+                winch.recv(),
+            ),
+        )
+        .await;
+        match next {
+            Either::Left(ev) => match ev {
                 Some(ExecEvent::Output { stdout, data }) => {
                     let n = data.len() as u32;
                     if stdout {
@@ -170,7 +182,7 @@ async fn interactive(session: &Session, req: ExecRequest) -> i32 {
                     break 1;
                 }
             },
-            item = input.recv(), if input_open && !proc.stdin_full() => match item {
+            Either::Right(Either::Left(item)) => match item {
                 Some(Input::Data(data)) => {
                     proc.write(&data).await;
                 }
@@ -184,7 +196,7 @@ async fn interactive(session: &Session, req: ExecRequest) -> i32 {
                     proc.eof().await;
                 }
             },
-            _ = async { match winch.as_mut() { Some(w) => { w.recv().await; } None => std::future::pending().await } } => {
+            Either::Right(Either::Right(_)) => {
                 if let Some((rows, cols)) = tty::window_size() {
                     proc.resize(rows, cols).await;
                 }

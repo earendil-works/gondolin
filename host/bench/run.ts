@@ -12,10 +12,30 @@ import path from "node:path";
 import os from "node:os";
 import { parseArgs } from "node:util";
 
-import { machineInfo, resolveEngine, setEngine } from "./lib/engine.ts";
+import {
+  type EngineName,
+  machineInfo,
+  qemuPath,
+  qemuVersion,
+  resolveEngine,
+  setEngine,
+} from "./lib/engine.ts";
+
+/** QEMU and transport settings an engine variant runs with */
+function engineEnvInfo(engine: EngineName) {
+  setEngine(engine);
+  return {
+    qemu: qemuVersion(),
+    qemuPath: qemuPath(),
+    virtiofsEnv: process.env.GONDOLIN_VIRTIOFS ?? null,
+    nativeBin:
+      engine === "node" ? null : (process.env.GONDOLIN_NATIVE_BIN ?? null),
+  };
+}
 import { Bench } from "./lib/harness.ts";
 import { type RunFile, loadRuns, renderSummary } from "./lib/summary.ts";
 import { bootSuite } from "./suites/boot.ts";
+import { cliSuite } from "./suites/cli.ts";
 import { execSuite } from "./suites/exec.ts";
 import { netSuite } from "./suites/net.ts";
 import { vfsSuite } from "./suites/vfs.ts";
@@ -34,6 +54,7 @@ const SLICES: Record<string, string[]> = {
     "native-memory$",
     "object-mount$",
   ],
+  cli: ["^cli\\."],
   net: ["\\.policy$", "ip-allow$", "noop-hooks$", "body-hooks$"],
 };
 
@@ -42,6 +63,7 @@ const SUITES: Record<string, (bench: Bench) => Promise<void>> = {
   exec: execSuite,
   vfs: vfsSuite,
   net: netSuite,
+  cli: cliSuite,
 };
 
 const { values } = parseArgs({
@@ -109,9 +131,14 @@ console.log(
 for (const suite of suites) {
   // With --interleave every slice of the suite runs on each engine in turn
   // so both engines see the same machine conditions per workload group.
+  // With a --filter, each slice must match both (lookaheads keep it one regex).
   const slices =
-    engines.length > 1 && !values.filter
-      ? SLICES[suite]
+    engines.length > 1
+      ? SLICES[suite].map((slice) =>
+          values.filter
+            ? `^(?=.*(?:${slice}))(?=.*(?:${values.filter}))`
+            : slice,
+        )
       : [values.filter ?? null];
   const benches = new Map(
     engines.map((engine) => [
@@ -125,6 +152,43 @@ for (const suite of suites) {
   );
   const startedAt = new Date();
   const startLoad = loadAvg();
+  // Saved after every slice so an interrupted run keeps what it measured.
+  const save = (complete: boolean) => {
+    for (const [engine, bench] of benches) saveRun(engine, bench, complete);
+  };
+  const saveRun = (engine: EngineName, bench: Bench, complete: boolean) => {
+    const run: RunFile = {
+      version: 1,
+      engine,
+      suite,
+      quick: values.quick,
+      complete,
+      filter: values.filter ?? null,
+      interleaved: engines.length > 1 ? engines : null,
+      // Notes describe caveats of the engine under test, never the node baseline.
+      note:
+        engine === "node" && engines.length > 1 ? null : (values.note ?? null),
+      iterations: values.iterations ? Number(values.iterations) : null,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      machine: {
+        ...machine,
+        ...engineEnvInfo(engine),
+        loadAvg: startLoad,
+        loadAvgEnd: loadAvg(),
+      },
+      workloads: bench.results,
+    };
+    if (values["no-save"]) return;
+    fs.mkdirSync(outDir, { recursive: true });
+    const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
+    const file = path.join(
+      outDir,
+      `${engine}-${suite}${values.quick ? "-quick" : ""}-${stamp}.json`,
+    );
+    fs.writeFileSync(file, `${JSON.stringify(run, null, 2)}\n`);
+    if (complete) console.log(`wrote ${file}`);
+  };
   for (const slice of slices) {
     for (const engine of engines) {
       const bench = benches.get(engine)!;
@@ -137,35 +201,9 @@ for (const suite of suites) {
         bench.fail(`${suite}.suite`, err);
       }
     }
+    save(false);
   }
-  for (const [engine, bench] of benches) {
-    const run: RunFile = {
-      version: 1,
-      engine,
-      suite,
-      quick: values.quick,
-      filter: values.filter ?? null,
-      interleaved: engines.length > 1 ? engines : null,
-      // Notes describe caveats of the engine under test, never the node baseline.
-      note:
-        engine === "node" && engines.length > 1 ? null : (values.note ?? null),
-      iterations: values.iterations ? Number(values.iterations) : null,
-      startedAt: startedAt.toISOString(),
-      finishedAt: new Date().toISOString(),
-      machine: { ...machine, loadAvg: startLoad, loadAvgEnd: loadAvg() },
-      workloads: bench.results,
-    };
-    if (!values["no-save"]) {
-      fs.mkdirSync(outDir, { recursive: true });
-      const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
-      const file = path.join(
-        outDir,
-        `${engine}-${suite}${values.quick ? "-quick" : ""}-${stamp}.json`,
-      );
-      fs.writeFileSync(file, `${JSON.stringify(run, null, 2)}\n`);
-      console.log(`wrote ${file}`);
-    }
-  }
+  save(true);
 }
 
 if (!values["no-save"]) writeSummary();

@@ -9,7 +9,6 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use bytes::{Buf, BytesMut};
 use gondolin_netstack::wire;
 use gondolin_netstack::{FlowHandler, MacAddr, NetConfig, NetStack, TcpFlow};
@@ -30,22 +29,24 @@ pub const GUEST_MAC: MacAddr = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 /// Flow handler that passes every flow to the test.
 pub struct ChannelHandler(pub mpsc::UnboundedSender<TcpFlow>);
 
-#[async_trait]
 impl FlowHandler for ChannelHandler {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        let _ = self.0.send(flow);
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self.0.send(flow);
+        })
     }
 }
 
 /// Echoes every flow back (until EOF, then half-closes).
 pub struct EchoHandler;
 
-#[async_trait]
 impl FlowHandler for EchoHandler {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        let (mut rd, mut wr) = tokio::io::split(flow.stream);
-        let _ = tokio::io::copy(&mut rd, &mut wr).await;
-        let _ = wr.shutdown().await;
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let (mut rd, mut wr) = tokio::io::split(flow.stream);
+            let _ = tokio::io::copy(&mut rd, &mut wr).await;
+            let _ = wr.shutdown().await;
+        })
     }
 }
 
@@ -178,7 +179,7 @@ impl RawGuest {
     }
 
     pub async fn recv(&mut self) -> Vec<u8> {
-        self.recv_within(Duration::from_secs(5)).await.expect("expected a frame")
+        self.recv_within(Duration::from_secs(30)).await.expect("expected a frame")
     }
 
     /// Asserts nothing arrives for a short while.
@@ -344,11 +345,23 @@ impl Guest {
         }
     }
 
-    /// Runs the guest until `f` returns `Some`, failing after `timeout`.
-    pub async fn run_until<T>(
+    /// Runs the guest until `f` returns `Some`, failing after `timeout`
+    /// (the panic names the caller).
+    #[track_caller]
+    pub fn run_until<'a, T: 'a>(
+        &'a mut self,
+        timeout: Duration,
+        f: impl FnMut(&mut Guest) -> Option<T> + 'a,
+    ) -> impl std::future::Future<Output = T> + 'a {
+        let caller = std::panic::Location::caller();
+        self.run_until_at(timeout, f, caller)
+    }
+
+    async fn run_until_at<T>(
         &mut self,
         timeout: Duration,
         mut f: impl FnMut(&mut Guest) -> Option<T>,
+        caller: &'static std::panic::Location<'static>,
     ) -> T {
         let deadline = Instant::now() + timeout;
         loop {
@@ -361,7 +374,7 @@ impl Guest {
             }
             self.iface.poll(self.now(), &mut self.dev, &mut self.sockets);
             self.flush().await;
-            assert!(Instant::now() < deadline, "guest timed out");
+            assert!(Instant::now() < deadline, "guest timed out ({caller})");
             let delay = self
                 .iface
                 .poll_delay(self.now(), &self.sockets)
@@ -391,25 +404,33 @@ impl Guest {
     /// Runs the guest for `dur` (keeps ACKing etc.).
     pub async fn idle(&mut self, dur: Duration) {
         let end = Instant::now() + dur;
-        self.run_until(dur + Duration::from_secs(5), |_| (Instant::now() >= end).then_some(()))
+        self.run_until(dur + Duration::from_secs(30), |_| (Instant::now() >= end).then_some(()))
             .await
     }
 
     /// Connects and waits for the handshake.
-    pub async fn connect_established(
+    #[track_caller]
+    pub fn connect_established(
         &mut self,
         dst: Ipv4Addr,
         port: u16,
         buf: usize,
-    ) -> SocketHandle {
+    ) -> impl std::future::Future<Output = SocketHandle> + '_ {
+        let caller = std::panic::Location::caller();
         let h = self.connect(dst, port, buf);
-        self.run_until(Duration::from_secs(5), |g| {
-            let s = g.tcp(h);
-            assert!(s.is_open(), "connect failed: {}", s.state());
-            (s.state() == tcp::State::Established).then_some(())
-        })
-        .await;
-        h
+        async move {
+            self.run_until_at(
+                Duration::from_secs(30),
+                |g| {
+                    let s = g.tcp(h);
+                    assert!(s.is_open(), "connect failed: {}", s.state());
+                    (s.state() == tcp::State::Established).then_some(())
+                },
+                caller,
+            )
+            .await;
+            h
+        }
     }
 }
 

@@ -5,7 +5,8 @@
 //! Header values are carried as strings with one char per byte (latin1), like
 //! the node engine's `latin1` header parsing.
 
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use gondolin_http::Header;
+use gondolin_http::head::{valid_name, valid_value};
 
 use crate::hooks::header_get;
 
@@ -38,7 +39,7 @@ pub fn latin1(bytes: &[u8]) -> String {
 
 /// String back to header bytes (latin1 when possible, else UTF-8); CR/LF
 /// become spaces like `renderHttpResponseHead` does.
-pub fn to_header_value(value: &str) -> Option<HeaderValue> {
+pub fn to_header_value(value: &str) -> Option<Vec<u8>> {
     let cleaned: std::borrow::Cow<'_, str> = if value.contains(['\r', '\n']) {
         value.replace(['\r', '\n'], " ").into()
     } else {
@@ -49,45 +50,45 @@ pub fn to_header_value(value: &str) -> Option<HeaderValue> {
     } else {
         cleaned.as_bytes().to_vec()
     };
-    HeaderValue::from_bytes(&bytes).ok()
+    valid_value(&bytes).then_some(bytes)
 }
 
 /// Request headers coalesced per name (cookie with `; `, others with `, `),
 /// lowercase and sorted by name like WHATWG `Headers` iteration.
-pub fn coalesce_request_headers(map: &HeaderMap) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::with_capacity(map.keys_len());
-    for name in map.keys() {
-        let sep = if name.as_str() == "cookie" { "; " } else { ", " };
-        let mut joined = String::new();
-        for (i, v) in map.get_all(name).iter().enumerate() {
-            if i > 0 {
-                joined.push_str(sep);
+pub fn coalesce_request_headers(headers: &[Header]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    for h in headers {
+        let name = h.name.to_ascii_lowercase();
+        let value = latin1(&h.value);
+        match out.iter_mut().find(|(k, _)| *k == name) {
+            Some((_, joined)) => {
+                joined.push_str(if name == "cookie" { "; " } else { ", " });
+                joined.push_str(&value);
             }
-            joined.push_str(&latin1(v.as_bytes()));
+            None => out.push((name, value)),
         }
-        out.push((name.as_str().to_string(), joined));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
 /// Response headers as a list (repeated names kept, e.g. `set-cookie`).
-pub fn response_headers(map: &HeaderMap) -> Vec<(String, String)> {
-    map.iter().map(|(k, v)| (k.as_str().to_string(), latin1(v.as_bytes()))).collect()
+pub fn response_headers(headers: &[Header]) -> Vec<(String, String)> {
+    headers.iter().map(|h| (h.name.to_ascii_lowercase(), latin1(&h.value))).collect()
 }
 
-/// Builds a header map; invalid names/values are skipped.
-pub fn to_header_map(headers: &[(String, String)]) -> HeaderMap {
-    let mut map = HeaderMap::with_capacity(headers.len());
+/// Wire headers with lowercase names; invalid names/values are skipped.
+pub fn to_wire_headers(headers: &[(String, String)]) -> Vec<Header> {
+    let mut out = Vec::with_capacity(headers.len());
     for (name, value) in headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+        if !valid_name(name.as_bytes()) {
             continue;
-        };
+        }
         if let Some(value) = to_header_value(value) {
-            map.append(name, value);
+            out.push(Header { name: name.to_ascii_lowercase(), value });
         }
     }
-    map
+    out
 }
 
 fn connection_tokens(headers: &[(String, String)]) -> Vec<String> {
@@ -202,19 +203,21 @@ mod tests {
 
     #[test]
     fn coalesce() {
-        let mut map = HeaderMap::new();
-        map.append("x-a", HeaderValue::from_static("1"));
-        map.append("cookie", HeaderValue::from_static("a=1"));
-        map.append("x-a", HeaderValue::from_static("2"));
-        map.append("cookie", HeaderValue::from_static("b=2"));
+        let map = vec![
+            Header::new("x-a", "1"),
+            Header::new("cookie", "a=1"),
+            Header::new("x-a", "2"),
+            Header::new("cookie", "b=2"),
+        ];
         assert_eq!(coalesce_request_headers(&map), h(&[("cookie", "a=1; b=2"), ("x-a", "1, 2")]));
     }
 
     #[test]
     fn latin1_roundtrip() {
-        let v = HeaderValue::from_bytes(b"caf\xe9").unwrap();
-        let s = latin1(v.as_bytes());
+        let v = b"caf\xe9".to_vec();
+        let s = latin1(&v);
         assert_eq!(to_header_value(&s).unwrap(), v);
-        assert_eq!(to_header_value("a\r\nb").unwrap(), HeaderValue::from_static("a  b"));
+        assert_eq!(to_header_value("a\r\nb").unwrap(), b"a  b".to_vec());
+        assert!(to_header_value("a\x00b").is_none());
     }
 }

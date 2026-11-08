@@ -12,8 +12,6 @@
 //! | d→c | `exit` | [`Exit`]: the VMM process exited |
 //! | d→c | `error` | [`crate::ErrorEvent`]: asynchronous errors (`SandboxServer` `error` events) |
 
-use serde::{Deserialize, Serialize};
-
 use crate::Value;
 
 pub const HELLO: &str = "hello";
@@ -26,142 +24,124 @@ pub const LOG: &str = "log";
 pub const EXIT: &str = "exit";
 pub const ERROR: &str = "error";
 
-/// First frame sent by the daemon.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hello {
-    /// controller protocol version ([`crate::PROTOCOL_VERSION`])
-    pub protocol: u32,
-    /// daemon version (crate version)
-    pub version: String,
-    /// optional features the daemon supports (e.g. `vfs.controller`, `net.external`)
-    pub features: Vec<String>,
-    /// daemon process id
-    pub pid: u32,
+gondolin_wire::wire_struct! {
+    /// First frame sent by the daemon.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Hello {
+        /// controller protocol version ([`crate::PROTOCOL_VERSION`])
+        pub protocol: u32,
+        /// daemon version (crate version)
+        pub version: String,
+        /// optional features the daemon supports (e.g. `vfs.controller`, `net.external`)
+        pub features: Vec<String>,
+        /// daemon process id
+        pub pid: u32,
+    }
 }
 
-/// Full session configuration, sent once before `start`.
-///
-/// `vfs` and `net` are owned by their subsystems and passed through as CBOR
-/// values; `null`/absent disables the subsystem (no VFS service: every guest
-/// filesystem request fails with `ENOSYS`; no network: no netdev at all).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Configure {
-    pub vm: VmConfig,
-    #[serde(default)]
-    pub limits: Limits,
-    /// enabled debug components (`exec`, `protocol`, `vfs`, `net`)
-    #[serde(default)]
-    pub debug: Vec<String>,
-    /// VFS configuration (`{ mode: "controller" }` or a native mount table)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vfs: Option<Value>,
-    /// network configuration (`{ mode: "external", socket_path }` or native config)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub net: Option<Value>,
+gondolin_wire::wire_struct! {
+    /// Full session configuration, sent once before `start`.
+    ///
+    /// `vfs` and `net` are owned by their subsystems and passed through as CBOR
+    /// values; `null`/absent disables the subsystem (no VFS service: every guest
+    /// filesystem request fails with `ENOSYS`; no network: no netdev at all).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Configure {
+        pub vm: VmConfig,
+        pub limits: Limits = Default::default(),
+        /// enabled debug components (`exec`, `protocol`, `vfs`, `net`)
+        pub debug: Vec<String> = Default::default(),
+        /// VFS configuration (`{ mode: "controller" }` or a native mount table)
+        pub vfs: Option<Value>,
+        /// network configuration (`{ mode: "external", socket_path }` or native config)
+        pub net: Option<Value>,
+    }
 }
 
-/// QEMU/VM settings. Paths are paths on the daemon's machine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VmConfig {
-    /// VM backend: `qemu` (default) or `krun`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vmm: Option<String>,
-    /// `gondolin-krun-runner` binary (vmm `krun`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub krun_runner_path: Option<String>,
-    /// qemu binary (path or name looked up in `PATH`; empty: by guest arch)
-    #[serde(default)]
-    pub qemu_path: String,
-    /// guest image selector (`name:tag`, build id or directory; empty: the
-    /// default image) resolved by the daemon with `gondolin-assets`
-    /// (downloading when needed); fills empty kernel/initrd/root disk paths.
-    /// `configure_result.image` describes the resolved image.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// guest architecture for `image` (`aarch64`/`x86_64`; default: from
-    /// `qemu_path`, else the daemon's host)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arch: Option<String>,
-    /// kernel image (empty when `image` provides it)
-    #[serde(default)]
-    pub kernel_path: String,
-    /// initrd (empty when `image` provides it)
-    #[serde(default)]
-    pub initrd_path: String,
-    /// root disk attached as `/dev/vda` (none: no root disk)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_disk: Option<RootDisk>,
-    /// memory size in qemu syntax (e.g. `1G`)
-    pub memory: String,
-    /// vcpu count
-    pub cpus: u32,
-    /// qemu machine type override
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_type: Option<String>,
-    /// qemu accelerator override (e.g. `kvm`, `hvf`, `tcg`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accel: Option<String>,
-    /// qemu cpu model override
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu: Option<String>,
-    /// guest console: `stdio` (default) or `none`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub console: Option<String>,
-    /// kernel cmdline replacing the default (`console=... initramfs_async=1`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub append: Option<String>,
-    /// extra cmdline pieces appended to the base cmdline (e.g. `gondolin.tmpfs=...`)
-    #[serde(default)]
-    pub append_extra: Vec<String>,
-    /// guest MAC address (`02:00:00:00:00:01` when absent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mac: Option<String>,
-    /// restart the VM when it exits unexpectedly
-    #[serde(default)]
-    pub auto_restart: bool,
-    /// pause the VM via QMP after this much idle time in `ms` (absent: never)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_pause_ms: Option<u64>,
+gondolin_wire::wire_struct! {
+    /// QEMU/VM settings. Paths are paths on the daemon's machine.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VmConfig {
+        /// VM backend: `qemu` (default) or `krun`
+        pub vmm: Option<String>,
+        /// `gondolin-krun-runner` binary (vmm `krun`)
+        pub krun_runner_path: Option<String>,
+        /// qemu binary (path or name looked up in `PATH`; empty: by guest arch)
+        pub qemu_path: String = Default::default(),
+        /// guest image selector (`name:tag`, build id or directory; empty: the
+        /// default image) resolved by the daemon with `gondolin-assets`
+        /// (downloading when needed); fills empty kernel/initrd/root disk paths.
+        /// `configure_result.image` describes the resolved image.
+        pub image: Option<String>,
+        /// guest architecture for `image` (`aarch64`/`x86_64`; default: from
+        /// `qemu_path`, else the daemon's host)
+        pub arch: Option<String>,
+        /// kernel image (empty when `image` provides it)
+        pub kernel_path: String = Default::default(),
+        /// initrd (empty when `image` provides it)
+        pub initrd_path: String = Default::default(),
+        /// root disk attached as `/dev/vda` (none: no root disk)
+        pub root_disk: Option<RootDisk>,
+        /// memory size in qemu syntax (e.g. `1G`)
+        pub memory: String,
+        /// vcpu count
+        pub cpus: u32,
+        /// qemu machine type override
+        pub machine_type: Option<String>,
+        /// qemu accelerator override (e.g. `kvm`, `hvf`, `tcg`)
+        pub accel: Option<String>,
+        /// qemu cpu model override
+        pub cpu: Option<String>,
+        /// guest console: `stdio` (default) or `none`
+        pub console: Option<String>,
+        /// kernel cmdline replacing the default (`console=... initramfs_async=1`)
+        pub append: Option<String>,
+        /// extra cmdline pieces appended to the base cmdline (e.g. `gondolin.tmpfs=...`)
+        pub append_extra: Vec<String> = Default::default(),
+        /// guest MAC address (`02:00:00:00:00:01` when absent)
+        pub mac: Option<String>,
+        /// restart the VM when it exits unexpectedly
+        pub auto_restart: bool = Default::default(),
+        /// pause the VM via QMP after this much idle time in `ms` (absent: never)
+        pub idle_pause_ms: Option<u64>,
+    }
 }
 
-/// Root disk attachment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RootDisk {
-    /// disk image (empty: the rootfs of `vm.image`)
-    #[serde(default)]
-    pub path: String,
-    /// `raw` or `qcow2` (empty: the format of the image's rootfs)
-    #[serde(default)]
-    pub format: String,
-    /// attach read-only
-    #[serde(default)]
-    pub read_only: bool,
-    /// qemu `snapshot=on` (writes are discarded)
-    #[serde(default)]
-    pub snapshot: bool,
-    /// prepare the disk in the daemon: `cow` (qcow2 overlay in the session
-    /// directory), `memory` (writes discarded), `readonly`, or `auto` (the
-    /// image manifest's `rootfsMode`, else `cow`); absent: use `path` as is
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    /// minimum virtual size in `bytes` (grows the overlay; needs a writable mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
+gondolin_wire::wire_struct! {
+    /// Root disk attachment.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RootDisk {
+        /// disk image (empty: the rootfs of `vm.image`)
+        pub path: String = Default::default(),
+        /// `raw` or `qcow2` (empty: the format of the image's rootfs)
+        pub format: String = Default::default(),
+        /// attach read-only
+        pub read_only: bool = Default::default(),
+        /// qemu `snapshot=on` (writes are discarded)
+        pub snapshot: bool = Default::default(),
+        /// prepare the disk in the daemon: `cow` (qcow2 overlay in the session
+        /// directory), `memory` (writes discarded), `readonly`, or `auto` (the
+        /// image manifest's `rootfsMode`, else `cow`); absent: use `path` as is
+        pub mode: Option<String>,
+        /// minimum virtual size in `bytes` (grows the overlay; needs a writable mode)
+        pub size: Option<u64>,
+    }
 }
 
-/// Exec queueing limits (`SandboxServerOptions`); absent fields take the
-/// node engine's defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Limits {
-    /// max stdin chunk per message in `bytes`
-    pub max_stdin_bytes: u64,
-    /// max stdin buffered for one exec that has not started yet in `bytes`
-    pub max_queued_stdin_bytes: u64,
-    /// max stdin buffered across all not-yet-started execs in `bytes`
-    pub max_total_queued_stdin_bytes: u64,
-    /// max exec pressure (running + queued-to-start)
-    pub max_queued_execs: u32,
+gondolin_wire::wire_struct! {
+    /// Exec queueing limits (`SandboxServerOptions`); absent fields take the
+    /// node engine's defaults.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Limits {
+        /// max stdin chunk per message in `bytes`
+        pub max_stdin_bytes: u64 = Limits::default().max_stdin_bytes,
+        /// max stdin buffered for one exec that has not started yet in `bytes`
+        pub max_queued_stdin_bytes: u64 = Limits::default().max_queued_stdin_bytes,
+        /// max stdin buffered across all not-yet-started execs in `bytes`
+        pub max_total_queued_stdin_bytes: u64 = Limits::default().max_total_queued_stdin_bytes,
+        /// max exec pressure (running + queued-to-start)
+        pub max_queued_execs: u32 = Limits::default().max_queued_execs,
+    }
 }
 
 impl Default for Limits {
@@ -175,73 +155,70 @@ impl Default for Limits {
     }
 }
 
-/// Successful `start_result` fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StartResult {
-    /// always `true`
-    pub ok: bool,
-    /// private socket directory of this session
-    pub socket_dir: String,
-}
-
-/// Guest activity reported by the controller (e.g. open network flows served
-/// by the controller), used for the idle pause.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Activity {
-    /// activity source name (one counter per source)
-    pub source: String,
-    /// whether the source is active
-    pub active: bool,
-}
-
-/// Sandbox state (`SandboxState`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    Starting,
-    Running,
-    Stopped,
-}
-
-impl State {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            State::Starting => "starting",
-            State::Running => "running",
-            State::Stopped => "stopped",
-        }
+gondolin_wire::wire_struct! {
+    /// Successful `start_result` fields.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StartResult {
+        /// always `true`
+        pub ok: bool,
+        /// private socket directory of this session
+        pub socket_dir: String,
     }
 }
 
-/// Global state change (emitted as `state` by the SDK and broadcast to clients).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Status {
-    pub state: State,
-    /// pid of the VMM process while one runs
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vmm_pid: Option<u32>,
+gondolin_wire::wire_struct! {
+    /// Guest activity reported by the controller (e.g. open network flows served
+    /// by the controller), used for the idle pause.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Activity {
+        /// activity source name (one counter per source)
+        pub source: String,
+        /// whether the source is active
+        pub active: bool,
+    }
 }
 
-/// Debug event (`SandboxServer` `debug` event).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Log {
-    /// debug component (`exec`, `protocol`, `vfs`, `net`, `qemu`, `error`)
-    pub component: String,
-    pub message: String,
+gondolin_wire::wire_enum! {
+    /// Sandbox state (`SandboxState`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum State {
+        Starting = "starting",
+        Running = "running",
+        Stopped = "stopped",
+    }
 }
 
-/// The VMM process exited.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Exit {
-    /// exit code (absent when killed by a signal or when it never started)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<i32>,
-    /// terminating signal name (`SIGKILL`, ...)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signal: Option<String>,
-    /// spawn failure message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+gondolin_wire::wire_struct! {
+    /// Global state change (emitted as `state` by the SDK and broadcast to clients).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Status {
+        pub state: State,
+        /// pid of the VMM process while one runs
+        pub vmm_pid: Option<u32>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// Debug event (`SandboxServer` `debug` event).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Log {
+        /// debug component (`exec`, `protocol`, `vfs`, `net`, `qemu`, `error`)
+        pub component: String,
+        pub message: String,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// The VMM process exited.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Exit {
+        /// exit code (absent when killed by a signal or when it never started)
+        pub code: Option<i32>,
+        /// terminating signal name (`SIGKILL`, ...)
+        pub signal: Option<String>,
+        /// spawn failure message
+        pub error: Option<String>,
+    }
 }
 
 #[cfg(test)]

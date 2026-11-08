@@ -16,16 +16,11 @@ gondolin-wire.workspace = true
 gondolin-proto.workspace = true
 gondolin-assets.workspace = true
 gondolin-egress.workspace = true
-serde.workspace = true
-serde_bytes.workspace = true
 tokio.workspace = true
-base64 = "0.22"
 libc = "0.2"
-serde_json = { version = "1", features = ["preserve_order"] }
-getrandom = "0.2"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+ring = "0.17"
+gondolin-http.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
 tempfile = "3"

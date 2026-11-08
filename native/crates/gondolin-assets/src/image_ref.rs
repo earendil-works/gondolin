@@ -3,17 +3,31 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use gondolin_wire::{DecodeError, FromValue, ToValue, Value};
 
 use crate::AssetsError;
 
 /// Guest architecture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arch {
-    #[serde(rename = "aarch64")]
     Aarch64,
-    #[serde(rename = "x86_64")]
     X86_64,
+}
+
+impl ToValue for Arch {
+    fn to_value(&self) -> Value {
+        Value::Text(self.as_str().into())
+    }
+}
+
+impl FromValue for Arch {
+    fn from_value(value: &Value) -> Result<Self, DecodeError> {
+        match value.as_text() {
+            Some("aarch64") => Ok(Arch::Aarch64),
+            Some("x86_64") => Ok(Arch::X86_64),
+            _ => Err(DecodeError::expected("`aarch64` or `x86_64`", value)),
+        }
+    }
 }
 
 impl Arch {

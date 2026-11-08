@@ -8,7 +8,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use gondolin_wire::Value;
+use gondolin_wire::cbor;
+use gondolin_wire::value::Value;
 use gondolin_wire::{FrameReader, FrameWriter, WireError};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -54,11 +55,11 @@ fn text(s: &str) -> Value {
 }
 
 fn int(v: u64) -> Value {
-    Value::Integer(v.into())
+    Value::Integer(v as i128)
 }
 
 fn sint(v: i64) -> Value {
-    Value::Integer(v.into())
+    Value::Integer(v as i128)
 }
 
 fn map(pairs: Vec<(&str, Value)>) -> Value {
@@ -156,12 +157,13 @@ impl RpcSession {
         let mut reader = FrameReader::new(r);
         let mut writer = FrameWriter::new(w);
         while let Some(frame) = reader.read_frame().await? {
-            let Ok(value) = gondolin_wire::decode::<Value>(&frame) else {
-                tracing::debug!("vfs: undecodable frame ({} bytes)", frame.len());
+            // §3.3 guest rules: i64 integers, no floats
+            let Ok(value) = gondolin_wire::decode_guest::<Value>(&frame) else {
+                gondolin_log::debug!("vfs: undecodable frame ({} bytes)", frame.len());
                 continue;
             };
             if let Some(response) = self.handle_message(&value).await {
-                writer.write_message(&response).await?;
+                writer.write_frame(&cbor::encode(&response)).await?;
                 writer.flush().await?;
             }
         }
@@ -219,14 +221,13 @@ impl RpcSession {
         let result = self.dispatch(op, req).await;
         self.core.record(op, result.is_ok());
         if let Err(e) = &result {
-            tracing::debug!(
-                op,
-                err = e.errno,
-                dur_us = start.elapsed().as_micros() as u64,
-                "vfs op failed"
+            gondolin_log::debug!(
+                "vfs op {op} failed: errno {} ({} µs)",
+                e.errno,
+                start.elapsed().as_micros()
             );
         } else {
-            tracing::trace!(op, dur_us = start.elapsed().as_micros() as u64, "vfs op");
+            gondolin_log::trace!("vfs op {op} ({} µs)", start.elapsed().as_micros());
         }
         result
     }

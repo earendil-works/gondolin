@@ -19,8 +19,6 @@ pub mod net;
 pub mod session;
 pub mod vfs;
 
-use serde::{Deserialize, Serialize};
-
 pub use gondolin_wire::{Envelope, RawEnvelope, Value};
 
 /// Protocol version carried in every envelope (`v`) and in `hello`.
@@ -34,18 +32,27 @@ pub fn result_type(t: &str) -> String {
     format!("{t}{RESULT_SUFFIX}")
 }
 
-/// Payload of a failed request (`<t>_result` with `ok: false`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct ResultError {
-    /// always `false`
-    pub ok: bool,
-    /// stable error code (`invalid_request`, `unsupported`, ...)
-    pub code: String,
-    /// human-readable message; for file operations the exact error message the
-    /// SDK surfaces
-    pub message: String,
+gondolin_wire::wire_struct! {
+    /// Payload of a failed request (`<t>_result` with `ok: false`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResultError {
+        /// always `false`
+        pub ok: bool,
+        /// stable error code (`invalid_request`, `unsupported`, ...)
+        pub code: String,
+        /// human-readable message; for file operations the exact error message the
+        /// SDK surfaces
+        pub message: String,
+    }
 }
+
+impl std::fmt::Display for ResultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ResultError {}
 
 impl ResultError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -53,11 +60,13 @@ impl ResultError {
     }
 }
 
-/// Payload of a successful request without further fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResultOk {
-    /// always `true`
-    pub ok: bool,
+gondolin_wire::wire_struct! {
+    /// Payload of a successful request without further fields.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResultOk {
+        /// always `true`
+        pub ok: bool,
+    }
 }
 
 impl ResultOk {
@@ -72,17 +81,18 @@ impl Default for ResultOk {
     }
 }
 
-/// Unsolicited `error` message (d→c). Also the answer to unknown message types
-/// (`code: "unsupported"`), with `id` set to the id of the offending message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ErrorEvent {
-    /// stable error code
-    pub code: String,
-    /// human-readable message
-    pub message: String,
-    /// message type that caused the error, when it was a reply to a message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+gondolin_wire::wire_struct! {
+    /// Unsolicited `error` message (d→c). Also the answer to unknown message types
+    /// (`code: "unsupported"`), with `id` set to the id of the offending message.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ErrorEvent {
+        /// stable error code
+        pub code: String,
+        /// human-readable message
+        pub message: String,
+        /// message type that caused the error, when it was a reply to a message
+        pub r#type: Option<String>,
+    }
 }
 
 /// Inserts `ok: true` into a payload map (for results with extra fields).

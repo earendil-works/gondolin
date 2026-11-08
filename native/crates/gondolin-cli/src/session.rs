@@ -86,10 +86,13 @@ impl Session {
     /// waits for the snapshot to be answered and returns `None`; termination
     /// signals return their exit code.
     pub async fn run<F: std::future::Future<Output = i32>>(&self, main: F) -> Option<i32> {
-        let code = tokio::select! {
-            code = main => code,
-            code = crate::commands::termination() => return Some(code),
-            _ = self.snapshotted() => return None,
+        use gondolind::util::{Either, select2};
+        let code = match select2(main, select2(crate::commands::termination(), self.snapshotted()))
+            .await
+        {
+            Either::Left(code) => code,
+            Either::Right(Either::Left(code)) => return Some(code),
+            Either::Right(Either::Right(())) => return None,
         };
         if self.snapshotting.load(std::sync::atomic::Ordering::SeqCst) {
             let _ =

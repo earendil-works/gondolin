@@ -130,10 +130,16 @@ pub enum ImportMode {
 }
 
 /// A local ref.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRef {
     pub reference: String,
     pub targets: indexed::Map<Arch, String>,
+}
+
+impl gondolin_wire::ToValue for LocalRef {
+    fn to_value(&self) -> gondolin_wire::Value {
+        gondolin_wire::value!({ "reference": (&self.reference), "targets": (&self.targets) })
+    }
 }
 
 /// Exclusive lock on a store key, released on drop.

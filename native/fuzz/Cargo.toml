@@ -11,16 +11,20 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+base64 = "0.22"
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 gondolin-wire = { path = "../crates/gondolin-wire" }
 gondolin-proto = { path = "../crates/gondolin-proto" }
 gondolin-netstack = { path = "../crates/gondolin-netstack" }
 gondolin-egress = { path = "../crates/gondolin-egress" }
+gondolin-http = { path = "../crates/gondolin-http" }
+url = "2"
 gondolin-sshproxy = { path = "../crates/gondolin-sshproxy" }
 gondolind = { path = "../crates/gondolind" }
+gondolin-assets = { path = "../crates/gondolin-assets" }
+miniz_oxide = "0.9"
 
 # standalone: not part of the native/ workspace (needs nightly + cargo-fuzz)
 [workspace]
@@ -46,6 +50,34 @@ bench = false
 [[bin]]
 name = "egress_flow"
 path = "fuzz_targets/egress_flow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_codec"
+path = "fuzz_targets/http_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x509_parse"
+path = "fuzz_targets/x509_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_parse"
+path = "fuzz_targets/url_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_conn"
+path = "fuzz_targets/http_conn.rs"
 test = false
 doc = false
 bench = false
@@ -85,6 +117,44 @@ test = false
 doc = false
 bench = false
 
-# Same vendored, patched dependencies as the main workspace.
-[patch.crates-io]
-russh = { path = "../vendor/russh" }
+[[bin]]
+name = "wire_cbor"
+path = "fuzz_targets/wire_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_json"
+path = "fuzz_targets/wire_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assets_tar"
+path = "fuzz_targets/assets_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assets_gzip"
+path = "fuzz_targets/assets_gzip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_transport"
+path = "fuzz_targets/ssh_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_keys"
+path = "fuzz_targets/ssh_keys.rs"
+test = false
+doc = false
+bench = false

@@ -1,4 +1,4 @@
-//! HTTP/1.x bridging: the guest-facing hyper server and the request pipeline
+//! HTTP/1.x bridging: the guest-facing server and the request pipeline
 //! (port of `handleHttpDataWithWriter` and `fetchHookRequestAndRespond` in
 //! `host/src/qemu/http.ts`).
 //!
@@ -8,29 +8,28 @@
 //! head is unchanged) → upstream fetch (connect-time ip check on new
 //! connections) → redirects (re-validated) → `on_response` hook.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use gondolin_http::client::{ClientError, ClientResponse, Target};
+use gondolin_http::head::{canonical_reason, valid_name};
+use gondolin_http::server::{Request, Response, ServerConfig};
+use gondolin_http::url::Url;
+use gondolin_http::{
+    Body as _, HeadLimits, Header, Incoming, ParseError, RequestHead as WireHead, Version,
+};
 use gondolin_proto::net::{HookRegistrations, NetPolicy};
-use http::{Method, Request, Response, StatusCode, Uri, Version};
-use http_body::Body as _;
-use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use hyper::ext::ReasonPhrase;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
-use url::Url;
 
 use crate::Shared;
 use crate::body::{
     self, HookBody, IdleTimeoutBody, LimitedBody, PullableBody, RecordingBody, find_blocked,
+    with_guard,
 };
 use crate::error::{Blocked, PipelineError};
 use crate::headers::{
     coalesce_request_headers, has_upgrade, is_websocket_upgrade, latin1, response_headers,
-    strip_hop_by_hop, strip_hop_by_hop_for_websocket, to_header_map,
+    strip_hop_by_hop, strip_hop_by_hop_for_websocket, to_header_value, to_wire_headers,
 };
 use crate::hooks::{
     BodyChoice, HookError, RequestDecision, RequestHead, ResponseDecision, ResponseHead,
@@ -75,21 +74,36 @@ pub(crate) async fn serve_http<IO>(shared: Arc<Shared>, io: IO, scheme: Scheme, 
 where
     IO: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let keep_alive = shared.limits.guest_keep_alive;
+    let ctx = ReqCtx { keep_alive: shared.limits.guest_keep_alive };
+    let config = ServerConfig {
+        keep_alive: ctx.keep_alive,
+        // heads up to this size reach `prepare` (431 with the node message)
+        limits: HeadLimits { max_bytes: MAX_HTTP_HEADER_BYTES + 8 * 1024, max_headers: 1024 },
+    };
     let svc_shared = shared.clone();
-    let svc = service_fn(move |req: Request<Incoming>| {
-        let shared = svc_shared.clone();
-        async move { Ok::<_, Infallible>(handle_request(shared, scheme, req).await) }
-    });
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder
-        .keep_alive(keep_alive)
-        .half_close(true)
-        .max_buf_size(MAX_HTTP_HEADER_BYTES + 8 * 1024)
-        .max_headers(1024);
-    if let Err(err) = builder.serve_connection(TokioIo::new(io), svc).with_upgrades().await {
-        tracing::debug!(target: "gondolin::egress", flow = flow_id, "http connection ended: {err}");
-    }
+    gondolin_http::server::serve(
+        io,
+        config,
+        move |req| handle_request(svc_shared.clone(), scheme, req),
+        move |err| parse_error_response(&ctx, err),
+    )
+    .await;
+    gondolin_log::debug!(target: "gondolin::egress", "http connection ended flow={}", flow_id);
+}
+
+/// Response to a request head the server could not parse.
+fn parse_error_response(ctx: &ReqCtx, err: &ParseError) -> Response {
+    gondolin_log::debug!(target: "gondolin::egress", "http request head invalid: {err}");
+    let err = match err {
+        ParseError::TooLarge | ParseError::TooManyHeaders => Blocked::new(
+            431,
+            "Request Header Fields Too Large",
+            format!("request headers exceed {MAX_HTTP_HEADER_BYTES} bytes"),
+        )
+        .into(),
+        _ => PipelineError::plain(400, "Bad Request"),
+    };
+    error_response(ctx, err, 400)
 }
 
 /// Request body of one hop.
@@ -126,15 +140,10 @@ struct Prepared {
     websocket: bool,
 }
 
-async fn handle_request(
-    shared: Arc<Shared>,
-    scheme: Scheme,
-    req: Request<Incoming>,
-) -> Response<HookBody> {
+async fn handle_request(shared: Arc<Shared>, scheme: Scheme, req: Request) -> Response {
     let ctx = ReqCtx { keep_alive: shared.limits.guest_keep_alive };
-    let (parts, incoming) = req.into_parts();
-    let mut req = Request::from_parts(parts, ());
-    let prepared = match prepare(&shared, scheme, &req, incoming).await {
+    let Request { head, body: incoming, upgrade, .. } = req;
+    let prepared = match prepare(&shared, scheme, &head, incoming).await {
         Ok(p) => p,
         Err(err) => return error_response(&ctx, err, 400),
     };
@@ -142,7 +151,8 @@ async fn handle_request(
         return match crate::ws::handle_websocket(
             &shared,
             &ctx,
-            &mut req,
+            head.version,
+            upgrade,
             prepared.base,
             prepared.prechecked,
         )
@@ -152,29 +162,31 @@ async fn handle_request(
             Err(err) => error_response(&ctx, err, 400),
         };
     }
-    drop(req);
+    drop(upgrade);
     let permit = shared.concurrency.clone().acquire_owned().await.ok();
     match fetch_and_respond(&shared, &ctx, prepared).await {
-        Ok(resp) => resp.map(move |b| {
-            let permit = permit;
-            b.map_frame(move |f| {
-                let _ = &permit;
-                f
-            })
-            .boxed()
-        }),
+        Ok(mut resp) => {
+            resp.body = with_guard(resp.body, permit);
+            resp
+        }
         Err(err) => error_response(&ctx, err, 502),
     }
 }
 
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
+}
+
 fn build_fetch_url(target: &str, host: Option<&str>, scheme: Scheme) -> Option<String> {
-    if let Some(rest) = target.strip_prefix("ws://") {
+    if let Some(rest) = strip_prefix_ci(target, "ws://") {
         return Some(format!("http://{rest}"));
     }
-    if let Some(rest) = target.strip_prefix("wss://") {
+    if let Some(rest) = strip_prefix_ci(target, "wss://") {
         return Some(format!("https://{rest}"));
     }
-    if target.starts_with("http://") || target.starts_with("https://") {
+    if strip_prefix_ci(target, "http://").is_some() || strip_prefix_ci(target, "https://").is_some()
+    {
         return Some(target.to_string());
     }
     let host = host.filter(|h| !h.is_empty())?;
@@ -194,15 +206,15 @@ fn parse_content_length(raw: &str) -> Option<u64> {
 async fn prepare(
     shared: &Shared,
     scheme: Scheme,
-    req: &Request<()>,
+    req: &WireHead,
     incoming: Incoming,
 ) -> Result<Prepared, PipelineError> {
-    let method = req.method().as_str().to_string();
-    let target = req.uri().to_string();
+    let method = req.method.clone();
+    let target = req.target.clone();
     let head_bytes = method.len()
         + target.len()
         + 11
-        + req.headers().iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum::<usize>();
+        + req.headers.iter().map(|h| h.name.len() + h.value.len() + 4).sum::<usize>();
     if head_bytes > MAX_HTTP_HEADER_BYTES {
         return Err(Blocked::new(
             431,
@@ -211,12 +223,12 @@ async fn prepare(
         )
         .into());
     }
-    let mut headers = coalesce_request_headers(req.headers());
+    let mut headers = coalesce_request_headers(&req.headers);
     let get = |headers: &[(String, String)], name: &str| {
         crate::hooks::header_get(headers, name).map(str::to_string)
     };
 
-    if req.version() == Version::HTTP_11
+    if req.version == Version::Http11
         && let Some(expect) = get(&headers, "expect")
     {
         let unsupported: Vec<String> = expect
@@ -314,16 +326,13 @@ async fn prepare(
 
     let body = if chunked {
         base.remove_header("content-length");
-        ReqBody::Stream(
-            LimitedBody::new(
-                incoming,
-                max,
-                Blocked::new(413, "Payload Too Large", format!("request body exceeds {max} bytes")),
-            )
-            .boxed(),
-        )
+        ReqBody::Stream(HookBody::new(LimitedBody::new(
+            incoming,
+            max,
+            Blocked::new(413, "Payload Too Large", format!("request body exceeds {max} bytes")),
+        )))
     } else if content_length > 0 {
-        ReqBody::Stream(incoming.map_err(Into::into).boxed())
+        ReqBody::Stream(incoming.boxed())
     } else {
         base.remove_header("content-length");
         ReqBody::Empty
@@ -449,7 +458,11 @@ pub(crate) async fn apply_request_hooks(
                             discard(pullable).await;
                             (
                                 new_head,
-                                ReqBody::Stream(LimitedBody::new(b, max, too_large()).boxed()),
+                                ReqBody::Stream(HookBody::new(LimitedBody::new(
+                                    b,
+                                    max,
+                                    too_large(),
+                                ))),
                                 false,
                             )
                         }
@@ -458,12 +471,11 @@ pub(crate) async fn apply_request_hooks(
                 RequestDecision::Respond { head: resp, body: choice } => {
                     discard(pullable).await;
                     let max = limits.max_response_body_bytes;
-                    let b = LimitedBody::new(
+                    let b = HookBody::new(LimitedBody::new(
                         choice.into_body_or_empty(),
                         max,
                         Blocked::bad_gateway(format!("response body exceeds {max} bytes")),
-                    )
-                    .boxed();
+                    ));
                     return Ok(RequestHookOutcome::ShortCircuit { head: resp, body: b });
                 }
             }
@@ -542,22 +554,22 @@ fn same_origin(a: &Url, b: &Url) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
-fn redirect_target(status: u16, headers: &http::HeaderMap, current: &Url) -> Option<Url> {
+fn redirect_target(status: u16, headers: &[Header], current: &Url) -> Option<Url> {
     if ![301, 302, 303, 307, 308].contains(&status) {
         return None;
     }
-    let location = headers.get(http::header::LOCATION)?;
-    current.join(&latin1(location.as_bytes())).ok()
+    let location = gondolin_http::header(headers, "location")?;
+    current.join(&latin1(location)).ok()
 }
 
-fn client_error(err: hyper_util::client::legacy::Error) -> PipelineError {
+fn client_error(err: ClientError) -> PipelineError {
     if let Some(blocked) = find_blocked(&err) {
         return blocked.into();
     }
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&err);
     while let Some(e) = source {
         if let Some(cb) = e.downcast_ref::<ConnectBlocked>() {
-            tracing::debug!(target: "gondolin::egress", "http connect blocked: {}", cb.0.message);
+            gondolin_log::debug!(target: "gondolin::egress", "http connect blocked: {}", cb.0.message);
             // node: the guarded lookup failure surfaces as a fetch failure
             return PipelineError::Other(format!("fetch failed: {}", cb.0.message));
         }
@@ -570,35 +582,52 @@ fn client_error(err: hyper_util::client::legacy::Error) -> PipelineError {
         msg.push_str(&e.to_string());
         source = e.source();
     }
-    tracing::debug!(target: "gondolin::egress", "http bridge fetch failed ({msg})");
+    gondolin_log::debug!(target: "gondolin::egress", "http bridge fetch failed ({msg})");
     PipelineError::Other(msg)
+}
+
+/// An upstream request: destination, method, origin-form target and headers.
+struct UpstreamRequest {
+    target: Target,
+    method: String,
+    path: String,
+    headers: Vec<Header>,
 }
 
 fn build_upstream_request(
     head: &RequestHead,
     url: &Url,
-    body: HookBody,
     keep_content_length: bool,
-) -> Result<Request<HookBody>, PipelineError> {
-    let method = Method::from_bytes(head.method.as_bytes())
-        .map_err(|_| PipelineError::plain(400, "Bad Request"))?;
-    let uri: Uri = url.as_str().parse().map_err(|_| PipelineError::plain(400, "Bad Request"))?;
-    let mut headers = to_header_map(&head.headers);
-    if !keep_content_length {
-        headers.remove(http::header::CONTENT_LENGTH);
+) -> Result<UpstreamRequest, PipelineError> {
+    let bad = || PipelineError::plain(400, "Bad Request");
+    if !valid_name(head.method.as_bytes()) {
+        return Err(bad());
     }
-    let mut req = Request::new(body);
-    *req.method_mut() = method;
-    *req.uri_mut() = uri;
-    *req.headers_mut() = headers;
-    Ok(req)
+    let https = url_protocol(url).ok_or_else(bad)? == "https";
+    let host = url.host_str().filter(|h| !h.is_empty()).ok_or_else(bad)?;
+    let port = url.port_or_known_default().ok_or_else(bad)?;
+    let path = match url.query() {
+        Some(q) => format!("{}?{q}", url.path()),
+        None => url.path().to_string(),
+    };
+    let path = if path.is_empty() { "/".to_string() } else { path };
+    let mut headers = to_wire_headers(&head.headers);
+    if !keep_content_length {
+        headers.retain(|h| h.name != "content-length");
+    }
+    Ok(UpstreamRequest {
+        target: Target { https, host: host.to_string(), port },
+        method: head.method.clone(),
+        path,
+        headers,
+    })
 }
 
 async fn fetch_and_respond(
     shared: &Shared,
     ctx: &ReqCtx,
     prepared: Prepared,
-) -> Result<Response<HookBody>, PipelineError> {
+) -> Result<Response, PipelineError> {
     let mut pending = prepared.base.clone();
     let mut body = prepared.body;
     for redirect_count in 0..=MAX_HTTP_REDIRECTS {
@@ -627,7 +656,7 @@ async fn fetch_and_respond(
             }
             RequestHookOutcome::Forward { head, body, original } => (head, body, original),
         };
-        tracing::debug!(target: "gondolin::egress", "http bridge {} {}", head.method, head.url);
+        gondolin_log::debug!(target: "gondolin::egress", "http bridge {} {}", head.method, head.url);
 
         let url = Url::parse(&head.url).map_err(|_| PipelineError::plain(400, "Bad Request"))?;
         if url_protocol(&url).is_none() || url.port_or_known_default().is_none_or(|p| p == 0) {
@@ -661,20 +690,24 @@ async fn fetch_and_respond(
             ReqBody::Bytes(b) => (body::full(b.clone()), Some(Ok(b))),
             ReqBody::Stream(s) => {
                 let (rec, record) = RecordingBody::new(s, REDIRECT_REPLAY_LIMIT);
-                (rec.boxed(), Some(Err(record)))
+                (HookBody::new(rec), Some(Err(record)))
             }
         };
-        let request = build_upstream_request(&head, &url, upstream_body, keep_cl && had_body)?;
-        let response =
-            match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, shared.client.request(request))
-                .await
-            {
-                Ok(r) => r.map_err(client_error)?,
-                Err(_) => return Err(PipelineError::Other("upstream headers timeout".into())),
-            };
+        let request = build_upstream_request(&head, &url, keep_cl && had_body)?;
+        let fetch = shared.client.request(
+            &request.target,
+            &request.method,
+            &request.path,
+            request.headers,
+            upstream_body,
+        );
+        let response = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, fetch).await {
+            Ok(r) => r.map_err(client_error)?,
+            Err(_) => return Err(PipelineError::Other("upstream headers timeout".into())),
+        };
 
-        let status = response.status().as_u16();
-        if let Some(target) = redirect_target(status, response.headers(), &url) {
+        let status = response.head.status;
+        if let Some(target) = redirect_target(status, &response.head.headers, &url) {
             drop(response);
             if redirect_count >= MAX_HTTP_REDIRECTS {
                 return Err(Blocked::new(508, "Loop Detected", "too many redirects").into());
@@ -707,10 +740,12 @@ async fn fetch_and_respond(
     Err(Blocked::new(508, "Loop Detected", "too many redirects").into())
 }
 
-fn status_text(status: StatusCode, reason: Option<&ReasonPhrase>) -> String {
-    match reason {
-        Some(r) => latin1(r.as_bytes()),
-        None => status.canonical_reason().unwrap_or("OK").to_string(),
+/// Status text of an upstream response: the received reason phrase (the
+/// canonical one when it matches).
+pub(crate) fn status_text(status: u16, reason: &[u8]) -> String {
+    match canonical_reason(status) {
+        Some(c) if c.as_bytes() == reason => c.to_string(),
+        _ => latin1(reason),
     }
 }
 
@@ -719,18 +754,19 @@ async fn respond(
     ctx: &ReqCtx,
     regs: &HookRegistrations,
     request: RequestHead,
-    response: Response<Incoming>,
-) -> Result<Response<HookBody>, PipelineError> {
-    let (parts, incoming) = response.into_parts();
-    let status = parts.status.as_u16();
+    response: ClientResponse,
+) -> Result<Response, PipelineError> {
+    let ClientResponse { head: wire, body: incoming, .. } = response;
+    let status = wire.status;
     let mut head = ResponseHead {
         status,
-        status_text: status_text(parts.status, parts.extensions.get::<ReasonPhrase>()),
-        headers: strip_hop_by_hop(response_headers(&parts.headers)),
+        status_text: status_text(status, &wire.reason),
+        headers: strip_hop_by_hop(response_headers(&wire.headers)),
     };
-    tracing::debug!(target: "gondolin::egress", "http bridge response {} {}", head.status, head.status_text);
+    drop(wire);
+    gondolin_log::debug!(target: "gondolin::egress", "http bridge response {} {}", head.status, head.status_text);
     head.set_header("connection", "close");
-    let upstream_body: HookBody = IdleTimeoutBody::new(incoming, UPSTREAM_BODY_TIMEOUT).boxed();
+    let upstream_body = HookBody::new(IdleTimeoutBody::new(incoming, UPSTREAM_BODY_TIMEOUT));
 
     let is_head = request.method.eq_ignore_ascii_case("HEAD");
     let suppress = is_head || matches!(status, 204 | 205 | 304);
@@ -841,7 +877,7 @@ pub(crate) fn normalize_hook_response(
             head.set_header("content-length", "0");
         }
     } else {
-        match body.size_hint().exact() {
+        match body.size_hint().exact_len() {
             Some(n) => head.set_header("content-length", n.to_string()),
             None => head.remove_header("content-length"),
         }
@@ -850,47 +886,39 @@ pub(crate) fn normalize_hook_response(
 }
 
 /// Builds the guest-facing response.
-pub(crate) fn guest_response(
-    ctx: &ReqCtx,
-    (mut head, body): (ResponseHead, HookBody),
-) -> Response<HookBody> {
+pub(crate) fn guest_response(ctx: &ReqCtx, (mut head, body): (ResponseHead, HookBody)) -> Response {
     if ctx.keep_alive {
         head.remove_header("connection");
     } else {
         head.set_header("connection", "close");
     }
-    let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut resp = Response::new(body);
-    *resp.status_mut() = status;
-    *resp.headers_mut() = to_header_map(&head.headers);
-    if status.canonical_reason() != Some(head.status_text.as_str())
+    wire_response(&head, body)
+}
+
+/// A response with `head` as given (status out of range: 502).
+pub(crate) fn wire_response(head: &ResponseHead, body: HookBody) -> Response {
+    let status = if (100..1000).contains(&head.status) { head.status } else { 502 };
+    let reason = if canonical_reason(status) != Some(head.status_text.as_str())
         && !head.status_text.is_empty()
-        && let Some(v) = crate::headers::to_header_value(&head.status_text)
-        && let Ok(reason) = ReasonPhrase::try_from(Bytes::copy_from_slice(v.as_bytes()))
     {
-        resp.extensions_mut().insert(reason);
-    }
-    resp
+        to_header_value(&head.status_text)
+    } else {
+        None
+    };
+    Response { status, reason, headers: to_wire_headers(&head.headers), body }
 }
 
 /// `respondWithError`: `<status> <text>[: <detail>]\n` as text/plain.
-pub(crate) fn error_response(
-    ctx: &ReqCtx,
-    err: PipelineError,
-    default_status: u16,
-) -> Response<HookBody> {
+pub(crate) fn error_response(ctx: &ReqCtx, err: PipelineError, default_status: u16) -> Response {
     let (status, text, detail): (u16, String, Option<String>) = match err {
         PipelineError::Blocked(b) => {
-            tracing::debug!(target: "gondolin::egress", "http blocked {}", b.message);
+            gondolin_log::debug!(target: "gondolin::egress", "http blocked {}", b.message);
             (b.status, b.status_text, Some(b.message))
         }
         PipelineError::Plain { status, status_text } => (status, status_text.to_string(), None),
         PipelineError::Other(msg) => {
-            tracing::warn!(target: "gondolin::egress", "http bridge error: {msg}");
-            let text = StatusCode::from_u16(default_status)
-                .ok()
-                .and_then(|s| s.canonical_reason())
-                .unwrap_or("Bad Gateway");
+            gondolin_log::warn!(target: "gondolin::egress", "http bridge error: {msg}");
+            let text = canonical_reason(default_status).unwrap_or("Bad Gateway");
             (default_status, text.to_string(), None)
         }
     };

@@ -147,3 +147,28 @@ async fn node_engine_ca_is_accepted() {
         server.err()
     );
 }
+
+#[tokio::test]
+async fn upstream_connections_are_pooled() {
+    let ca = TestCa::new("gondolin-mitm-ca");
+    let up = TestCa::new("upstream-ca");
+    let (addr, accepted) = upstream_counted(
+        handler(|_req| async move { Response::new(body("ok")) }),
+        Some(up.server_config(&["secure.test"])),
+    )
+    .await;
+    let mut cfg = config(Some(open_rules()), Some(&ca));
+    cfg.upstream_ca_pems = vec![up.cert_pem.clone()];
+    let h = Harness::new(cfg, Arc::new(gondolin_egress::NoHooks));
+    for _ in 0..3 {
+        let mut tls = h.tls(&ca, "secure.test").await;
+        tls.write_all(
+            format!("GET / HTTP/1.1\r\nHost: secure.test:{}\r\n\r\n", addr.port()).as_bytes(),
+        )
+        .await
+        .unwrap();
+        let r = parse(&read_to_end(&mut tls).await);
+        assert_eq!(r.text(), "ok");
+    }
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

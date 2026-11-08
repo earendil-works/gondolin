@@ -1,6 +1,6 @@
 [package]
 name = "gondolin-wire"
-description = "Length-prefixed CBOR framing shared by gondolind's guest and controller protocols"
+description = "Length-prefixed CBOR framing, CBOR/JSON codecs and typed message conversion shared by the Gondolin native crates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,7 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
-ciborium.workspace = true
-serde.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-serde_bytes.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }

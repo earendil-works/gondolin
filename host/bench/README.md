@@ -23,8 +23,8 @@ Options:
 | flag | meaning |
 |---|---|
 | `--engine node\|native` | engine (default: `GONDOLIN_ENGINE`, else `node`) |
-| `--interleave node,native` | run both engines, alternating per workload group |
-| `--suite a,b` | suites to run: `boot`, `exec`, `vfs`, `net` (default: all) |
+| `--interleave node,native[,native-virtiofs]` | run several engines, alternating per workload group |
+| `--suite a,b` | suites to run: `boot`, `exec`, `vfs`, `net`, `cli` (default: all) |
 | `--quick` | at most 1 warmup and 3 iterations, smaller payloads |
 | `--iterations N` | override measured iterations of every workload |
 | `--filter regex` | only workloads whose name matches (setup of unmatched groups is skipped) |
@@ -95,6 +95,41 @@ before trusting a small difference.
   `policy-body-hooks` (onRequest/onResponse reading cloned bodies). Workloads:
   sequential small GETs with a new connection each and with keep-alive,
   8-way concurrent GETs, 32 MiB download/upload, 256 MiB download.
+
+## Engines
+
+- `node`: the in-process TypeScript engine.
+- `native`: the native engine (`GONDOLIN_NATIVE_BIN`, the multi-call `gondolin`
+  binary started as `gondolin daemon`), with the QEMU on `PATH` (Homebrew's
+  QEMU has no vhost-user, so the guest uses sandboxfs).
+- `native-virtiofs`: the native engine with `GONDOLIN_VIRTIOFS=1` and a
+  vhost-user capable QEMU first on `PATH` (`GONDOLIN_BENCH_VIRTIOFS_QEMU_DIR`,
+  default `/tmp/qemu-vu/qemu-10.2.1/build`; see
+  `native/docs/qemu-macos-vhost-user.md`). The vfs suite fails instead of
+  measuring sandboxfs when the guest did not mount virtio-fs; every vfs
+  workload records the guest transport in its params, and run files record
+  the QEMU path/version and `GONDOLIN_VIRTIOFS`.
+
+- `native-prev`, `native-prev-virtiofs`: the same with the binary in
+  `GONDOLIN_BENCH_PREV_BIN` (an earlier build kept aside), to compare two
+  builds of the native engine under identical load.
+
+When a suite's newest run was interleaved, SUMMARY.md shows exactly the
+engines of that run (never mixing in older runs of other engines).
+
+virtio-fs needs a guest image with current helpers. Build one from the local
+Zig sources (the published helpers may lag behind):
+
+```bash
+GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make -C guest assets
+export GONDOLIN_GUEST_DIR=$PWD/guest/image/out
+```
+
+The `cli` suite measures `gondolin exec -- true` wall time: the node CLI on
+the node engine (`node` column) against the static CLI (`native` column, plus
+the node CLI on the native engine as `cli.node-cli-exec-true.*`). `cold` runs
+use a fresh `XDG_CACHE_HOME` each (MITM CA, QEMU probe cache, sessions), `warm`
+runs share one; the image always comes from `GONDOLIN_GUEST_DIR`.
 
 ## Engine processes and checks
 

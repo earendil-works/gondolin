@@ -225,10 +225,7 @@ async fn image(sub: &str, rest: &[String]) -> Result<(), String> {
             let selector = pos.first().ok_or(format!("image {sub} requires <SELECTOR>"))?;
             let resolved =
                 assets.resolve(selector, arch, Some(&progress)).await.map_err(|e| e.to_string())?;
-            let source = serde_json::to_value(resolved.source)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_default();
+            let source = resolved.source.as_str();
             if sub == "inspect" {
                 println!("selector: {}", resolved.selector);
                 println!("source: {source}");

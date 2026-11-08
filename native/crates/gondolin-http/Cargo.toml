@@ -1,0 +1,16 @@
+[package]
+name = "gondolin-http"
+description = "Small HTTP/1.1 codec (sans-io) with tokio server/client adapters and a rustls stream for gondolind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+tokio.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }

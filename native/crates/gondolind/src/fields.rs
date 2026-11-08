@@ -62,7 +62,7 @@ pub fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
-        Value::Integer(i) => i128::from(*i) != 0,
+        Value::Integer(i) => (*i) != 0,
         Value::Float(f) => *f != 0.0 && !f.is_nan(),
         Value::Text(t) => !t.is_empty(),
         _ => true,
@@ -72,7 +72,7 @@ pub fn truthy(v: &Value) -> bool {
 /// Integer value (floats with an integral value count, like JS numbers).
 pub fn as_int(v: &Value) -> Option<i128> {
     match v {
-        Value::Integer(i) => Some(i128::from(*i)),
+        Value::Integer(i) => Some(*i),
         Value::Float(f)
             if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15 =>
         {
@@ -85,7 +85,7 @@ pub fn as_int(v: &Value) -> Option<i128> {
 /// Finite numeric value.
 pub fn as_number(v: &Value) -> Option<f64> {
     match v {
-        Value::Integer(i) => Some(i128::from(*i) as f64),
+        Value::Integer(i) => Some((*i) as f64),
         Value::Float(f) if f.is_finite() => Some(*f),
         _ => None,
     }

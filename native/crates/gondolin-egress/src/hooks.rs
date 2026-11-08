@@ -1,10 +1,8 @@
 //! Programmable hooks (tier 2/3): the [`HookBackend`] trait, plain-data
 //! request/response heads, decisions and lazily pulled bodies.
 
-use std::net::IpAddr;
-
-use async_trait::async_trait;
 use gondolin_proto::net::HookRegistrations;
+use std::net::IpAddr;
 
 use crate::body::{BodyHandle, HookBody};
 use crate::error::Blocked;
@@ -153,53 +151,73 @@ pub enum ResponseDecision {
 }
 
 /// Hook failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum HookError {
     /// the hook rejected the request with a status (`HttpRequestBlockedError`)
-    #[error(transparent)]
-    Blocked(#[from] Blocked),
+    Blocked(Blocked),
     /// the hook failed (exception, transport error): `502 Bad Gateway`
-    #[error("{0}")]
     Failed(String),
 }
+
+impl From<Blocked> for HookError {
+    fn from(b: Blocked) -> Self {
+        HookError::Blocked(b)
+    }
+}
+
+impl std::fmt::Display for HookError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookError::Blocked(b) => b.fmt(f),
+            HookError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for HookError {}
 
 /// Programmable hooks reached from the egress pipeline.
 ///
 /// Only phases set in [`HookBackend::registrations`] are ever called. Bodies are
 /// offered as [`BodyHandle`]s that the hook may pull; a body that is never
 /// pulled is not buffered and is forwarded natively when the decision keeps it.
-#[async_trait]
 pub trait HookBackend: Send + Sync + 'static {
     /// Which phases exist; read on every request (cheap, may change at runtime).
     fn registrations(&self) -> HookRegistrations;
 
     /// Request policy on the head only (`isRequestAllowed`).
-    async fn is_request_allowed(&self, _request: &RequestHead) -> Result<bool, HookError> {
-        Ok(true)
+    fn is_request_allowed<'a>(
+        &'a self,
+        _request: &'a RequestHead,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move { Ok(true) })
     }
 
     /// Destination ip policy (`isIpAllowed`); called after the declarative checks passed.
-    async fn is_ip_allowed(&self, _info: &IpAllowInfo) -> Result<bool, HookError> {
-        Ok(true)
+    fn is_ip_allowed<'a>(
+        &'a self,
+        _info: &'a IpAllowInfo,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move { Ok(true) })
     }
 
     /// Request hook (`onRequest`), before secret substitution.
-    async fn on_request(
-        &self,
+    fn on_request<'a>(
+        &'a self,
         _request: RequestHead,
         _body: Option<BodyHandle>,
-    ) -> Result<RequestDecision, HookError> {
-        Ok(RequestDecision::Continue)
+    ) -> crate::BoxFuture<'a, Result<RequestDecision, HookError>> {
+        Box::pin(async move { Ok(RequestDecision::Continue) })
     }
 
     /// Response hook (`onResponse`) with the final request head.
-    async fn on_response(
-        &self,
+    fn on_response<'a>(
+        &'a self,
         _response: ResponseHead,
         _body: Option<BodyHandle>,
         _request: RequestHead,
-    ) -> Result<ResponseDecision, HookError> {
-        Ok(ResponseDecision::Continue)
+    ) -> crate::BoxFuture<'a, Result<ResponseDecision, HookError>> {
+        Box::pin(async move { Ok(ResponseDecision::Continue) })
     }
 }
 
@@ -207,7 +225,6 @@ pub trait HookBackend: Send + Sync + 'static {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoHooks;
 
-#[async_trait]
 impl HookBackend for NoHooks {
     fn registrations(&self) -> HookRegistrations {
         HookRegistrations::default()

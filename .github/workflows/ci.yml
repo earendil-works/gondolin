@@ -87,6 +87,20 @@ jobs:
             native/target/release/gondolin
           retention-days: 7
 
+  native-deps:
+    name: Native dependency budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # runtime crates of the gondolin binary per release target
+      # (native/scripts/count-deps.sh, budget in native/deps-budget)
+      - name: Count runtime crates
+        run: make -C native deps
+
   build-guest:
     name: Build Guest (${{ matrix.arch }})
     runs-on: ubuntu-latest

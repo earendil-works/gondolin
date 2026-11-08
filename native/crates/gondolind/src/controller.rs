@@ -14,12 +14,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use gondolin_proto::{ErrorEvent, PROTOCOL_VERSION, RESULT_SUFFIX, ResultError, Value};
 #[cfg(test)]
 use gondolin_wire::Envelope;
+use gondolin_wire::ToValue;
 use gondolin_wire::{FrameReader, RawEnvelope, WireError};
-use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -29,17 +28,26 @@ use crate::panics::CatchUnwind;
 pub const OUTGOING_SOFT_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Error of a daemon→controller request.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum CallError {
     /// the controller answered `ok: false`
-    #[error("{0}")]
     Remote(ResultError),
     /// the controller went away before answering
-    #[error("controller disconnected")]
     Disconnected,
-    #[error("invalid response: {0}")]
     Invalid(String),
 }
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::Remote(e) => e.fmt(f),
+            CallError::Disconnected => f.write_str("controller disconnected"),
+            CallError::Invalid(m) => write!(f, "invalid response: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for CallError {}
 
 struct Outgoing {
     queue: VecDeque<Vec<u8>>,
@@ -72,7 +80,7 @@ impl Controller {
 
     /// Queues one message. Returns `false` when the connection is closed or the
     /// message could not be encoded (logged to stderr).
-    pub fn send<P: Serialize + ?Sized>(&self, t: &str, id: u64, p: &P) -> bool {
+    pub fn send<P: ToValue + ?Sized>(&self, t: &str, id: u64, p: &P) -> bool {
         let frame = match encode_frame(t, id, p) {
             Ok(frame) => frame,
             Err(err) => {
@@ -134,7 +142,7 @@ impl Controller {
 
     /// Sends a request to the controller and waits for its `<t>_result`.
     /// Resolves to the result payload (with `ok: true`).
-    pub async fn request<P: Serialize + ?Sized>(&self, t: &str, p: &P) -> Result<Value, CallError> {
+    pub async fn request<P: ToValue + ?Sized>(&self, t: &str, p: &P) -> Result<Value, CallError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -288,18 +296,16 @@ fn result_name(t: &str) -> String {
 }
 
 /// Encodes one framed envelope (length prefix and CBOR in one buffer).
-pub fn encode_frame<P: Serialize + ?Sized>(t: &str, id: u64, p: &P) -> Result<Vec<u8>, WireError> {
-    #[derive(Serialize)]
-    struct Env<'a, P: ?Sized> {
-        v: u32,
-        t: &'a str,
-        id: u64,
-        p: &'a P,
-    }
+pub fn encode_frame<P: ToValue + ?Sized>(t: &str, id: u64, p: &P) -> Result<Vec<u8>, WireError> {
+    let env = Value::Map(vec![
+        (Value::Text("v".into()), Value::Integer(PROTOCOL_VERSION.into())),
+        (Value::Text("t".into()), Value::Text(t.into())),
+        (Value::Text("id".into()), Value::Integer(id.into())),
+        (Value::Text("p".into()), p.to_value()),
+    ]);
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(&[0u8; 4]);
-    ciborium::into_writer(&Env { v: PROTOCOL_VERSION, t, id, p }, &mut out)
-        .map_err(|e| WireError::Encode(e.to_string()))?;
+    gondolin_wire::cbor::encode_into(&env, &mut out);
     let len = out.len() - 4;
     if len > gondolin_wire::MAX_FRAME {
         return Err(WireError::FrameTooLarge(len));
@@ -316,9 +322,9 @@ pub fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 /// Handler for controller messages of registered types (subsystems). It runs
 /// on the controller reader task, so it must not block: spawn for anything
 /// that waits. Requests (`id != 0`) must be answered with `<t>_result`.
-#[async_trait]
 pub trait ControllerHandler: Send + Sync + 'static {
-    async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>);
+    fn handle<'a>(&'a self, msg: RawEnvelope, ctl: &'a Arc<Controller>)
+    -> crate::BoxFuture<'a, ()>;
 }
 
 /// Routes incoming controller messages. Clones share the handler table, so
@@ -410,17 +416,27 @@ mod tests {
 
     struct Panics;
 
-    #[async_trait]
     impl ControllerHandler for Panics {
-        async fn handle(&self, _msg: RawEnvelope, _ctl: &Arc<Controller>) {
-            panic!("handler bug");
+        fn handle<'a>(
+            &'a self,
+            _msg: RawEnvelope,
+            _ctl: &'a Arc<Controller>,
+        ) -> crate::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                panic!("handler bug");
+            })
         }
     }
 
-    #[async_trait]
     impl ControllerHandler for Echo {
-        async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>) {
-            ctl.reply_ok(&msg.t, msg.id, vec![(Value::Text("echo".into()), msg.p)]);
+        fn handle<'a>(
+            &'a self,
+            msg: RawEnvelope,
+            ctl: &'a Arc<Controller>,
+        ) -> crate::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                ctl.reply_ok(&msg.t, msg.id, vec![(Value::Text("echo".into()), msg.p)]);
+            })
         }
     }
 

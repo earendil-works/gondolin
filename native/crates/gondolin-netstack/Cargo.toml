@@ -7,12 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 bytes.workspace = true
-serde.workspace = true
-thiserror.workspace = true
+gondolin-log.workspace = true
+gondolin-wire.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 smoltcp = { version = "0.14", default-features = false, features = [
     "std",
     "alloc",
@@ -23,6 +21,7 @@ smoltcp = { version = "0.14", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
 # The test "guest" is a second smoltcp stack speaking Ethernet over the netdev pipe.
 smoltcp = { version = "0.14", default-features = false, features = [
     "std",
@@ -33,4 +32,3 @@ smoltcp = { version = "0.14", default-features = false, features = [
     "socket-tcp",
     "async",
 ] }
-ciborium.workspace = true

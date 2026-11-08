@@ -1,15 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::future::Future;
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 use bytes::Bytes;
 use gondolin_egress::{Egress, HookBackend, NoHooks, Resolver};
 use gondolin_netstack::{FlowAbort, FlowControl, FlowHandler, FlowMeta, TcpFlow};
@@ -21,6 +11,14 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::future::Future;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
 
@@ -120,23 +118,27 @@ impl TestResolver {
     }
 }
 
-#[async_trait]
 impl Resolver for TestResolver {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail.lock().unwrap().iter().any(|h| h == host) {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
-        }
-        let mut answers = self.answers.lock().unwrap();
-        if let Some(list) = answers.get_mut(host) {
-            if list.len() > 1 {
-                return Ok(list.remove(0));
+    fn lookup<'a>(
+        &'a self,
+        host: &'a str,
+    ) -> gondolin_egress::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.lock().unwrap().iter().any(|h| h == host) {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
             }
-            if let Some(last) = list.first() {
-                return Ok(last.clone());
+            let mut answers = self.answers.lock().unwrap();
+            if let Some(list) = answers.get_mut(host) {
+                if list.len() > 1 {
+                    return Ok(list.remove(0));
+                }
+                if let Some(last) = list.first() {
+                    return Ok(last.clone());
+                }
             }
-        }
-        Ok(vec!["127.0.0.1".parse().unwrap()])
+            Ok(vec!["127.0.0.1".parse().unwrap()])
+        })
     }
 }
 
@@ -156,14 +158,25 @@ where
 
 /// Starts an upstream HTTP(S) server on 127.0.0.1.
 pub async fn upstream(handler: Handler, tls: Option<rustls::ServerConfig>) -> SocketAddr {
+    upstream_counted(handler, tls).await.0
+}
+
+/// [`upstream`] that also counts accepted connections.
+pub async fn upstream_counted(
+    handler: Handler,
+    tls: Option<rustls::ServerConfig>,
+) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let acceptor = tls.map(|c| tokio_rustls::TlsAcceptor::from(Arc::new(c)));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = accepted.clone();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            counter.fetch_add(1, Ordering::SeqCst);
             let handler = handler.clone();
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
@@ -190,7 +203,7 @@ pub async fn upstream(handler: Handler, tls: Option<rustls::ServerConfig>) -> So
             });
         }
     });
-    addr
+    (addr, accepted)
 }
 
 #[derive(Default)]

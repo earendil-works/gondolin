@@ -24,8 +24,6 @@
 //! full the daemon stops reading controller messages, so the controller must
 //! honour its pipe's backpressure (write callbacks/`drain`).
 
-use serde::{Deserialize, Serialize};
-
 pub const FILE_READ: &str = "file_read";
 pub const FILE_READ_DATA: &str = "file_read_data";
 pub const FILE_WRITE: &str = "file_write";
@@ -34,54 +32,56 @@ pub const FILE_WRITE_DATA: &str = "file_write_data";
 pub const FILE_DELETE: &str = "file_delete";
 pub const FILE_CANCEL: &str = "file_cancel";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileRead {
-    pub path: String,
-    /// working directory for relative paths (guest path)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// preferred chunk size in `bytes` (guest clamps to [1 KiB, 1 MiB])
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunk_size: Option<u32>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileRead {
+        pub path: String,
+        /// working directory for relative paths (guest path)
+        pub cwd: Option<String>,
+        /// preferred chunk size in `bytes` (guest clamps to [1 KiB, 1 MiB])
+        pub chunk_size: Option<u32>,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileData {
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileData {
+        pub data: Vec<u8>,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileWrite {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileWrite {
+        pub path: String,
+        pub cwd: Option<String>,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileWriteData {
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub eof: bool,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileWriteData {
+        pub data: Vec<u8>,
+        pub eof: bool = Default::default() => skip_if std::ops::Not::not,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileDelete {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recursive: Option<bool>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileDelete {
+        pub path: String,
+        pub cwd: Option<String>,
+        pub force: Option<bool>,
+        pub recursive: Option<bool>,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileCancel {
-    /// error message the operation fails with (default `operation aborted`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FileCancel {
+        /// error message the operation fails with (default `operation aborted`)
+        pub message: Option<String>,
+    }
 }
 
 #[cfg(test)]

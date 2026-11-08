@@ -24,6 +24,7 @@ pub mod router;
 pub mod rpc;
 #[cfg(test)]
 mod rpc_tests;
+mod sys;
 pub mod types;
 pub mod virtiofs;
 #[cfg(test)]
@@ -33,12 +34,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use gondolin_proto::vfs::{
     FsCall, FsCallResult, HookContext, MountConfig, MountLayer, MountSource, ObjectDirEntry,
     VfsCall, VfsCallResult, VfsConfig,
 };
-use serde_bytes::ByteBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use error::{VfsError, VfsResult, errno};
@@ -48,28 +47,35 @@ use router::{Mount, MountRouter};
 use rpc::{MountsInfo, ReaddirCache, RpcSession};
 use types::{OpenFlags, vpath};
 
+/// Boxed `Send` future of the provider and backend traits (dyn-compatible
+/// async methods without `async_trait`).
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// The controller side of the object tier and of `before` hooks.
 ///
 /// gondolind implements it by sending `vfs_call` / `vfs_hook` requests over
 /// the controller pipe. `call` returns only successful results (`ok: true`);
 /// failures are errors carrying the errno.
-#[async_trait]
 pub trait ObjectBackend: Send + Sync + 'static {
-    async fn call(&self, call: VfsCall) -> VfsResult<VfsCallResult>;
+    fn call<'a>(&'a self, call: VfsCall) -> BoxFuture<'a, VfsResult<VfsCallResult>>;
 
     /// Blocking `before` hook; an error denies the operation.
-    async fn before_hook(&self, _ctx: &HookContext) -> VfsResult<()> {
-        Ok(())
+    fn before_hook<'a>(&'a self, _ctx: &'a HookContext) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { Ok(()) })
     }
 }
 
 /// Backend for configurations without object mounts or hooks.
 pub struct NoBackend;
 
-#[async_trait]
 impl ObjectBackend for NoBackend {
-    async fn call(&self, call: VfsCall) -> VfsResult<VfsCallResult> {
-        Err(VfsError::new(errno::ENOSYS, format!("no object backend for mount {}", call.mount_id)))
+    fn call<'a>(&'a self, call: VfsCall) -> BoxFuture<'a, VfsResult<VfsCallResult>> {
+        Box::pin(async move {
+            Err(VfsError::new(
+                errno::ENOSYS,
+                format!("no object backend for mount {}", call.mount_id),
+            ))
+        })
     }
 }
 
@@ -239,14 +245,15 @@ impl VfsService {
         let mut reader = gondolin_wire::FrameReader::new(r);
         let mut writer = gondolin_wire::FrameWriter::new(w);
         while let Some(frame) = reader.read_frame().await? {
-            let Ok(value) = gondolin_wire::decode::<gondolin_wire::Value>(&frame) else {
-                tracing::debug!("vfs: undecodable frame ({} bytes)", frame.len());
+            // §3.3 guest rules: i64 integers, no floats
+            let Ok(value) = gondolin_wire::decode_guest::<gondolin_wire::Value>(&frame) else {
+                gondolin_log::debug!("vfs: undecodable frame ({} bytes)", frame.len());
                 continue;
             };
             // the session lock is held per request only
             let response = self.rpc.handle_message(&value).await;
             if let Some(response) = response {
-                writer.write_message(&response).await?;
+                writer.write_frame(&gondolin_wire::cbor::encode(&response)).await?;
                 writer.flush().await?;
             }
         }
@@ -255,7 +262,7 @@ impl VfsService {
 
     /// Handles one sandboxfs request (for embedders that own the framing,
     /// like gondolind's `virtio-fs` port). Requests run one at a time.
-    pub async fn request(&self, op: &str, req: &gondolin_wire::Value) -> rpc::RpcReply {
+    pub async fn request(&self, op: &str, req: &gondolin_wire::value::Value) -> rpc::RpcReply {
         self.rpc.reply(op, req).await
     }
 
@@ -419,7 +426,7 @@ impl VfsService {
                 let handle = self.fs_handle(fh)?;
                 let len = (length as usize).min(gondolin_wire::MAX_FRAME - 64 * 1024);
                 let data = handle.read(offset, len).await?;
-                FsCallResult { data: Some(ByteBuf::from(data)), ..fs_ok() }
+                FsCallResult { data: Some(data), ..fs_ok() }
             }
             FsCall::Write { fh, offset, data } => {
                 let handle = self.fs_handle(fh)?;

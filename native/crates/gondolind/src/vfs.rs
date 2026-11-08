@@ -12,11 +12,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use gondolin_proto::vfs::{
     FsCall, HookContext, VfsCall, VfsCallResult, VfsConfig, VfsInvalidate, types,
 };
-use gondolin_vfs::{EventSink, ObjectBackend, VfsError, VfsResult, VfsService, errno};
+use gondolin_vfs::{BoxFuture, EventSink, ObjectBackend, VfsError, VfsResult, VfsService, errno};
 use gondolin_wire::{RawEnvelope, Value};
 
 use crate::controller::{CallError, Controller, ControllerHandler};
@@ -37,17 +36,20 @@ fn call_error(e: CallError) -> VfsError {
     }
 }
 
-#[async_trait]
 impl ObjectBackend for ControllerObjects {
-    async fn call(&self, call: VfsCall) -> VfsResult<VfsCallResult> {
-        let result = self.ctl.request(types::VFS_CALL, &call).await.map_err(call_error)?;
-        let result: VfsCallResult = gondolin_wire::from_value(result)
-            .map_err(|e| VfsError::new(errno::EIO, format!("invalid vfs_call_result: {e}")))?;
-        gondolin_vfs::call_result(result)
+    fn call<'a>(&'a self, call: VfsCall) -> BoxFuture<'a, VfsResult<VfsCallResult>> {
+        Box::pin(async move {
+            let result = self.ctl.request(types::VFS_CALL, &call).await.map_err(call_error)?;
+            let result: VfsCallResult = gondolin_wire::from_value(result)
+                .map_err(|e| VfsError::new(errno::EIO, format!("invalid vfs_call_result: {e}")))?;
+            gondolin_vfs::call_result(result)
+        })
     }
 
-    async fn before_hook(&self, ctx: &HookContext) -> VfsResult<()> {
-        self.ctl.request(types::VFS_HOOK, ctx).await.map(|_| ()).map_err(call_error)
+    fn before_hook<'a>(&'a self, ctx: &'a HookContext) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.ctl.request(types::VFS_HOOK, ctx).await.map(|_| ()).map_err(call_error)
+        })
     }
 }
 
@@ -72,7 +74,7 @@ impl VirtioFsService for VirtioFsDevice {
         let mut backend =
             gondolin_virtiofs::vhost_user::Backend::new(self.server.clone(), 1 + self.queues);
         if let Err(e) = backend.serve(conn) {
-            tracing::debug!("virtio-fs: connection ended: {e}");
+            gondolin_log::debug!("virtio-fs: connection ended: {e}");
         }
     }
 
@@ -85,15 +87,18 @@ impl VirtioFsService for VirtioFsDevice {
     }
 }
 
-#[async_trait]
 impl VfsBackend for NativeVfs {
-    async fn handle(&self, op: &str, req: Value) -> FsReply {
-        let reply = self.service.request(op, &req).await;
-        FsReply { err: reply.err as i64, res: reply.res, message: reply.message }
+    fn handle<'a>(&'a self, op: &'a str, req: Value) -> crate::BoxFuture<'a, FsReply> {
+        Box::pin(async move {
+            let reply = self.service.request(op, &req).await;
+            FsReply { err: reply.err as i64, res: reply.res, message: reply.message }
+        })
     }
 
-    async fn close(&self) {
-        self.service.close().await;
+    fn close<'a>(&'a self) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.service.close().await;
+        })
     }
 
     fn virtio_fs(&self) -> Option<Arc<dyn VirtioFsService>> {
@@ -125,22 +130,27 @@ struct FsCallHandler {
     service: Arc<VfsService>,
 }
 
-#[async_trait]
 impl ControllerHandler for FsCallHandler {
-    async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>) {
-        let call: FsCall = match msg.payload() {
-            Ok(call) => call,
-            Err(e) => {
-                ctl.reply_err(&msg.t, msg.id, "invalid_request", &e.to_string());
-                return;
-            }
-        };
-        let service = self.service.clone();
-        let ctl = ctl.clone();
-        tokio::spawn(async move {
-            let result = service.controller_call(call).await;
-            ctl.send(types::FS_CALL_RESULT, msg.id, &result);
-        });
+    fn handle<'a>(
+        &'a self,
+        msg: RawEnvelope,
+        ctl: &'a Arc<Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let call: FsCall = match msg.payload() {
+                Ok(call) => call,
+                Err(e) => {
+                    ctl.reply_err(&msg.t, msg.id, "invalid_request", &e.to_string());
+                    return;
+                }
+            };
+            let service = self.service.clone();
+            let ctl = ctl.clone();
+            tokio::spawn(async move {
+                let result = service.controller_call(call).await;
+                ctl.send(types::FS_CALL_RESULT, msg.id, &result);
+            });
+        })
     }
 }
 
@@ -148,28 +158,33 @@ struct InvalidateHandler {
     service: Arc<VfsService>,
 }
 
-#[async_trait]
 impl ControllerHandler for InvalidateHandler {
-    async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>) {
-        let inv: VfsInvalidate = match msg.payload() {
-            Ok(inv) => inv,
-            Err(e) => {
-                ctl.reply_err(&msg.t, msg.id, "invalid_request", &e.to_string());
-                return;
-            }
-        };
-        match self.service.invalidate(inv.mount_id, inv.path.as_deref()) {
-            Ok(()) => {
-                if msg.id != 0 {
-                    ctl.reply_ok(&msg.t, msg.id, vec![]);
+    fn handle<'a>(
+        &'a self,
+        msg: RawEnvelope,
+        ctl: &'a Arc<Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let inv: VfsInvalidate = match msg.payload() {
+                Ok(inv) => inv,
+                Err(e) => {
+                    ctl.reply_err(&msg.t, msg.id, "invalid_request", &e.to_string());
+                    return;
+                }
+            };
+            match self.service.invalidate(inv.mount_id, inv.path.as_deref()) {
+                Ok(()) => {
+                    if msg.id != 0 {
+                        ctl.reply_ok(&msg.t, msg.id, vec![]);
+                    }
+                }
+                Err(e) => {
+                    if msg.id != 0 {
+                        ctl.reply_err(&msg.t, msg.id, &e.code(), &e.message);
+                    }
                 }
             }
-            Err(e) => {
-                if msg.id != 0 {
-                    ctl.reply_err(&msg.t, msg.id, &e.code(), &e.message);
-                }
-            }
-        }
+        })
     }
 }
 

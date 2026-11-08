@@ -1,35 +1,35 @@
 //! The MITM certificate authority, generated and cached by the daemon when
 //! the controller does not provide one (remote sessions).
 //!
-//! Compatible with `host/src/mitm.ts` both ways: `ca.key` (PKCS#1 RSA PEM) and
-//! `ca.crt` in `<cache>/gondolin/ssl` (or a given directory); RSA 2048, CN
-//! `gondolin-mitm-ca`, positive 16-byte serial, 10 years validity backdated by
-//! 5 minutes, critical basic constraints and key usage (keyCertSign, cRLSign),
-//! SHA-1 subject/authority key identifiers (RFC 5280 method 1), so the node
-//! engine accepts a CA the daemon created and vice versa.
+//! Compatible with `host/src/mitm.ts` both ways: `ca.key` and `ca.crt` in
+//! `<cache>/gondolin/ssl` (or a given directory); CN `gondolin-mitm-ca`,
+//! positive 16-byte serial, 10 years validity backdated by 5 minutes, critical
+//! basic constraints and key usage (keyCertSign, cRLSign), SHA-1
+//! subject/authority key identifiers (RFC 5280 method 1).
+//!
+//! Keys: the daemon creates ECDSA P-256 CAs (PKCS#8 `PRIVATE KEY`; ring can
+//! sign with RSA but not generate RSA keys) and loads existing ones of either
+//! kind: RSA 2048 CAs created by the node engine (PKCS#1 `RSA PRIVATE KEY`) or
+//! older daemons, and ECDSA ones. The node engine signs leaves with both
+//! (`createCertificate` supports RSA and ECDSA issuers) and keeps creating RSA
+//! CAs itself.
 
-use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyIdMethod, KeyPair,
-    KeyUsagePurpose, PKCS_RSA_SHA256, PublicKeyData, SerialNumber,
-};
+use gondolin_egress::x509::{self, SigningKey};
 use ring::rand::SecureRandom;
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
-use rsa::pkcs8::EncodePrivateKey;
 
-const RSA_KEY_BITS: usize = 2048;
-const CA_VALIDITY: Duration = Duration::from_secs(3650 * 24 * 60 * 60);
-const NOT_BEFORE_SKEW: Duration = Duration::from_secs(5 * 60);
+/// CA validity in `s` (10 years)
+const CA_VALIDITY_SECS: i64 = 3650 * 24 * 60 * 60;
+/// notBefore backdating in `s`
+const NOT_BEFORE_SKEW_SECS: i64 = 5 * 60;
 
 /// The CA as PEM.
 #[derive(Debug, Clone)]
 pub struct MitmCaPem {
     /// `ca.crt`
     pub cert_pem: String,
-    /// `ca.key` (PKCS#1 RSA)
+    /// `ca.key` (PKCS#8 ECDSA for CAs created here; PKCS#1 RSA from the node engine)
     pub key_pem: String,
 }
 
@@ -39,7 +39,7 @@ pub fn default_dir() -> PathBuf {
 }
 
 /// `loadOrCreateMitmCa`: loads a valid persisted CA or creates (and persists)
-/// a new one. Blocking (RSA key generation); run it off the async runtime.
+/// a new one. Blocking (file I/O, key generation); run it off the async runtime.
 pub fn load_or_create(dir: &Path) -> Result<MitmCaPem, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let key_path = dir.join("ca.key");
@@ -77,128 +77,70 @@ fn write_atomic(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     })
 }
 
-/// `ring`'s system RNG for the `rsa` crate.
-struct SystemRng(ring::rand::SystemRandom);
-
-impl rand_core::TryRng for SystemRng {
-    type Error = Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
-        let mut b = [0u8; 4];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
-        let mut b = [0u8; 8];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u64::from_le_bytes(b))
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
-        self.0.fill(dst).expect("system random number generator failed");
-        Ok(())
-    }
+/// Loads a CA key (PKCS#1 RSA, or PKCS#8 RSA/ECDSA) and its key identifier.
+fn load_key(key_pem: &str) -> Result<(SigningKey, Vec<u8>), String> {
+    let key = SigningKey::from_pem(key_pem).map_err(|e| format!("invalid ca key: {e}"))?;
+    let ski = x509::key_identifier(&key.spki()).map_err(|e| e.to_string())?;
+    Ok((key, ski))
 }
 
-impl rand_core::TryCryptoRng for SystemRng {}
-
-/// SHA-1 over the subjectPublicKey bits of a SubjectPublicKeyInfo
-/// (`computeKeyIdentifier`).
-fn key_identifier(spki_der: &[u8]) -> Result<Vec<u8>, String> {
-    let bits = spki_public_key_bits(spki_der).ok_or("invalid subject public key info")?;
-    Ok(ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, bits).as_ref().to_vec())
-}
-
-/// Minimal DER walk: SEQUENCE { algorithm SEQUENCE, subjectPublicKey BIT STRING }.
-fn spki_public_key_bits(der: &[u8]) -> Option<&[u8]> {
-    fn header(d: &[u8]) -> Option<(u8, usize, usize)> {
-        let tag = *d.first()?;
-        let first = *d.get(1)? as usize;
-        if first < 0x80 {
-            return Some((tag, 2, first));
-        }
-        let n = first & 0x7f;
-        if n == 0 || n > 4 {
-            return None;
-        }
-        let mut len = 0usize;
-        for i in 0..n {
-            len = (len << 8) | *d.get(2 + i)? as usize;
-        }
-        Some((tag, 2 + n, len))
-    }
-    let (tag, hl, len) = header(der)?;
-    if tag != 0x30 {
-        return None;
-    }
-    let body = der.get(hl..hl + len)?;
-    let (_, ahl, alen) = header(body)?;
-    let rest = body.get(ahl + alen..)?;
-    let (btag, bhl, blen) = header(rest)?;
-    if btag != 0x03 {
-        return None;
-    }
-    // skip the unused-bits octet
-    rest.get(bhl + 1..bhl + blen)
-}
-
-fn rcgen_key(key_pem: &str) -> Result<(KeyPair, Vec<u8>), String> {
-    let key =
-        rsa::RsaPrivateKey::from_pkcs1_pem(key_pem).map_err(|e| format!("invalid ca key: {e}"))?;
-    let pkcs8 = key.to_pkcs8_der().map_err(|e| format!("cannot encode ca key: {e}"))?;
-    let der = rustls_pki_types::PrivatePkcs8KeyDer::from(pkcs8.as_bytes().to_vec());
-    let kp = KeyPair::from_pkcs8_der_and_sign_algo(&der, &PKCS_RSA_SHA256)
-        .map_err(|e| format!("invalid ca key: {e}"))?;
-    let ski = key_identifier(&kp.subject_public_key_info())?;
-    Ok((kp, ski))
-}
-
-/// Generates a new CA.
+/// Generates a new CA (ECDSA P-256): CN `gondolin-mitm-ca`, critical basic
+/// constraints (CA) and key usage (keyCertSign, cRLSign), SHA-1 subject and
+/// authority key identifiers.
 pub fn generate() -> Result<MitmCaPem, String> {
-    let mut rng = SystemRng(ring::rand::SystemRandom::new());
-    let key = rsa::RsaPrivateKey::new(&mut rng, RSA_KEY_BITS)
-        .map_err(|e| format!("rsa key generation failed: {e}"))?;
-    let key_pem = key
-        .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
-        .map_err(|e| format!("cannot encode ca key: {e}"))?
-        .to_string();
-    let (kp, ski) = rcgen_key(&key_pem)?;
+    let (key, pkcs8) = SigningKey::generate_p256().map_err(|e| e.to_string())?;
+    let spki = key.spki();
+    let ski = x509::key_identifier(&spki).map_err(|e| e.to_string())?;
 
     let mut serial = [0u8; 16];
-    rng.0.fill(&mut serial).map_err(|_| "random number generator failed")?;
+    ring::rand::SystemRandom::new()
+        .fill(&mut serial)
+        .map_err(|_| "random number generator failed")?;
     // positive and minimally encoded
     serial[0] &= 0x7f;
     if serial[0] == 0 {
         serial[0] = 1;
     }
-
-    let mut params = CertificateParams::default();
-    let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "gondolin-mitm-ca");
-    params.distinguished_name = dn;
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.serial_number = Some(SerialNumber::from_slice(&serial));
-    let not_before = time::OffsetDateTime::now_utc() - NOT_BEFORE_SKEW;
-    params.not_before = not_before;
-    params.not_after = not_before + CA_VALIDITY;
-    params.key_identifier_method = KeyIdMethod::PreSpecified(ski);
-    params.use_authority_key_identifier_extension = true;
-    let cert = params.self_signed(&kp).map_err(|e| format!("cannot create ca certificate: {e}"))?;
-    Ok(MitmCaPem { cert_pem: cert.pem(), key_pem })
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let not_before = now - NOT_BEFORE_SKEW_SECS;
+    let name = x509::common_name("gondolin-mitm-ca");
+    let der = x509::issue(
+        &x509::CertificateParams {
+            serial: &serial,
+            not_before,
+            not_after: not_before + CA_VALIDITY_SECS,
+            issuer: &name,
+            subject: &name,
+            spki: &spki,
+            extensions: &[
+                x509::basic_constraints(true, true),
+                x509::key_usage(&[5, 6], true),
+                x509::subject_key_identifier(&ski),
+                x509::authority_key_identifier(&ski),
+            ],
+        },
+        &key,
+    )
+    .map_err(|e| format!("cannot create ca certificate: {e}"))?;
+    Ok(MitmCaPem {
+        cert_pem: x509::pem("CERTIFICATE", &der),
+        key_pem: x509::pem("PRIVATE KEY", &pkcs8),
+    })
 }
 
 /// Checks a persisted CA: the key parses and matches the certificate, which
 /// has a positive serial and the key identifiers derived from its key.
 pub fn validate(key_pem: &str, cert_pem: &str) -> Result<(), String> {
-    let (kp, ski) = rcgen_key(key_pem)?;
+    let (_, ski) = load_key(key_pem)?;
     let der = pem_der(cert_pem).ok_or("invalid ca certificate pem")?;
-    let spki = kp.subject_public_key_info();
-    let find = |needle: &[u8]| der.windows(needle.len()).any(|w| w == needle);
-    if !find(&spki) {
+    let info = x509::parse_certificate(&der).map_err(|e| e.to_string())?;
+    if x509::key_identifier(&info.spki).ok().as_ref() != Some(&ski) {
         return Err("persisted mitm ca key does not match cert".into());
     }
+    let find = |needle: &[u8]| der.windows(needle.len()).any(|w| w == needle);
     // SKI (OCTET STRING of the id) and AKI keyIdentifier ([0] of the id)
     let mut ski_der = vec![0x04, ski.len() as u8];
     ski_der.extend_from_slice(&ski);
@@ -286,47 +228,50 @@ pub struct MitmCaHandler;
 /// Request type of [`MitmCaHandler`].
 pub const MITM_CA: &str = "mitm_ca";
 
-#[async_trait::async_trait]
 impl crate::controller::ControllerHandler for MitmCaHandler {
-    async fn handle(
-        &self,
+    fn handle<'a>(
+        &'a self,
         msg: gondolin_wire::RawEnvelope,
-        ctl: &std::sync::Arc<crate::controller::Controller>,
-    ) {
-        let dir = crate::fields::Fields::of(&msg.p)
-            .text("dir")
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(default_dir);
-        let ctl = ctl.clone();
-        tokio::spawn(async move {
-            let shown = dir.display().to_string();
-            let res = tokio::task::spawn_blocking(move || load_or_create(&dir))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            match res {
-                Ok(ca) => ctl.reply_ok(
-                    MITM_CA,
-                    msg.id,
-                    vec![
-                        (
-                            gondolin_wire::Value::Text("cert_pem".into()),
-                            gondolin_wire::Value::Text(ca.cert_pem),
-                        ),
-                        (
-                            gondolin_wire::Value::Text("dir".into()),
-                            gondolin_wire::Value::Text(shown),
-                        ),
-                    ],
-                ),
-                Err(err) => ctl.reply_err(MITM_CA, msg.id, "mitm_ca_failed", &err),
-            }
-        });
+        ctl: &'a std::sync::Arc<crate::controller::Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let dir = crate::fields::Fields::of(&msg.p)
+                .text("dir")
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(default_dir);
+            let ctl = ctl.clone();
+            tokio::spawn(async move {
+                let shown = dir.display().to_string();
+                let res = tokio::task::spawn_blocking(move || load_or_create(&dir))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                match res {
+                    Ok(ca) => ctl.reply_ok(
+                        MITM_CA,
+                        msg.id,
+                        vec![
+                            (
+                                gondolin_wire::Value::Text("cert_pem".into()),
+                                gondolin_wire::Value::Text(ca.cert_pem),
+                            ),
+                            (
+                                gondolin_wire::Value::Text("dir".into()),
+                                gondolin_wire::Value::Text(shown),
+                            ),
+                        ],
+                    ),
+                    Err(err) => ctl.reply_err(MITM_CA, msg.id, "mitm_ca_failed", &err),
+                }
+            });
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -334,7 +279,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gondolind-ca-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = load_or_create(&dir).unwrap();
-        assert!(a.key_pem.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(a.key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
         validate(&a.key_pem, &a.cert_pem).unwrap();
         let b = load_or_create(&dir).unwrap();
         assert_eq!(a.cert_pem, b.cert_pem);
@@ -342,6 +287,86 @@ mod tests {
         std::fs::write(dir.join("ca.crt"), "garbage").unwrap();
         let c = load_or_create(&dir).unwrap();
         assert_ne!(c.cert_pem, a.cert_pem);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn node_rsa_ca_is_loaded_and_signs_leaves() {
+        // created by host/src/mitm.ts (RSA 2048, PKCS#1 key)
+        let cert = include_str!("../../gondolin-egress/tests/fixtures/node-ca.crt");
+        let key = include_str!("../../gondolin-egress/tests/fixtures/node-ca.key");
+        assert!(key.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        validate(key, cert).unwrap();
+        let dir = std::env::temp_dir().join(format!("gondolind-ca-rsa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca.crt"), cert).unwrap();
+        std::fs::write(dir.join("ca.key"), key).unwrap();
+        // kept, not regenerated
+        assert_eq!(load_or_create(&dir).unwrap().cert_pem, cert);
+        let authority =
+            gondolin_egress::MitmAuthority::from_pem(cert, key, 4, Duration::from_secs(60))
+                .unwrap();
+        authority.generate_leaf("example.com").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ecdsa_ca_signs_leaves() {
+        let ca = generate().unwrap();
+        let authority = gondolin_egress::MitmAuthority::from_pem(
+            &ca.cert_pem,
+            &ca.key_pem,
+            4,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        authority.server_config("example.com").unwrap();
+    }
+
+    #[test]
+    fn openssl_verifies_ca_and_leaves() {
+        let Ok(out) = std::process::Command::new("openssl").arg("version").output() else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("gondolind-ca-openssl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let node_cert = include_str!("../../gondolin-egress/tests/fixtures/node-ca.crt");
+        let node_key = include_str!("../../gondolin-egress/tests/fixtures/node-ca.key");
+        let ours = generate().unwrap();
+        for (i, (cert, key)) in
+            [(ours.cert_pem.as_str(), ours.key_pem.as_str()), (node_cert, node_key)]
+                .iter()
+                .enumerate()
+        {
+            let authority =
+                gondolin_egress::MitmAuthority::from_pem(cert, key, 4, Duration::from_secs(60))
+                    .unwrap();
+            for name in ["example.com", "192.0.2.1", "::1"] {
+                let (leaf, _) = authority.generate_leaf(name).unwrap();
+                let ca_path = dir.join(format!("ca{i}.pem"));
+                let leaf_path = dir.join(format!("leaf{i}.pem"));
+                std::fs::write(&ca_path, cert).unwrap();
+                std::fs::write(&leaf_path, gondolin_egress::x509::pem("CERTIFICATE", &leaf))
+                    .unwrap();
+                let out = std::process::Command::new("openssl")
+                    .args(["verify", "-x509_strict", "-purpose", "sslserver", "-CAfile"])
+                    .arg(&ca_path)
+                    .arg(&leaf_path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{name}: {}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

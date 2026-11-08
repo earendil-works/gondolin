@@ -1,25 +1,26 @@
-//! End-to-end: a russh "guest" client talks to the proxy over an in-memory
-//! flow; the proxy talks to an in-process russh upstream server.
+//! End-to-end: an SSH "guest" client (our own client) talks to the proxy over
+//! an in-memory flow; the proxy talks to an in-process upstream server (our
+//! own server). OpenSSH interop: `openssh_client_against_proxy` here and
+//! `tests/openssh.rs`.
 
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use gondolin_netstack::{FlowAbort, FlowControl, FlowMeta, TcpFlow};
+use gondolin_sshproxy::ssh::agent;
+use gondolin_sshproxy::ssh::connection::{AuthMethod, ChannelMsg, ChannelRequest};
+use gondolin_sshproxy::ssh::session::{Channel, Client, Server, SessionConfig};
+use gondolin_sshproxy::ssh::transport::TransportConfig;
+use gondolin_sshproxy::ssh::wire::{Reader, Writer};
+use gondolin_sshproxy::ssh::{PrivateKey, PublicKey};
 use gondolin_sshproxy::{
     NoSshHooks, SshCredential, SshEgressConfig, SshHookCall, SshHookResult, SshHooks, SshProxy,
 };
-use russh::keys::ssh_key::LineEnding;
-use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::keys::{PrivateKey, PublicKey, PublicKeyOrCertificate};
-use russh::server::{self, Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, Sig, client};
 
 fn key(seed: u8) -> PrivateKey {
-    PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
+    PrivateKey::from_ed25519_seed(&[seed; 32])
 }
 
 // ---------------------------------------------------------------------------
@@ -42,178 +43,147 @@ struct Upstream {
     flooded: Arc<AtomicUsize>,
 }
 
-struct UpstreamConn {
-    up: Upstream,
-    cat: HashMap<ChannelId, ()>,
-    /// channels whose stdin is consumed slowly (`slow-flood`)
-    slow: HashMap<ChannelId, ()>,
-}
-
-impl Drop for UpstreamConn {
-    fn drop(&mut self) {
-        self.up.open.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-impl server::Handler for UpstreamConn {
-    type Error = russh::Error;
-
-    async fn auth_publickey(
-        &mut self,
-        user: &str,
-        key: server::VerifiedPublicKey<'_>,
-    ) -> Result<Auth, Self::Error> {
-        self.up.log.lock().unwrap().users.push(user.to_string());
-        if key.public_key == &self.up.authorized { Ok(Auth::Accept) } else { Ok(Auth::reject()) }
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        _channel: Channel<Msg>,
-        reply: server::ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply.accept().await;
-        Ok(())
-    }
-
-    async fn exec_request(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        let command = String::from_utf8_lossy(data).into_owned();
-        self.up.log.lock().unwrap().commands.push(command.clone());
-        if command == "fail-exec" {
-            return session.channel_failure(channel);
-        }
-        session.channel_success(channel)?;
-        let handle = session.handle();
-        let (verb, arg) = command.split_once(' ').unwrap_or((command.as_str(), ""));
-        match verb {
-            "echo" => {
-                let out = format!("{arg}\n");
-                tokio::spawn(async move {
-                    let _ = handle.data(channel, out.into_bytes()).await;
-                    let _ = handle.exit_status_request(channel, 0).await;
-                    let _ = handle.eof(channel).await;
-                    let _ = handle.close(channel).await;
-                });
-            }
-            "stderr" => {
-                let out = format!("{arg}\n");
-                tokio::spawn(async move {
-                    let _ = handle.extended_data(channel, 1, out.into_bytes()).await;
-                    let _ = handle.exit_status_request(channel, 3).await;
-                    let _ = handle.eof(channel).await;
-                    let _ = handle.close(channel).await;
-                });
-            }
-            "signal" => {
-                tokio::spawn(async move {
-                    let _ = handle
-                        .exit_signal_request(channel, Sig::TERM, false, "killed".into(), "".into())
-                        .await;
-                    let _ = handle.eof(channel).await;
-                    let _ = handle.close(channel).await;
-                });
-            }
-            "cat" => {
-                self.cat.insert(channel, ());
-            }
-            "flood" | "slow-flood" => {
-                // `flood N`: N bytes of output (stdin is read and dropped);
-                // `slow-flood N` also takes stdin slowly (see `data`).
-                if verb == "slow-flood" {
-                    self.slow.insert(channel, ());
+async fn upstream_channel(up: Upstream, server: Server, ch: Channel) {
+    let ch = Arc::new(ch);
+    let command = loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Request { request: ChannelRequest::Exec { command }, want_reply }) => {
+                let command = String::from_utf8_lossy(&command).into_owned();
+                up.log.lock().unwrap().commands.push(command.clone());
+                if command == "fail-exec" {
+                    let _ = ch.reply(false);
+                    continue;
                 }
-                let total: usize = arg.parse().unwrap();
-                let flooded = self.up.flooded.clone();
-                tokio::spawn(async move {
-                    let chunk = vec![b'f'; 32 * 1024];
-                    let mut sent = 0;
-                    while sent < total {
-                        let n = chunk.len().min(total - sent);
-                        if handle.data(channel, chunk[..n].to_vec()).await.is_err() {
-                            return;
-                        }
-                        sent += n;
-                        flooded.fetch_add(n, Ordering::SeqCst);
+                if want_reply {
+                    let _ = ch.reply(true);
+                }
+                break command;
+            }
+            Some(ChannelMsg::Request { want_reply: true, .. }) => {
+                let _ = ch.reply(true);
+            }
+            Some(_) => {}
+            None => return,
+        }
+    };
+    let (verb, arg) = command.split_once(' ').unwrap_or((command.as_str(), ""));
+    let finish = |ch: &Channel, code: u32| {
+        let _ = ch.exit_status(code);
+        let _ = ch.eof();
+        let _ = ch.close();
+    };
+    match verb {
+        "echo" => {
+            let _ = ch.data(format!("{arg}\n").as_bytes()).await;
+            finish(&ch, 0);
+        }
+        "stderr" => {
+            let _ = ch.extended_data(1, format!("{arg}\n").as_bytes()).await;
+            finish(&ch, 3);
+        }
+        "signal" => {
+            let _ = ch.request(
+                &ChannelRequest::ExitSignal {
+                    name: "TERM".into(),
+                    core_dumped: false,
+                    message: "killed".into(),
+                    lang: String::new(),
+                },
+                false,
+            );
+            let _ = ch.eof();
+            let _ = ch.close();
+        }
+        "cat" => loop {
+            match ch.wait().await {
+                Some(ChannelMsg::Data(d)) => {
+                    if ch.data(&d).await.is_err() {
+                        return;
                     }
-                    let _ = handle.exit_status_request(channel, 0).await;
-                    let _ = handle.eof(channel).await;
-                    let _ = handle.close(channel).await;
-                });
+                }
+                Some(ChannelMsg::Eof) => {
+                    finish(&ch, 0);
+                    return;
+                }
+                Some(ChannelMsg::Close) | None => return,
+                Some(_) => {}
             }
-            "drop" => {
+        },
+        "flood" | "slow-flood" => {
+            // `flood N`: N bytes of output (stdin is read and dropped);
+            // `slow-flood N` also takes stdin slowly
+            let total: usize = arg.parse().unwrap();
+            let slow = verb == "slow-flood";
+            let reader = {
+                let ch = ch.clone();
                 tokio::spawn(async move {
-                    let _ = handle
-                        .disconnect(russh::Disconnect::ByApplication, "bye".into(), "en".into())
-                        .await;
-                });
+                    while let Some(m) = ch.wait().await {
+                        if matches!(m, ChannelMsg::Data(_)) && slow {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                    }
+                })
+            };
+            let chunk = vec![b'f'; 32 * 1024];
+            let mut sent = 0;
+            while sent < total {
+                let n = chunk.len().min(total - sent);
+                if ch.data(&chunk[..n]).await.is_err() {
+                    reader.abort();
+                    return;
+                }
+                sent += n;
+                up.flooded.fetch_add(n, Ordering::SeqCst);
             }
-            _ => {} // "sleep": never answers
+            finish(&ch, 0);
+            reader.abort();
         }
-        Ok(())
-    }
-
-    async fn data(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        if self.cat.contains_key(&channel) {
-            session.data(channel, data.to_vec())?;
+        "drop" => server.disconnect("bye"),
+        _ => {
+            // "sleep": never answers
+            while ch.wait().await.is_some() {}
         }
-        if self.slow.contains_key(&channel) {
-            // A slow reader: this stops the whole upstream session loop.
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-        Ok(())
-    }
-
-    async fn channel_eof(
-        &mut self,
-        channel: ChannelId,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        if self.cat.remove(&channel).is_some() {
-            session.exit_status_request(channel, 0)?;
-            session.eof(channel)?;
-            session.close(channel)?;
-        }
-        Ok(())
     }
 }
 
 /// Starts an upstream server; returns its port and host key.
 async fn start_upstream(authorized: PublicKey) -> (u16, PrivateKey, Upstream) {
     let host_key = key(7);
-    let config = Arc::new(server::Config {
-        keys: vec![host_key.clone()],
-        auth_rejection_time: Duration::ZERO,
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        ..Default::default()
-    });
     let up =
         Upstream { authorized, log: Arc::default(), open: Arc::default(), flooded: Arc::default() };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server_up = up.clone();
+    let hk = host_key.clone();
     tokio::spawn(async move {
         loop {
             let (sock, _) = listener.accept().await.unwrap();
             server_up.log.lock().unwrap().connections += 1;
             server_up.open.fetch_add(1, Ordering::SeqCst);
-            let conn =
-                UpstreamConn { up: server_up.clone(), cat: HashMap::new(), slow: HashMap::new() };
-            let config = config.clone();
-            tokio::spawn(async move {
-                if let Ok(session) = server::run_stream(config, sock, conn).await {
-                    let _ = session.await;
+            let up = server_up.clone();
+            let policy_up = server_up.clone();
+            let transport = TransportConfig::server("SSH-2.0-test-upstream", vec![hk.clone()]);
+            let auth = Arc::new(move |req: &gondolin_sshproxy::ssh::connection::AuthRequest| {
+                match &req.method {
+                    AuthMethod::PublicKey { key, signed, .. } => {
+                        if *signed {
+                            policy_up.log.lock().unwrap().users.push(req.user.clone());
+                        }
+                        key == &policy_up.authorized
+                    }
+                    _ => false,
                 }
+            });
+            tokio::spawn(async move {
+                let server =
+                    Server::start(sock, transport, SessionConfig::default(), auth).unwrap();
+                let mut tasks = tokio::task::JoinSet::new();
+                while let Some(ch) = server.accept().await {
+                    tasks.spawn(upstream_channel(up.clone(), server.clone(), ch));
+                }
+                drop(tasks);
+                drop(server);
+                up.open.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
@@ -222,18 +192,6 @@ async fn start_upstream(authorized: PublicKey) -> (u16, PrivateKey, Upstream) {
 
 // ---------------------------------------------------------------------------
 // Guest client
-
-struct GuestClient;
-
-impl client::Handler for GuestClient {
-    type Error = russh::Error;
-    async fn check_server_key(
-        &mut self,
-        _key: &PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
-    }
-}
 
 #[derive(Default)]
 struct RecordAbort(AtomicBool);
@@ -244,7 +202,7 @@ impl FlowAbort for RecordAbort {
 }
 
 struct Guest {
-    handle: client::Handle<GuestClient>,
+    client: Client,
     aborted: Arc<RecordAbort>,
 }
 
@@ -252,9 +210,7 @@ async fn guest_connect(proxy: &SshProxy, hostname: &str, port: u16, user: &str) 
     guest_connect_with(proxy, hostname, port, user, 64 * 1024).await
 }
 
-/// Connects a guest over an in-memory pipe of `pipe` bytes. The guest is a
-/// russh client, which stops reading while it writes: the proxy must keep
-/// reading regardless (write pump), or bulk data both ways deadlocks.
+/// Connects a guest over an in-memory pipe of `pipe` bytes.
 async fn guest_connect_with(
     proxy: &SshProxy,
     hostname: &str,
@@ -275,12 +231,15 @@ async fn guest_connect_with(
     flow.control = FlowControl::new(aborted.clone());
     let proxy = proxy.clone();
     tokio::spawn(async move { proxy.handle(flow, target).await });
-    let mut handle =
-        client::connect_stream(Arc::new(client::Config::default()), guest_end, GuestClient)
-            .await
-            .unwrap();
-    assert!(handle.authenticate_none(user).await.unwrap().success());
-    Guest { handle, aborted }
+    let client = Client::connect(
+        guest_end,
+        TransportConfig::client("SSH-2.0-test-guest"),
+        SessionConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert!(client.authenticate_none(user).await.unwrap());
+    Guest { client, aborted }
 }
 
 #[derive(Debug, Default)]
@@ -288,26 +247,25 @@ struct ExecResult {
     stdout: Vec<u8>,
     stderr: String,
     exit_status: Option<u32>,
-    exit_signal: Option<Sig>,
+    exit_signal: Option<String>,
     request_ok: bool,
 }
 
-async fn collect(channel: Channel<client::Msg>) -> ExecResult {
-    let (rd, _wr) = channel.split();
-    collect_half(rd).await
-}
-
-async fn collect_half(mut rd: russh::ChannelReadHalf) -> ExecResult {
+async fn collect(channel: &Channel) -> ExecResult {
     let mut r = ExecResult::default();
-    while let Some(msg) = rd.wait().await {
+    while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Success => r.request_ok = true,
-            ChannelMsg::Data { data } => r.stdout.extend_from_slice(&data),
+            ChannelMsg::Data(data) => r.stdout.extend_from_slice(&data),
             ChannelMsg::ExtendedData { data, ext: 1 } => {
                 r.stderr.push_str(&String::from_utf8_lossy(&data))
             }
-            ChannelMsg::ExitStatus { exit_status } => r.exit_status = Some(exit_status),
-            ChannelMsg::ExitSignal { signal_name, .. } => r.exit_signal = Some(signal_name),
+            ChannelMsg::Request { request: ChannelRequest::ExitStatus { code }, .. } => {
+                r.exit_status = Some(code)
+            }
+            ChannelMsg::Request { request: ChannelRequest::ExitSignal { name, .. }, .. } => {
+                r.exit_signal = Some(name)
+            }
             ChannelMsg::Close => break,
             _ => {}
         }
@@ -316,9 +274,9 @@ async fn collect_half(mut rd: russh::ChannelReadHalf) -> ExecResult {
 }
 
 async fn run(guest: &Guest, command: &str) -> ExecResult {
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.exec(true, command).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(20), collect(channel)).await.expect("exec timed out")
+    let channel = guest.client.open_session().await.unwrap();
+    channel.exec(true, command).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), collect(&channel)).await.expect("exec timed out")
 }
 
 struct Setup {
@@ -330,7 +288,7 @@ struct Setup {
 
 fn known_hosts_for(port: u16, host_key: &PrivateKey) -> tempfile::NamedTempFile {
     let mut f = tempfile::NamedTempFile::new().unwrap();
-    writeln!(f, "[127.0.0.1]:{port} {}", host_key.public_key().to_openssh().unwrap()).unwrap();
+    writeln!(f, "[127.0.0.1]:{port} {}", host_key.public_key().to_openssh()).unwrap();
     f
 }
 
@@ -338,7 +296,7 @@ fn credential(port: u16, client_key: &PrivateKey) -> SshCredential {
     SshCredential {
         host: format!("127.0.0.1:{port}"),
         username: Some("deploy".into()),
-        private_key: client_key.to_openssh(LineEnding::LF).unwrap().to_string(),
+        private_key: client_key.to_openssh(),
         passphrase: None,
     }
 }
@@ -362,6 +320,46 @@ async fn setup() -> Setup {
     setup_with(|_| {}, Arc::new(NoSshHooks)).await
 }
 
+/// An in-process ssh-agent holding `keys`.
+fn start_agent(path: &std::path::Path, keys: Vec<PrivateKey>) {
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let keys = Arc::new(keys);
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let keys = keys.clone();
+            tokio::spawn(async move {
+                while let Ok(req) = agent::read_message(&mut sock).await {
+                    let reply = match req[0] {
+                        agent::REQUEST_IDENTITIES => {
+                            let mut w = Writer::msg(agent::IDENTITIES_ANSWER);
+                            w.u32(keys.len() as u32);
+                            for k in keys.iter() {
+                                w.string(k.public_key().to_blob()).string("test");
+                            }
+                            w.finish()
+                        }
+                        agent::SIGN_REQUEST => {
+                            let mut r = Reader::new(&req[1..]);
+                            let blob = r.string().unwrap();
+                            let data = r.string().unwrap();
+                            let k = keys.iter().find(|k| k.public_key().to_blob() == blob).unwrap();
+                            let alg = k.signature_algorithms()[0];
+                            let mut w = Writer::msg(agent::SIGN_RESPONSE);
+                            w.string(k.sign(alg, data).unwrap());
+                            w.finish()
+                        }
+                        _ => vec![agent::FAILURE],
+                    };
+                    if agent::write_message(&mut sock, &reply).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -378,7 +376,7 @@ async fn exec_is_proxied_with_credential() {
     assert_eq!(r.exit_status, Some(3));
 
     let r = run(&guest, "signal").await;
-    assert!(matches!(r.exit_signal, Some(Sig::TERM)), "{:?}", r.exit_signal);
+    assert_eq!(r.exit_signal.as_deref(), Some("TERM"));
 
     {
         let log = s.up.log.lock().unwrap();
@@ -399,20 +397,19 @@ async fn exec_is_proxied_with_credential() {
 
 /// Runs `cat` upstream with `size` bytes written and read concurrently.
 async fn cat_both_ways(guest: &Guest, size: usize, seed: u32, timeout: Duration) {
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.exec(true, "cat").await.unwrap();
+    let channel = Arc::new(guest.client.open_session().await.unwrap());
+    channel.exec(true, "cat").unwrap();
     let payload: Vec<u8> = (0..size as u32).map(|i| (i.wrapping_add(seed) % 251) as u8).collect();
-    let (rd, wr) = channel.split();
+    let wr = channel.clone();
     let sent = payload.clone();
     let writer = tokio::spawn(async move {
-        wr.data_bytes(sent).await.unwrap();
-        wr.eof().await.unwrap();
-        wr
+        wr.data(&sent).await.unwrap();
+        wr.eof().unwrap();
     });
-    let r = tokio::time::timeout(timeout, collect_half(rd))
+    let r = tokio::time::timeout(timeout, collect(&channel))
         .await
         .unwrap_or_else(|_| panic!("cat of {size} bytes both ways stalled"));
-    let _wr = writer.await.unwrap();
+    writer.await.unwrap();
     assert_eq!(r.exit_status, Some(0));
     assert_eq!(r.stdout.len(), payload.len());
     assert!(r.stdout == payload);
@@ -469,25 +466,24 @@ async fn tiny_guest_pipe_is_streamed_both_ways() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_guest_reader_backpressures_upstream() {
     const TOTAL: usize = 64 << 20;
-    // windows (upstream→proxy, proxy→guest, 2 MiB each) plus the guest's own
-    // russh buffer (~3 MiB); ~7 MiB measured. Granting window on receipt, the
-    // proxy's channel buffers added 8 MiB more (~15 MiB).
+    // windows (upstream→proxy, proxy→guest, 2 MiB each) plus socket and
+    // output buffers. Granting window on receipt instead (russh's default),
+    // the proxy's channel buffers added 8 MiB more (~15 MiB).
     const IN_FLIGHT: usize = 10 << 20;
     let s = setup().await;
     let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.exec(true, format!("flood {TOTAL}")).await.unwrap();
-    let (mut rd, wr) = channel.split();
+    let channel = Arc::new(guest.client.open_session().await.unwrap());
+    channel.exec(true, &format!("flood {TOTAL}")).unwrap();
+    let (rd, wr) = (channel.clone(), channel.clone());
     // stdin at full speed the whole time (dropped upstream)
     let writer = tokio::spawn(async move {
         let chunk = vec![b's'; 256 * 1024];
         for _ in 0..(TOTAL / chunk.len()) {
-            if wr.data_bytes(chunk.clone()).await.is_err() {
+            if wr.data(&chunk).await.is_err() {
                 break;
             }
         }
-        let _ = wr.eof().await;
-        wr
+        let _ = wr.eof();
     });
     let flooded = s.up.flooded.clone();
     let read = async {
@@ -496,7 +492,7 @@ async fn slow_guest_reader_backpressures_upstream() {
         let mut exit = None;
         while let Some(msg) = rd.wait().await {
             match msg {
-                ChannelMsg::Data { data } => {
+                ChannelMsg::Data(data) => {
                     received += data.len();
                     // a slow reader: long pauses every 8 MiB
                     if received / (8 << 20) > paused {
@@ -506,7 +502,9 @@ async fn slow_guest_reader_backpressures_upstream() {
                         assert!(ahead <= IN_FLIGHT, "upstream {ahead} bytes ahead of the guest");
                     }
                 }
-                ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                ChannelMsg::Request { request: ChannelRequest::ExitStatus { code }, .. } => {
+                    exit = Some(code)
+                }
                 ChannelMsg::Close => break,
                 _ => {}
             }
@@ -517,8 +515,8 @@ async fn slow_guest_reader_backpressures_upstream() {
         tokio::time::timeout(Duration::from_secs(120), read).await.expect("flood stalled");
     assert_eq!(received, TOTAL);
     assert_eq!(exit, Some(0));
-    // The upstream closed the channel with stdin still flowing; russh's writer
-    // waits for window that never comes, so stop it.
+    // The upstream closed the channel with stdin still flowing; the writer
+    // may wait for window that never comes, so stop it.
     writer.abort();
     // The proxy released the upstream connection.
     for _ in 0..100 {
@@ -535,21 +533,24 @@ async fn shells_and_subsystems_are_denied() {
     let s = setup().await;
     let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
 
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.request_pty(true, "xterm", 80, 24, 0, 0, &[]).await.unwrap();
-    channel.request_shell(true).await.unwrap();
-    let r = tokio::time::timeout(Duration::from_secs(10), collect(channel)).await.unwrap();
+    let channel = guest.client.open_session().await.unwrap();
+    channel
+        .request(&ChannelRequest::Pty { term: "xterm".into(), cols: 80, rows: 24 }, true)
+        .unwrap();
+    channel.request(&ChannelRequest::Shell, true).unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(10), collect(&channel)).await.unwrap();
     assert_eq!(r.stderr, "gondolin ssh proxy: interactive shells are not supported\n");
     assert_eq!(r.exit_status, Some(1));
 
-    let mut channel = guest.handle.channel_open_session().await.unwrap();
-    channel.request_subsystem(true, "sftp").await.unwrap();
+    let channel = guest.client.open_session().await.unwrap();
+    channel.request(&ChannelRequest::Subsystem { name: "sftp".into() }, true).unwrap();
     let reply = tokio::time::timeout(Duration::from_secs(10), channel.wait()).await.unwrap();
     assert!(matches!(reply, Some(ChannelMsg::Failure)), "{reply:?}");
 
     // Other channel types (port forwarding) are refused.
-    let forward =
-        guest.handle.channel_open_direct_tcpip("127.0.0.1", 22u32, "127.0.0.1", 1u32).await;
+    let mut extra = Writer::new();
+    extra.string("127.0.0.1").u32(22).string("127.0.0.1").u32(1);
+    let forward = guest.client.open_channel("direct-tcpip", &extra.finish()).await;
     assert!(forward.is_err());
     assert_eq!(s.up.log.lock().unwrap().connections, 0);
 }
@@ -568,26 +569,30 @@ struct PolicyHooks {
     seen: Mutex<Vec<SshHookCall>>,
 }
 
-#[async_trait]
 impl SshHooks for PolicyHooks {
-    async fn ssh_hook_call(&self, call: SshHookCall) -> Result<SshHookResult, String> {
-        self.seen.lock().unwrap().push(call.clone());
-        match call {
-            SshHookCall::ExecPolicy { request } if request.command.starts_with("echo") => {
-                Ok(SshHookResult { allow: true, ..Default::default() })
+    fn ssh_hook_call(
+        &self,
+        call: SshHookCall,
+    ) -> gondolin_netstack::BoxFuture<'_, Result<SshHookResult, String>> {
+        Box::pin(async move {
+            self.seen.lock().unwrap().push(call.clone());
+            match call {
+                SshHookCall::ExecPolicy { request } if request.command.starts_with("echo") => {
+                    Ok(SshHookResult { allow: true, ..Default::default() })
+                }
+                SshHookCall::ExecPolicy { request } if request.command == "boom" => {
+                    Err("policy exploded".into())
+                }
+                SshHookCall::ExecPolicy { .. } => Ok(SshHookResult {
+                    allow: false,
+                    exit_code: Some(42),
+                    message: Some("denied".into()),
+                }),
+                SshHookCall::HostVerify { .. } => {
+                    Ok(SshHookResult { allow: false, ..Default::default() })
+                }
             }
-            SshHookCall::ExecPolicy { request } if request.command == "boom" => {
-                Err("policy exploded".into())
-            }
-            SshHookCall::ExecPolicy { .. } => Ok(SshHookResult {
-                allow: false,
-                exit_code: Some(42),
-                message: Some("denied".into()),
-            }),
-            SshHookCall::HostVerify { .. } => {
-                Ok(SshHookResult { allow: false, ..Default::default() })
-            }
-        }
+        })
     }
 }
 
@@ -676,17 +681,10 @@ async fn ssh_agent_auth_uses_guest_username() {
     let (port, host_key, up) = start_upstream(client_key.public_key().clone()).await;
     let kh = known_hosts_for(port, &host_key);
 
-    // In-process agent holding the key.
+    // In-process agent holding the key (and one not authorized upstream first).
     let path = std::env::temp_dir().join(format!("gsp-agent-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    tokio::spawn(russh::keys::agent::server::serve(
-        tokio_stream::wrappers::UnixListenerStream::new(listener),
-        (),
-    ));
-    let mut agent = russh::keys::agent::client::AgentClient::connect_uds(&path).await.unwrap();
-    agent.add_identity(&key(3), &[]).await.unwrap(); // not authorized upstream
-    agent.add_identity(&client_key, &[]).await.unwrap();
+    start_agent(&path, vec![key(3), client_key.clone()]);
 
     let config = SshEgressConfig {
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -714,8 +712,8 @@ async fn connection_caps_are_enforced() {
     .await;
     let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
     // Holds a slot (upstream never answers "sleep").
-    let held = guest.handle.channel_open_session().await.unwrap();
-    held.exec(true, "sleep").await.unwrap();
+    let held = guest.client.open_session().await.unwrap();
+    held.exec(true, "sleep").unwrap();
     for _ in 0..100 {
         if s.proxy.upstream_connections() == 1 {
             break;
@@ -730,8 +728,8 @@ async fn connection_caps_are_enforced() {
     assert_eq!(r.exit_status, Some(255));
 
     let guest2 = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
-    let held2 = guest2.handle.channel_open_session().await.unwrap();
-    held2.exec(true, "sleep").await.unwrap();
+    let held2 = guest2.client.open_session().await.unwrap();
+    held2.exec(true, "sleep").unwrap();
     for _ in 0..100 {
         if s.proxy.upstream_connections() == 2 {
             break;
@@ -746,7 +744,7 @@ async fn connection_caps_are_enforced() {
     );
 
     // Closing the guest channel releases its upstream connection.
-    held.close().await.unwrap();
+    held.close().unwrap();
     for _ in 0..100 {
         if s.proxy.upstream_connections() == 1 {
             break;
@@ -792,10 +790,10 @@ async fn ready_timeout_bounds_stalled_upstreams() {
 async fn upstream_disconnect_mid_exec_aborts_flow() {
     let s = setup().await;
     let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.exec(true, "drop").await.unwrap();
+    let channel = guest.client.open_session().await.unwrap();
+    channel.exec(true, "drop").unwrap();
     // In production abort() resets the guest TCP connection; here it only records.
-    let _pending = tokio::spawn(collect(channel));
+    let _pending = tokio::spawn(async move { collect(&channel).await });
     for _ in 0..100 {
         if guest.aborted.0.load(Ordering::SeqCst) {
             break;
@@ -929,13 +927,13 @@ async fn both_directions_saturated_with_slow_consumers() {
     const TOTAL: usize = 24 << 20;
     let s = setup().await;
     let guest = guest_connect(&s.proxy, "127.0.0.1", s.port, "git").await;
-    let channel = guest.handle.channel_open_session().await.unwrap();
-    channel.exec(true, format!("slow-flood {TOTAL}")).await.unwrap();
-    let (mut rd, wr) = channel.split();
+    let channel = Arc::new(guest.client.open_session().await.unwrap());
+    channel.exec(true, &format!("slow-flood {TOTAL}")).unwrap();
+    let (rd, wr) = (channel.clone(), channel.clone());
     let writer = tokio::spawn(async move {
         let chunk = vec![b's'; 256 * 1024];
         loop {
-            if wr.data_bytes(chunk.clone()).await.is_err() {
+            if wr.data(&chunk).await.is_err() {
                 break;
             }
         }
@@ -946,14 +944,16 @@ async fn both_directions_saturated_with_slow_consumers() {
         let mut exit = None;
         while let Some(msg) = rd.wait().await {
             match msg {
-                ChannelMsg::Data { data } => {
+                ChannelMsg::Data(data) => {
                     received += data.len();
                     if received / (4 << 20) > paused {
                         paused += 1;
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
                 }
-                ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                ChannelMsg::Request { request: ChannelRequest::ExitStatus { code }, .. } => {
+                    exit = Some(code)
+                }
                 ChannelMsg::Close => break,
                 _ => {}
             }

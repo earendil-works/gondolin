@@ -6,21 +6,18 @@
 //! and routes the controller's `body_pull`/`body_release` messages to
 //! [`RemoteHooks::serve_body_pull`] / [`RemoteHooks::serve_body_release`].
 
+use crate::BoxFuture;
+use bytes::Bytes;
+use gondolin_http::Body;
+use gondolin_proto::net::{
+    BodyChunk, BodyPull, HookCall, HookDecision, HookPhase, HookRegistrations, WireBody,
+    WireIpInfo, WireRequestHead, WireResponseHead,
+};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
-
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures_util::future::BoxFuture;
-use gondolin_proto::net::{
-    BodyChunk, BodyPull, HookCall, HookDecision, HookPhase, HookRegistrations, WireBody,
-    WireIpInfo, WireRequestHead, WireResponseHead,
-};
-use http_body::{Body, Frame};
-use http_body_util::BodyExt;
 
 use crate::body::{BodyHandle, PullError};
 use crate::error::{Blocked, BoxError};
@@ -39,12 +36,14 @@ const MAX_SERVED_CHUNK: u64 = 1024 * 1024;
 const INLINE_BODY_BYTES: usize = 64 * 1024;
 
 /// Requests to the controller (implemented by gondolind's transport).
-#[async_trait]
 pub trait ControllerLink: Send + Sync + 'static {
     /// Sends `hook_call` and waits for `hook_call_result`.
-    async fn hook_call(&self, call: HookCall) -> Result<HookDecision, String>;
+    fn hook_call<'a>(
+        &'a self,
+        call: HookCall,
+    ) -> crate::BoxFuture<'a, Result<HookDecision, String>>;
     /// Pulls from a controller-held stream (`body_pull` → `body_pull_result`).
-    async fn body_pull(&self, pull: BodyPull) -> Result<BodyChunk, String>;
+    fn body_pull<'a>(&'a self, pull: BodyPull) -> crate::BoxFuture<'a, Result<BodyChunk, String>>;
     /// Tells the controller a stream is no longer needed (`body_release`).
     fn body_release(&self, stream: u64);
 }
@@ -134,9 +133,9 @@ impl RemoteHooks {
             WireBody::Original => BodyChoice::Original,
             WireBody::None => BodyChoice::None,
             WireBody::Bytes { data } => BodyChoice::Body(crate::body::full(data)),
-            WireBody::Stream { stream } => {
-                BodyChoice::Body(ControllerBody::new(self.link.clone(), stream).boxed())
-            }
+            WireBody::Stream { stream } => BodyChoice::Body(crate::body::HookBody::new(
+                ControllerBody::new(self.link.clone(), stream),
+            )),
         }
     }
 }
@@ -177,110 +176,128 @@ fn unexpected(phase: &str, decision: &HookDecision) -> HookError {
     HookError::Failed(format!("unexpected {phase} decision: {decision:?}"))
 }
 
-#[async_trait]
 impl HookBackend for RemoteHooks {
     fn registrations(&self) -> HookRegistrations {
         self.registrations.read().unwrap().clone()
     }
 
-    async fn is_request_allowed(&self, request: &RequestHead) -> Result<bool, HookError> {
-        let call = HookCall {
-            phase: HookPhase::IsRequestAllowed,
-            request: Some(wire_request(request, None)),
-            response: None,
-            ip: None,
-        };
-        match self.call(call).await? {
-            HookDecision::Allowed { allowed } => Ok(allowed),
-            HookDecision::Continue => Ok(true),
-            other => Err(unexpected("is_request_allowed", &other)),
-        }
+    fn is_request_allowed<'a>(
+        &'a self,
+        request: &'a RequestHead,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            let call = HookCall {
+                phase: HookPhase::IsRequestAllowed,
+                request: Some(wire_request(request, None)),
+                response: None,
+                ip: None,
+            };
+            match self.call(call).await? {
+                HookDecision::Allowed { allowed } => Ok(allowed),
+                HookDecision::Continue => Ok(true),
+                other => Err(unexpected("is_request_allowed", &other)),
+            }
+        })
     }
 
-    async fn is_ip_allowed(&self, info: &IpAllowInfo) -> Result<bool, HookError> {
-        let call = HookCall {
-            phase: HookPhase::IsIpAllowed,
-            request: None,
-            response: None,
-            ip: Some(WireIpInfo {
-                hostname: info.hostname.clone(),
-                ip: info.ip.to_string(),
-                family: if info.ip.is_ipv6() { 6 } else { 4 },
-                port: info.port,
-                protocol: info.protocol.to_string(),
-            }),
-        };
-        match self.call(call).await? {
-            HookDecision::Allowed { allowed } => Ok(allowed),
-            HookDecision::Continue => Ok(true),
-            other => Err(unexpected("is_ip_allowed", &other)),
-        }
+    fn is_ip_allowed<'a>(
+        &'a self,
+        info: &'a IpAllowInfo,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            let call = HookCall {
+                phase: HookPhase::IsIpAllowed,
+                request: None,
+                response: None,
+                ip: Some(WireIpInfo {
+                    hostname: info.hostname.clone(),
+                    ip: info.ip.to_string(),
+                    family: if info.ip.is_ipv6() { 6 } else { 4 },
+                    port: info.port,
+                    protocol: info.protocol.to_string(),
+                }),
+            };
+            match self.call(call).await? {
+                HookDecision::Allowed { allowed } => Ok(allowed),
+                HookDecision::Continue => Ok(true),
+                other => Err(unexpected("is_ip_allowed", &other)),
+            }
+        })
     }
 
-    async fn on_request(
-        &self,
+    fn on_request<'a>(
+        &'a self,
         request: RequestHead,
         body: Option<BodyHandle>,
-    ) -> Result<RequestDecision, HookError> {
-        let (body_prefix, body_complete) = match &body {
-            Some(b) => inline_prefix(b, &request.headers).await,
-            None => (None, false),
-        };
-        let stream = body.map(|b| self.register_stream(b));
-        let mut wire = wire_request(&request, stream);
-        wire.body_prefix = body_prefix;
-        wire.body_complete = body_complete;
-        let call =
-            HookCall { phase: HookPhase::OnRequest, request: Some(wire), response: None, ip: None };
-        let result = self.call(call).await;
-        self.drop_stream(stream);
-        match result? {
-            HookDecision::Continue => Ok(RequestDecision::Continue),
-            HookDecision::Request { request, body } => {
-                Ok(RequestDecision::Request { head: request_head(request), body: self.body(body) })
+    ) -> crate::BoxFuture<'a, Result<RequestDecision, HookError>> {
+        Box::pin(async move {
+            let (body_prefix, body_complete) = match &body {
+                Some(b) => inline_prefix(b, &request.headers).await,
+                None => (None, false),
+            };
+            let stream = body.map(|b| self.register_stream(b));
+            let mut wire = wire_request(&request, stream);
+            wire.body_prefix = body_prefix;
+            wire.body_complete = body_complete;
+            let call = HookCall {
+                phase: HookPhase::OnRequest,
+                request: Some(wire),
+                response: None,
+                ip: None,
+            };
+            let result = self.call(call).await;
+            self.drop_stream(stream);
+            match result? {
+                HookDecision::Continue => Ok(RequestDecision::Continue),
+                HookDecision::Request { request, body } => Ok(RequestDecision::Request {
+                    head: request_head(request),
+                    body: self.body(body),
+                }),
+                HookDecision::Response { response, body } => Ok(RequestDecision::Respond {
+                    head: response_head(response),
+                    body: self.body(body),
+                }),
+                other => Err(unexpected("on_request", &other)),
             }
-            HookDecision::Response { response, body } => Ok(RequestDecision::Respond {
-                head: response_head(response),
-                body: self.body(body),
-            }),
-            other => Err(unexpected("on_request", &other)),
-        }
+        })
     }
 
-    async fn on_response(
-        &self,
+    fn on_response<'a>(
+        &'a self,
         response: ResponseHead,
         body: Option<BodyHandle>,
         request: RequestHead,
-    ) -> Result<ResponseDecision, HookError> {
-        let (body_prefix, body_complete) = match &body {
-            Some(b) => inline_prefix(b, &response.headers).await,
-            None => (None, false),
-        };
-        let stream = body.map(|b| self.register_stream(b));
-        let call = HookCall {
-            phase: HookPhase::OnResponse,
-            request: Some(wire_request(&request, None)),
-            response: Some(WireResponseHead {
-                status: response.status,
-                status_text: response.status_text.clone(),
-                headers: response.headers.clone(),
-                body: stream,
-                body_prefix,
-                body_complete,
-            }),
-            ip: None,
-        };
-        let result = self.call(call).await;
-        self.drop_stream(stream);
-        match result? {
-            HookDecision::Continue => Ok(ResponseDecision::Continue),
-            HookDecision::Response { response, body } => Ok(ResponseDecision::Response {
-                head: response_head(response),
-                body: self.body(body),
-            }),
-            other => Err(unexpected("on_response", &other)),
-        }
+    ) -> crate::BoxFuture<'a, Result<ResponseDecision, HookError>> {
+        Box::pin(async move {
+            let (body_prefix, body_complete) = match &body {
+                Some(b) => inline_prefix(b, &response.headers).await,
+                None => (None, false),
+            };
+            let stream = body.map(|b| self.register_stream(b));
+            let call = HookCall {
+                phase: HookPhase::OnResponse,
+                request: Some(wire_request(&request, None)),
+                response: Some(WireResponseHead {
+                    status: response.status,
+                    status_text: response.status_text.clone(),
+                    headers: response.headers.clone(),
+                    body: stream,
+                    body_prefix,
+                    body_complete,
+                }),
+                ip: None,
+            };
+            let result = self.call(call).await;
+            self.drop_stream(stream);
+            match result? {
+                HookDecision::Continue => Ok(ResponseDecision::Continue),
+                HookDecision::Response { response, body } => Ok(ResponseDecision::Response {
+                    head: response_head(response),
+                    body: self.body(body),
+                }),
+                other => Err(unexpected("on_response", &other)),
+            }
+        })
     }
 }
 
@@ -300,13 +317,10 @@ impl ControllerBody {
 }
 
 impl Body for ControllerBody {
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
+    fn poll_data(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+    ) -> Poll<Option<Result<Bytes, BoxError>>> {
         loop {
             if self.done {
                 return Poll::Ready(None);
@@ -338,7 +352,7 @@ impl Body for ControllerBody {
                         self.done = true;
                     }
                     if !chunk.data.is_empty() {
-                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(chunk.data)))));
+                        return Poll::Ready(Some(Ok(Bytes::from(chunk.data))));
                     }
                 }
             }
@@ -371,18 +385,27 @@ mod tests {
         released: Mutex<Vec<u64>>,
     }
 
-    #[async_trait]
     impl ControllerLink for Link {
-        async fn hook_call(&self, call: HookCall) -> Result<HookDecision, String> {
-            self.calls.lock().unwrap().push(call);
-            self.decision.lock().unwrap().take().ok_or_else(|| "no decision".to_string())
+        fn hook_call<'a>(
+            &'a self,
+            call: HookCall,
+        ) -> crate::BoxFuture<'a, Result<HookDecision, String>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(call);
+                self.decision.lock().unwrap().take().ok_or_else(|| "no decision".to_string())
+            })
         }
-        async fn body_pull(&self, pull: BodyPull) -> Result<BodyChunk, String> {
-            let mut chunks = self.chunks.lock().unwrap();
-            if chunks.is_empty() {
-                return Ok(BodyChunk { stream: pull.stream, data: vec![], eof: true });
-            }
-            Ok(chunks.remove(0))
+        fn body_pull<'a>(
+            &'a self,
+            pull: BodyPull,
+        ) -> crate::BoxFuture<'a, Result<BodyChunk, String>> {
+            Box::pin(async move {
+                let mut chunks = self.chunks.lock().unwrap();
+                if chunks.is_empty() {
+                    return Ok(BodyChunk { stream: pull.stream, data: vec![], eof: true });
+                }
+                Ok(chunks.remove(0))
+            })
         }
         fn body_release(&self, stream: u64) {
             self.released.lock().unwrap().push(stream);
@@ -416,7 +439,7 @@ mod tests {
             panic!("unexpected decision");
         };
         assert_eq!(head.method, "PUT");
-        assert_eq!(&b.collect().await.unwrap().to_bytes()[..], b"abcd");
+        assert_eq!(&b.collect().await.unwrap()[..], b"abcd");
         assert!(link.released.lock().unwrap().is_empty());
     }
 
@@ -425,29 +448,37 @@ mod tests {
         struct PullingLink {
             hooks: Mutex<Option<Arc<RemoteHooks>>>,
         }
-        #[async_trait]
         impl ControllerLink for PullingLink {
-            async fn hook_call(&self, call: HookCall) -> Result<HookDecision, String> {
-                let hooks = self.hooks.lock().unwrap().clone().unwrap();
-                let request = call.request.unwrap();
-                // small bodies arrive inline and complete
-                assert_eq!(request.body_prefix.as_deref(), Some(&b"hello"[..]));
-                assert!(request.body_complete);
-                let stream = request.body.unwrap();
-                let mut data = Vec::new();
-                loop {
-                    let chunk =
-                        hooks.serve_body_pull(BodyPull { stream, max: 2, offset: None }).await?;
-                    data.extend(chunk.data);
-                    if chunk.eof {
-                        break;
+            fn hook_call<'a>(
+                &'a self,
+                call: HookCall,
+            ) -> crate::BoxFuture<'a, Result<HookDecision, String>> {
+                Box::pin(async move {
+                    let hooks = self.hooks.lock().unwrap().clone().unwrap();
+                    let request = call.request.unwrap();
+                    // small bodies arrive inline and complete
+                    assert_eq!(request.body_prefix.as_deref(), Some(&b"hello"[..]));
+                    assert!(request.body_complete);
+                    let stream = request.body.unwrap();
+                    let mut data = Vec::new();
+                    loop {
+                        let chunk = hooks
+                            .serve_body_pull(BodyPull { stream, max: 2, offset: None })
+                            .await?;
+                        data.extend(chunk.data);
+                        if chunk.eof {
+                            break;
+                        }
                     }
-                }
-                assert_eq!(data, b"hello");
-                Ok(HookDecision::Continue)
+                    assert_eq!(data, b"hello");
+                    Ok(HookDecision::Continue)
+                })
             }
-            async fn body_pull(&self, _pull: BodyPull) -> Result<BodyChunk, String> {
-                unreachable!()
+            fn body_pull<'a>(
+                &'a self,
+                _pull: BodyPull,
+            ) -> crate::BoxFuture<'a, Result<BodyChunk, String>> {
+                Box::pin(async move { unreachable!() })
             }
             fn body_release(&self, _stream: u64) {}
         }
@@ -457,7 +488,7 @@ mod tests {
         let body = PullableBody::new(crate::body::full("hello"), 100, Blocked::bad_gateway("x"));
         let decision = hooks.on_request(head(), Some(body.handle())).await.unwrap();
         assert!(matches!(decision, RequestDecision::Continue));
-        assert_eq!(&body.into_body().await.collect().await.unwrap().to_bytes()[..], b"hello");
+        assert_eq!(&body.into_body().await.collect().await.unwrap()[..], b"hello");
         assert!(hooks.streams.lock().unwrap().is_empty());
     }
 

@@ -63,6 +63,8 @@ function run(
       clearTimeout(timer);
       resolve({ code: code ?? -1, stdout, stderr });
     });
+    // commands that do not read stdin may exit before the write (EPIPE)
+    child.stdin!.on("error", () => {});
     child.stdin!.end(input ?? "");
   });
 }
@@ -386,13 +388,15 @@ s.listen(9000);
     assert.match(stdout, /ready/, stderr);
     const url = /Ingress enabled: (http:\/\/\S+)/.exec(stderr)?.[1];
     assert.ok(url, stderr);
-    // the listeners file is reloaded asynchronously
+    // the listeners file is reloaded asynchronously and the guest's node
+    // server may still be starting (slow under nested virtualization)
     let body = "";
-    for (let i = 0; i < 50; i++) {
+    const fetchDeadline = Date.now() + 60_000;
+    while (Date.now() < fetchDeadline) {
       const res = await fetch(`${url}/app/x?y=1`);
       body = await res.text();
       if (res.status === 200) break;
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 200));
     }
     assert.equal(body, "path=/x?y=1 prefix=/app");
     assert.equal((await fetch(`${url}/nope`)).status, 404);

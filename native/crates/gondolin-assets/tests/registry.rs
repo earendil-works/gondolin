@@ -49,7 +49,7 @@ fn make_image(
         "runtimeDefaults": { "rootfsMode": "memory" },
         "buildTime": "2026-01-01T00:00:00.000Z",
         "assets": { "kernel": "vmlinuz-virt", "initramfs": "initramfs.cpio.lz4", "rootfs": "rootfs.ext4", "krunKernel": "krun-kernel" },
-        "checksums": serde_json::to_value(&checksums).unwrap(),
+        "checksums": serde_json::from_str::<serde_json::Value>(&gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(&checksums))).unwrap(),
     });
     tweak(&mut manifest, &mut files);
     let build_id = manifest["buildId"].as_str().unwrap().to_string();
@@ -506,6 +506,26 @@ async fn local_resolution_errors_and_default_image() {
     let image = Assets::new(opts).resolve_default_local().unwrap().unwrap();
     assert_eq!(image.source, ImageSourceKind::GuestDir);
     assert_eq!(image.rootfs_mode, None);
+
+    // A checkpoint's build id resolves to the guest dir when it is that build
+    // (it is in neither the store nor the registry).
+    let local_id = "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee";
+    std::fs::write(
+        guest.path().join("manifest.json"),
+        format!("{{\"version\":1,\"buildId\":\"{local_id}\",\"config\":{{}}}}"),
+    )
+    .unwrap();
+    let mut opts = options(store.path(), port);
+    opts.guest_dir = Some(guest.path().to_path_buf());
+    let with_guest = Assets::new(opts);
+    let image = with_guest.resolve_build_id(local_id, None).await.unwrap();
+    assert_eq!(
+        (image.source, image.build_id.as_deref()),
+        (ImageSourceKind::GuestDir, Some(local_id))
+    );
+    // other build ids still come from the store
+    let image = with_guest.resolve_build_id(&a.build_id, None).await.unwrap();
+    assert_eq!(image.source, ImageSourceKind::BuildId);
 
     let checkout = tempfile::tempdir().unwrap();
     let out = checkout.path().join("guest/image/out");

@@ -26,6 +26,16 @@ const STDIN_HIGH_WATER: u64 = 1024 * 1024;
 /// Startup timeout (`DEFAULT_START_TIMEOUT_MS`)
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// [`START_TIMEOUT`], or `$GONDOLIN_START_TIMEOUT_MS` (as the node engine's
+/// VM honours it; slow hosts such as nested virtualization need more).
+fn start_timeout() -> Duration {
+    std::env::var("GONDOLIN_START_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(START_TIMEOUT, Duration::from_millis)
+}
+
 /// Events of one exec.
 #[derive(Debug)]
 pub enum ExecEvent {
@@ -119,9 +129,10 @@ impl Client {
     }
 
     /// Sends a client message (`client` is filled in).
-    pub async fn send(&self, t: &str, mut payload: serde_json::Value) -> bool {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("client".into(), self.id.into());
+    pub async fn send(&self, t: &str, mut payload: gondolin_wire::Value) -> bool {
+        {
+            let obj = &mut payload;
+            obj.insert("client", self.id);
         }
         self.engine.send(t, &json_to_cbor(&payload)).await
     }
@@ -199,7 +210,7 @@ impl ExecHandle {
         if stdout == 0 && stderr == 0 {
             return;
         }
-        let mut msg = serde_json::json!({ "id": self.id });
+        let mut msg = gondolin_wire::value!({ "id": self.id });
         if stdout > 0 {
             msg["stdout"] = stdout.into();
         }
@@ -296,17 +307,18 @@ impl Vm {
         }
         let debug = prepared.configure["debug"].as_array().is_some_and(|a| !a.is_empty());
         engine.log.store(debug, Ordering::Relaxed);
-        let result = tokio::time::timeout(START_TIMEOUT, async {
+        let timeout = start_timeout();
+        let result = tokio::time::timeout(timeout, async {
             engine
                 .request_value("configure", json_to_cbor(&prepared.configure))
                 .await
                 .map_err(|e| e.message)?;
-            engine.request("start", &serde_json::Map::new()).await.map_err(|e| e.message)?;
+            engine.request("start", &gondolin_wire::Value::map()).await.map_err(|e| e.message)?;
             let client = Client::open(engine.clone(), 1).await;
             client
                 .send(
                     px::BOOT,
-                    serde_json::json!({
+                    gondolin_wire::value!({
                         "fuseMount": prepared.fuse_mount,
                         "fuseBinds": prepared.fuse_binds,
                     }),
@@ -326,7 +338,7 @@ impl Vm {
                 engine.shutdown().await;
                 return Err(format!(
                     "vm startup timed out after {}ms while waiting for guest readiness",
-                    START_TIMEOUT.as_millis()
+                    timeout.as_millis()
                 ));
             }
         };
@@ -550,7 +562,7 @@ fn escape_proc_mounts(p: &str) -> String {
 /// `ensureVmmAvailable`: the VMM binary must run.
 fn check_vmm(prepared: &Prepared) -> Result<(), String> {
     let vm = &prepared.configure["vm"];
-    let krun = vm["vmm"] == "krun";
+    let krun = vm["vmm"].as_text() == Some("krun");
     let path = if krun {
         vm["krun_runner_path"].as_str().unwrap_or("gondolin-krun-runner")
     } else {
@@ -585,9 +597,10 @@ async fn wait_running(engine: &Engine, client: &Client) -> Result<(), String> {
         if let Some(exit) = state.borrow().exit.clone() {
             return Err(exit);
         }
-        tokio::select! {
-            r = status.changed() => if r.is_err() { return Err("sandbox connection closed".into()) },
-            r = state.changed() => if r.is_err() { return Err("session ended".into()) },
+        match gondolind::util::select2(status.changed(), state.changed()).await {
+            gondolind::util::Either::Left(Err(_)) => return Err("sandbox connection closed".into()),
+            gondolind::util::Either::Right(Err(_)) => return Err("session ended".into()),
+            _ => {}
         }
     }
 }

@@ -17,12 +17,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::ordmap::OrderedSet;
 use bytes::Bytes;
 use gondolin_proto::exec as px;
 use gondolin_proto::session::{self as ps, Configure, Limits, State};
+use gondolin_wire::ToValue;
 use gondolin_wire::{RawEnvelope, Value};
-use indexmap::IndexSet;
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bootcfg::{self, RawBind, SandboxFsConfig};
@@ -215,7 +215,7 @@ pub struct Session {
     runtime: Option<Runtime>,
     boot_shared: Arc<Mutex<Option<SandboxFsConfig>>>,
 
-    pub(crate) clients: IndexSet<px::ClientId>,
+    pub(crate) clients: OrderedSet<px::ClientId>,
     pub(crate) boot_config: Option<SandboxFsConfig>,
     pub(crate) status: State,
     vfs_ready: bool,
@@ -281,7 +281,7 @@ impl Session {
             net: NetSetup::None,
             runtime: None,
             boot_shared: Arc::new(Mutex::new(None)),
-            clients: IndexSet::new(),
+            clients: OrderedSet::new(),
             boot_config: None,
             status: State::Stopped,
             vfs_ready: false,
@@ -304,12 +304,36 @@ impl Session {
     /// that are not handled elsewhere; it closing means the controller is gone.
     pub async fn run(mut self, mut ch: SessionChannels, mut ctl_rx: mpsc::Receiver<RawEnvelope>) {
         let mut controller_gone = false;
+        enum Next {
+            Event(Event),
+            Vmm(u64, VmmEvent),
+            Control(ControlEvent),
+            Controller(Option<RawEnvelope>),
+        }
         while !self.finished {
-            tokio::select! {
-                biased;
-                Some(ev) = ch.events.recv() => self.handle_event(ev),
-                Some((generation, ev)) = ch.vmm.recv() => self.handle_vmm(generation, ev),
-                Some(ev) = ch.control.recv() => {
+            // biased: session events, VMM, guest control, then the controller
+            let intake = !controller_gone && !self.intake_blocked();
+            let next = std::future::poll_fn(|cx| {
+                use std::task::Poll;
+                if let Poll::Ready(Some(ev)) = ch.events.poll_recv(cx) {
+                    return Poll::Ready(Next::Event(ev));
+                }
+                if let Poll::Ready(Some((generation, ev))) = ch.vmm.poll_recv(cx) {
+                    return Poll::Ready(Next::Vmm(generation, ev));
+                }
+                if let Poll::Ready(Some(ev)) = ch.control.poll_recv(cx) {
+                    return Poll::Ready(Next::Control(ev));
+                }
+                if intake && let Poll::Ready(msg) = ctl_rx.poll_recv(cx) {
+                    return Poll::Ready(Next::Controller(msg));
+                }
+                Poll::Pending
+            })
+            .await;
+            match next {
+                Next::Event(ev) => self.handle_event(ev),
+                Next::Vmm(generation, ev) => self.handle_vmm(generation, ev),
+                Next::Control(ev) => {
                     self.handle_control(ev);
                     // handle what else is queued in the same round, so back
                     // to back output frames are coalesced
@@ -321,13 +345,11 @@ impl Session {
                         self.handle_control(ev);
                     }
                 }
-                msg = ctl_rx.recv(), if !controller_gone && !self.intake_blocked() => match msg {
-                    Some(msg) => self.handle_controller(msg),
-                    None => {
-                        controller_gone = true;
-                        self.controller_gone();
-                    }
-                },
+                Next::Controller(Some(msg)) => self.handle_controller(msg),
+                Next::Controller(None) => {
+                    controller_gone = true;
+                    self.controller_gone();
+                }
             }
             self.after_event();
         }
@@ -362,7 +384,7 @@ impl Session {
         self.ctl.error_event("error", &message, None);
     }
 
-    pub(crate) fn send_client<P: Serialize>(&self, t: &str, p: &P) {
+    pub(crate) fn send_client<P: ToValue>(&self, t: &str, p: &P) {
         self.ctl.send(t, 0, p);
     }
 
@@ -381,7 +403,7 @@ impl Session {
     }
 
     /// Queues a guest control message (`bridge.send`).
-    pub(crate) fn guest_send<P: Serialize>(&self, t: &str, id: u32, p: P) -> bool {
+    pub(crate) fn guest_send<P: ToValue>(&self, t: &str, id: u32, p: P) -> bool {
         self.guest.send(&crate::guestmsg::envelope(t, id, p))
     }
 
@@ -777,7 +799,7 @@ impl Session {
                 vm.qemu_path
             );
             if service.required() {
-                tracing::warn!("{message}");
+                gondolin_log::warn!("{message}");
                 let log = gondolin_proto::session::Log { component: "vfs".into(), message };
                 self.ctl.send(gondolin_proto::session::LOG, 0, &log);
             } else {
@@ -1198,7 +1220,7 @@ impl Session {
             )
             .map_err(StartError::Fatal)?;
             let path = rt.dir.0.join(format!("krun-{generation}.json"));
-            let json = serde_json::to_vec(&runner).map_err(|e| StartError::Fatal(e.to_string()))?;
+            let json = gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(&runner));
             std::fs::write(&path, json)
                 .map_err(|e| StartError::Fatal(format!("cannot write krun config: {e}")))?;
             let program = crate::krun::runner_path(&cfg.vm);
@@ -1429,13 +1451,14 @@ struct ControlHandler {
     ctl: Arc<Controller>,
 }
 
-#[async_trait::async_trait]
 impl PortHandler for ControlHandler {
-    async fn frame(&self, frame: Bytes) -> Result<(), String> {
-        let value: Value = gondolin_wire::decode(&frame).map_err(|e| e.to_string())?;
-        self.ctl.wait_capacity().await;
-        let _ = self.tx.send(ControlEvent::Frame(value)).await;
-        Ok(())
+    fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let value: Value = gondolin_wire::decode_guest(&frame).map_err(|e| e.to_string())?;
+            self.ctl.wait_capacity().await;
+            let _ = self.tx.send(ControlEvent::Frame(value)).await;
+            Ok(())
+        })
     }
 
     fn error(&self, message: String) {

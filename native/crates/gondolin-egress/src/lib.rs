@@ -7,7 +7,7 @@
 //! Per flow: explicit `tcp.hosts` mappings are tunneled raw; otherwise the
 //! first bytes are classified (HTTP/1.x request line, TLS ClientHello, SSH
 //! banner on SSH ports) and everything else is reset. HTTP is bridged by a
-//! hyper server per flow, TLS is terminated with a per-host leaf certificate
+//! `gondolin-http` server per flow, TLS is terminated with a per-host leaf certificate
 //! (MITM) and then bridged the same way.
 
 mod body;
@@ -23,8 +23,10 @@ mod patterns;
 mod policy;
 mod remote;
 mod secrets;
+pub mod system_roots;
 mod upstream;
 mod ws;
+pub mod x509;
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -32,7 +34,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use gondolin_netstack::{FlowHandler, TcpFlow};
 use gondolin_proto::net::{NetConfig, NetLimits, NetPolicy, TcpHostMapping};
@@ -44,26 +45,50 @@ pub use crate::body::{
 };
 pub use crate::classify::{Classification, MAX_FLOW_SNIFF, classify};
 pub use crate::error::{Blocked, BoxError};
+
+/// A boxed, sendable future (the async trait methods of egress).
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 pub use crate::hooks::{
     BodyChoice, HookBackend, HookError, IpAllowInfo, NoHooks, RequestDecision, RequestHead,
     ResponseDecision, ResponseHead,
 };
 pub use crate::http::MAX_HTTP_HEADER_BYTES;
 pub use crate::ip::{is_internal_ip, is_internal_ip_str};
-pub use crate::mitm::{MitmAuthority, MitmError};
+pub use crate::mitm::{MitmAuthority, MitmError, pkcs1_to_pkcs8};
 pub use crate::patterns::{match_hostname, matches_any_host, normalize_pattern, unique_hosts};
 pub use crate::policy::{CachingResolver, Resolver, SystemResolver};
 pub use crate::remote::{ControllerLink, RemoteHooks};
 pub use crate::secrets::apply_secrets;
 
 /// Errors building an [`Egress`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum EgressError {
-    #[error(transparent)]
-    Mitm(#[from] MitmError),
-    #[error(transparent)]
-    Trust(#[from] upstream::TrustError),
+    Mitm(MitmError),
+    Trust(upstream::TrustError),
 }
+
+impl From<MitmError> for EgressError {
+    fn from(e: MitmError) -> Self {
+        EgressError::Mitm(e)
+    }
+}
+
+impl From<upstream::TrustError> for EgressError {
+    fn from(e: upstream::TrustError) -> Self {
+        EgressError::Trust(e)
+    }
+}
+
+impl std::fmt::Display for EgressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EgressError::Mitm(e) => e.fmt(f),
+            EgressError::Trust(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EgressError {}
 
 /// Shared state of all flows.
 pub(crate) struct Shared {
@@ -115,9 +140,10 @@ impl Egress {
             system_roots: config.use_system_roots,
             extra_pems: config.upstream_ca_pems,
         })?;
-        let client = upstream::build_client(engine.clone(), tls.clone());
         let mut tls = tls;
         tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tls = Arc::new(tls);
+        let client = upstream::build_client(engine.clone(), tls.clone());
         let mitm = match &config.mitm {
             Some(ca) => Some(Arc::new(MitmAuthority::from_pem(
                 &ca.cert_pem,
@@ -134,7 +160,7 @@ impl Egress {
                 engine,
                 limits: config.limits,
                 client,
-                tls_client: Arc::new(tls),
+                tls_client: tls,
                 mitm,
                 concurrency,
                 tcp_hosts: config.tcp_hosts,
@@ -186,137 +212,138 @@ fn mapped_target<'a>(
         .or_else(|| mappings.iter().find(|m| m.host == host && m.port.is_none()))
 }
 
-#[async_trait]
 impl FlowHandler for Egress {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        let shared = self.shared.clone();
-        let TcpFlow { meta, mut stream, control } = flow;
-        let id = meta.id;
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let shared = self.shared.clone();
+            let TcpFlow { meta, mut stream, control } = flow;
+            let id = meta.id;
 
-        if let Some(target) =
-            mapped_target(&shared.tcp_hosts, meta.synthetic_hostname.as_deref(), meta.dst.port())
-        {
-            tracing::debug!(
-                target: "gondolin::egress",
-                flow = id,
-                "tcp map {} {}:{} -> {}:{}",
-                meta.src,
-                meta.synthetic_hostname.as_deref().unwrap_or_default(),
+            if let Some(target) = mapped_target(
+                &shared.tcp_hosts,
+                meta.synthetic_hostname.as_deref(),
                 meta.dst.port(),
-                target.upstream_host,
-                target.upstream_port
-            );
-            match tokio::net::TcpStream::connect((
-                target.upstream_host.as_str(),
-                target.upstream_port,
-            ))
-            .await
-            {
-                Ok(mut upstream) => {
-                    let _ = upstream.set_nodelay(true);
-                    if let Err(err) =
-                        tokio::io::copy_bidirectional(&mut stream, &mut upstream).await
-                    {
-                        tracing::debug!(target: "gondolin::egress", flow = id, "tcp map ended: {err}");
+            ) {
+                gondolin_log::debug!(
+                    target: "gondolin::egress",
+                    "tcp map {} {}:{} -> {}:{} flow={}",
+                    meta.src,
+                    meta.synthetic_hostname.as_deref().unwrap_or_default(),
+                    meta.dst.port(),
+                    target.upstream_host,
+                    target.upstream_port, id);
+                match tokio::net::TcpStream::connect((
+                    target.upstream_host.as_str(),
+                    target.upstream_port,
+                ))
+                .await
+                {
+                    Ok(mut upstream) => {
+                        let _ = upstream.set_nodelay(true);
+                        if let Err(err) =
+                            tokio::io::copy_bidirectional(&mut stream, &mut upstream).await
+                        {
+                            gondolin_log::debug!(target: "gondolin::egress", "tcp map ended: {err} flow={}", id);
+                        }
+                    }
+                    Err(err) => {
+                        gondolin_log::debug!(target: "gondolin::egress", "tcp map connect failed: {err} flow={}", id);
+                        control.abort();
                     }
                 }
-                Err(err) => {
-                    tracing::debug!(target: "gondolin::egress", flow = id, "tcp map connect failed: {err}");
-                    control.abort();
-                }
-            }
-            return;
-        }
-
-        let ssh = shared.ssh.read().unwrap().clone();
-        let ssh_port = ssh.ports.contains(&meta.dst.port());
-        let mut buf = BytesMut::with_capacity(4096);
-        let class = loop {
-            match classify(&buf, ssh_port) {
-                Classification::NeedMore => {}
-                other => break other,
-            }
-            if buf.len() >= MAX_FLOW_SNIFF {
-                deny(&control, &meta.src, &meta.dst, id, "sniff-limit-exceeded");
                 return;
             }
-            match stream.read_buf(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-        };
 
-        let prefixed = Lingering::new(Prefixed { prefix: buf.freeze(), inner: stream });
-        match class {
-            Classification::Http { method } if method == "CONNECT" => {
-                deny(&control, &meta.src, &meta.dst, id, "connect-not-allowed");
-            }
-            Classification::Http { .. } => {
-                http::serve_http(shared, prefixed, http::Scheme::Http, id).await;
-            }
-            Classification::Tls => {
-                let Some(mitm) = shared.mitm.clone() else {
-                    deny(&control, &meta.src, &meta.dst, id, "tls-without-mitm-ca");
+            let ssh = shared.ssh.read().unwrap().clone();
+            let ssh_port = ssh.ports.contains(&meta.dst.port());
+            let mut buf = BytesMut::with_capacity(4096);
+            let class = loop {
+                match classify(&buf, ssh_port) {
+                    Classification::NeedMore => {}
+                    other => break other,
+                }
+                if buf.len() >= MAX_FLOW_SNIFF {
+                    deny(&control, &meta.src, &meta.dst, id, "sniff-limit-exceeded");
                     return;
-                };
-                let acceptor = tokio_rustls::LazyConfigAcceptor::new(
-                    rustls::server::Acceptor::default(),
-                    prefixed,
-                );
-                let start = match acceptor.await {
-                    Ok(start) => start,
-                    Err(err) => {
-                        tracing::debug!(target: "gondolin::egress", flow = id, "tls client hello failed: {err}");
-                        control.abort();
+                }
+                match stream.read_buf(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+            };
+
+            let prefixed = Lingering::new(Prefixed { prefix: buf.freeze(), inner: stream });
+            match class {
+                Classification::Http { method } if method == "CONNECT" => {
+                    deny(&control, &meta.src, &meta.dst, id, "connect-not-allowed");
+                }
+                Classification::Http { .. } => {
+                    http::serve_http(shared, prefixed, http::Scheme::Http, id).await;
+                }
+                Classification::Tls => {
+                    let Some(mitm) = shared.mitm.clone() else {
+                        deny(&control, &meta.src, &meta.dst, id, "tls-without-mitm-ca");
                         return;
-                    }
-                };
-                let servername = start
-                    .client_hello()
-                    .server_name()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| meta.dst.ip().to_string());
-                tracing::debug!(target: "gondolin::egress", flow = id, "tls sni {servername}");
-                let name = servername.clone();
-                let config = match tokio::task::spawn_blocking(move || mitm.server_config(&name))
+                    };
+                    let start = match gondolin_http::tls::read_client_hello(prefixed).await {
+                        Ok(start) => start,
+                        Err(err) => {
+                            gondolin_log::debug!(target: "gondolin::egress", "tls client hello failed: {err} flow={}", id);
+                            control.abort();
+                            return;
+                        }
+                    };
+                    let servername = start
+                        .client_hello()
+                        .server_name()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| meta.dst.ip().to_string());
+                    gondolin_log::debug!(target: "gondolin::egress", "tls sni {servername} flow={}", id);
+                    let name = servername.clone();
+                    let config = match tokio::task::spawn_blocking(move || {
+                        mitm.server_config(&name)
+                    })
                     .await
-                {
-                    Ok(Ok(config)) => config,
-                    Ok(Err(err)) => {
-                        tracing::warn!(target: "gondolin::egress", flow = id, "tls mitm for {servername} failed: {err}");
-                        control.abort();
+                    {
+                        Ok(Ok(config)) => config,
+                        Ok(Err(err)) => {
+                            gondolin_log::warn!(target: "gondolin::egress", "tls mitm for {servername} failed: {err} flow={}", id);
+                            control.abort();
+                            return;
+                        }
+                        Err(_) => {
+                            control.abort();
+                            return;
+                        }
+                    };
+                    let tls = match start.into_stream(config).await {
+                        Ok(tls) => tls,
+                        Err(err) => {
+                            gondolin_log::debug!(target: "gondolin::egress", "tls handshake failed: {err} flow={}", id);
+                            control.abort();
+                            return;
+                        }
+                    };
+                    http::serve_http(shared, tls, http::Scheme::Https, id).await;
+                }
+                Classification::Ssh => {
+                    let Some(proxy) = ssh.proxy else {
+                        deny(&control, &meta.src, &meta.dst, id, "ssh-not-enabled");
                         return;
-                    }
-                    Err(_) => {
-                        control.abort();
+                    };
+                    let Some(target) = proxy.target_for(&meta) else {
+                        deny(&control, &meta.src, &meta.dst, id, "policy-deny");
                         return;
-                    }
-                };
-                let tls = match start.into_stream(config).await {
-                    Ok(tls) => tls,
-                    Err(err) => {
-                        tracing::debug!(target: "gondolin::egress", flow = id, "tls handshake failed: {err}");
-                        control.abort();
-                        return;
-                    }
-                };
-                http::serve_http(shared, tls, http::Scheme::Https, id).await;
+                    };
+                    proxy
+                        .handle(TcpFlow { meta, stream: Box::pin(prefixed), control }, target)
+                        .await;
+                }
+                Classification::Deny | Classification::NeedMore => {
+                    deny(&control, &meta.src, &meta.dst, id, "unknown-protocol");
+                }
             }
-            Classification::Ssh => {
-                let Some(proxy) = ssh.proxy else {
-                    deny(&control, &meta.src, &meta.dst, id, "ssh-not-enabled");
-                    return;
-                };
-                let Some(target) = proxy.target_for(&meta) else {
-                    deny(&control, &meta.src, &meta.dst, id, "policy-deny");
-                    return;
-                };
-                proxy.handle(TcpFlow { meta, stream: Box::pin(prefixed), control }, target).await;
-            }
-            Classification::Deny | Classification::NeedMore => {
-                deny(&control, &meta.src, &meta.dst, id, "unknown-protocol");
-            }
-        }
+        })
     }
 }
 
@@ -327,7 +354,7 @@ fn deny(
     id: u64,
     reason: &str,
 ) {
-    tracing::debug!(target: "gondolin::egress", flow = id, "tcp blocked {src} -> {dst} ({reason})");
+    gondolin_log::debug!(target: "gondolin::egress", "tcp blocked {src} -> {dst} ({reason}) flow={}", id);
     control.abort();
 }
 

@@ -1,0 +1,9 @@
+[package]
+name = "gondolin-log"
+description = "Minimal logging facade of the Gondolin native crates (replaces tracing)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

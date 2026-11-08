@@ -25,8 +25,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Serialize;
+use gondolin_wire::{ToValue, Value, wire_enum, wire_struct};
 
+pub mod archive;
 pub mod cli;
 mod fetch;
 pub mod image_ref;
@@ -46,34 +47,42 @@ use crate::store::{assets_exist, load_guest_assets, random_suffix};
 /// Default image when `$GONDOLIN_DEFAULT_IMAGE` is unset.
 pub const DEFAULT_IMAGE: &str = "alpine-base:latest";
 
-/// Error categories (stable for callers and the controller protocol).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorKind {
-    /// no object for a build id (local)
-    ObjectNotFound,
-    /// no local ref
-    RefNotFound,
-    /// local ref without a target for the requested arch
-    RefArchNotFound,
-    /// invalid input, manifest or registry
-    Invalid,
-    /// filesystem error
-    Io,
-    /// HTTP error
-    Network,
-    /// checksum mismatch
-    Checksum,
+wire_enum! {
+    /// Error categories (stable for callers and the controller protocol).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ErrorKind {
+        /// no object for a build id (local)
+        ObjectNotFound = "object_not_found",
+        /// no local ref
+        RefNotFound = "ref_not_found",
+        /// local ref without a target for the requested arch
+        RefArchNotFound = "ref_arch_not_found",
+        /// invalid input, manifest or registry
+        Invalid = "invalid",
+        /// filesystem error
+        Io = "io",
+        /// HTTP error
+        Network = "network",
+        /// checksum mismatch
+        Checksum = "checksum",
+    }
 }
 
 /// Resolution/download error; the message matches the node engine's where it
 /// has an equivalent.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{message}")]
+#[derive(Debug, Clone)]
 pub struct AssetsError {
     pub kind: ErrorKind,
     pub message: String,
 }
+
+impl std::fmt::Display for AssetsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AssetsError {}
 
 impl AssetsError {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -104,9 +113,9 @@ impl AssetsError {
     }
 }
 
-/// Progress of registry fetches and downloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+/// Progress of registry fetches and downloads; encodes as
+/// `{ "event": "<snake_case variant>", ...fields }` (absent totals as null).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressEvent {
     FetchRegistry {
         url: String,
@@ -139,59 +148,91 @@ pub enum ProgressEvent {
     },
 }
 
+impl ToValue for ProgressEvent {
+    fn to_value(&self) -> Value {
+        let total = |t: &Option<u64>| t.map_or(Value::Null, |t| t.to_value());
+        match self {
+            ProgressEvent::FetchRegistry { url } => {
+                gondolin_wire::value!({ "event": "fetch_registry", "url": url })
+            }
+            ProgressEvent::DownloadStart { label, url, total: t } => gondolin_wire::value!({
+                "event": "download_start", "label": label, "url": url, "total": (total(t))
+            }),
+            ProgressEvent::DownloadProgress { label, downloaded, total: t } => {
+                gondolin_wire::value!({
+                    "event": "download_progress",
+                    "label": label,
+                    "downloaded": downloaded,
+                    "total": (total(t))
+                })
+            }
+            ProgressEvent::DownloadDone { label, bytes, elapsed_ms } => gondolin_wire::value!({
+                "event": "download_done", "label": label, "bytes": bytes, "elapsed_ms": elapsed_ms
+            }),
+            ProgressEvent::Verifying { label } => {
+                gondolin_wire::value!({ "event": "verifying", "label": label })
+            }
+            ProgressEvent::Installed { build_id, created } => gondolin_wire::value!({
+                "event": "installed", "build_id": build_id, "created": created
+            }),
+            ProgressEvent::WaitingForLock { build_id } => {
+                gondolin_wire::value!({ "event": "waiting_for_lock", "build_id": build_id })
+            }
+        }
+    }
+}
+
 /// Progress callback.
 pub type Progress = dyn Fn(ProgressEvent) + Send + Sync;
 
-/// Where a resolved image came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ImageSourceKind {
-    /// a directory given as selector
-    Path,
-    /// a build id
-    BuildId,
-    /// a `name:tag` ref
-    Ref,
-    /// `$GONDOLIN_GUEST_DIR`
-    GuestDir,
-    /// `guest/image/out` of a source checkout
-    Checkout,
+wire_enum! {
+    /// Where a resolved image came from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ImageSourceKind {
+        /// a directory given as selector
+        Path = "path",
+        /// a build id
+        BuildId = "build-id",
+        /// a `name:tag` ref
+        Ref = "ref",
+        /// `$GONDOLIN_GUEST_DIR`
+        GuestDir = "guest-dir",
+        /// `guest/image/out` of a source checkout
+        Checkout = "checkout",
+    }
 }
 
-/// Disk image format of the rootfs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiskFormat {
-    Raw,
-    Qcow2,
+wire_enum! {
+    /// Disk image format of the rootfs.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DiskFormat {
+        Raw = "raw",
+        Qcow2 = "qcow2",
+    }
 }
 
-/// A resolved guest image: everything needed to boot it.
-#[derive(Debug, Clone, Serialize)]
-pub struct ResolvedImage {
-    pub source: ImageSourceKind,
-    /// selector after resolution (absolute path, build id or canonical ref)
-    pub selector: String,
-    pub asset_dir: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arch: Option<Arch>,
-    pub kernel: PathBuf,
-    pub initrd: PathBuf,
-    pub rootfs: PathBuf,
-    pub rootfs_format: DiskFormat,
-    /// libkrun kernel (`manifest.assets.krunKernel`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub krun_kernel: Option<PathBuf>,
-    /// libkrun initrd (`manifest.assets.krunInitrd`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub krun_initrd: Option<PathBuf>,
-    /// `manifest.runtimeDefaults.rootfsMode`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rootfs_mode: Option<RootfsMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub manifest: Option<AssetManifest>,
+wire_struct! {
+    /// A resolved guest image: everything needed to boot it (snake_case keys).
+    #[derive(Debug, Clone)]
+    pub struct ResolvedImage {
+        pub source: ImageSourceKind,
+        /// selector after resolution (absolute path, build id or canonical ref)
+        pub selector: String,
+        pub asset_dir: PathBuf,
+        pub build_id: Option<String>,
+        pub arch: Option<Arch>,
+        pub kernel: PathBuf,
+        pub initrd: PathBuf,
+        pub rootfs: PathBuf,
+        pub rootfs_format: DiskFormat,
+        /// libkrun kernel (`manifest.assets.krunKernel`)
+        pub krun_kernel: Option<PathBuf>,
+        /// libkrun initrd (`manifest.assets.krunInitrd`)
+        pub krun_initrd: Option<PathBuf>,
+        /// `manifest.runtimeDefaults.rootfsMode`
+        pub rootfs_mode: Option<RootfsMode>,
+        pub manifest: Option<AssetManifest>,
+    }
 }
 
 impl ResolvedImage {
@@ -274,7 +315,7 @@ impl AssetsOptions {
 /// Image resolver over a [`Store`] and the builtin registry.
 pub struct Assets {
     options: AssetsOptions,
-    client: std::sync::OnceLock<reqwest::Client>,
+    client: std::sync::OnceLock<fetch::HttpClient>,
 }
 
 fn no_progress(_: ProgressEvent) {}
@@ -296,11 +337,11 @@ impl Assets {
         &self.options
     }
 
-    fn client(&self) -> Result<&reqwest::Client, AssetsError> {
+    fn client(&self) -> Result<&fetch::HttpClient, AssetsError> {
         if let Some(c) = self.client.get() {
             return Ok(c);
         }
-        let client = fetch::http_client()?;
+        let client = fetch::HttpClient::new()?;
         Ok(self.client.get_or_init(|| client))
     }
 
@@ -547,6 +588,31 @@ impl Assets {
             .map(Some);
         }
         Ok(self.default_from_store())
+    }
+
+    /// A build id the way checkpoints resolve theirs (node:
+    /// `resolveAssetDirByBuildId`): `$GONDOLIN_GUEST_DIR` or a checkout's
+    /// `guest/image/out` when their manifest has this build id, else the
+    /// store, else (unlike node, which fails there) the registry.
+    pub async fn resolve_build_id(
+        &self,
+        build_id: &str,
+        progress: Option<&Progress>,
+    ) -> Result<ResolvedImage, AssetsError> {
+        let wanted = image_ref::normalize_build_id(build_id)?;
+        let local = [
+            (ImageSourceKind::GuestDir, self.options.guest_dir.clone()),
+            (ImageSourceKind::Checkout, self.find_checkout()),
+        ];
+        for (kind, dir) in local {
+            let Some(dir) = dir else { continue };
+            let matches =
+                load_manifest(&dir).and_then(|m| m.build_id).as_deref() == Some(wanted.as_str());
+            if matches && assets_exist(&dir) {
+                return ResolvedImage::from_dir(kind, dir.display().to_string(), &dir, None, None);
+            }
+        }
+        self.resolve(&wanted, None, progress).await
     }
 
     /// The default guest image, downloading it if needed (`ensureGuestAssets`).

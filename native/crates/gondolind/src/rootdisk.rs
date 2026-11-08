@@ -41,9 +41,9 @@ pub fn infer_format(path: &str) -> &'static str {
 
 fn virtual_size(qemu_img: &Path, image: &Path) -> Result<u64, String> {
     let out = run(qemu_img, &["info", "--output=json", &image.display().to_string()])?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&out).map_err(|e| format!("invalid qemu-img info output: {e}"))?;
-    json["virtual-size"].as_u64().ok_or_else(|| {
+    let json = gondolin_wire::json::parse(&String::from_utf8_lossy(&out))
+        .map_err(|e| format!("invalid qemu-img info output: {e}"))?;
+    json["virtual-size"].as_integer().and_then(|n| u64::try_from(n).ok()).ok_or_else(|| {
         format!("qemu-img info did not report a valid virtual size for {}", image.display())
     })
 }

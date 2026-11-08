@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use gondolin_wire::{RawEnvelope, Value};
-use serde::Serialize;
 
 use crate::fields::Fields;
 use crate::session::Session;
@@ -51,10 +50,10 @@ impl Drop for CheckpointState {
     }
 }
 
-#[derive(Serialize)]
-struct Data<'a> {
-    #[serde(with = "serde_bytes")]
-    data: &'a [u8],
+gondolin_wire::wire_encode! {
+    struct Data<'a> {
+        data: &'a [u8],
+    }
 }
 
 fn import_path() -> PathBuf {

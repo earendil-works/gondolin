@@ -73,6 +73,7 @@ export const OID_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
 
 const OID_COMMON_NAME = "2.5.4.3";
 const OID_SHA256_WITH_RSA = "1.2.840.113549.1.1.11";
+const OID_ECDSA_WITH_SHA256 = "1.2.840.10045.4.3.2";
 
 const TAG_BOOLEAN = 0x01;
 const TAG_INTEGER = 0x02;
@@ -172,17 +173,20 @@ export function encodeCommonNameName(commonName: string): Buffer {
 
 /** Create and sign a DER encoded X.509 v3 certificate */
 export function createCertificate(options: CreateCertificateOptions): Buffer {
-  if (options.signingKey.asymmetricKeyType !== "rsa") {
-    throw new Error("certificate signing key must be an RSA key");
+  const keyType = options.signingKey.asymmetricKeyType;
+  if (keyType !== "rsa" && keyType !== "ec") {
+    throw new Error("certificate signing key must be an RSA or ECDSA key");
   }
   if (options.serialNumber.length === 0) {
     throw new Error("certificate serial number must not be empty");
   }
 
-  const signatureAlgorithm = sequence(
-    encodeOid(OID_SHA256_WITH_RSA),
-    tlv(TAG_NULL),
-  );
+  // RSA: sha256WithRSAEncryption (NULL parameters); ECDSA (CAs created by
+  // gondolind): ecdsa-with-SHA256 (no parameters)
+  const signatureAlgorithm =
+    keyType === "rsa"
+      ? sequence(encodeOid(OID_SHA256_WITH_RSA), tlv(TAG_NULL))
+      : sequence(encodeOid(OID_ECDSA_WITH_SHA256));
   const spki = options.publicKey.export({ type: "spki", format: "der" });
 
   const tbsCertificate = sequence(
@@ -199,7 +203,8 @@ export function createCertificate(options: CreateCertificateOptions): Buffer {
       : Buffer.alloc(0),
   );
 
-  // RSA keys sign with PKCS#1 v1.5 padding by default
+  // RSA keys sign with PKCS#1 v1.5 padding, EC keys produce a DER
+  // Ecdsa-Sig-Value (both the defaults)
   const signature = crypto.sign("sha256", tbsCertificate, options.signingKey);
 
   return sequence(

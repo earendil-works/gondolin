@@ -102,31 +102,22 @@ pub fn resolve_async(
             let assets = Assets::from_env();
             let progress_ctl = ctl.clone();
             let progress = move |ev: ProgressEvent| {
-                let message = serde_json::to_string(&ev).unwrap_or_default();
+                let message =
+                    gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(&ev));
                 progress_ctl.send(LOG, 0, &Log { component: "assets".into(), message });
             };
             let image = if selector.trim().is_empty() {
                 assets.resolve_default(Some(&progress)).await
+            } else if gondolin_assets::is_build_id(selector.trim()) {
+                // also the local default image (`GONDOLIN_GUEST_DIR`, a
+                // checkout) when it is that build, as checkpoints need
+                assets.resolve_build_id(selector.trim(), Some(&progress)).await
             } else {
-                match assets.resolve(&selector, arch, Some(&progress)).await {
-                    // a build id may also be the local default image
-                    // (`GONDOLIN_GUEST_DIR`, a checkout) that is not in the store
-                    Err(err) if gondolin_assets::is_build_id(selector.trim()) => {
-                        match assets.resolve_default_local() {
-                            Ok(Some(local))
-                                if local.build_id.as_deref() == Some(selector.trim()) =>
-                            {
-                                Ok(local)
-                            }
-                            _ => Err(err),
-                        }
-                    }
-                    other => other,
-                }
+                assets.resolve(&selector, arch, Some(&progress)).await
             }
             .map_err(|e| e.to_string())?;
             apply_image(&mut cfg.vm, &image)?;
-            let described = gondolin_wire::to_value(&image).map_err(|e| e.to_string())?;
+            let described = gondolin_wire::ToValue::to_value(&image);
             Ok::<(Configure, Value), String>((cfg, described))
         })
         .await

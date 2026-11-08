@@ -25,10 +25,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use bytes::Bytes;
+use gondolin_wire::ToValue;
 use gondolin_wire::{RawEnvelope, Value};
-use serde::Serialize;
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::controller::{Controller, ControllerHandler};
@@ -76,40 +75,52 @@ pub struct TcpForwarder {
     drained: Notify,
 }
 
-#[derive(Serialize)]
-struct Fwd<'a, P: Serialize> {
+struct Fwd<'a, P: ToValue> {
     channel: &'a str,
     stream: u32,
-    #[serde(flatten)]
+    /// fields merged into the message
     p: P,
 }
 
-#[derive(Serialize)]
-struct Opened {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+impl<P: ToValue> ToValue for Fwd<'_, P> {
+    fn to_value(&self) -> Value {
+        let mut out = vec![
+            (Value::Text("channel".into()), Value::Text(self.channel.into())),
+            (Value::Text("stream".into()), Value::Integer(self.stream.into())),
+        ];
+        gondolin_wire::convert::merge_into(&mut out, self.p.to_value());
+        Value::Map(out)
+    }
 }
 
-#[derive(Serialize)]
-struct Data<'a> {
-    #[serde(with = "serde_bytes")]
-    data: &'a [u8],
+gondolin_wire::wire_struct! {
+    struct Opened {
+        ok: bool,
+        message: Option<String>,
+    }
 }
 
-#[derive(Serialize)]
-struct Closed {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+gondolin_wire::wire_encode! {
+    struct Data<'a> {
+        data: &'a [u8],
+    }
 }
 
-#[derive(Serialize)]
-struct Empty {}
+gondolin_wire::wire_struct! {
+    struct Closed {
+        message: Option<String>,
+    }
+}
 
-#[derive(Serialize)]
-struct GuestOpen<'a> {
-    host: &'a str,
-    port: u16,
+gondolin_wire::wire_encode! {
+    struct Empty {}
+}
+
+gondolin_wire::wire_encode! {
+    struct GuestOpen<'a> {
+        host: &'a str,
+        port: u16,
+    }
 }
 
 impl TcpForwarder {
@@ -135,11 +146,11 @@ impl TcpForwarder {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn to_ctl<P: Serialize>(&self, t: &str, stream: u32, p: P) {
+    fn to_ctl<P: ToValue>(&self, t: &str, stream: u32, p: P) {
         self.ctl.send(t, 0, &Fwd { channel: self.channel, stream, p });
     }
 
-    fn to_guest<P: Serialize>(&self, t: &str, stream: u32, p: P) -> bool {
+    fn to_guest<P: ToValue>(&self, t: &str, stream: u32, p: P) -> bool {
         self.outbox.send(&guestmsg::envelope(t, stream, p))
     }
 
@@ -361,19 +372,20 @@ impl TcpForwarder {
     }
 }
 
-#[async_trait]
 impl PortHandler for TcpForwarder {
-    async fn frame(&self, frame: Bytes) -> Result<(), String> {
-        let v: Value = gondolin_wire::decode(&frame).map_err(|e| e.to_string())?;
-        let f = Fields::of(&v);
-        let (Some(t), Some(id)) = (f.text("t"), fields::request_id(f.get("id"))) else {
-            return Ok(());
-        };
-        let p = f.get("p").map(Fields::of).unwrap_or_else(|| Fields::of(&Value::Null));
-        self.ctl.wait_capacity().await;
-        self.guest_message(t, id, &p);
-        self.wait_queue_room().await;
-        Ok(())
+    fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let v: Value = gondolin_wire::decode_guest(&frame).map_err(|e| e.to_string())?;
+            let f = Fields::of(&v);
+            let (Some(t), Some(id)) = (f.text("t"), fields::request_id(f.get("id"))) else {
+                return Ok(());
+            };
+            let p = f.get("p").map(Fields::of).unwrap_or_else(|| Fields::of(&Value::Null));
+            self.ctl.wait_capacity().await;
+            self.guest_message(t, id, &p);
+            self.wait_queue_room().await;
+            Ok(())
+        })
     }
 
     fn error(&self, message: String) {
@@ -396,36 +408,42 @@ pub struct FwdDispatch {
     pub ingress: Arc<TcpForwarder>,
 }
 
-#[async_trait]
 impl ControllerHandler for FwdDispatch {
-    async fn handle(&self, msg: RawEnvelope, ctl: &Arc<Controller>) {
-        let f = Fields::of(&msg.p);
-        let fwd = match f.text("channel") {
-            Some("ssh") => &self.ssh,
-            Some("ingress") => &self.ingress,
-            _ => {
-                ctl.error_event("invalid_request", "unknown forwarder channel", Some(&msg.t));
+    fn handle<'a>(
+        &'a self,
+        msg: RawEnvelope,
+        ctl: &'a Arc<Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let f = Fields::of(&msg.p);
+            let fwd = match f.text("channel") {
+                Some("ssh") => &self.ssh,
+                Some("ingress") => &self.ingress,
+                _ => {
+                    ctl.error_event("invalid_request", "unknown forwarder channel", Some(&msg.t));
+                    return;
+                }
+            };
+            let Some(stream) = fields::request_id(f.get("stream")) else {
+                ctl.error_event(
+                    "invalid_request",
+                    "forwarder messages need a uint32 stream",
+                    Some(&msg.t),
+                );
                 return;
+            };
+            if let Err(panic) = crate::panics::catch(|| fwd.controller_message(&msg.t, stream, &f))
+            {
+                // the stream may be half updated: drop it on both sides
+                fwd.remove(stream);
+                let _ = fwd.to_guest("tcp_close", stream, Empty {});
+                fwd.to_ctl(
+                    FWD_CLOSE,
+                    stream,
+                    Closed { message: Some(format!("internal error: {panic}")) },
+                );
             }
-        };
-        let Some(stream) = fields::request_id(f.get("stream")) else {
-            ctl.error_event(
-                "invalid_request",
-                "forwarder messages need a uint32 stream",
-                Some(&msg.t),
-            );
-            return;
-        };
-        if let Err(panic) = crate::panics::catch(|| fwd.controller_message(&msg.t, stream, &f)) {
-            // the stream may be half updated: drop it on both sides
-            fwd.remove(stream);
-            let _ = fwd.to_guest("tcp_close", stream, Empty {});
-            fwd.to_ctl(
-                FWD_CLOSE,
-                stream,
-                Closed { message: Some(format!("internal error: {panic}")) },
-            );
-        }
+        })
     }
 }
 

@@ -15,7 +15,7 @@ if [[ "${1:-}" == "--release" ]]; then
   cargo_flags+=(--release)
   shift
 fi
-(cd "$native" && cargo build -p gondolind ${cargo_flags[@]+"${cargo_flags[@]}"}) || exit 1
+(cd "$native" && cargo build -p gondolind -p gondolin-cli ${cargo_flags[@]+"${cargo_flags[@]}"}) || exit 1
 
 cd "$here"
 if [[ $# -eq 0 ]]; then

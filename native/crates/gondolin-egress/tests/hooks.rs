@@ -1,10 +1,5 @@
 mod common;
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 use common::*;
 use gondolin_egress::{
     Blocked, BodyChoice, BodyHandle, HookBackend, HookError, IpAllowInfo, RequestDecision,
@@ -12,6 +7,9 @@ use gondolin_egress::{
 };
 use gondolin_proto::net::{BodyHookRegistration, HookRegistrations, HttpRules, SecretRule};
 use http::Response;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 type ReqFn = Box<
     dyn Fn(
@@ -45,50 +43,66 @@ impl Fake {
     }
 }
 
-#[async_trait]
 impl HookBackend for Fake {
     fn registrations(&self) -> HookRegistrations {
         self.regs.clone()
     }
 
-    async fn is_request_allowed(&self, request: &RequestHead) -> Result<bool, HookError> {
-        self.log.lock().unwrap().push(format!(
-            "is_request_allowed {} {}",
-            request.method,
-            request.header("authorization").unwrap_or("-")
-        ));
-        Ok(self.deny_request.is_none()
-            || self.deny_request.as_deref() != request.header("authorization"))
+    fn is_request_allowed<'a>(
+        &'a self,
+        request: &'a RequestHead,
+    ) -> gondolin_egress::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push(format!(
+                "is_request_allowed {} {}",
+                request.method,
+                request.header("authorization").unwrap_or("-")
+            ));
+            Ok(self.deny_request.is_none()
+                || self.deny_request.as_deref() != request.header("authorization"))
+        })
     }
 
-    async fn is_ip_allowed(&self, info: &IpAllowInfo) -> Result<bool, HookError> {
-        self.log.lock().unwrap().push(format!("is_ip_allowed {} {}", info.hostname, info.ip));
-        Ok(true)
+    fn is_ip_allowed<'a>(
+        &'a self,
+        info: &'a IpAllowInfo,
+    ) -> gondolin_egress::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push(format!("is_ip_allowed {} {}", info.hostname, info.ip));
+            Ok(true)
+        })
     }
 
-    async fn on_request(
-        &self,
+    fn on_request<'a>(
+        &'a self,
         request: RequestHead,
         body: Option<BodyHandle>,
-    ) -> Result<RequestDecision, HookError> {
-        self.log.lock().unwrap().push(format!("on_request {}", request.url));
-        match &self.on_request {
-            Some(f) => f(request, body).await,
-            None => Ok(RequestDecision::Continue),
-        }
+    ) -> gondolin_egress::BoxFuture<'a, Result<RequestDecision, HookError>> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push(format!("on_request {}", request.url));
+            match &self.on_request {
+                Some(f) => f(request, body).await,
+                None => Ok(RequestDecision::Continue),
+            }
+        })
     }
 
-    async fn on_response(
-        &self,
+    fn on_response<'a>(
+        &'a self,
         response: ResponseHead,
         body: Option<BodyHandle>,
         request: RequestHead,
-    ) -> Result<ResponseDecision, HookError> {
-        self.log.lock().unwrap().push(format!("on_response {} {}", response.status, request.url));
-        match &self.on_response {
-            Some(f) => f(response, body).await,
-            None => Ok(ResponseDecision::Continue),
-        }
+    ) -> gondolin_egress::BoxFuture<'a, Result<ResponseDecision, HookError>> {
+        Box::pin(async move {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("on_response {} {}", response.status, request.url));
+            match &self.on_response {
+                Some(f) => f(response, body).await,
+                None => Ok(ResponseDecision::Continue),
+            }
+        })
     }
 }
 

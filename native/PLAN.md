@@ -73,8 +73,8 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Hook latency: small bodies inline with `hook_call`, DNS overlapped with
       onRequest; body-reading hook 1.9–2.0 ms vs node 2.1–2.3 ms (loaded
       machine; confirm on the quiet A/B)
-- [x] sshproxy deadlocks: write pump per transport; vendored russh 0.65.1 with
-      opt-in window-on-consume patch (`native/vendor/russh/GONDOLIN-PATCHES.md`)
+- [x] sshproxy deadlocks fixed (consumption-based windows, separate reader and
+      writer tasks; now in our own SSH implementation)
 
 ## M4: remaining parity
 
@@ -112,8 +112,7 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
       `--print-configure` parity test (15 vectors); multi-call (`gondolin daemon`)
 - [x] One binary per platform package (multi-call `gondolin`, SDK starts
       `gondolin daemon`); fat LTO: 10–12 MB static binaries, 5 MB tarballs
-- [ ] Dependency diet (251 runtime crates today; owner wants < 30) — awaiting
-      owner decision on scope (see conversation)
+- [~] Dependency diet, see M8
 - [x] Release readiness without releasing: actionlint-clean workflows,
       retired `macos-14` replaced, image release uses source-built helpers
       (virtio-fs), `scripts/release-dry-run.sh`, `RELEASING.md`
@@ -122,8 +121,9 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Linux tests in Docker (`make native-test-docker`): cargo arm64 + amd64,
       TCG VMs through the native engine incl. virtio-fs/memfd/openat2/pdeathsig,
       102/103 host test files on native
-- [ ] Linux with KVM (needs a nested-virt VM: Parallels 27 doesn't expose EL2
-      on arm64; Lima/vz with nestedVirtualization would)
+- [x] Linux with KVM: Lima vz + nestedVirtualization (`make native-test-kvm`);
+      410 Rust tests, virtio-fs on stock Ubuntu QEMU 8.2.2; host suites mostly
+      pass, remaining failures are timeouts (nested exits ~30 µs, boot 12.8 s)
 
 ## M6: djs hooks (tier 2)
 
@@ -159,9 +159,38 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] CI: `native` job (check, tests, release build) and `test-native` job
       (full host suite on native + virtio-fs check + sandboxfs fallback run on
       stock Ubuntu QEMU/KVM); node-engine job kept, marked deprecated
-- [ ] First CI run (not pushed yet): x86_64 `microvm` + virtio-fs never booted
+- [x] x86_64 `microvm` (MMIO vhost-user-fs, memory-backend) and q35 + virtio-fs
+      boot and pass under TCG on QEMU 8.2.2 (GitHub's) and 10.0 (`make
+      native-test-docker PHASES=vm-x64`)
+- [ ] First real CI run with KVM (not pushed yet)
 - [ ] Step 2 (after a release in the field): delete the node engine and the
       fallback modes; `auto` = native or a clear error; drop test-both
+
+## M8: dependency diet — done (249 → 26 runtime crates)
+
+Decision: keep tokio with minimal features (`native/docs/runtime-without-tokio.md`).
+Every replacement is a sans-io protocol core plus a thin tokio adapter, fuzzed
+like the code it replaces. `make -C native deps` enforces the budget (CI job).
+
+- [x] Own exec-only SSH over ring replaces russh (OpenSSH interop both ways)
+- [x] MITM CA via ring; own x509 writer instead of rcgen/x509/asn1/time
+- [x] `gondolin-http` (sans-io HTTP/1.1 + rustls adapter) instead of hyper,
+      reqwest, tower, tokio-rustls; `gondolin_http::url` instead of url/idna
+- [x] Own CBOR/JSON codec + `wire_struct!`/`wire_enum!`/`wire_tagged!`
+      instead of serde/ciborium/serde_json; `gondolin-log` instead of tracing;
+      no proc macros, async-trait, thiserror, futures, lru, indexmap, base64
+- [x] Own tar reader + gzip over miniz_oxide; own system-root loader; libc
+      instead of rustix; tokio trimmed (rt, net, time, sync, io-util)
+- [x] Result: 26 crates on all four targets (tokio/mio/socket2/
+      pin-project-lite/bytes, libc/cfg-if, ring/untrusted/getrandom, rustls/
+      webpki/pki-types/subtle/zeroize/once_cell, webpki-roots, miniz_oxide/
+      adler2, smoltcp + 6 helpers); Cargo.lock 332 → 131 packages; release
+      binary 10.2 → 6.2 MB (aarch64)
+- [x] Post-diet validation: Docker Linux (arm64, amd64 emulated, TCG VMs incl.
+      x86_64 microvm, whole host suite 760/0), Linux VM tests 32/32, 18 fuzz
+      targets × 5 min clean, release dry run incl. krun; fixed native resume
+      from locally built images
+- [ ] Optional: smoltcp's 6 unconditional helpers (trimmed vendor or own TCP)
 
 ## Hardening
 

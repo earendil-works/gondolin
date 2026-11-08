@@ -1,7 +1,9 @@
 # Linux test environment for native/scripts/test-linux-docker.sh: Rust, Node,
 # pnpm and Debian's QEMU (which has vhost-user-fs and memfd guest RAM). No
 # sources are baked in; the repository is bind-mounted read-only at run time.
-FROM debian:trixie
+# BASE=ubuntu:24.04 gives the QEMU of GitHub's ubuntu-latest runners.
+ARG BASE=debian:trixie
+FROM ${BASE}
 
 ARG NODE_MAJOR=24
 ARG PNPM_VERSION=12.8.1
@@ -31,5 +33,7 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-to
 
 # Unprivileged test user: several tests check permission errors, which root
 # bypasses. Volumes are chowned to it by the entry script.
-RUN useradd -m -u 1000 -s /bin/bash tester \
+# (ubuntu images ship a uid 1000 user)
+RUN (userdel -r ubuntu 2>/dev/null || true) \
+  && useradd -m -u 1000 -s /bin/bash tester \
   && echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester

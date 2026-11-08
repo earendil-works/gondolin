@@ -52,15 +52,24 @@ const MAX_FRAME_LEN: usize = 65_550;
 const READ_CHUNK: usize = 256 * 1024;
 
 /// Errors constructing or serving a [`NetStack`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum NetStackError {
-    #[error(
-        "dns mode 'trusted' requires at least one IPv4 resolver (none found); configure dns.trusted_servers or an IPv4 resolver on the host"
-    )]
     NoTrustedResolvers,
-    #[error("invalid network configuration: {0}")]
     InvalidConfig(String),
 }
+
+impl std::fmt::Display for NetStackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetStackError::NoTrustedResolvers => f.write_str(
+                "dns mode 'trusted' requires at least one IPv4 resolver (none found); configure dns.trusted_servers or an IPv4 resolver on the host",
+            ),
+            NetStackError::InvalidConfig(m) => write!(f, "invalid network configuration: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for NetStackError {}
 
 /// Counters for diagnostics and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -224,11 +233,14 @@ impl NetStack {
         let _guard = Guard(shared);
 
         let (rd, wr) = tokio::io::split(stream);
-        tokio::select! {
-            r = reader(shared, rd) => r,
-            r = writer(shared, wr) => r,
-            () = ticker(shared) => Ok(()),
-        }
+        crate::race(
+            reader(shared, rd),
+            crate::race(writer(shared, wr), async {
+                ticker(shared).await;
+                Ok(())
+            }),
+        )
+        .await
     }
 }
 
@@ -532,7 +544,7 @@ impl State {
             > shared.config.limits.tx_queue_max_bytes
         {
             self.tx_dropped += 1;
-            tracing::debug!(len, "tx-drop: qemu queue full");
+            gondolin_log::debug!("tx-drop: qemu queue full len={len}");
             return false;
         }
         true
@@ -575,14 +587,14 @@ impl State {
                 let ip = match wire::parse_ipv4(eth.payload) {
                     Ok(ip) => ip,
                     Err(err) => {
-                        tracing::trace!(?err, "dropping ipv4 packet");
+                        gondolin_log::trace!("dropping ipv4 packet: {err:?}");
                         return;
                     }
                 };
                 match ip.protocol {
                     wire::IP_PROTO_UDP => self.handle_udp(shared, &ip),
                     _ if ip.src != shared.config.guest_ip => {
-                        tracing::trace!(src = %ip.src, "dropping packet from foreign source");
+                        gondolin_log::trace!("dropping packet from foreign source src={}", ip.src);
                     }
                     wire::IP_PROTO_ICMP => self.handle_icmp(shared, &ip),
                     wire::IP_PROTO_TCP => {
@@ -645,13 +657,13 @@ impl State {
         reply[3] = 0;
         let ck = wire::checksum(&reply);
         reply[2..4].copy_from_slice(&ck.to_be_bytes());
-        tracing::trace!(
-            src = %ip.src,
-            dst = %ip.dst,
-            id = u16::from_be_bytes([data[4], data[5]]),
-            seq = u16::from_be_bytes([data[6], data[7]]),
-            size = data.len(),
-            "icmp echo"
+        gondolin_log::trace!(
+            "icmp echo src={} dst={} id={} seq={} size={}",
+            ip.src,
+            ip.dst,
+            u16::from_be_bytes([data[4], data[5]]),
+            u16::from_be_bytes([data[6], data[7]]),
+            data.len()
         );
         let mac = self.device.guest_mac;
         self.emit_ipv4(shared, mac, ip.dst, ip.src, wire::IP_PROTO_ICMP, &reply);
@@ -666,10 +678,10 @@ impl State {
             && udp.dst_port == crate::dhcp::DHCP_SERVER_PORT
         {
             if let Some(reply) = crate::dhcp::handle(udp.payload, config, &shared.dhcp_dns) {
-                tracing::debug!(
-                    kind = if reply.msg_type == crate::dhcp::DHCP_OFFER { "OFFER" } else { "ACK" },
-                    ip = %config.guest_ip,
-                    "dhcp"
+                gondolin_log::debug!(
+                    "dhcp kind={} ip={}",
+                    if reply.msg_type == crate::dhcp::DHCP_OFFER { "OFFER" } else { "ACK" },
+                    config.guest_ip
                 );
                 let dgram = wire::udp_datagram(
                     config.gateway_ip,
@@ -693,7 +705,13 @@ impl State {
             return;
         }
         if udp.dst_port != 53 {
-            tracing::debug!(src = %ip.src, sport = udp.src_port, dst = %ip.dst, dport = udp.dst_port, "udp blocked");
+            gondolin_log::debug!(
+                "udp blocked src={} sport={} dst={} dport={}",
+                ip.src,
+                udp.src_port,
+                ip.dst,
+                udp.dst_port
+            );
             return;
         }
         let guest = SocketAddrV4::new(ip.src, udp.src_port);
@@ -702,7 +720,9 @@ impl State {
             DnsMode::Synthetic => self.synthetic_dns(shared, guest, target, udp.payload),
             DnsMode::Trusted => {
                 if dns::parse_query(udp.payload).is_none() {
-                    tracing::debug!(%guest, %target, "dns blocked (non-dns payload)");
+                    gondolin_log::debug!(
+                        "dns blocked (non-dns payload) guest={guest} target={target}"
+                    );
                     return;
                 }
                 self.forward_dns(shared, guest, target, udp.payload);
@@ -737,7 +757,10 @@ impl State {
                 ttl_seconds: dns_config.synthetic_ttl_seconds,
             },
         );
-        tracing::trace!(%guest, %target, name = %query.question.name, "dns synthetic");
+        gondolin_log::trace!(
+            "dns synthetic guest={guest} target={target} name={}",
+            query.question.name
+        );
         self.udp_to_guest(shared, target, guest, &response);
     }
 
@@ -768,7 +791,7 @@ impl State {
                 let oldest = self.udp.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| *k);
                 match oldest {
                     Some(k) => {
-                        tracing::debug!(guest = %k.0, target = %k.1, "udp session evicted");
+                        gondolin_log::debug!("udp session evicted guest={} target={}", k.0, k.1);
                         self.udp.remove(&k);
                     }
                     None => break,
@@ -786,7 +809,7 @@ impl State {
             let (sender, socket) = match open_udp(upstream) {
                 Ok(pair) => pair,
                 Err(err) => {
-                    tracing::debug!(%upstream, %err, "dns upstream socket failed");
+                    gondolin_log::debug!("dns upstream socket failed upstream={upstream}: {err}");
                     return;
                 }
             };
@@ -800,13 +823,15 @@ impl State {
                 socket,
                 Duration::from_millis(limits.udp_session_idle_timeout_ms.max(1)),
             ));
-            tracing::trace!(%guest, %target, %upstream, "dns session opened");
+            gondolin_log::trace!(
+                "dns session opened guest={guest} target={target} upstream={upstream}"
+            );
             self.udp.insert(key, UdpSession { sender, generation, last_used: now, task });
         }
         let session = self.udp.get_mut(&key).expect("session inserted");
         session.last_used = now;
         if let Err(err) = session.sender.send(payload) {
-            tracing::debug!(%err, "dns send failed");
+            gondolin_log::debug!("dns send failed: {err}");
         }
     }
 
@@ -855,7 +880,7 @@ impl State {
     fn listen(&mut self, shared: &Shared, tuple: Tuple) -> Option<FlowKey> {
         let limits = &shared.config.limits;
         if self.entries.len() >= limits.max_tcp_flows {
-            tracing::debug!(guest = %tuple.0, dst = %tuple.1, "tcp flow limit reached");
+            gondolin_log::debug!("tcp flow limit reached guest={} dst={}", tuple.0, tuple.1);
             return None;
         }
         let mut socket = tcp::Socket::new(
@@ -1003,7 +1028,7 @@ impl State {
                         dst: SocketAddr::V4(dst),
                         synthetic_hostname,
                     };
-                    tracing::debug!(id, %guest, %dst, "tcp flow established");
+                    gondolin_log::debug!("tcp flow established id={id} guest={guest} dst={dst}");
                     spawn.push(flow::new_flow(shared.clone(), self.session, key, meta));
                 }
             },
@@ -1042,7 +1067,7 @@ impl State {
             } else if expired && !entry.push {
                 entry.push = true;
                 self.read_hold_timeouts += 1;
-                tracing::debug!(key, "tcp read released without push");
+                gondolin_log::debug!("tcp read released without push key={key}");
             }
             if entry.push {
                 entry.wake_reader();
@@ -1172,13 +1197,13 @@ async fn udp_receiver(
                 if let Some(s) = st.udp.get_mut(&key) {
                     s.last_used = Instant::now();
                 }
-                tracing::trace!(guest = %key.0, target = %key.1, n, "dns reply");
+                gondolin_log::trace!("dns reply guest={} target={} n={n}", key.0, key.1);
                 // Reply as if it came from the address the guest targeted.
                 st.udp_to_guest(&shared, key.1, key.0, &buf[..n]);
                 st.after_change(&shared);
             }
             Ok(Err(err)) => {
-                tracing::debug!(%err, "dns upstream socket error");
+                gondolin_log::debug!("dns upstream socket error: {err}");
                 let removed = st.udp.remove(&key);
                 drop(st);
                 drop(removed);
@@ -1187,7 +1212,7 @@ async fn udp_receiver(
             Err(_) => {
                 let idle_for = st.udp.get(&key).map(|s| s.last_used.elapsed()).unwrap_or(idle);
                 if idle_for >= idle {
-                    tracing::trace!(guest = %key.0, target = %key.1, "udp session idle");
+                    gondolin_log::trace!("udp session idle guest={} target={}", key.0, key.1);
                     let removed = st.udp.remove(&key);
                     drop(st);
                     drop(removed);
@@ -1210,7 +1235,10 @@ fn spawn_flows(shared: &Arc<Shared>, flows: Vec<TcpFlow>) {
             // aborted.
             let handled = CatchUnwind(Box::pin(handler.handle_tcp(flow))).await;
             if handled.is_err() {
-                tracing::error!(target: "gondolin::netstack", flow = id, "flow handler panicked; connection reset");
+                gondolin_log::error!(
+                    target: "gondolin::netstack",
+                    "flow handler panicked; connection reset flow={id}"
+                );
                 control.abort();
             }
         });
@@ -1235,7 +1263,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 }
 
 async fn reader<R: AsyncRead>(shared: &Arc<Shared>, rd: R) -> io::Result<()> {
-    tokio::pin!(rd);
+    let mut rd = std::pin::pin!(rd);
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
     let max_queued = shared.config.limits.tx_queue_max_bytes;
     loop {
@@ -1244,7 +1272,7 @@ async fn reader<R: AsyncRead>(shared: &Arc<Shared>, rd: R) -> io::Result<()> {
         // that sends without receiving must be throttled here.
         loop {
             let drained = shared.tx_drained.notified();
-            tokio::pin!(drained);
+            let mut drained = std::pin::pin!(drained);
             drained.as_mut().enable();
             if shared.lock().device.queued() <= max_queued {
                 break;
@@ -1291,7 +1319,7 @@ async fn reader<R: AsyncRead>(shared: &Arc<Shared>, rd: R) -> io::Result<()> {
 }
 
 async fn writer<W: AsyncWrite>(shared: &Arc<Shared>, wr: W) -> io::Result<()> {
-    tokio::pin!(wr);
+    let mut wr = std::pin::pin!(wr);
     loop {
         let chunk = {
             let mut st = shared.lock();
@@ -1328,10 +1356,8 @@ async fn ticker(shared: &Arc<Shared>) {
         };
         match deadline {
             Some(deadline) => {
-                tokio::select! {
-                    () = shared.poll_notify.notified() => {}
-                    () = tokio::time::sleep_until(deadline.into()) => {}
-                }
+                let _ =
+                    tokio::time::timeout_at(deadline.into(), shared.poll_notify.notified()).await;
             }
             None => shared.poll_notify.notified().await,
         }

@@ -261,7 +261,7 @@ impl FileSystem for VirtioFs {
 
     fn release(&self, _node: u64, fh: u64) {
         if let Err(e) = self.run("release", self.core.release(fh)) {
-            tracing::debug!("virtiofs: release failed: errno {e}");
+            gondolin_log::debug!("virtiofs: release failed: errno {e}");
         }
     }
 

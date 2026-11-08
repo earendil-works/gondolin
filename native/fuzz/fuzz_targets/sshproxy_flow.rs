@@ -1,5 +1,5 @@
 //! sshproxy: arbitrary guest bytes on an SSH-classified flow (banner, packet
-//! framing, key exchange messages of the guest-facing russh server). The
+//! framing, key exchange messages of the guest-facing SSH server). The
 //! upstream can never be reached (agent socket missing, no host verifier).
 #![no_main]
 

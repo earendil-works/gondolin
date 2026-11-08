@@ -11,6 +11,8 @@
 
 use std::io::{IsTerminal, Write};
 
+use gondolin_wire::ToValue;
+
 use crate::{Arch, Assets, ProgressEvent, ResolvedImage};
 
 const USAGE: &str = "usage:
@@ -99,17 +101,11 @@ fn progress_printer() -> impl Fn(ProgressEvent) + Send + Sync {
 
 fn print_image(image: &ResolvedImage, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(image).unwrap_or_default());
+        println!("{}", gondolin_wire::json::to_string_pretty(&image.to_value()));
         return;
     }
     println!("selector: {}", image.selector);
-    println!(
-        "source:   {}",
-        serde_json::to_value(image.source)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default()
-    );
+    println!("source:   {}", image.source.as_str());
     if let Some(id) = &image.build_id {
         println!("build id: {id}");
     }
@@ -121,13 +117,7 @@ fn print_image(image: &ResolvedImage, json: bool) {
     println!("initrd:   {}", image.initrd.display());
     println!("rootfs:   {}", image.rootfs.display());
     if let Some(mode) = image.rootfs_mode {
-        println!(
-            "rootfs mode: {}",
-            serde_json::to_value(mode)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_default()
-        );
+        println!("rootfs mode: {}", mode.as_str());
     }
 }
 
@@ -166,7 +156,7 @@ pub async fn run(args: &[String]) -> i32 {
         "list" => {
             let refs = assets.store().list_refs();
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&refs).unwrap_or_default());
+                println!("{}", gondolin_wire::json::to_string_pretty(&refs.to_value()));
             } else {
                 for r in refs {
                     let targets: Vec<String> =

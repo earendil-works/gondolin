@@ -1,8 +1,7 @@
 //! Errors that turn into guest-visible HTTP error responses.
 
 /// A request rejected with a specific status (`HttpRequestBlockedError`).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blocked {
     pub status: u16,
     pub status_text: String,
@@ -28,19 +27,42 @@ impl Blocked {
     }
 }
 
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Blocked {}
+
 /// Outcome of a failed request pipeline step.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum PipelineError {
     /// rejected with a status and a detail message
-    #[error(transparent)]
-    Blocked(#[from] Blocked),
+    Blocked(Blocked),
     /// error response without detail (`respondWithError(status, text)`)
-    #[error("{status} {status_text}")]
     Plain { status: u16, status_text: &'static str },
     /// unexpected failure (upstream errors, hook failures): `502 Bad Gateway`
-    #[error("{0}")]
     Other(String),
 }
+
+impl From<Blocked> for PipelineError {
+    fn from(b: Blocked) -> Self {
+        PipelineError::Blocked(b)
+    }
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::Blocked(b) => b.fmt(f),
+            PipelineError::Plain { status, status_text } => write!(f, "{status} {status_text}"),
+            PipelineError::Other(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
 
 impl PipelineError {
     pub fn plain(status: u16, status_text: &'static str) -> Self {

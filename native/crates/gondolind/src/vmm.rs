@@ -1,13 +1,13 @@
 //! The QEMU child process: spawning, log forwarding, termination
 //! (`terminateChild` in `host/src/sandbox/child-process.ts`).
 
-use std::process::Stdio;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Delay between SIGTERM and SIGKILL when stopping QEMU.
 pub const SIGKILL_AFTER: Duration = Duration::from_millis(3000);
@@ -40,12 +40,34 @@ pub enum VmmEvent {
 /// Handle to a running VMM process.
 pub struct VmmProcess {
     pub pid: u32,
-    stop_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+    stop_tx: Option<oneshot::Sender<bool>>,
+}
+
+/// Signals a child that may have exited: never after the waiter thread saw
+/// the exit (the zombie is reaped only after `exited` is set under the lock,
+/// so the pid cannot be recycled while we hold it).
+#[derive(Clone)]
+struct Signaller {
+    pid: i32,
+    exited: Arc<Mutex<bool>>,
+}
+
+impl Signaller {
+    fn kill(&self, signal: i32) {
+        let exited = self.exited.lock().unwrap();
+        if !*exited {
+            // SAFETY: kill(2) on our own, not yet reaped child.
+            unsafe {
+                libc::kill(self.pid, signal);
+            }
+        }
+    }
 }
 
 impl VmmProcess {
     /// Spawns `program args`; events are delivered through `events` as
-    /// `(generation, event)`.
+    /// `(generation, event)`. The child is watched by std threads (one waiter,
+    /// one reader per output pipe).
     pub fn spawn(
         program: &str,
         args: &[String],
@@ -56,6 +78,7 @@ impl VmmProcess {
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::process::CommandExt;
             // SAFETY: prctl is async-signal-safe; kill QEMU if the daemon dies.
             unsafe {
                 cmd.pre_exec(|| {
@@ -65,60 +88,75 @@ impl VmmProcess {
             }
         }
         let mut child = cmd.spawn()?;
-        let pid = child.id().unwrap_or(0);
+        let pid = child.id();
         CURRENT_PID.store(pid as i32, Ordering::SeqCst);
         // macOS has no PR_SET_PDEATHSIG: a helper kills QEMU if we die
         let watchdog = spawn_watchdog(pid);
 
+        // log readers: one thread per pipe; each reports when it is done
         let mut readers = Vec::new();
-        for (stderr, pipe) in [
-            (
-                false,
-                child
-                    .stdout
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-            ),
-            (
-                true,
-                child
-                    .stderr
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-            ),
-        ] {
+        let pipes: [(bool, Option<Box<dyn Read + Send>>); 2] = [
+            (false, child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>)),
+            (true, child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)),
+        ];
+        for (stderr, pipe) in pipes {
             let Some(mut pipe) = pipe else { continue };
             let events = events.clone();
-            readers.push(tokio::spawn(async move {
+            let (done_tx, done_rx) = oneshot::channel::<()>();
+            readers.push(done_rx);
+            std::thread::Builder::new().name("vmm-log".into()).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
-                    match pipe.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
+                    match pipe.read(&mut buf) {
+                        Ok(0) => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
                         Ok(n) => {
                             let ev = VmmEvent::Log { stderr, chunk: buf[..n].to_vec() };
-                            if events.send((generation, ev)).await.is_err() {
-                                return;
+                            if events.blocking_send((generation, ev)).is_err() {
+                                break;
                             }
                         }
                     }
                 }
-            }));
+                let _ = done_tx.send(());
+            })?;
         }
 
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<bool>();
+        // waiter: observes the exit without reaping (WNOWAIT), marks it under
+        // the signaller's lock, then reaps
+        let signaller = Signaller { pid: pid as i32, exited: Arc::new(Mutex::new(false)) };
+        let (exit_tx, exit_rx) = oneshot::channel::<Option<std::process::ExitStatus>>();
+        {
+            let signaller = signaller.clone();
+            std::thread::Builder::new().name("vmm-wait".into()).spawn(move || {
+                wait_exit_nowait(pid as i32);
+                let status = {
+                    let mut exited = signaller.exited.lock().unwrap();
+                    *exited = true;
+                    child.wait().ok()
+                };
+                let _ = exit_tx.send(status);
+            })?;
+        }
+
+        let (stop_tx, stop_rx) = oneshot::channel::<bool>();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                status = child.wait() => status.ok(),
-                req = &mut stop_rx => {
+            let mut exit_rx = exit_rx;
+            let status = match crate::util::select2(&mut exit_rx, stop_rx).await {
+                crate::util::Either::Left(status) => status.ok().flatten(),
+                crate::util::Either::Right(req) => {
                     let force = req.unwrap_or(true);
-                    terminate(&mut child, pid, force).await
+                    terminate(&signaller, &mut exit_rx, force).await
                 }
             };
             let _ = CURRENT_PID.compare_exchange(pid as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
             if let Some(mut w) = watchdog {
                 // closing its stdin after QEMU is gone just lets it exit
                 drop(w.stdin.take());
-                let _ = tokio::time::timeout(Duration::from_millis(500), w.wait()).await;
+                std::thread::spawn(move || {
+                    let _ = w.wait();
+                });
             }
             // let the log readers drain so exit diagnostics see the last lines
             let drain = async {
@@ -146,8 +184,22 @@ impl VmmProcess {
     }
 }
 
+/// Blocks until child `pid` exited, leaving it unreaped.
+fn wait_exit_nowait(pid: i32) {
+    loop {
+        // SAFETY: waitid on our own child with a zeroed siginfo.
+        let r = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT)
+        };
+        if r == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
 /// Starts `gondolind --vmm-watchdog <pid>` with a pipe on its stdin (macOS).
-fn spawn_watchdog(pid: u32) -> Option<tokio::process::Child> {
+fn spawn_watchdog(pid: u32) -> Option<std::process::Child> {
     if !cfg!(target_os = "macos") || cfg!(test) || pid == 0 {
         return None;
     }
@@ -214,23 +266,17 @@ pub fn run_watchdog(pid: i32) -> i32 {
 }
 
 async fn terminate(
-    child: &mut tokio::process::Child,
-    pid: u32,
+    signaller: &Signaller,
+    exit_rx: &mut oneshot::Receiver<Option<std::process::ExitStatus>>,
     force: bool,
 ) -> Option<std::process::ExitStatus> {
-    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-    // SAFETY: kill(2) on our own child.
-    unsafe {
-        libc::kill(pid as i32, signal);
+    signaller.kill(if force { libc::SIGKILL } else { libc::SIGTERM });
+    if let Ok(status) = tokio::time::timeout(SIGKILL_AFTER, &mut *exit_rx).await {
+        return status.ok().flatten();
     }
-    match tokio::time::timeout(SIGKILL_AFTER, child.wait()).await {
-        Ok(status) => return status.ok(),
-        Err(_) => {
-            let _ = child.start_kill();
-        }
-    }
-    match tokio::time::timeout(CLOSE_TIMEOUT.saturating_sub(SIGKILL_AFTER), child.wait()).await {
-        Ok(status) => status.ok(),
+    signaller.kill(libc::SIGKILL);
+    match tokio::time::timeout(CLOSE_TIMEOUT.saturating_sub(SIGKILL_AFTER), exit_rx).await {
+        Ok(status) => status.ok().flatten(),
         Err(_) => None,
     }
 }

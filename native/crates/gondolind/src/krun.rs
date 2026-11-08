@@ -5,37 +5,32 @@
 use std::path::{Path, PathBuf};
 
 use gondolin_proto::session::VmConfig;
-use serde::Serialize;
 
 use crate::qemu::ChardevPaths;
 
 /// Default kernel cmdline of the krun backend.
 pub const DEFAULT_APPEND: &str = "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init";
 
-/// Runner configuration (`KrunRunnerConfig`).
-#[derive(Debug, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RunnerConfig {
-    pub kernel_path: String,
-    pub initrd_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub root_disk_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub root_disk_format: Option<String>,
-    pub root_disk_read_only: bool,
-    #[serde(rename = "memoryMiB")]
-    pub memory_mib: u64,
-    pub cpus: u32,
-    pub virtio_socket_path: String,
-    pub virtio_fs_socket_path: String,
-    pub virtio_ssh_socket_path: String,
-    pub virtio_ingress_socket_path: String,
-    pub append: String,
-    pub console: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub net_socket_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub net_mac: Option<String>,
+gondolin_wire::wire_encode! {
+    /// Runner configuration (`KrunRunnerConfig`), camelCase JSON.
+    #[derive(Debug, PartialEq)]
+    pub struct RunnerConfig {
+        pub kernel_path: String as "kernelPath",
+        pub initrd_path: String as "initrdPath",
+        pub root_disk_path: Option<String> as "rootDiskPath",
+        pub root_disk_format: Option<String> as "rootDiskFormat",
+        pub root_disk_read_only: bool as "rootDiskReadOnly",
+        pub memory_mib: u64 as "memoryMiB",
+        pub cpus: u32,
+        pub virtio_socket_path: String as "virtioSocketPath",
+        pub virtio_fs_socket_path: String as "virtioFsSocketPath",
+        pub virtio_ssh_socket_path: String as "virtioSshSocketPath",
+        pub virtio_ingress_socket_path: String as "virtioIngressSocketPath",
+        pub append: String,
+        pub console: String,
+        pub net_socket_path: Option<String> as "netSocketPath",
+        pub net_mac: Option<String> as "netMac",
+    }
 }
 
 /// `parseMemoryToMiB`: qemu-style sizes (`512`, `512M`, `1G`, ...) in MiB.

@@ -3,12 +3,10 @@
 //! (ports of `createHttpHooks().isIpAllowed`, `ensureRequestAllowed`,
 //! `resolveHostname` and the default internal-range policy).
 
+use gondolin_proto::net::{HookRegistrations, NetPolicy};
 use std::io;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
-
-use async_trait::async_trait;
-use gondolin_proto::net::{HookRegistrations, NetPolicy};
 
 use crate::error::{Blocked, PipelineError};
 use crate::hooks::{HookBackend, HookError, IpAllowInfo, RequestHead};
@@ -16,26 +14,26 @@ use crate::ip::{is_internal_ip, parse_ip};
 use crate::patterns::matches_any_host;
 
 /// Host name resolution (`dns.lookup(host, { all: true, verbatim: true })`).
-#[async_trait]
 pub trait Resolver: Send + Sync + 'static {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>>;
+    fn lookup<'a>(&'a self, host: &'a str) -> crate::BoxFuture<'a, io::Result<Vec<IpAddr>>>;
 }
 
 /// Resolves with the system resolver (`getaddrinfo`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemResolver;
 
-#[async_trait]
 impl Resolver for SystemResolver {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        let addrs = tokio::net::lookup_host((host, 0)).await?;
-        let mut out: Vec<IpAddr> = Vec::new();
-        for addr in addrs {
-            if !out.contains(&addr.ip()) {
-                out.push(addr.ip());
+    fn lookup<'a>(&'a self, host: &'a str) -> crate::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+        Box::pin(async move {
+            let addrs = tokio::net::lookup_host((host, 0)).await?;
+            let mut out: Vec<IpAddr> = Vec::new();
+            for addr in addrs {
+                if !out.contains(&addr.ip()) {
+                    out.push(addr.ip());
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 }
 
@@ -64,24 +62,25 @@ impl<R: Resolver> CachingResolver<R> {
     }
 }
 
-#[async_trait]
 impl<R: Resolver> Resolver for CachingResolver<R> {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        let now = std::time::Instant::now();
-        if let Some((at, ips)) = self.entries.lock().unwrap().get(host)
-            && now.duration_since(*at) < self.ttl
-        {
-            return Ok(ips.clone());
-        }
-        let ips = self.inner.lookup(host).await?;
-        if !ips.is_empty() {
-            let mut entries = self.entries.lock().unwrap();
-            if entries.len() >= RESOLVER_CACHE_MAX {
-                entries.clear();
+    fn lookup<'a>(&'a self, host: &'a str) -> crate::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+        Box::pin(async move {
+            let now = std::time::Instant::now();
+            if let Some((at, ips)) = self.entries.lock().unwrap().get(host)
+                && now.duration_since(*at) < self.ttl
+            {
+                return Ok(ips.clone());
             }
-            entries.insert(host.to_string(), (std::time::Instant::now(), ips.clone()));
-        }
-        Ok(ips)
+            let ips = self.inner.lookup(host).await?;
+            if !ips.is_empty() {
+                let mut entries = self.entries.lock().unwrap();
+                if entries.len() >= RESOLVER_CACHE_MAX {
+                    entries.clear();
+                }
+                entries.insert(host.to_string(), (std::time::Instant::now(), ips.clone()));
+            }
+            Ok(ips)
+        })
     }
 }
 
@@ -188,7 +187,7 @@ impl PolicyEngine {
             Ok(ips) if !ips.is_empty() => Ok(ips),
             Ok(_) => Err(dns_failed(hostname, "no addresses")),
             Err(err) => {
-                tracing::debug!(target: "gondolin::egress", "http dns lookup failed {hostname} ({err})");
+                gondolin_log::debug!(target: "gondolin::egress", "http dns lookup failed {hostname} ({err})");
                 Err(dns_failed(hostname, lookup_code(&err)))
             }
         }
@@ -246,7 +245,7 @@ impl PolicyEngine {
             }
         }
         let is_default = self.is_default_ip_policy();
-        tracing::debug!(
+        gondolin_log::debug!(
             target: "gondolin::egress",
             "http ip policy blocked {hostname}{}",
             if is_default { " by default internal-range policy" } else { "" }
@@ -283,32 +282,33 @@ mod tests {
 
     struct Static(Vec<IpAddr>);
 
-    #[async_trait]
     impl Resolver for Static {
-        async fn lookup(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
-            Ok(self.0.clone())
+        fn lookup<'a>(&'a self, _host: &'a str) -> crate::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+            Box::pin(async move { Ok(self.0.clone()) })
         }
     }
 
     /// Counts lookups; fails for `fail.test`.
     struct Counting(std::sync::atomic::AtomicUsize);
 
-    #[async_trait]
     impl Resolver for Counting {
-        async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u8;
-            if host == "fail.test" {
-                return Err(io::Error::other("nope"));
-            }
-            Ok(vec![IpAddr::from([192, 0, 2, n])])
+        fn lookup<'a>(&'a self, host: &'a str) -> crate::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+            Box::pin(async move {
+                let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u8;
+                if host == "fail.test" {
+                    return Err(io::Error::other("nope"));
+                }
+                Ok(vec![IpAddr::from([192, 0, 2, n])])
+            })
         }
     }
 
     #[tokio::test]
     async fn caching_resolver_reuses_answers_until_ttl() {
+        // a TTL no slow (emulated) test run reaches
         let r = CachingResolver::with_ttl(
             Counting(Default::default()),
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(3600),
         );
         let first = r.lookup("a.test").await.unwrap();
         assert_eq!(r.lookup("a.test").await.unwrap(), first);
@@ -317,7 +317,14 @@ mod tests {
         assert!(r.lookup("fail.test").await.is_err());
         assert!(r.lookup("fail.test").await.is_err());
         assert_eq!(r.inner.0.load(std::sync::atomic::Ordering::SeqCst), 4);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // expired answers are looked up again
+        let r = CachingResolver::with_ttl(
+            Counting(Default::default()),
+            std::time::Duration::from_millis(10),
+        );
+        let first = r.lookup("a.test").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_ne!(r.lookup("a.test").await.unwrap(), first);
     }
 

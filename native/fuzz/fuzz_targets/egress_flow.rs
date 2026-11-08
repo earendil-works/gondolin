@@ -4,12 +4,6 @@
 //! accept). Upstream resolution always fails, so nothing leaves the process.
 #![no_main]
 
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
-
-use async_trait::async_trait;
 use gondolin_egress::{
     BodyChoice, BodyHandle, Egress, HookBackend, HookError, RequestDecision, RequestHead, Resolver,
 };
@@ -19,6 +13,10 @@ use gondolin_proto::net::{
     SecretRule, SshEgressConfig,
 };
 use libfuzzer_sys::fuzz_target;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Raw input: 4 control bytes (port selector, flags, pull count, chunk size)
@@ -47,10 +45,12 @@ impl Input {
 
 struct NoDns;
 
-#[async_trait]
 impl Resolver for NoDns {
-    async fn lookup(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
-        Err(io::Error::new(io::ErrorKind::NotFound, "fuzz"))
+    fn lookup<'a>(
+        &'a self,
+        _host: &'a str,
+    ) -> gondolin_egress::BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+        Box::pin(async move { Err(io::Error::new(io::ErrorKind::NotFound, "fuzz")) })
     }
 }
 
@@ -59,7 +59,6 @@ struct Hooks {
     replace_body: bool,
 }
 
-#[async_trait]
 impl HookBackend for Hooks {
     fn registrations(&self) -> HookRegistrations {
         HookRegistrations {
@@ -70,27 +69,29 @@ impl HookBackend for Hooks {
         }
     }
 
-    async fn on_request(
-        &self,
+    fn on_request<'a>(
+        &'a self,
         request: RequestHead,
         body: Option<BodyHandle>,
-    ) -> Result<RequestDecision, HookError> {
-        if let Some(body) = body {
-            for i in 0..self.pull % 8 {
-                match body.pull_at(u64::from(i) * 7, 1 + usize::from(self.pull)).await {
-                    Ok(Some(_)) => {}
-                    _ => break,
+    ) -> gondolin_egress::BoxFuture<'a, Result<RequestDecision, HookError>> {
+        Box::pin(async move {
+            if let Some(body) = body {
+                for i in 0..self.pull % 8 {
+                    match body.pull_at(u64::from(i) * 7, 1 + usize::from(self.pull)).await {
+                        Ok(Some(_)) => {}
+                        _ => break,
+                    }
+                    let _ = body.pull(usize::from(self.pull) + 1).await;
                 }
-                let _ = body.pull(usize::from(self.pull) + 1).await;
             }
-        }
-        if self.replace_body {
-            return Ok(RequestDecision::Request {
-                head: request,
-                body: BodyChoice::Body(gondolin_egress::full_body("replaced")),
-            });
-        }
-        Ok(RequestDecision::Continue)
+            if self.replace_body {
+                return Ok(RequestDecision::Request {
+                    head: request,
+                    body: BodyChoice::Body(gondolin_egress::full_body("replaced")),
+                });
+            }
+            Ok(RequestDecision::Continue)
+        })
     }
 }
 

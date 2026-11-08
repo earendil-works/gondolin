@@ -4,8 +4,7 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use gondolin_wire::{ToValue, Value, wire_struct};
 
 use crate::AssetsError;
 use crate::image_ref::{Arch, ImageRef, normalize_build_id};
@@ -16,21 +15,21 @@ pub const REGISTRY_CACHE_FILE: &str = "builtin-image-registry-cache.json";
 const SCHEMA: u64 = 1;
 const LABEL: &str = "builtin image registry";
 
-/// Downloadable image archive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageSource {
-    /// absolute archive URL
-    pub url: String,
-    /// expected archive `sha256` (lowercase hex)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    /// architecture of the archived image
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arch: Option<Arch>,
+wire_struct! {
+    /// Downloadable image archive.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ImageSource {
+        /// absolute archive URL
+        pub url: String,
+        /// expected archive `sha256` (lowercase hex)
+        pub sha256: Option<String>,
+        /// architecture of the archived image
+        pub arch: Option<Arch>,
+    }
 }
 
 /// Parsed registry. Maps keep the document's order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registry {
     pub schema: u64,
     /// canonical refs → arch → build id
@@ -39,11 +38,20 @@ pub struct Registry {
     pub builds: indexed::Map<String, ImageSource>,
 }
 
-/// Small insertion-ordered map (serde as a JSON object) so the cache file
-/// keeps the registry's order like the node engine's `JSON.stringify`.
+impl ToValue for Registry {
+    fn to_value(&self) -> Value {
+        let mut out = Value::map();
+        out.insert("schema", self.schema.to_value());
+        out.insert("refs", self.refs.to_value());
+        out.insert("builds", self.builds.to_value());
+        out
+    }
+}
+
+/// Small insertion-ordered map (a JSON object) so the cache file keeps the
+/// registry's order like the node engine's `JSON.stringify`.
 pub mod indexed {
-    use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
-    use serde::ser::{Serialize, SerializeMap, Serializer};
+    use gondolin_wire::{ToValue, Value};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Map<K, V>(pub Vec<(K, V)>);
@@ -80,42 +88,25 @@ pub mod indexed {
         }
     }
 
-    impl<K: Serialize, V: Serialize> Serialize for Map<K, V> {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let mut map = s.serialize_map(Some(self.0.len()))?;
-            for (k, v) in &self.0 {
-                map.serialize_entry(k, v)?;
-            }
-            map.end()
-        }
-    }
-
-    impl<'de, K: Deserialize<'de> + PartialEq, V: Deserialize<'de>> Deserialize<'de> for Map<K, V> {
-        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            struct V2<K, V>(std::marker::PhantomData<(K, V)>);
-            impl<'de, K: Deserialize<'de> + PartialEq, V: Deserialize<'de>> Visitor<'de> for V2<K, V> {
-                type Value = Map<K, V>;
-                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    f.write_str("a map")
-                }
-                fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
-                    let mut out = Map::default();
-                    while let Some((k, v)) = a.next_entry()? {
-                        out.insert(k, v);
-                    }
-                    Ok(out)
-                }
-            }
-            d.deserialize_map(V2(std::marker::PhantomData))
+    /// Keys encode to text (`String`, `Arch`).
+    impl<K: ToValue, V: ToValue> ToValue for Map<K, V> {
+        fn to_value(&self) -> Value {
+            Value::Map(self.0.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect())
         }
     }
 }
 
-fn expect_object<'a>(
-    value: &'a Value,
-    message: &str,
-) -> Result<&'a Map<String, Value>, AssetsError> {
-    value.as_object().ok_or_else(|| AssetsError::invalid(message))
+/// The entries of an object with text keys (non-text keys can't occur in JSON).
+fn entries(value: &Value) -> impl Iterator<Item = (&String, &Value)> {
+    value.as_map().into_iter().flatten().filter_map(|(k, v)| match k {
+        Value::Text(k) => Some((k, v)),
+        _ => None,
+    })
+}
+
+/// `value` when it is an object.
+fn expect_object<'a>(value: &'a Value, message: &str) -> Result<&'a Value, AssetsError> {
+    value.as_map().map(|_| value).ok_or_else(|| AssetsError::invalid(message))
 }
 
 fn normalize_sha256(value: &Value, label: &str) -> Result<String, AssetsError> {
@@ -130,7 +121,7 @@ fn normalize_sha256(value: &Value, label: &str) -> Result<String, AssetsError> {
 fn parse_source(
     value: &Value,
     where_: &str,
-    base: &reqwest::Url,
+    base: &gondolin_http::url::Url,
 ) -> Result<ImageSource, AssetsError> {
     let rec = expect_object(value, &format!("invalid {where_}: expected object"))?;
     let url = match rec.get("url").and_then(Value::as_str) {
@@ -146,7 +137,7 @@ fn parse_source(
     };
     let arch = match rec.get("arch") {
         None => None,
-        Some(Value::String(s)) => Some(
+        Some(Value::Text(s)) => Some(
             Arch::normalize(s)
                 .ok_or_else(|| AssetsError::invalid(format!("invalid {where_}.arch: {s}")))?,
         ),
@@ -162,10 +153,10 @@ impl Registry {
     /// (relative build URLs resolve against it).
     pub fn parse(raw: &Value, source_url: &str) -> Result<Registry, AssetsError> {
         let rec = expect_object(raw, &format!("invalid {LABEL}: expected object"))?;
-        if rec.get("schema").and_then(Value::as_f64) != Some(SCHEMA as f64) {
+        if rec.get("schema").and_then(Value::as_float) != Some(SCHEMA as f64) {
             return Err(AssetsError::invalid(format!("invalid {LABEL} schema: expected {SCHEMA}")));
         }
-        let base = reqwest::Url::parse(source_url)
+        let base = gondolin_http::url::Url::parse(source_url)
             .map_err(|_| AssetsError::invalid(format!("invalid registry url: {source_url}")))?;
 
         let raw_builds = expect_object(
@@ -173,7 +164,7 @@ impl Registry {
             &format!("invalid {LABEL}: builds must be an object"),
         )?;
         let mut builds = indexed::Map::default();
-        for (build_id, value) in raw_builds {
+        for (build_id, value) in entries(raw_builds) {
             let id = normalize_build_id(build_id)?;
             builds.insert(id, parse_source(value, &format!("builds['{build_id}']"), &base)?);
         }
@@ -183,7 +174,7 @@ impl Registry {
             &format!("invalid {LABEL}: refs must be an object"),
         )?;
         let mut refs = indexed::Map::default();
-        for (reference, arch_map) in raw_refs {
+        for (reference, arch_map) in entries(raw_refs) {
             let canonical = ImageRef::parse(reference)?.canonical();
             if &canonical != reference {
                 return Err(AssetsError::invalid(format!("invalid {LABEL} ref key: {reference}")));
@@ -193,7 +184,7 @@ impl Registry {
                 &format!("invalid registry ref '{reference}': expected object"),
             )?;
             let mut mapped = indexed::Map::default();
-            for (raw_key, value) in entries {
+            for (raw_key, value) in crate::registry::entries(entries) {
                 let where_ = format!("refs['{reference}']['{raw_key}']");
                 let arch = Arch::normalize(raw_key).ok_or_else(|| {
                     AssetsError::invalid(format!(
@@ -273,19 +264,30 @@ pub(crate) fn describe_available(entries: &indexed::Map<Arch, String>) -> String
 }
 
 /// On-disk cache entry (`{ url, etag?, registry }`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegistryCache {
     pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     pub registry: Registry,
+}
+
+impl ToValue for RegistryCache {
+    fn to_value(&self) -> Value {
+        let mut out = Value::map();
+        out.insert("url", self.url.to_value());
+        if let Some(etag) = &self.etag {
+            out.insert("etag", etag.to_value());
+        }
+        out.insert("registry", self.registry.to_value());
+        out
+    }
 }
 
 /// Loads the cache for `url` (ignored when for another URL or invalid).
 pub fn load_cache(store: &Path, url: &str) -> Option<RegistryCache> {
     let content = std::fs::read_to_string(store.join(REGISTRY_CACHE_FILE)).ok()?;
-    let raw: Value = serde_json::from_str(&content).ok()?;
-    let obj = raw.as_object()?;
+    let raw = gondolin_wire::json::parse(&content).ok()?;
+    let obj = expect_object(&raw, "").ok()?;
     if obj.get("url").and_then(Value::as_str) != Some(url) {
         return None;
     }
@@ -299,7 +301,7 @@ pub fn save_cache(store: &Path, cache: &RegistryCache) -> std::io::Result<()> {
     std::fs::create_dir_all(store)?;
     let path = store.join(REGISTRY_CACHE_FILE);
     let tmp = store.join(format!("{REGISTRY_CACHE_FILE}.tmp-{}", crate::store::random_suffix()));
-    let json = serde_json::to_string_pretty(cache).map_err(std::io::Error::other)?;
+    let json = gondolin_wire::json::to_string_pretty(&cache.to_value());
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
@@ -314,12 +316,12 @@ mod tests {
     const ID_X: &str = "f59d9a69-1f62-57e0-a392-6800d3dd021d";
 
     fn doc() -> Value {
-        serde_json::json!({
+        gondolin_wire::value!({
             "schema": 1,
             "refs": { "alpine-base:latest": { "arm64": ID_A, "x86_64": ID_X }, "solo:1": { "x86_64": ID_X } },
             "builds": {
-                ID_A: { "url": "images/a.tar.gz", "sha256": "AB".repeat(32), "arch": "aarch64" },
-                ID_X: { "url": "https://example.com/x.tar.gz", "arch": "x86_64", "extra": true }
+                (ID_A): { "url": "images/a.tar.gz", "sha256": "AB".repeat(32), "arch": "aarch64" },
+                (ID_X): { "url": "https://example.com/x.tar.gz", "arch": "x86_64", "extra": true }
             }
         })
     }
@@ -340,7 +342,7 @@ mod tests {
             "image ref not found in builtin registry: nope:1"
         );
         // serializes with normalized keys in document order
-        let out = serde_json::to_string(&r).unwrap();
+        let out = gondolin_wire::json::to_string(&r.to_value());
         assert!(
             out.starts_with(r#"{"schema":1,"refs":{"alpine-base:latest":{"aarch64":"#),
             "{out}"
@@ -350,25 +352,25 @@ mod tests {
     #[test]
     fn rejects_bad_documents() {
         let mut d = doc();
-        d["schema"] = 2.into();
+        d["schema"] = Value::from(2u64);
         assert_eq!(
             Registry::parse(&d, "https://h/r.json").unwrap_err().to_string(),
             "invalid builtin image registry schema: expected 1"
         );
         let mut d = doc();
-        d["refs"]["alpine-base"] = serde_json::json!({});
+        d["refs"]["alpine-base"] = gondolin_wire::value!({});
         assert_eq!(
             Registry::parse(&d, "https://h/r.json").unwrap_err().to_string(),
             "invalid builtin image registry ref key: alpine-base"
         );
         let mut d = doc();
-        d["refs"]["x:1"] = serde_json::json!({ "x86_64": ID_A });
+        d["refs"]["x:1"] = gondolin_wire::value!({ "x86_64": ID_A });
         assert_eq!(
             Registry::parse(&d, "https://h/r.json").unwrap_err().to_string(),
             "invalid refs['x:1']['x86_64']: arch x86_64 does not match build arch aarch64"
         );
         let mut d = doc();
-        d["refs"]["x:1"] = serde_json::json!({ "riscv": ID_A });
+        d["refs"]["x:1"] = gondolin_wire::value!({ "riscv": ID_A });
         assert!(Registry::parse(&d, "https://h/r.json").is_err());
         let mut d = doc();
         d["builds"][ID_A]["sha256"] = "zz".into();
@@ -403,7 +405,7 @@ mod tests {
     #[test]
     fn parses_repo_registry_file() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../builtin-image-registry.json");
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let raw = gondolin_wire::json::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
         let r = Registry::parse(&raw, DEFAULT_IMAGE_REGISTRY_URL).unwrap();
         assert!(r.refs.get(&"alpine-base:latest".to_string()).is_some());
     }

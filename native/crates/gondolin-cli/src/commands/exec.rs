@@ -3,8 +3,6 @@
 
 use std::io::Write;
 
-use serde_json::json;
-
 use super::{host_env, parse_failure, render_error, usage};
 use crate::args::{ExecArgs, parse_exec};
 use crate::configure;
@@ -40,7 +38,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
 pub async fn print_configure(prepared: Result<configure::Prepared, String>) -> i32 {
     match prepared {
         Ok(p) => {
-            let out = serde_json::to_string_pretty(&configure::printable(&p)).unwrap_or_default();
+            let out = gondolin_wire::json::to_string_pretty(&configure::printable(&p));
             println!("{out}");
             0
         }
@@ -139,15 +137,16 @@ async fn run_socket(args: &ExecArgs, path: &str) -> i32 {
     };
     let mut exit_code = 0;
     for command in &args.commands {
-        let mut msg = json!({ "type": "exec", "id": command.id, "cmd": command.cmd });
+        let mut msg =
+            gondolin_wire::value!({ "type": "exec", "id": command.id, "cmd": command.cmd });
         if !command.argv.is_empty() {
-            msg["argv"] = json!(command.argv);
+            msg["argv"] = gondolin_wire::value!(command.argv);
         }
         if !command.env.is_empty() {
-            msg["env"] = json!(command.env);
+            msg["env"] = gondolin_wire::value!(command.env);
         }
         if let Some(cwd) = &command.cwd {
-            msg["cwd"] = json!(cwd);
+            msg["cwd"] = gondolin_wire::value!(cwd);
         }
         msg["stdout_window"] = SOCKET_WINDOW_BYTES.into();
         msg["stderr_window"] = SOCKET_WINDOW_BYTES.into();
@@ -166,7 +165,7 @@ async fn run_socket(args: &ExecArgs, path: &str) -> i32 {
                         let _ = std::io::stderr().lock().write_all(&data);
                     }
                     let _ = client
-                        .send(&json!({ "type": "exec_window", "id": id, key: data.len() }))
+                        .send(&gondolin_wire::value!({ "type": "exec_window", "id": id, (key): data.len() }))
                         .await;
                 }
                 Ok(Some(ServerMessage::Output { .. })) => {}

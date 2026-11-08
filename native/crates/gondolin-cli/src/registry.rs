@@ -12,25 +12,24 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value as Json, json};
+use gondolin_wire::Value as Json;
+use gondolin_wire::{FromValue, ToValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::engine::{ClientEvent, Engine};
 
-/// Persisted session metadata (`SessionInfo`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    pub id: String,
-    pub pid: i64,
-    pub socket_path: String,
-    pub created_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+gondolin_wire::wire_struct! {
+    /// Persisted session metadata (`SessionInfo`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SessionInfo {
+        pub id: String,
+        pub pid: i64,
+        pub socket_path: String as "socketPath",
+        pub created_at: String as "createdAt",
+        pub label: Option<String>,
+    }
 }
 
 /// A discovered session (`SessionEntry`).
@@ -80,7 +79,7 @@ pub fn register(id: &str, label: Option<String>) -> Result<SessionInfo, String> 
         created_at: crate::checkpoint::iso_now(),
         label,
     };
-    let mut json = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
+    let mut json = gondolin_wire::json::to_string_pretty(&info.to_value());
     json.push('\n');
     std::fs::write(dir.join(format!("{id}.json")), json)
         .map_err(|e| format!("cannot register session: {e}"))?;
@@ -103,7 +102,8 @@ fn read_infos() -> Vec<(String, Option<SessionInfo>)> {
         let Some(stem) = name.strip_suffix(".json") else { continue };
         let info = std::fs::read_to_string(e.path())
             .ok()
-            .and_then(|s| serde_json::from_str::<SessionInfo>(&s).ok())
+            .and_then(|s| gondolin_wire::json::parse(&s).ok())
+            .and_then(|v| SessionInfo::from_value(&v).ok())
             .filter(|i| !i.id.is_empty() && !i.socket_path.is_empty());
         out.push((stem.to_string(), info));
     }
@@ -216,7 +216,7 @@ pub async fn write_client_frame<W: AsyncWrite + Unpin>(
     w: &mut W,
     msg: &Json,
 ) -> std::io::Result<()> {
-    let payload = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
+    let payload = gondolin_wire::json::to_string(msg).into_bytes();
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     buf.extend_from_slice(&payload);
@@ -334,7 +334,7 @@ impl IpcServer {
 }
 
 fn error_json(code: &str, message: &str, id: Option<u32>) -> Json {
-    let mut v = json!({ "type": "error", "code": code, "message": message });
+    let mut v = gondolin_wire::value!({ "type": "error", "code": code, "message": message });
     if let Some(id) = id {
         v["id"] = id.into();
     }
@@ -367,7 +367,7 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
     let send_json = {
         let out = out_tx.clone();
         move |v: Json| {
-            let _ = out.send((0, serde_json::to_vec(&v).unwrap_or_default(), false));
+            let _ = out.send((0, gondolin_wire::json::to_string(&v).into_bytes(), false));
         }
     };
     // external <-> internal exec ids
@@ -388,7 +388,10 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
             Ok(Some(f)) => f,
             _ => break,
         };
-        let Ok(msg) = serde_json::from_slice::<Json>(&frame) else {
+        let Ok(msg) = std::str::from_utf8(&frame)
+            .map_err(|_| ())
+            .and_then(|t| gondolin_wire::json::parse(t).map_err(|_| ()))
+        else {
             send_json(error_json("invalid_request", "invalid framed JSON message", None));
             continue;
         };
@@ -431,7 +434,7 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                             let send = |v: Json| {
                                 let _ = out2.send((
                                     0,
-                                    serde_json::to_vec(&v).unwrap_or_default(),
+                                    gondolin_wire::json::to_string(&v).into_bytes(),
                                     false,
                                 ));
                             };
@@ -456,7 +459,7 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                                     }
                                     ClientEvent::Response { id, exit_code, signal } => {
                                         if let Some(ext) = external(id) {
-                                            let mut v = json!({ "type": "exec_response", "id": ext, "exit_code": exit_code });
+                                            let mut v = gondolin_wire::value!({ "type": "exec_response", "id": ext, "exit_code": exit_code });
                                             if let Some(s) = signal {
                                                 v["signal"] = s.into();
                                             }
@@ -467,7 +470,7 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                                     ClientEvent::StdinAck { id, bytes } => {
                                         if let Some(ext) = external(id) {
                                             send(
-                                                json!({ "type": "stdin_ack", "id": ext, "bytes": bytes }),
+                                                gondolin_wire::value!({ "type": "stdin_ack", "id": ext, "bytes": bytes }),
                                             );
                                         }
                                     }
@@ -486,7 +489,9 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                                         send(error_json(&code, &message, None));
                                     }
                                     ClientEvent::Status(state) => {
-                                        send(json!({ "type": "status", "state": state }));
+                                        send(
+                                            gondolin_wire::value!({ "type": "status", "state": state }),
+                                        );
                                     }
                                     ClientEvent::Closed => break,
                                 }
@@ -497,10 +502,11 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                     }
                 };
                 let mut payload = msg.clone();
-                if let Some(obj) = payload.as_object_mut() {
+                {
+                    let obj = &mut payload;
                     obj.remove("type");
-                    obj.insert("id".into(), internal.into());
-                    obj.insert("client".into(), c.into());
+                    obj.insert("id", internal);
+                    obj.insert("client", c);
                 }
                 ctx.engine.send("exec", &crate::configure::json_to_cbor(&payload)).await;
             }
@@ -511,18 +517,17 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                     continue;
                 };
                 let mut payload = msg.clone();
-                if let Some(obj) = payload.as_object_mut() {
+                {
+                    let obj = &mut payload;
                     obj.remove("type");
-                    obj.insert("id".into(), internal.into());
-                    obj.insert("client".into(), c.into());
+                    obj.insert("id", internal);
+                    obj.insert("client", c);
                     // stdin data is base64 over IPC, bytes for the daemon
                     if t == "stdin"
-                        && let Some(Json::String(data)) = obj.get("data")
+                        && let Some(Json::Text(data)) = obj.get("data")
                     {
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(data)
-                            .unwrap_or_default();
-                        obj.insert("data".into(), crate::configure::b64(&bytes));
+                        let bytes = gondolin_wire::base64::decode(data).unwrap_or_default();
+                        obj.insert("data", crate::configure::b64(&bytes));
                     }
                 }
                 ctx.engine.send(t, &crate::configure::json_to_cbor(&payload)).await;
@@ -553,13 +558,20 @@ async fn serve_connection(stream: UnixStream, ctx: Arc<IpcContext>, ids: Arc<Mut
                 tokio::spawn(async move {
                     match snapshot(path).await {
                         Ok((path, name)) => {
-                            let v = json!({ "type": "snapshot_response", "id": ext, "path": path, "name": name });
-                            let _ = out.send((0, serde_json::to_vec(&v).unwrap_or_default(), true));
+                            let v = gondolin_wire::value!({ "type": "snapshot_response", "id": ext, "path": path, "name": name });
+                            let _ = out.send((
+                                0,
+                                gondolin_wire::json::to_string(&v).into_bytes(),
+                                true,
+                            ));
                         }
                         Err(e) => {
                             let v = error_json("snapshot_failed", &e, Some(ext));
-                            let _ =
-                                out.send((0, serde_json::to_vec(&v).unwrap_or_default(), false));
+                            let _ = out.send((
+                                0,
+                                gondolin_wire::json::to_string(&v).into_bytes(),
+                                false,
+                            ));
                         }
                     }
                 });
@@ -628,7 +640,10 @@ pub async fn next_message(
         };
         match kind {
             0 => {
-                if let Ok(v) = serde_json::from_slice(&payload) {
+                if let Ok(v) = std::str::from_utf8(&payload)
+                    .map_err(|_| ())
+                    .and_then(|t| gondolin_wire::json::parse(t).map_err(|_| ()))
+                {
                     return Ok(Some(ServerMessage::Json(v)));
                 }
             }
@@ -683,7 +698,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00.000Z".into(),
             label: None,
         };
-        let s = serde_json::to_string(&info).unwrap();
+        let s = gondolin_wire::json::to_string(&info.to_value());
         assert_eq!(
             s,
             r#"{"id":"x","pid":1,"socketPath":"/s","createdAt":"2024-01-01T00:00:00.000Z"}"#

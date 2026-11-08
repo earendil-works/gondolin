@@ -29,8 +29,6 @@
 //! an `invalid_request` client error, not a protocol error), so the structs
 //! below describe well-formed messages.
 
-use serde::{Deserialize, Serialize};
-
 use crate::session::State;
 
 pub const CLIENT_OPEN: &str = "client_open";
@@ -52,160 +50,171 @@ pub const CLIENT_STDIN_ACK: &str = "client_stdin_ack";
 /// Client number chosen by the controller.
 pub type ClientId = u32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientRef {
-    pub client: ClientId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Boot {
-    pub client: ClientId,
-    /// guest mountpoint of the sandboxfs FUSE mount (default `/data`)
-    #[serde(rename = "fuseMount", default, skip_serializing_if = "Option::is_none")]
-    pub fuse_mount: Option<String>,
-    /// guest paths bind-mounted from the FUSE mount
-    #[serde(rename = "fuseBinds", default, skip_serializing_if = "Option::is_none")]
-    pub fuse_binds: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Exec {
-    pub client: ClientId,
-    /// exec id (uint32, unique among running execs)
-    pub id: u32,
-    pub cmd: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub argv: Option<Vec<String>>,
-    /// `KEY=VALUE` entries
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdin: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pty: Option<bool>,
-    /// initial stdout credit in `bytes` (0 = guest default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdout_window: Option<u32>,
-    /// initial stderr credit in `bytes` (0 = guest default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr_window: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Stdin {
-    pub client: ClientId,
-    pub id: u32,
-    #[serde(with = "serde_bytes", default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eof: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PtyResize {
-    pub client: ClientId,
-    pub id: u32,
-    pub rows: u32,
-    pub cols: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecWindow {
-    pub client: ClientId,
-    pub id: u32,
-    /// additional stdout credit in `bytes`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<u32>,
-    /// additional stderr credit in `bytes`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Lifecycle {
-    pub client: ClientId,
-    /// `restart` or `shutdown` (stops the VM, not the daemon)
-    pub action: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientUnknown {
-    pub client: ClientId,
-    /// the client message's `type`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientStatus {
-    pub client: ClientId,
-    pub state: State,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientError {
-    pub client: ClientId,
-    /// exec id the error belongs to (absent for request-level errors)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<u32>,
-    pub code: String,
-    pub message: String,
-}
-
-/// Output stream of an exec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Stream {
-    Stdout,
-    Stderr,
-}
-
-impl Stream {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Stream::Stdout => "stdout",
-            Stream::Stderr => "stderr",
-        }
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientRef {
+        pub client: ClientId,
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecOutput {
-    pub client: ClientId,
-    pub id: u32,
-    pub stream: Stream,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Boot {
+        pub client: ClientId,
+        /// guest mountpoint of the sandboxfs FUSE mount (default `/data`)
+        pub fuse_mount: Option<String> as "fuseMount",
+        /// guest paths bind-mounted from the FUSE mount
+        pub fuse_binds: Option<Vec<String>> as "fuseBinds",
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Exec {
+        pub client: ClientId,
+        /// exec id (uint32, unique among running execs)
+        pub id: u32,
+        pub cmd: String,
+        pub argv: Option<Vec<String>>,
+        /// `KEY=VALUE` entries
+        pub env: Option<Vec<String>>,
+        pub cwd: Option<String>,
+        pub stdin: Option<bool>,
+        pub pty: Option<bool>,
+        /// initial stdout credit in `bytes` (0 = guest default)
+        pub stdout_window: Option<u32>,
+        /// initial stderr credit in `bytes` (0 = guest default)
+        pub stderr_window: Option<u32>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Stdin {
+        pub client: ClientId,
+        pub id: u32,
+        pub data: Option<Vec<u8>>,
+        pub eof: Option<bool>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PtyResize {
+        pub client: ClientId,
+        pub id: u32,
+        pub rows: u32,
+        pub cols: u32,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExecWindow {
+        pub client: ClientId,
+        pub id: u32,
+        /// additional stdout credit in `bytes`
+        pub stdout: Option<u32>,
+        /// additional stderr credit in `bytes`
+        pub stderr: Option<u32>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Lifecycle {
+        pub client: ClientId,
+        /// `restart` or `shutdown` (stops the VM, not the daemon)
+        pub action: String,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientUnknown {
+        pub client: ClientId,
+        /// the client message's `type`
+        pub r#type: Option<String>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientStatus {
+        pub client: ClientId,
+        pub state: State,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientError {
+        pub client: ClientId,
+        /// exec id the error belongs to (absent for request-level errors)
+        pub id: Option<u32>,
+        pub code: String,
+        pub message: String,
+    }
+}
+
+gondolin_wire::wire_enum! {
+    /// Output stream of an exec.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Stream {
+        Stdout = "stdout",
+        Stderr = "stderr",
+    }
+}
+
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExecOutput {
+        pub client: ClientId,
+        pub id: u32,
+        pub stream: Stream,
+        pub data: Vec<u8>,
+    }
 }
 
 /// [`ExecOutput`] borrowing its data (encoding without a copy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecOutputRef<'a> {
     pub client: ClientId,
     pub id: u32,
     pub stream: Stream,
-    #[serde(with = "serde_bytes")]
     pub data: &'a [u8],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecResponse {
-    pub client: ClientId,
-    pub id: u32,
-    pub exit_code: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signal: Option<i32>,
+impl gondolin_wire::ToValue for ExecOutputRef<'_> {
+    fn to_value(&self) -> gondolin_wire::value::Value {
+        gondolin_wire::value!({
+            "client": self.client,
+            "id": self.id,
+            "stream": self.stream,
+            "data": self.data,
+        })
+    }
 }
 
-/// Stdin of an exec that left the daemon's queue towards the guest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StdinAck {
-    pub client: ClientId,
-    pub id: u32,
-    /// acknowledged stdin in `bytes`
-    pub bytes: u64,
+gondolin_wire::wire_struct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExecResponse {
+        pub client: ClientId,
+        pub id: u32,
+        pub exit_code: i32,
+        pub signal: Option<i32>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// Stdin of an exec that left the daemon's queue towards the guest.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StdinAck {
+        pub client: ClientId,
+        pub id: u32,
+        /// acknowledged stdin in `bytes`
+        pub bytes: u64,
+    }
 }
 
 #[cfg(test)]

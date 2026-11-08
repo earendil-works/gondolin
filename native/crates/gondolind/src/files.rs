@@ -8,9 +8,9 @@
 
 use std::collections::VecDeque;
 
+use crate::ordmap::OrderedMap;
 use gondolin_proto::files as pf;
 use gondolin_wire::{RawEnvelope, Value};
-use indexmap::IndexMap;
 
 use crate::controller::Controller;
 use crate::fields::{self, Fields};
@@ -85,7 +85,7 @@ pub(crate) struct FileState {
     next_id: u32,
     /// guest id of the operation holding the slot
     pub active: Option<u32>,
-    pub ops: IndexMap<u32, FileOp>,
+    pub ops: OrderedMap<u32, FileOp>,
     waiters: VecDeque<FileWaiter>,
     pub blocked: Option<Blocked>,
 }
@@ -95,7 +95,7 @@ impl Default for FileState {
         FileState {
             next_id: 1,
             active: None,
-            ops: IndexMap::new(),
+            ops: OrderedMap::new(),
             waiters: VecDeque::new(),
             blocked: None,
         }
@@ -111,7 +111,7 @@ impl FileState {
     }
 }
 
-fn frame<P: serde::Serialize>(t: &str, id: u32, p: P) -> Vec<u8> {
+fn frame<P: gondolin_wire::ToValue>(t: &str, id: u32, p: P) -> Vec<u8> {
     let env = guestmsg::envelope(t, id, p);
     gondolin_wire::encode(&env).and_then(|b| gondolin_wire::frame(&b)).expect("guest frame encodes")
 }

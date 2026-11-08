@@ -35,12 +35,18 @@ destinations, or escape the classification (raw TCP); see "Guarantees" below.
 |---|---|---|
 | `netstack_parse` | Ethernet/IPv4/UDP/TCP headers, DNS queries/answers/per-host map, DHCP, resolv.conf | clean |
 | `netstack_stack` | real `NetStack` with structured guest frames incl. completed TCP handshakes | clean |
-| `egress_flow` | `Egress::handle_tcp`: classification, hyper HTTP/1, pipeline with secrets + body-pulling hook, TLS accept | finding 1 |
+| `egress_flow` | `Egress::handle_tcp`: classification, HTTP/1 (`gondolin-http`), pipeline with secrets + body-pulling hook, TLS accept | finding 1 |
+| `http_codec` | `gondolin-http` head parsing/framing rules, re-encoding round trips, Content-Length/chunked/close-delimited decoding under arbitrary input splits | clean |
+| `url_parse` | `gondolin-http` URL parser vs the `url` crate (differential: parse, components, `join`, query pairs) | clean (only known url-crate deviations from WHATWG excluded) |
+| `x509_parse` | DER reading of CA certificates/public keys (subject, SPKI, key identifier), SAN and time encoding | clean |
+| `http_conn` | `gondolin-http` server (bodies, 100-continue, upgrades, keep-alive) and client (untrusted response heads/bodies) on arbitrary peer bytes | clean |
 | `egress_policy` | secret substitution, host patterns, internal IPs, classification | clean |
 | `tls_client_hello` | ClientHello / SNI / ALPN sniffing | clean |
 | `wire_guest` | guest frame reader, CBOR decode, sandboxfs and TCP-forwarder port handlers | clean |
 | `sshproxy_flow` | guest-facing SSH server after the banner | clean |
 | `sshproxy_parse` | git exec parsing, known_hosts, allowlist patterns | clean |
+| `ssh_transport` | own SSH core: raw transport input, encrypted connection-layer payloads after a handshake | clean (2 min × 6 workers) |
+| `ssh_keys` | key files, public key blobs, signatures, agent replies | clean (2 min × 6 workers) |
 
 Notes: release builds now unwind and contain panics (`native/DESIGN.md`,
 "Panics"): a panic in a guest flow resets that flow, a panicking request is
@@ -61,7 +67,7 @@ so non-ASCII bytes are multi-byte in Rust strings.
 | absolute-form requests | `Host` from the guest is forwarded | `Host` rewritten to the URL authority (no virtual-host steering) |
 | upstream TLS verification | undici / node CA store | rustls/webpki with node's default CA store sent by the controller |
 | guest never sees the CA key | key stays in the controller | key in the controller (local) or daemon (remote); never mounted into the guest |
-| request head limit | 64 KiB → `431` | 64 KiB → `431` (+ hyper's buffer cap), 1024 headers |
+| request head limit | 64 KiB → `431` | 64 KiB → `431` with the node message (heads over 72 KiB are rejected while reading), 1024 headers |
 | request body limit | `maxHttpBodyBytes` (`413`) | same (Content-Length upfront, chunked while streaming) |
 | response limit with `onResponse` | whole body buffered, `502` above the limit | only what the hook reads is retained; limit enforced on retained and on decoded bytes |
 | pipelined/extra request bytes | discarded up to 64 KiB, then abort | drained up to 64 KiB / 2 s after the response, then closed |

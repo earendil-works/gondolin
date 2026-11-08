@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbitrary::Arbitrary;
-use async_trait::async_trait;
 use bytes::{Buf, BytesMut};
 use gondolin_netstack::{
     DnsConfig, FlowHandler, MacAddr, NetConfig, NetStack, SyntheticHostMapping, TcpFlow, wire,
@@ -76,17 +75,18 @@ struct Echo;
 
 static FLOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-#[async_trait]
 impl FlowHandler for Echo {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        // `FUZZ_REPORT_FLOWS=1`: shows that handshakes complete
-        let n = FLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n.is_power_of_two() && std::env::var_os("FUZZ_REPORT_FLOWS").is_some() {
-            eprintln!("netstack_stack: {} flows accepted", n + 1);
-        }
-        let (mut rd, mut wr) = tokio::io::split(flow.stream);
-        let _ = tokio::io::copy(&mut rd, &mut wr).await;
-        let _ = wr.shutdown().await;
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // `FUZZ_REPORT_FLOWS=1`: shows that handshakes complete
+            let n = FLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n.is_power_of_two() && std::env::var_os("FUZZ_REPORT_FLOWS").is_some() {
+                eprintln!("netstack_stack: {} flows accepted", n + 1);
+            }
+            let (mut rd, mut wr) = tokio::io::split(flow.stream);
+            let _ = tokio::io::copy(&mut rd, &mut wr).await;
+            let _ = wr.shutdown().await;
+        })
     }
 }
 

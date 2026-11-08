@@ -8,34 +8,33 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use gondolin_wire::{DecodeError, FromValue, ToValue, Value, wire_enum, wire_struct};
 
-/// Userspace network stack configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetConfig {
-    /// host-side gateway address (ARP, DHCP server, synthetic DNS server)
-    #[serde(with = "as_str")]
-    pub gateway_ip: Ipv4Addr,
-    /// address leased to the guest via DHCP
-    #[serde(with = "as_str")]
-    pub guest_ip: Ipv4Addr,
-    /// subnet prefix length of the virtual LAN
-    pub prefix_len: u8,
-    /// gateway MAC address
-    pub gateway_mac: MacAddr,
-    /// guest MAC address (QEMU `-device ...,mac=`); updated from frames the guest sends
-    pub guest_mac: MacAddr,
-    /// IP MTU of the virtual link in `bytes`
-    pub mtu: u16,
-    /// whether the guest NIC offloads TCP/UDP checksums (krun's virtio-net
-    /// `CSUM` feature: guest packets may carry partial checksums, so they are
-    /// not verified)
-    pub checksum_offload: bool,
-    /// DNS behavior
-    pub dns: DnsConfig,
-    /// resource limits
-    pub limits: NetLimits,
+wire_struct! {
+    /// Userspace network stack configuration; absent fields take the defaults.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NetConfig {
+        /// host-side gateway address (ARP, DHCP server, synthetic DNS server)
+        pub gateway_ip: Ipv4Addr = NetConfig::default().gateway_ip,
+        /// address leased to the guest via DHCP
+        pub guest_ip: Ipv4Addr = NetConfig::default().guest_ip,
+        /// subnet prefix length of the virtual LAN
+        pub prefix_len: u8 = NetConfig::default().prefix_len,
+        /// gateway MAC address
+        pub gateway_mac: MacAddr = NetConfig::default().gateway_mac,
+        /// guest MAC address (QEMU `-device ...,mac=`); updated from frames the guest sends
+        pub guest_mac: MacAddr = NetConfig::default().guest_mac,
+        /// IP MTU of the virtual link in `bytes`
+        pub mtu: u16 = NetConfig::default().mtu,
+        /// whether the guest NIC offloads TCP/UDP checksums (krun's virtio-net
+        /// `CSUM` feature: guest packets may carry partial checksums, so they are
+        /// not verified)
+        pub checksum_offload: bool = false,
+        /// DNS behavior
+        pub dns: DnsConfig = DnsConfig::default(),
+        /// resource limits
+        pub limits: NetLimits = NetLimits::default(),
+    }
 }
 
 impl Default for NetConfig {
@@ -68,50 +67,51 @@ impl NetConfig {
     }
 }
 
-/// How UDP/53 traffic from the guest is handled (`docs/network.md`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DnsMode {
-    /// answer A/AAAA locally with synthetic addresses; nothing leaves the host
-    #[default]
-    Synthetic,
-    /// forward validated queries to trusted IPv4 resolvers only
-    Trusted,
-    /// forward UDP/53 to whatever IP the guest targeted
-    Open,
+wire_enum! {
+    /// How UDP/53 traffic from the guest is handled (`docs/network.md`).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum DnsMode {
+        /// answer A/AAAA locally with synthetic addresses; nothing leaves the host
+        #[default]
+        Synthetic = "synthetic",
+        /// forward validated queries to trusted IPv4 resolvers only
+        Trusted = "trusted",
+        /// forward UDP/53 to whatever IP the guest targeted
+        Open = "open",
+    }
 }
 
-/// Synthetic `A` answer strategy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SyntheticHostMapping {
-    /// every name resolves to [`DnsConfig::synthetic_ipv4`]
-    #[default]
-    Single,
-    /// every name gets its own address in `198.19.0.0/16` (reverse-mappable)
-    PerHost,
+wire_enum! {
+    /// Synthetic `A` answer strategy.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum SyntheticHostMapping {
+        /// every name resolves to [`DnsConfig::synthetic_ipv4`]
+        #[default]
+        Single = "single",
+        /// every name gets its own address in `198.19.0.0/16` (reverse-mappable)
+        PerHost = "per-host",
+    }
 }
 
-/// DNS options (`VMOptions.dns`, resolved by the controller).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DnsConfig {
-    /// DNS mode
-    pub mode: DnsMode,
-    /// trusted IPv4 resolvers (mode `trusted`); empty = the daemon host's resolvers
-    #[serde(with = "as_str_vec")]
-    pub trusted_servers: Vec<Ipv4Addr>,
-    /// synthetic `A` answer (mode `synthetic`, single mapping)
-    #[serde(with = "as_str")]
-    pub synthetic_ipv4: Ipv4Addr,
-    /// synthetic `AAAA` answer (mode `synthetic`)
-    #[serde(with = "as_str")]
-    pub synthetic_ipv6: Ipv6Addr,
-    /// synthetic answer TTL in `seconds`
-    pub synthetic_ttl_seconds: u32,
-    /// synthetic `A` strategy; the controller resolves the node engine's auto
-    /// default (`per-host` when SSH or mapped TCP egress is enabled)
-    pub synthetic_host_mapping: SyntheticHostMapping,
+wire_struct! {
+    /// DNS options (`VMOptions.dns`, resolved by the controller); absent
+    /// fields take the defaults.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DnsConfig {
+        /// DNS mode
+        pub mode: DnsMode = DnsMode::default(),
+        /// trusted IPv4 resolvers (mode `trusted`); empty = the daemon host's resolvers
+        pub trusted_servers: Vec<Ipv4Addr> = Vec::new(),
+        /// synthetic `A` answer (mode `synthetic`, single mapping)
+        pub synthetic_ipv4: Ipv4Addr = DnsConfig::default().synthetic_ipv4,
+        /// synthetic `AAAA` answer (mode `synthetic`)
+        pub synthetic_ipv6: Ipv6Addr = DnsConfig::default().synthetic_ipv6,
+        /// synthetic answer TTL in `seconds`
+        pub synthetic_ttl_seconds: u32 = DnsConfig::default().synthetic_ttl_seconds,
+        /// synthetic `A` strategy; the controller resolves the node engine's auto
+        /// default (`per-host` when SSH or mapped TCP egress is enabled)
+        pub synthetic_host_mapping: SyntheticHostMapping = SyntheticHostMapping::default(),
+    }
 }
 
 impl Default for DnsConfig {
@@ -127,28 +127,30 @@ impl Default for DnsConfig {
     }
 }
 
-/// Resource limits. Every buffer in the stack is bounded by one of these.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetLimits {
-    /// max concurrent guest TCP connections (incl. handshakes and lingering closes)
-    pub max_tcp_flows: usize,
-    /// per-flow receive buffer (guest -> host) in `bytes`; bounds the advertised window
-    pub tcp_rx_buffer_bytes: usize,
-    /// per-flow send buffer (host -> guest) in `bytes`
-    pub tcp_tx_buffer_bytes: usize,
-    /// queued frames to QEMU in `bytes` above which TCP stops emitting segments
-    pub tx_queue_soft_bytes: usize,
-    /// queued frames to QEMU in `bytes` above which other frames (DNS, ICMP, ...) are dropped
-    pub tx_queue_max_bytes: usize,
-    /// max concurrent upstream UDP (DNS) sockets; least recently used is evicted
-    pub max_udp_sessions: usize,
-    /// idle time in `ms` after which an upstream UDP socket is closed
-    pub udp_session_idle_timeout_ms: u64,
-    /// time in `ms` a guest connection may stay in the handshake
-    pub tcp_handshake_timeout_ms: u64,
-    /// time in `ms` a closed flow may linger waiting for the guest's FIN/ACK before RST
-    pub tcp_linger_timeout_ms: u64,
+wire_struct! {
+    /// Resource limits. Every buffer in the stack is bounded by one of these;
+    /// absent fields take the defaults.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NetLimits {
+        /// max concurrent guest TCP connections (incl. handshakes and lingering closes)
+        pub max_tcp_flows: usize = NetLimits::default().max_tcp_flows,
+        /// per-flow receive buffer (guest -> host) in `bytes`; bounds the advertised window
+        pub tcp_rx_buffer_bytes: usize = NetLimits::default().tcp_rx_buffer_bytes,
+        /// per-flow send buffer (host -> guest) in `bytes`
+        pub tcp_tx_buffer_bytes: usize = NetLimits::default().tcp_tx_buffer_bytes,
+        /// queued frames to QEMU in `bytes` above which TCP stops emitting segments
+        pub tx_queue_soft_bytes: usize = NetLimits::default().tx_queue_soft_bytes,
+        /// queued frames to QEMU in `bytes` above which other frames (DNS, ICMP, ...) are dropped
+        pub tx_queue_max_bytes: usize = NetLimits::default().tx_queue_max_bytes,
+        /// max concurrent upstream UDP (DNS) sockets; least recently used is evicted
+        pub max_udp_sessions: usize = NetLimits::default().max_udp_sessions,
+        /// idle time in `ms` after which an upstream UDP socket is closed
+        pub udp_session_idle_timeout_ms: u64 = NetLimits::default().udp_session_idle_timeout_ms,
+        /// time in `ms` a guest connection may stay in the handshake
+        pub tcp_handshake_timeout_ms: u64 = NetLimits::default().tcp_handshake_timeout_ms,
+        /// time in `ms` a closed flow may linger waiting for the guest's FIN/ACK before RST
+        pub tcp_linger_timeout_ms: u64 = NetLimits::default().tcp_linger_timeout_ms,
+    }
 }
 
 impl Default for NetLimits {
@@ -193,9 +195,16 @@ impl fmt::Debug for MacAddr {
 }
 
 /// Error parsing a [`MacAddr`].
-#[derive(Debug, thiserror::Error)]
-#[error("invalid MAC address")]
+#[derive(Debug)]
 pub struct InvalidMac;
+
+impl fmt::Display for InvalidMac {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid MAC address")
+    }
+}
+
+impl std::error::Error for InvalidMac {}
 
 impl FromStr for MacAddr {
     type Err = InvalidMac;
@@ -217,66 +226,16 @@ impl FromStr for MacAddr {
     }
 }
 
-impl Serialize for MacAddr {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        as_str::serialize(self, s)
+impl ToValue for MacAddr {
+    fn to_value(&self) -> Value {
+        Value::Text(self.to_string())
     }
 }
 
-impl<'de> Deserialize<'de> for MacAddr {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        as_str::deserialize(d)
-    }
-}
-
-/// Serde helpers encoding `Display`/`FromStr` types as strings (CBOR is not
-/// human-readable, so std's IP impls would otherwise produce byte arrays).
-pub(crate) mod as_str {
-    use std::fmt::Display;
-    use std::str::FromStr;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<T: Display, S: Serializer>(value: &T, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(value)
-    }
-
-    pub fn deserialize<'de, T, D>(d: D) -> Result<T, D::Error>
-    where
-        T: FromStr,
-        T::Err: Display,
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-pub(crate) mod as_str_vec {
-    use std::fmt::Display;
-    use std::str::FromStr;
-
-    use serde::ser::SerializeSeq;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<T: Display, S: Serializer>(values: &[T], s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(values.len()))?;
-        for value in values {
-            seq.serialize_element(&value.to_string())?;
-        }
-        seq.end()
-    }
-
-    pub fn deserialize<'de, T, D>(d: D) -> Result<Vec<T>, D::Error>
-    where
-        T: FromStr,
-        T::Err: Display,
-        D: Deserializer<'de>,
-    {
-        Vec::<String>::deserialize(d)?
-            .iter()
-            .map(|s| s.parse().map_err(serde::de::Error::custom))
-            .collect()
+impl FromValue for MacAddr {
+    fn from_value(value: &Value) -> Result<Self, DecodeError> {
+        let text = value.as_text().ok_or_else(|| DecodeError::expected("a MAC address", value))?;
+        text.parse().map_err(|_| DecodeError::new(format!("invalid MAC address {text:?}")))
     }
 }
 
@@ -304,40 +263,24 @@ mod tests {
             },
             ..NetConfig::default()
         };
-        let mut buf = Vec::new();
-        ciborium::into_writer(&config, &mut buf).unwrap();
-        let value: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
-        let map = value.as_map().unwrap();
-        let get = |k: &str| {
-            map.iter().find(|(key, _)| key.as_text() == Some(k)).map(|(_, v)| v.clone()).unwrap()
-        };
-        assert_eq!(get("gateway_ip").as_text(), Some("192.168.127.1"));
-        assert_eq!(get("gateway_mac").as_text(), Some("5a:94:ef:e4:0c:dd"));
-        let dns = get("dns");
-        let dns_map = dns.as_map().unwrap();
-        let mapping =
-            dns_map.iter().find(|(k, _)| k.as_text() == Some("synthetic_host_mapping")).unwrap();
-        assert_eq!(mapping.1.as_text(), Some("per-host"));
+        let buf = gondolin_wire::encode(&config).unwrap();
+        let value: Value = gondolin_wire::decode(&buf).unwrap();
+        assert_eq!(value.get("gateway_ip").and_then(Value::as_text), Some("192.168.127.1"));
+        assert_eq!(value.get("gateway_mac").and_then(Value::as_text), Some("5a:94:ef:e4:0c:dd"));
+        let dns = value.get("dns").unwrap();
+        assert_eq!(dns.get("synthetic_host_mapping").and_then(Value::as_text), Some("per-host"));
+        let servers = dns.get("trusted_servers").and_then(Value::as_array).unwrap();
+        assert_eq!(servers[0].as_text(), Some("1.1.1.1"));
 
-        let back: NetConfig = ciborium::from_reader(&buf[..]).unwrap();
+        let back: NetConfig = gondolin_wire::decode(&buf).unwrap();
         assert_eq!(back, config);
 
         // Missing fields take defaults.
-        let mut partial = Vec::new();
-        ciborium::into_writer(
-            &ciborium::Value::Map(vec![(
-                ciborium::Value::Text("dns".into()),
-                ciborium::Value::Map(vec![(
-                    ciborium::Value::Text("mode".into()),
-                    ciborium::Value::Text("open".into()),
-                )]),
-            )]),
-            &mut partial,
-        )
-        .unwrap();
-        let parsed: NetConfig = ciborium::from_reader(&partial[..]).unwrap();
+        let partial = gondolin_wire::value!({ "dns": { "mode": "open" } });
+        let parsed: NetConfig = gondolin_wire::from_value(&partial).unwrap();
         assert_eq!(parsed.dns.mode, DnsMode::Open);
         assert_eq!(parsed.guest_ip, Ipv4Addr::new(192, 168, 127, 3));
+        assert_eq!(parsed.limits, NetLimits::default());
     }
 
     #[test]

@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 
 use gondolin_egress::cli_policy::{CompileCtx, NetFlags, compile_cli_net};
-use serde_json::Value;
+use gondolin_wire::Value;
 
 fn normalize(value: &mut Value, marker: Option<&str>, home: &str) {
     match value {
-        Value::String(s) => {
+        Value::Text(s) => {
             if let Some(marker) = marker {
                 *s = s.replace(marker, "<MARKER>");
             }
@@ -19,20 +19,26 @@ fn normalize(value: &mut Value, marker: Option<&str>, home: &str) {
             }
         }
         Value::Array(items) => items.iter_mut().for_each(|v| normalize(v, marker, home)),
-        Value::Object(map) => map.values_mut().for_each(|v| normalize(v, marker, home)),
+        Value::Map(map) => {
+            map.iter_mut().for_each(|(_, v)| normalize(v, marker, home));
+            // key order is not significant
+            map.sort_by(|a, b| a.0.as_str().cmp(&b.0.as_str()));
+        }
         _ => {}
     }
 }
 
 #[test]
 fn matches_the_typescript_cli() {
-    let cases: Vec<Value> =
-        serde_json::from_str(include_str!("fixtures/cli-net/cases.json")).unwrap();
+    let cases: Vec<Value> = gondolin_wire::json::parse(include_str!("fixtures/cli-net/cases.json"))
+        .unwrap()
+        .into_array()
+        .unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
     assert!(cases.len() >= 30);
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        let flags: NetFlags = serde_json::from_value(case["flags"].clone())
+        let flags: NetFlags = gondolin_wire::from_value(&case["flags"])
             .unwrap_or_else(|e| panic!("{name}: flags: {e}"));
         let ctx = CompileCtx {
             mitm_ca: Some(("<CERT>".into(), "<KEY>".into())),
@@ -50,12 +56,13 @@ fn matches_the_typescript_cli() {
         if let Some(marker) = &marker {
             assert_eq!(marker.len(), 48, "{name}");
         }
-        let obj = net.as_object_mut().unwrap();
         // by design: system/webpki roots instead of node's CA store
-        assert_eq!(obj.remove("use_system_roots"), Some(Value::Bool(true)), "{name}");
-        assert_eq!(obj.remove("use_webpki_roots"), Some(Value::Bool(true)), "{name}");
+        assert_eq!(net.remove("use_system_roots"), Some(Value::Bool(true)), "{name}");
+        assert_eq!(net.remove("use_webpki_roots"), Some(Value::Bool(true)), "{name}");
         normalize(&mut net, marker.as_deref(), &home);
-        assert_eq!(net, case["net"], "{name}");
+        let mut expected = case["net"].clone();
+        normalize(&mut expected, None, "");
+        assert_eq!(net, expected, "{name}");
 
         let mut env: BTreeMap<String, String> = compiled.guest_env;
         for value in env.values_mut() {
@@ -64,7 +71,7 @@ fn matches_the_typescript_cli() {
             }
         }
         let expected: BTreeMap<String, String> =
-            serde_json::from_value(case["guest_env"].clone()).unwrap();
+            gondolin_wire::from_value(&case["guest_env"]).unwrap();
         assert_eq!(env, expected, "{name}");
     }
 }
@@ -78,12 +85,11 @@ fn compiled_payload_decodes_as_the_daemon_config() {
     };
     let compiled = compile_cli_net(&flags, &CompileCtx::default()).unwrap();
     // the egress part is what `gondolind` decodes from `configure.net`
-    let config: gondolin_proto::net::NetConfig =
-        serde_json::from_value(compiled.net.clone()).unwrap();
+    let config: gondolin_proto::net::NetConfig = gondolin_wire::from_value(&compiled.net).unwrap();
     assert_eq!(config.tcp_hosts.len(), 1);
     assert!(config.use_system_roots && config.use_webpki_roots);
     assert_eq!(config.policy.rules.unwrap().allowed_hosts, vec!["api.example.com".to_string()]);
     let stack: gondolin_netstack::NetConfig =
-        serde_json::from_value(compiled.net["stack"].clone()).unwrap();
+        gondolin_wire::from_value(&compiled.net["stack"]).unwrap();
     assert_eq!(stack.dns.synthetic_host_mapping, gondolin_netstack::SyntheticHostMapping::PerHost);
 }

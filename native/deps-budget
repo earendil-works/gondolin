@@ -1,0 +1,3 @@
+# Maximum third-party runtime crates of the `gondolin` binary over the release
+# targets (scripts/count-deps.sh); lower it whenever the count drops.
+26

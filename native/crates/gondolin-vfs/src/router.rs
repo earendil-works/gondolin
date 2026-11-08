@@ -1,8 +1,7 @@
 //! Mount table: longest-prefix routing with synthetic parent directories
 //! (the node engine's `MountRouterProvider`).
 
-use async_trait::async_trait;
-
+use crate::BoxFuture;
 use crate::error::{VfsError, VfsResult, errno};
 use crate::provider::{DynProvider, Handle, Provider};
 use crate::types::{Attr, DirEntry, EntryKind, OpenFlags, StatFs, vpath};
@@ -149,167 +148,209 @@ impl MountRouter {
     }
 }
 
-#[async_trait]
 impl Provider for MountRouter {
     fn readonly(&self) -> bool {
         self.all_readonly
     }
 
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        self.stat_like(path, false).await
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.stat_like(path, false).await })
     }
 
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        self.stat_like(path, true).await
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.stat_like(path, true).await })
     }
 
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        let children = self.virtual_children(path);
-        let Some(r) = self.route(path) else {
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(async move {
+            let children = self.virtual_children(path);
+            let Some(r) = self.route(path) else {
+                if children.is_empty() {
+                    return Err(VfsError::op(errno::ENOENT, "readdir", path));
+                }
+                return Ok(children
+                    .into_iter()
+                    .map(|c| DirEntry::new(c, EntryKind::Dir))
+                    .collect());
+            };
+            let entries = match r.mount.provider.readdir(&r.rel).await {
+                Ok(entries) => entries,
+                Err(e) if is_noent(&e) && r.mount.path == "/" && !children.is_empty() => Vec::new(),
+                Err(e) => return Err(e),
+            };
             if children.is_empty() {
-                return Err(VfsError::op(errno::ENOENT, "readdir", path));
+                return Ok(entries);
             }
-            return Ok(children.into_iter().map(|c| DirEntry::new(c, EntryKind::Dir)).collect());
-        };
-        let entries = match r.mount.provider.readdir(&r.rel).await {
-            Ok(entries) => entries,
-            Err(e) if is_noent(&e) && r.mount.path == "/" && !children.is_empty() => Vec::new(),
-            Err(e) => return Err(e),
-        };
-        if children.is_empty() {
-            return Ok(entries);
-        }
-        let mut out: Vec<DirEntry> =
-            entries.into_iter().filter(|e| !children.contains(&e.name)).collect();
-        out.extend(children.into_iter().map(|c| DirEntry::new(c, EntryKind::Dir)));
-        Ok(out)
+            let mut out: Vec<DirEntry> =
+                entries.into_iter().filter(|e| !children.contains(&e.name)).collect();
+            out.extend(children.into_iter().map(|c| DirEntry::new(c, EntryKind::Dir)));
+            Ok(out)
+        })
     }
 
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        let r = self.require(path, "open")?;
-        r.mount.provider.open(&r.rel, flags, mode).await
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move {
+            let r = self.require(path, "open")?;
+            r.mount.provider.open(&r.rel, flags, mode).await
+        })
     }
 
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        let r = self.require(path, "mkdir")?;
-        r.mount.provider.mkdir(&r.rel, mode, recursive).await
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "mkdir")?;
+            r.mount.provider.mkdir(&r.rel, mode, recursive).await
+        })
     }
 
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        let r = self.require(path, "rmdir")?;
-        r.mount.provider.rmdir(&r.rel).await
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "rmdir")?;
+            r.mount.provider.rmdir(&r.rel).await
+        })
     }
 
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        let r = self.require(path, "unlink")?;
-        r.mount.provider.unlink(&r.rel).await
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "unlink")?;
+            r.mount.provider.unlink(&r.rel).await
+        })
     }
 
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        let (m, a, b) = self.same_mount(from, to, "rename")?;
-        m.provider.rename(&a, &b).await
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let (m, a, b) = self.same_mount(from, to, "rename")?;
+            m.provider.rename(&a, &b).await
+        })
     }
 
-    async fn link(&self, from: &str, to: &str) -> VfsResult<()> {
-        let (m, a, b) = self.same_mount(from, to, "link")?;
-        m.provider.link(&a, &b).await
+    fn link<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let (m, a, b) = self.same_mount(from, to, "link")?;
+            m.provider.link(&a, &b).await
+        })
     }
 
-    async fn symlink(&self, target: &str, path: &str) -> VfsResult<()> {
-        let r = self.require(path, "symlink")?;
-        r.mount.provider.symlink(target, &r.rel).await
+    fn symlink<'a>(&'a self, target: &'a str, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "symlink")?;
+            r.mount.provider.symlink(target, &r.rel).await
+        })
     }
 
-    async fn readlink(&self, path: &str) -> VfsResult<String> {
-        let r = self.require(path, "readlink")?;
-        r.mount.provider.readlink(&r.rel).await
+    fn readlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let r = self.require(path, "readlink")?;
+            r.mount.provider.readlink(&r.rel).await
+        })
     }
 
-    async fn chmod(&self, path: &str, mode: u32) -> VfsResult<()> {
-        let r = self.require(path, "chmod")?;
-        r.mount.provider.chmod(&r.rel, mode).await
+    fn chmod<'a>(&'a self, path: &'a str, mode: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "chmod")?;
+            r.mount.provider.chmod(&r.rel, mode).await
+        })
     }
 
-    async fn utimes(
-        &self,
-        path: &str,
+    fn utimes<'a>(
+        &'a self,
+        path: &'a str,
         atime_ms: Option<Option<i64>>,
         mtime_ms: Option<Option<i64>>,
-    ) -> VfsResult<()> {
-        let r = self.require(path, "utimes")?;
-        r.mount.provider.utimes(&r.rel, atime_ms, mtime_ms).await
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "utimes")?;
+            r.mount.provider.utimes(&r.rel, atime_ms, mtime_ms).await
+        })
     }
 
-    async fn truncate(&self, path: &str, size: u64) -> VfsResult<()> {
-        let r = self.require(path, "truncate")?;
-        r.mount.provider.truncate(&r.rel, size).await
+    fn truncate<'a>(&'a self, path: &'a str, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let r = self.require(path, "truncate")?;
+            r.mount.provider.truncate(&r.rel, size).await
+        })
     }
 
-    async fn access(&self, path: &str, mask: u32) -> VfsResult<()> {
-        match self.route(path) {
-            Some(r) => match r.mount.provider.access(&r.rel, mask).await {
-                Err(e)
-                    if is_noent(&e)
-                        && r.mount.path == "/"
-                        && !self.virtual_children(path).is_empty() =>
-                {
-                    Ok(())
-                }
-                res => res,
-            },
-            None => self.ensure_virtual_dir(path, "access"),
-        }
-    }
-
-    async fn statfs(&self, path: &str) -> VfsResult<StatFs> {
-        if let Some(r) = self.route(path) {
-            match r.mount.provider.statfs(&r.rel).await {
-                Err(e) if e.is(errno::ENOSYS) => {}
-                res => return res,
-            }
-        }
-        // Virtual directories report the first mount below that has stats.
-        let p = vpath::normalize(path);
-        let prefix = if p == "/" { "/".to_string() } else { format!("{p}/") };
-        for m in &self.mounts {
-            if !m.path.starts_with(&prefix) {
-                continue;
-            }
-            match m.provider.statfs("/").await {
-                Ok(s) => return Ok(s),
-                Err(e) if e.is(errno::ENOSYS) || e.is(errno::ENOENT) => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(StatFs::SYNTHETIC)
-    }
-
-    async fn realpath(&self, path: &str) -> VfsResult<String> {
-        match self.route(path) {
-            Some(r) => {
-                let resolved = match r.mount.provider.realpath(&r.rel).await {
+    fn access<'a>(&'a self, path: &'a str, mask: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            match self.route(path) {
+                Some(r) => match r.mount.provider.access(&r.rel, mask).await {
                     Err(e)
                         if is_noent(&e)
                             && r.mount.path == "/"
                             && !self.virtual_children(path).is_empty() =>
                     {
-                        return Ok(vpath::normalize(path));
+                        Ok(())
                     }
-                    res => res?,
-                };
-                if r.mount.path == "/" {
-                    Ok(resolved)
-                } else if resolved == "/" {
-                    Ok(r.mount.path.clone())
-                } else {
-                    Ok(format!("{}{}", r.mount.path, resolved))
+                    res => res,
+                },
+                None => self.ensure_virtual_dir(path, "access"),
+            }
+        })
+    }
+
+    fn statfs<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<StatFs>> {
+        Box::pin(async move {
+            if let Some(r) = self.route(path) {
+                match r.mount.provider.statfs(&r.rel).await {
+                    Err(e) if e.is(errno::ENOSYS) => {}
+                    res => return res,
                 }
             }
-            None => {
-                self.ensure_virtual_dir(path, "realpath")?;
-                Ok(vpath::normalize(path))
+            // Virtual directories report the first mount below that has stats.
+            let p = vpath::normalize(path);
+            let prefix = if p == "/" { "/".to_string() } else { format!("{p}/") };
+            for m in &self.mounts {
+                if !m.path.starts_with(&prefix) {
+                    continue;
+                }
+                match m.provider.statfs("/").await {
+                    Ok(s) => return Ok(s),
+                    Err(e) if e.is(errno::ENOSYS) || e.is(errno::ENOENT) => continue,
+                    Err(e) => return Err(e),
+                }
             }
-        }
+            Ok(StatFs::SYNTHETIC)
+        })
+    }
+
+    fn realpath<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            match self.route(path) {
+                Some(r) => {
+                    let resolved = match r.mount.provider.realpath(&r.rel).await {
+                        Err(e)
+                            if is_noent(&e)
+                                && r.mount.path == "/"
+                                && !self.virtual_children(path).is_empty() =>
+                        {
+                            return Ok(vpath::normalize(path));
+                        }
+                        res => res?,
+                    };
+                    if r.mount.path == "/" {
+                        Ok(resolved)
+                    } else if resolved == "/" {
+                        Ok(r.mount.path.clone())
+                    } else {
+                        Ok(format!("{}{}", r.mount.path, resolved))
+                    }
+                }
+                None => {
+                    self.ensure_virtual_dir(path, "realpath")?;
+                    Ok(vpath::normalize(path))
+                }
+            }
+        })
     }
 
     fn invalidate(&self, path: Option<&str>) {
@@ -318,10 +359,12 @@ impl Provider for MountRouter {
         }
     }
 
-    async fn close(&self) {
-        for m in &self.mounts {
-            m.provider.close().await;
-        }
+    fn close<'a>(&'a self) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            for m in &self.mounts {
+                m.provider.close().await;
+            }
+        })
     }
 }
 

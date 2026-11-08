@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gondolin_proto::exec::ClientId;
 use gondolin_proto::session::State;
-use serde_json::Value as Json;
+use gondolin_wire::Value as Json;
 use tokio::sync::oneshot;
 
 use crate::guestmsg::{ExecRequest, TimeSync};

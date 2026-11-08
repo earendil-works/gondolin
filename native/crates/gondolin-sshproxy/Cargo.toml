@@ -9,14 +9,11 @@ publish.workspace = true
 [dependencies]
 gondolin-netstack.workspace = true
 gondolin-proto.workspace = true
-async-trait.workspace = true
-thiserror.workspace = true
+gondolin-log.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-base64 = "0.22"
+gondolin-wire.workspace = true
 ring = "0.17"
-russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "process"] }
 tempfile = "3"
-tokio-stream = { version = "0.1", features = ["net"] }

@@ -4,6 +4,7 @@
 //! Strings here are JS-style header strings: header bytes are mapped 1:1 to
 //! chars (latin1), so byte offsets of ASCII placeholders are stable.
 
+use gondolin_http::url::Url;
 use gondolin_proto::net::{HttpRules, PlaceholderMode, SecretRule};
 
 use crate::error::Blocked;
@@ -24,10 +25,7 @@ struct Replacement<'a> {
 
 /// Lowercased hostname of an absolute URL (`""` when unparsable).
 pub fn url_hostname(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-        .unwrap_or_default()
+    Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_lowercase())).unwrap_or_default()
 }
 
 /// Applies the createHttpHooks secret step to a request head (in place).
@@ -181,12 +179,10 @@ fn headers_contain_forbidden(
 }
 
 fn query_pairs(url: &str) -> Option<Vec<(String, String)>> {
-    let parsed = url::Url::parse(url).ok()?;
+    let parsed = Url::parse(url).ok()?;
     match parsed.query() {
         None | Some("") => None,
-        Some(_) => {
-            Some(parsed.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect())
-        }
+        Some(_) => Some(parsed.query_pairs()),
     }
 }
 
@@ -371,7 +367,7 @@ fn replace_in_url_parameters(
     entries: &[SecretRule],
     marker: Option<&str>,
 ) -> Result<String, Blocked> {
-    let Ok(mut parsed) = url::Url::parse(url) else {
+    let Ok(mut parsed) = Url::parse(url) else {
         return Ok(url.to_string());
     };
     let Some(pairs) = query_pairs(url) else {
@@ -393,7 +389,7 @@ fn replace_in_url_parameters(
     if updated.is_empty() {
         parsed.set_query(None);
     } else {
-        parsed.query_pairs_mut().clear().extend_pairs(updated);
+        parsed.set_query_pairs(&updated);
     }
     Ok(parsed.to_string())
 }
@@ -450,8 +446,7 @@ fn lenient_base64_decode(token: &str) -> Vec<u8> {
 }
 
 fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
+    gondolin_wire::base64::encode(data)
 }
 
 /// Header strings carry latin1 chars; Basic tokens are ASCII so this is exact.
@@ -710,8 +705,8 @@ mod tests {
 
         r.replace_secrets_in_query = true;
         let out = run(&r, head(&format!("https://example.com/data?token={ph}&ok=1"), &[])).unwrap();
-        let parsed = url::Url::parse(&out.url).unwrap();
-        let token = parsed.query_pairs().find(|(k, _)| k == "token").unwrap().1.into_owned();
+        let parsed = Url::parse(&out.url).unwrap();
+        let token = parsed.query_pairs().into_iter().find(|(k, _)| k == "token").unwrap().1;
         assert_eq!(token, "s3cr3t+/=?");
         assert!(!out.url.contains(&ph));
 

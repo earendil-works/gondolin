@@ -2,42 +2,59 @@
 //! (compatible with the CA cached by `host/src/mitm.ts`), cached as ready
 //! rustls server configs.
 
-use std::net::IpAddr;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lru::LruCache;
-use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType, SerialNumber,
-};
 use ring::rand::SecureRandom;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+use crate::x509::{self, SigningKey};
+
 /// Leaf validity in days (`LEAF_VALIDITY_DAYS`)
 const LEAF_VALIDITY_DAYS: i64 = 825;
-/// notBefore backdating for clock skew
-const NOT_BEFORE_SKEW: time::Duration = time::Duration::minutes(5);
+/// notBefore backdating for clock skew in `s`
+const NOT_BEFORE_SKEW_SECS: i64 = 5 * 60;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum MitmError {
-    #[error("invalid mitm ca certificate: {0}")]
     Cert(String),
-    #[error("invalid mitm ca key: {0}")]
     Key(String),
-    #[error("leaf certificate generation failed: {0}")]
     Leaf(String),
-    #[error("tls config: {0}")]
-    Tls(#[from] rustls::Error),
+    Tls(rustls::Error),
 }
+
+impl From<rustls::Error> for MitmError {
+    fn from(e: rustls::Error) -> Self {
+        MitmError::Tls(e)
+    }
+}
+
+impl std::fmt::Display for MitmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MitmError::Cert(e) => write!(f, "invalid mitm ca certificate: {e}"),
+            MitmError::Key(e) => write!(f, "invalid mitm ca key: {e}"),
+            MitmError::Leaf(e) => write!(f, "leaf certificate generation failed: {e}"),
+            MitmError::Tls(e) => write!(f, "tls config: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for MitmError {}
 
 /// Signs leaf certificates and caches server configs per server name.
 pub struct MitmAuthority {
-    issuer: Issuer<'static, KeyPair>,
+    signer: SigningKey,
+    /// CA subject Name (DER), the leaves' issuer
+    issuer_name: Vec<u8>,
+    /// CA key identifier (leaves' authority key identifier)
+    ca_key_id: Vec<u8>,
     ca_der: CertificateDer<'static>,
-    cache: Mutex<LruCache<String, (Arc<ServerConfig>, Instant)>>,
+    /// server name → config and last use (the least recently used is evicted)
+    cache: Mutex<HashMap<String, (Arc<ServerConfig>, Instant)>>,
     max_entries: usize,
     ttl: Duration,
     provider: Arc<rustls::crypto::CryptoProvider>,
@@ -60,21 +77,21 @@ impl MitmAuthority {
     ) -> Result<Self, MitmError> {
         let ca_der = CertificateDer::from_pem_slice(cert_pem.as_bytes())
             .map_err(|e| MitmError::Cert(e.to_string()))?;
-        let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
-            .map_err(|e| MitmError::Key(e.to_string()))?;
-        let pkcs8: Vec<u8> = match &key {
-            PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
-            PrivateKeyDer::Pkcs1(k) => pkcs1_to_pkcs8(k.secret_pkcs1_der()),
-            _ => return Err(MitmError::Key("unsupported key format (SEC1)".into())),
+        let signer = SigningKey::from_pem(key_pem).map_err(|e| MitmError::Key(e.to_string()))?;
+        let info = x509::parse_certificate(&ca_der).map_err(|e| MitmError::Cert(e.to_string()))?;
+        if x509::key_identifier(&signer.spki()).ok() != x509::key_identifier(&info.spki).ok() {
+            return Err(MitmError::Key("ca key does not match the ca certificate".into()));
+        }
+        let ca_key_id = match info.key_identifier {
+            Some(id) => id,
+            None => x509::key_identifier(&info.spki).map_err(|e| MitmError::Cert(e.to_string()))?,
         };
-        let key_pair =
-            KeyPair::try_from(pkcs8.as_slice()).map_err(|e| MitmError::Key(e.to_string()))?;
-        let issuer = Issuer::from_ca_cert_der(&ca_der, key_pair)
-            .map_err(|e| MitmError::Cert(e.to_string()))?;
         Ok(Self {
-            issuer,
+            signer,
+            issuer_name: info.subject,
+            ca_key_id,
             ca_der,
-            cache: Mutex::new(LruCache::unbounded()),
+            cache: Mutex::new(HashMap::new()),
             max_entries,
             ttl,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
@@ -101,24 +118,22 @@ impl MitmAuthority {
                     *at = now;
                     return Ok(config.clone());
                 }
-                cache.pop(&name);
+                cache.remove(&name);
             }
         }
         let config = Arc::new(self.build_config(&name)?);
         if caching {
             let mut cache = self.cache.lock().unwrap();
             let now = Instant::now();
-            cache.put(name, (config.clone(), now));
+            cache.insert(name, (config.clone(), now));
             // prune expired, then enforce the size bound (LRU)
-            while let Some((_, (_, at))) = cache.peek_lru() {
-                if now.duration_since(*at) > self.ttl {
-                    cache.pop_lru();
-                } else {
-                    break;
-                }
-            }
+            cache.retain(|_, (_, at)| now.duration_since(*at) <= self.ttl);
             while cache.len() > self.max_entries {
-                cache.pop_lru();
+                let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone());
+                match oldest {
+                    Some(k) => cache.remove(&k),
+                    None => break,
+                };
             }
         }
         Ok(config)
@@ -147,76 +162,64 @@ impl MitmAuthority {
         &self,
         name: &str,
     ) -> Result<(CertificateDer<'static>, Vec<u8>), MitmError> {
-        let leaf_err = |e: rcgen::Error| MitmError::Leaf(e.to_string());
-        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(leaf_err)?;
-        let mut params = CertificateParams::default();
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, name.replace(['\r', '\n'], ""));
-        params.distinguished_name = dn;
-        params.subject_alt_names = vec![match name.parse::<IpAddr>() {
-            Ok(ip) => SanType::IpAddress(ip),
-            Err(_) => SanType::DnsName(
-                name.to_string()
-                    .try_into()
-                    .map_err(|e: rcgen::Error| MitmError::Leaf(e.to_string()))?,
-            ),
-        }];
-        let not_before = time::OffsetDateTime::now_utc() - NOT_BEFORE_SKEW;
-        params.not_before = not_before;
-        params.not_after = not_before + time::Duration::days(LEAF_VALIDITY_DAYS);
-        params.serial_number = Some(positive_serial());
-        params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.use_authority_key_identifier_extension = true;
-        let cert = params.signed_by(&key, &self.issuer).map_err(leaf_err)?;
-        Ok((cert.der().clone(), key.serialize_der()))
+        let leaf_err = |e: x509::X509Error| MitmError::Leaf(e.to_string());
+        let (key, pkcs8) = SigningKey::generate_p256().map_err(leaf_err)?;
+        let spki = key.spki();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        let not_before = now - NOT_BEFORE_SKEW_SECS;
+        let extensions = vec![
+            x509::basic_constraints(false, true),
+            x509::key_usage(&[0], true),
+            x509::ext_key_usage_server_auth(),
+            x509::subject_alt_name(name).map_err(leaf_err)?,
+            x509::subject_key_identifier(&x509::key_identifier(&spki).map_err(leaf_err)?),
+            x509::authority_key_identifier(&self.ca_key_id),
+        ];
+        let der = x509::issue(
+            &x509::CertificateParams {
+                serial: &positive_serial(),
+                not_before,
+                not_after: not_before + LEAF_VALIDITY_DAYS * 86_400,
+                issuer: &self.issuer_name,
+                subject: &x509::common_name(&name.replace(['\r', '\n'], "")),
+                spki: &spki,
+                extensions: &extensions,
+            },
+            &self.signer,
+        )
+        .map_err(leaf_err)?;
+        Ok((CertificateDer::from(der), pkcs8))
     }
 }
 
 /// Random positive 16-byte serial (`generatePositiveSerialNumber`).
-fn positive_serial() -> SerialNumber {
+fn positive_serial() -> [u8; 16] {
     let mut bytes = [0u8; 16];
     ring::rand::SystemRandom::new().fill(&mut bytes).expect("system rng");
     bytes[0] &= 0x7f;
     if bytes[0] == 0 {
         bytes[0] = 1;
     }
-    SerialNumber::from_slice(&bytes)
-}
-
-fn der_len(len: usize, out: &mut Vec<u8>) {
-    if len < 0x80 {
-        out.push(len as u8);
-    } else {
-        let bytes = (len as u64).to_be_bytes();
-        let skip = bytes.iter().take_while(|b| **b == 0).count();
-        out.push(0x80 | (8 - skip) as u8);
-        out.extend_from_slice(&bytes[skip..]);
-    }
-}
-
-fn der_tlv(tag: u8, content: &[u8], out: &mut Vec<u8>) {
-    out.push(tag);
-    der_len(content.len(), out);
-    out.extend_from_slice(content);
+    bytes
 }
 
 /// Wraps a PKCS#1 RSAPrivateKey into PKCS#8 PrivateKeyInfo.
-fn pkcs1_to_pkcs8(pkcs1: &[u8]) -> Vec<u8> {
+pub fn pkcs1_to_pkcs8(pkcs1: &[u8]) -> Vec<u8> {
     const RSA_ALG: [u8; 15] =
         [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
     let mut content = vec![0x02, 0x01, 0x00];
     content.extend_from_slice(&RSA_ALG);
-    der_tlv(0x04, pkcs1, &mut content);
-    let mut out = Vec::with_capacity(content.len() + 8);
-    der_tlv(0x30, &content, &mut out);
-    out
+    content.extend_from_slice(&x509::tlv(0x04, pkcs1));
+    x509::tlv(0x30, &content)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose};
     use rustls::client::danger::ServerCertVerifier;
 
     /// A CA like the one `host/src/mitm.ts` creates, generated with rcgen.

@@ -1,16 +1,18 @@
 //! RPC-level tests: a fake guest sends sandboxfs frames over a duplex stream
 //! (ports of `host/test/fs-rpc.test.ts` and the VFS tests).
 
+use crate::BoxFuture;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use async_trait::async_trait;
 use gondolin_proto::vfs::{
     CommitMode, Enumeration, FsCall, HookContext, MountConfig, MountSource, ObjectCacheConfig,
     ObjectMountConfig, VfsCall, VfsCallResult, VfsConfig, VfsHookConfig,
 };
-use gondolin_wire::{FrameReader, FrameWriter, Value};
+use gondolin_wire::cbor::{self, Profile};
+use gondolin_wire::value::Value;
+use gondolin_wire::{FrameReader, FrameWriter};
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 
 use crate::error::{VfsError, VfsResult, errno};
@@ -39,7 +41,7 @@ fn text(s: &str) -> Value {
 }
 
 fn int(v: u64) -> Value {
-    Value::Integer(v.into())
+    Value::Integer(v as i128)
 }
 
 fn map(pairs: Vec<(&str, Value)>) -> Value {
@@ -104,14 +106,14 @@ impl Guest {
 
     async fn send(&mut self, op: &str, req: Value) -> u32 {
         let (id, msg) = self.request(op, req);
-        self.writer.write_message(&msg).await.unwrap();
+        self.writer.write_frame(&cbor::encode(&msg)).await.unwrap();
         self.writer.flush().await.unwrap();
         id
     }
 
     async fn recv(&mut self, id: u32, op: &str) -> Reply {
         let frame = self.reader.read_frame().await.unwrap().unwrap();
-        let v: Value = gondolin_wire::decode(&frame).unwrap();
+        let v: Value = cbor::decode_with(&frame, Profile::Guest).unwrap();
         assert_eq!(get(&v, "t").unwrap().as_text(), Some("fs_response"));
         assert_eq!(uint(&v, "id"), id as u64);
         let p = get(&v, "p").unwrap();
@@ -248,38 +250,51 @@ struct Probe {
     no_access: bool,
 }
 
-#[async_trait]
 impl Provider for Probe {
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        self.inner.lstat(path).await
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.inner.lstat(path).await })
     }
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        self.inner.stat(path).await
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.inner.stat(path).await })
     }
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        *self.readdirs.lock().unwrap().entry(path.to_string()).or_default() += 1;
-        self.inner.readdir(path).await
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(async move {
+            *self.readdirs.lock().unwrap().entry(path.to_string()).or_default() += 1;
+            self.inner.readdir(path).await
+        })
     }
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        self.inner.open(path, flags, mode).await
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
     }
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        self.inner.mkdir(path, mode, recursive).await
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.mkdir(path, mode, recursive).await })
     }
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        self.inner.rmdir(path).await
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.rmdir(path).await })
     }
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        self.inner.unlink(path).await
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.unlink(path).await })
     }
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.inner.rename(from, to).await
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.rename(from, to).await })
     }
-    async fn access(&self, path: &str, mask: u32) -> VfsResult<()> {
-        if self.no_access {
-            return Err(VfsError::op(errno::ENOSYS, "access", path));
-        }
-        self.inner.access(path, mask).await
+    fn access<'a>(&'a self, path: &'a str, mask: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            if self.no_access {
+                return Err(VfsError::op(errno::ENOSYS, "access", path));
+            }
+            self.inner.access(path, mask).await
+        })
     }
 }
 
@@ -834,19 +849,10 @@ async fn resync_after_garbage_body() {
     let (r, mut w) = tokio::io::split(client);
     // undecodable frame, a non-request, a request without id, an oversized frame header
     w.write_all(&[0, 0, 0, 2, 0xff, 0xff]).await.unwrap();
-    let other = gondolin_wire::encode(&map(vec![
-        ("v", int(1)),
-        ("t", text("fs_response")),
-        ("id", int(1)),
-    ]))
-    .unwrap();
+    let other = cbor::encode(&map(vec![("v", int(1)), ("t", text("fs_response")), ("id", int(1))]));
     w.write_all(&gondolin_wire::frame(&other).unwrap()).await.unwrap();
-    let noid = gondolin_wire::encode(&map(vec![
-        ("v", int(1)),
-        ("t", text("fs_request")),
-        ("p", map(vec![])),
-    ]))
-    .unwrap();
+    let noid =
+        cbor::encode(&map(vec![("v", int(1)), ("t", text("fs_request")), ("p", map(vec![]))]));
     w.write_all(&gondolin_wire::frame(&noid).unwrap()).await.unwrap();
     let big = (gondolin_wire::MAX_FRAME + 1) as u32;
     w.write_all(&big.to_be_bytes()).await.unwrap();
@@ -872,21 +878,24 @@ struct HookBackend {
     calls: AtomicUsize,
 }
 
-#[async_trait]
 impl ObjectBackend for HookBackend {
-    async fn call(&self, _call: VfsCall) -> VfsResult<VfsCallResult> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Err(VfsError::new(errno::ENOSYS, "none"))
+    fn call<'a>(&'a self, _call: VfsCall) -> BoxFuture<'a, VfsResult<VfsCallResult>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(VfsError::new(errno::ENOSYS, "none"))
+        })
     }
-    async fn before_hook(&self, ctx: &HookContext) -> VfsResult<()> {
-        self.seen.lock().unwrap().push(ctx.clone());
-        if ctx.op == "open"
-            && ctx.path.as_deref() == Some("/blocked.txt")
-            && ctx.flags.as_deref().is_some_and(|f| f.contains('w') || f.contains('a'))
-        {
-            return Err(VfsError::new(errno::EACCES, "blocked"));
-        }
-        Ok(())
+    fn before_hook<'a>(&'a self, ctx: &'a HookContext) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.seen.lock().unwrap().push(ctx.clone());
+            if ctx.op == "open"
+                && ctx.path.as_deref() == Some("/blocked.txt")
+                && ctx.flags.as_deref().is_some_and(|f| f.contains('w') || f.contains('a'))
+            {
+                return Err(VfsError::new(errno::EACCES, "blocked"));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -996,8 +1005,7 @@ async fn routing_readonly_and_object_mounts_body() {
             MountConfig {
                 path: "/ro".into(),
                 source: MountSource::Static {
-                    files: [("/ca.crt".to_string(), serde_bytes::ByteBuf::from(b"pem".to_vec()))]
-                        .into(),
+                    files: [("/ca.crt".to_string(), b"pem".to_vec())].into(),
                 },
                 readonly: true,
                 layers: vec![],

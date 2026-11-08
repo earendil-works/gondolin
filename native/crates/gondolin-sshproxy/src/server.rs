@@ -1,93 +1,72 @@
 //! Guest-facing SSH server and the per-exec bridge to upstream.
 
-use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
 
 use gondolin_netstack::{FlowControl, TcpFlow};
-use russh::keys::PrivateKey;
-use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::server::{self, Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, SshId};
 use tokio::task::JoinSet;
 
+use crate::ssh::PrivateKey;
+use crate::ssh::connection::{ChannelMsg, ChannelRequest};
+use crate::ssh::session::{Channel, Server, SessionConfig};
+use crate::ssh::transport::TransportConfig;
 use crate::{Inner, SshConfigError, SshExecRequest, SshHookCall, SshTarget, upstream};
 
 /// Identification string of the guest-facing server (as the node engine).
 const SERVER_ID: &str = "SSH-2.0-gondolin-ssh-proxy";
-/// Messages russh buffers per channel before its session loop stops reading
-/// the connection. Both of our sessions advertise SSH window only as the
-/// bridge consumes data (`window_on_consume`, our russh patch), so a channel
-/// holds at most one window (2 MiB, 64 full-size packets) and this buffer
-/// never fills unless a peer sends tiny packets. Flow control is the SSH
-/// window: a direction blocked on its far side stops consuming, its sender
-/// runs out of window, and the connection keeps being read (window adjusts
-/// for the other direction get through). With russh's default (window
-/// granted on receipt) the only backpressure was a full buffer stopping the
-/// whole connection, which deadlocked a channel saturated both ways.
-pub(crate) const CHANNEL_BUFFER: usize = 256;
 
 pub(crate) fn ephemeral_host_key() -> Result<PrivateKey, SshConfigError> {
-    let mut seed = [0u8; 32];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed)
-        .map_err(|_| SshConfigError("failed to generate ssh host key".into()))?;
-    Ok(PrivateKey::from(Ed25519Keypair::from_seed(&seed)))
+    PrivateKey::generate_ed25519()
+        .map_err(|_| SshConfigError("failed to generate ssh host key".into()))
 }
 
-pub(crate) fn server_config(host_key: PrivateKey) -> Arc<server::Config> {
-    Arc::new(server::Config {
-        server_id: SshId::Standard(Cow::Borrowed(SERVER_ID)),
-        methods: MethodSet::from(
-            &[
-                MethodKind::None,
-                MethodKind::Password,
-                MethodKind::PublicKey,
-                MethodKind::KeyboardInteractive,
-            ][..],
-        ),
-        auth_rejection_time: Duration::ZERO,
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        keys: vec![host_key],
-        // The guest connection lives as long as the guest wants it to.
-        inactivity_timeout: None,
-        nodelay: true,
-        channel_buffer_size: CHANNEL_BUFFER,
-        window_on_consume: true,
-        ..Default::default()
-    })
+/// The guest-facing server's configuration.
+///
+/// Both of our sessions advertise SSH window only as the bridge consumes data
+/// (a channel holds at most one window, 2 MiB). Flow control is the SSH
+/// window: a direction blocked on its far side stops consuming, its sender
+/// runs out of window, and the connection keeps being read, so window adjusts
+/// for the other direction get through.
+pub(crate) fn server_config(host_key: PrivateKey) -> (TransportConfig, SessionConfig) {
+    (TransportConfig::server(SERVER_ID, vec![host_key]), SessionConfig::default())
 }
 
 pub(crate) async fn serve(inner: Arc<Inner>, flow: TcpFlow, target: SshTarget) {
     let TcpFlow { meta, stream, control } = flow;
-    tracing::debug!(
-        target: "gondolin::ssh",
-        flow = meta.id,
-        "ssh proxy start {} -> {}:{}",
+    gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy start {} -> {}:{}", meta.id,
         meta.src,
         target.hostname,
         target.port
     );
-    let handler = GuestHandler {
-        ctx: Arc::new(FlowCtx {
-            inner: inner.clone(),
-            target,
-            src: meta.src,
-            control: control.clone(),
-            upstreams: AtomicUsize::new(0),
-            flow_id: meta.id,
-        }),
-        username: String::new(),
-        tasks: JoinSet::new(),
+    let ctx = Arc::new(FlowCtx {
+        inner: inner.clone(),
+        target,
+        src: meta.src,
+        control: control.clone(),
+        upstreams: AtomicUsize::new(0),
+        flow_id: meta.id,
+    });
+    let (transport, session) = inner.server_config.clone();
+    // Any authentication is accepted: the guest is not trusted with anything
+    // by authenticating; upstream auth happens with host-side credentials.
+    let server = match Server::start(stream, transport, session, Arc::new(|_| true)) {
+        Ok(server) => server,
+        Err(err) => {
+            gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy error: {err}", meta.id);
+            control.abort();
+            return;
+        }
     };
-    let stream = crate::pump::Pumped::new(stream);
-    let result = match server::run_stream(inner.server_config.clone(), stream, handler).await {
-        Ok(session) => session.await,
-        Err(e) => Err(e),
-    };
-    if let Err(err) = result {
-        tracing::debug!(target: "gondolin::ssh", flow = meta.id, "ssh proxy error: {err}");
+    // channel tasks; dropped (aborted) with the connection
+    let mut tasks = JoinSet::new();
+    while let Some(channel) = server.accept().await {
+        let username = server.user().unwrap_or_default();
+        tasks.spawn(channel_task(ctx.clone(), channel, username));
+        while tasks.try_join_next().is_some() {}
+    }
+    if let Some(err) = server.closed().await {
+        gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy error: {err}", meta.id);
         control.abort();
     }
 }
@@ -103,167 +82,59 @@ struct FlowCtx {
     flow_id: u64,
 }
 
-struct GuestHandler {
-    ctx: Arc<FlowCtx>,
-    /// username the guest authenticated as
-    username: String,
-    /// channel tasks; dropped (aborted) with the connection
-    tasks: JoinSet<()>,
-}
-
-impl GuestHandler {
-    fn accept(&mut self, user: &str) -> Result<Auth, russh::Error> {
-        if !user.is_empty() {
-            self.username = user.to_string();
-        }
-        Ok(Auth::Accept)
-    }
-}
-
-impl server::Handler for GuestHandler {
-    type Error = russh::Error;
-
-    // Any authentication is accepted: the guest is not trusted with anything
-    // by authenticating; upstream auth happens with host-side credentials.
-    async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
-        self.accept(user)
-    }
-
-    async fn auth_password(&mut self, user: &str, _password: &str) -> Result<Auth, Self::Error> {
-        self.accept(user)
-    }
-
-    async fn auth_publickey(
-        &mut self,
-        user: &str,
-        _key: russh::server::VerifiedPublicKey<'_>,
-    ) -> Result<Auth, Self::Error> {
-        self.accept(user)
-    }
-
-    async fn auth_keyboard_interactive<'a>(
-        &'a mut self,
-        user: &str,
-        _submethods: &str,
-        _response: Option<server::Response<'a>>,
-    ) -> Result<Auth, Self::Error> {
-        self.accept(user)
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        channel: Channel<Msg>,
-        reply: server::ChannelOpenHandle,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply.accept().await;
-        let ctx = self.ctx.clone();
-        let username = self.username.clone();
-        let handle = session.handle();
-        self.tasks.spawn(channel_task(ctx, channel, handle, username));
-        Ok(())
-    }
-
-    async fn pty_request(
-        &mut self,
-        channel: ChannelId,
-        _term: &str,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)
-    }
-
-    async fn env_request(
-        &mut self,
-        channel: ChannelId,
-        _name: &str,
-        _value: &str,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)
-    }
-
-    async fn window_change_request(
-        &mut self,
-        channel: ChannelId,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)
-    }
-
-    async fn shell_request(
-        &mut self,
-        channel: ChannelId,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        // Accepted, then answered with an error by the channel task (node behavior).
-        session.channel_success(channel)
-    }
-
-    async fn exec_request(
-        &mut self,
-        channel: ChannelId,
-        _data: &[u8],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)
-    }
-
-    async fn subsystem_request(
-        &mut self,
-        channel: ChannelId,
-        name: &str,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        tracing::debug!(target: "gondolin::ssh", flow = self.ctx.flow_id, "ssh subsystem {name:?} denied");
-        session.channel_failure(channel)
-    }
-}
-
-async fn finish(writer: &russh::ChannelWriteHalf<Msg>, stderr: Option<String>, exit: u32) {
+async fn finish(channel: &Channel, stderr: Option<String>, exit: u32) {
     if let Some(message) = stderr {
-        let _ = writer.extended_data_bytes(1, message.into_bytes()).await;
+        let _ = channel.extended_data(1, message.as_bytes()).await;
     }
-    let _ = writer.exit_status(exit).await;
-    let _ = writer.eof().await;
-    let _ = writer.close().await;
+    let _ = channel.exit_status(exit);
+    let _ = channel.eof();
+    let _ = channel.close();
 }
 
-async fn channel_task(
-    ctx: Arc<FlowCtx>,
-    channel: Channel<Msg>,
-    handle: server::Handle,
-    username: String,
-) {
-    let id = channel.id();
-    let (mut reader, writer) = channel.split();
+async fn channel_task(ctx: Arc<FlowCtx>, channel: Channel, username: String) {
     loop {
-        match reader.wait().await {
-            Some(ChannelMsg::Exec { command, .. }) => {
+        let Some(m) = channel.wait().await else { return };
+        let ChannelMsg::Request { request, want_reply } = m else { continue };
+        match request {
+            ChannelRequest::Exec { command } => {
+                if want_reply {
+                    let _ = channel.reply(true);
+                }
                 let command = String::from_utf8_lossy(&command).into_owned();
-                exec(ctx, id, reader, writer, handle, username, command).await;
+                exec(ctx, channel, username, command).await;
                 return;
             }
-            Some(ChannelMsg::RequestShell { .. }) => {
+            ChannelRequest::Shell => {
+                // accepted, then answered with an error (node behavior)
+                if want_reply {
+                    let _ = channel.reply(true);
+                }
                 finish(
-                    &writer,
+                    &channel,
                     Some("gondolin ssh proxy: interactive shells are not supported\n".into()),
                     1,
                 )
                 .await;
                 return;
             }
-            Some(_) => {}
-            None => return,
+            ChannelRequest::Subsystem { name } => {
+                gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh subsystem {name:?} denied", ctx.flow_id);
+                if want_reply {
+                    let _ = channel.reply(false);
+                }
+            }
+            ChannelRequest::Pty { .. }
+            | ChannelRequest::Env { .. }
+            | ChannelRequest::WindowChange { .. } => {
+                if want_reply {
+                    let _ = channel.reply(true);
+                }
+            }
+            _ => {
+                if want_reply {
+                    let _ = channel.reply(false);
+                }
+            }
         }
     }
 }
@@ -281,7 +152,7 @@ impl Drop for Slot<'_> {
     }
 }
 
-fn acquire_slot<'a>(ctx: &'a FlowCtx) -> Result<Slot<'a>, String> {
+fn acquire_slot(ctx: &FlowCtx) -> Result<Slot<'_>, String> {
     let inner = &ctx.inner;
     if ctx.upstreams.fetch_add(1, Ordering::SeqCst) >= inner.max_per_flow {
         ctx.upstreams.fetch_sub(1, Ordering::SeqCst);
@@ -308,15 +179,7 @@ enum Rejection {
     Error(String),
 }
 
-async fn exec(
-    ctx: Arc<FlowCtx>,
-    id: ChannelId,
-    mut guest_rd: russh::ChannelReadHalf,
-    guest_wr: russh::ChannelWriteHalf<Msg>,
-    handle: server::Handle,
-    username: String,
-    command: String,
-) {
+async fn exec(ctx: Arc<FlowCtx>, guest: Channel, username: String, command: String) {
     let flow_id = ctx.flow_id;
     let target = &ctx.target;
     let prepared = async {
@@ -336,10 +199,7 @@ async fn exec(
                 .await
                 .map_err(Rejection::Error)?;
             if !decision.allow {
-                tracing::debug!(
-                    target: "gondolin::ssh",
-                    flow = flow_id,
-                    "ssh proxy exec denied {}:{} {command:?}",
+                gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy exec denied {}:{} {command:?}", flow_id,
                     target.hostname,
                     target.port
                 );
@@ -355,41 +215,52 @@ async fn exec(
         let channel = upstream::exec(&upstream, &command).await.map_err(Rejection::Error)?;
         Ok((slot, upstream, channel))
     };
-    let (slot, upstream, up_channel) = match prepared.await {
+    let (slot, upstream, up) = match prepared.await {
         Ok(ok) => ok,
         Err(Rejection::Denied(message, code)) => {
-            finish(&guest_wr, message, code).await;
+            finish(&guest, message, code).await;
             return;
         }
         Err(Rejection::Error(message)) => {
-            tracing::debug!(target: "gondolin::ssh", flow = flow_id, "ssh proxy exec failed: {message}");
-            finish(&guest_wr, Some(format!("gondolin ssh proxy error: {message}\n")), 255).await;
+            gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy exec failed: {message}", flow_id);
+            finish(&guest, Some(format!("gondolin ssh proxy error: {message}\n")), 255).await;
             return;
         }
     };
-    tracing::debug!(target: "gondolin::ssh", flow = flow_id, "ssh proxy exec {} {command:?}", target.hostname);
+    gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh proxy exec {} {command:?}", flow_id, target.hostname);
 
-    let (mut up_rd, up_wr) = up_channel.split();
     let guest_closed = AtomicBool::new(false);
 
     // guest -> upstream
     let to_upstream = async {
         loop {
-            match guest_rd.wait().await {
-                Some(ChannelMsg::Data { data }) => {
-                    if up_wr.data_bytes(data).await.is_err() {
-                        break;
-                    }
+            match guest.wait().await {
+                Some(ChannelMsg::Data(data)) => {
+                    // once the upstream closed its side, stdin is dropped while
+                    // the output still drains to the guest
+                    let _ = up.data(&data).await;
                 }
                 Some(ChannelMsg::Eof) => {
-                    let _ = up_wr.eof().await;
+                    let _ = up.eof();
                 }
-                Some(ChannelMsg::Signal { signal }) => {
-                    let _ = up_wr.signal(signal).await;
+                Some(ChannelMsg::Request { request, want_reply }) => {
+                    let ok = match request {
+                        ChannelRequest::Signal { name } => {
+                            let _ = up.request(&ChannelRequest::Signal { name }, false);
+                            true
+                        }
+                        ChannelRequest::WindowChange { .. }
+                        | ChannelRequest::Env { .. }
+                        | ChannelRequest::Pty { .. } => true,
+                        _ => false,
+                    };
+                    if want_reply {
+                        let _ = guest.reply(ok);
+                    }
                 }
                 Some(ChannelMsg::Close) | None => {
                     guest_closed.store(true, Ordering::SeqCst);
-                    let _ = up_wr.close().await;
+                    let _ = up.close();
                     break;
                 }
                 Some(_) => {}
@@ -400,41 +271,41 @@ async fn exec(
     // upstream -> guest
     let to_guest = async {
         loop {
-            match up_rd.wait().await {
-                Some(ChannelMsg::Data { data }) => {
-                    if guest_wr.data_bytes(data).await.is_err() {
+            match up.wait().await {
+                Some(ChannelMsg::Data(data)) => {
+                    if guest.data(&data).await.is_err() {
                         break;
                     }
                 }
-                Some(ChannelMsg::ExtendedData { data, ext }) => {
-                    if guest_wr.extended_data_bytes(ext, data).await.is_err() {
+                Some(ChannelMsg::ExtendedData { ext, data }) => {
+                    if guest.extended_data(ext, &data).await.is_err() {
                         break;
                     }
                 }
-                Some(ChannelMsg::ExitStatus { exit_status }) => {
-                    let _ = guest_wr.exit_status(exit_status).await;
-                }
-                Some(ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped,
-                    error_message,
-                    lang_tag,
-                }) => {
-                    let _ = handle
-                        .exit_signal_request(id, signal_name, core_dumped, error_message, lang_tag)
-                        .await;
-                }
+                Some(ChannelMsg::Request { request, want_reply }) => match request {
+                    ChannelRequest::ExitStatus { code } => {
+                        let _ = guest.exit_status(code);
+                    }
+                    request @ ChannelRequest::ExitSignal { .. } => {
+                        let _ = guest.request(&request, false);
+                    }
+                    _ => {
+                        if want_reply {
+                            let _ = up.reply(false);
+                        }
+                    }
+                },
                 Some(ChannelMsg::Eof) => {
-                    let _ = guest_wr.eof().await;
+                    let _ = guest.eof();
                 }
                 Some(ChannelMsg::Close) => {
-                    let _ = guest_wr.close().await;
+                    let _ = guest.close();
                     break;
                 }
                 None => {
                     if !guest_closed.load(Ordering::SeqCst) {
                         // Upstream connection lost mid-exec (node: ssh-upstream-error).
-                        tracing::debug!(target: "gondolin::ssh", flow = flow_id, "ssh upstream connection lost");
+                        gondolin_log::debug!(target: "gondolin::ssh", "flow {}: ssh upstream connection lost", flow_id);
                         ctx.control.abort();
                     }
                     break;
@@ -446,10 +317,8 @@ async fn exec(
 
     // Once either side closed the channel the other direction has nothing left
     // to deliver (closing peers don't confirm reliably), so stop both.
-    tokio::select! {
-        () = to_upstream => {}
-        () = to_guest => {}
-    }
-    upstream::disconnect(upstream).await;
+    gondolin_netstack::race(to_upstream, to_guest).await;
+    drop(up);
+    upstream.disconnect();
     drop(slot);
 }

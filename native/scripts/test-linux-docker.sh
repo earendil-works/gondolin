@@ -15,6 +15,20 @@
 #               (default: exec vfs native-vfs network-egress cli-vm; `all`:
 #               every host test but krun and container-build, ~4 min)
 #
+# optional phases (not in the default list):
+#   vm-x64      the x86_64 Linux CI configuration: the x86_64 musl `gondolin`
+#               (cross-compiled on the host) in a linux/amd64 container with
+#               the QEMU of GitHub's ubuntu-latest (X64_BASE, default
+#               ubuntu:24.04), all emulated. Runs the smoke test twice: forced
+#               `microvm` (what KVM runners pick: MMIO devices,
+#               vhost-user-fs-device, memory-backend=mem) under
+#               `-accel tcg,thread=multi`, and the default (q35 + TCG). Needs
+#               an x86_64 guest image with source-built helpers in
+#               GUEST_IMAGE_X64 (default guest/image/out-x86_64; build with
+#               `cd guest && GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make
+#               build ALPINE_ARCH=x86_64 IMAGE_OUT=./image/out-x86_64`).
+#               ~5 min after the first run.
+#
 # The repository is mounted read-only; Linux build outputs, node_modules and
 # the cargo/pnpm caches live in docker volumes named gondolin-lt-*
 # (`docker volume rm $(docker volume ls -q -f name=gondolin-lt-)` resets).
@@ -34,11 +48,16 @@ PHASES=("$@")
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 
-ensure_image() { # <platform>
-  local platform=$1 tag="$TAG-${1#linux/}"
+ensure_image() { # <platform> [base image]
+  local platform=$1 base=${2:-} tag="$TAG-${1#linux/}"
+  local build_args=()
+  if [ -n "$base" ]; then
+    tag="$tag-${base//[:\/]/-}"
+    build_args=(--build-arg "BASE=$base")
+  fi
   if ! docker image inspect "$tag" >/dev/null 2>&1; then
     echo "building $tag" >&2
-    docker build --platform "$platform" -t "$tag" -f "$DOCKERFILE" "$HERE/docker" >&2
+    docker build --platform "$platform" ${build_args[@]+"${build_args[@]}"} -t "$tag" -f "$DOCKERFILE" "$HERE/docker" >&2
   fi
   echo "$tag"
 }
@@ -108,11 +127,41 @@ run_amd64() {
     echo; echo "amd64: $failed failing binaries"; [ "$failed" = 0 ]'
 }
 
+run_vm_x64() {
+  local image=${GUEST_IMAGE_X64:-$REPO/guest/image/out-x86_64}
+  if [ ! -f "$image/manifest.json" ] || ! grep -q '"arch": "x86_64"' "$image/manifest.json"; then
+    echo "no x86_64 guest image at $image (set GUEST_IMAGE_X64 or build it: cd guest &&" \
+      "GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make build ALPINE_ARCH=x86_64 IMAGE_OUT=./image/out-x86_64)" >&2
+    return 1
+  fi
+  local target=x86_64-unknown-linux-musl
+  (
+    # shellcheck disable=SC1091
+    source "$HERE/cross-env.sh"
+    cross_env "$target"
+    echo "building gondolin for $target" >&2
+    cd "$NATIVE" && cargo build --locked --release --target "$target" -p gondolin-cli
+  ) || return 1
+  local tag
+  tag=$(ensure_image linux/amd64 "${X64_BASE:-ubuntu:24.04}")
+  local tty=()
+  [ -t 1 ] && tty=(-t)
+  # node_modules etc. in their own volumes: native addons differ per platform/libc
+  docker run --rm ${tty[@]+"${tty[@]}"} --platform linux/amd64 --init --shm-size=2g \
+    -e GONDOLIN_DEBUG -e SMOKE_CONSOLE \
+    -e GONDOLIN_NATIVE_BIN="/src/native/target/$target/release/gondolin" \
+    -v "$REPO:/src:ro" -v "$image:/image:ro" \
+    -v gondolin-lt-x64-nm:/src/node_modules -v gondolin-lt-x64-nm-host:/src/host/node_modules \
+    -v gondolin-lt-x64-pnpm:/pnpm-store -v gondolin-lt-x64-work:/work \
+    "$tag" /src/native/scripts/docker/in-container.sh vm-x64
+}
+
 FAILED=()
 for phase in "${PHASES[@]}"; do
   case "$phase" in
     cargo|vm|host-tests) in_container "$phase" || FAILED+=("$phase") ;;
     amd64) run_amd64 || FAILED+=("$phase") ;;
+    vm-x64) run_vm_x64 || FAILED+=("$phase") ;;
     *) echo "unknown phase $phase" >&2; exit 2 ;;
   esac
 done

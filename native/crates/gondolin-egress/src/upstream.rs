@@ -1,27 +1,23 @@
-//! Upstream connections: a pooled hyper client whose connector resolves and
+//! Upstream connections: a pooled HTTP client whose connector resolves and
 //! checks every new connection against the ip policy (DNS rebinding
 //! protection at connect time), plus raw connections for WebSocket tunnels.
 
-use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use http::Uri;
-use hyper_rustls::HttpsConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use gondolin_http::HeadLimits;
+use gondolin_http::client::{
+    Client, ClientConfig as HttpClientConfig, Connect, ConnectFuture, Target,
+};
 use rustls::ClientConfig;
+use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
-use crate::body::HookBody;
 use crate::error::{Blocked, BoxError, PipelineError};
-use crate::policy::{PolicyEngine, bare_host};
+use crate::policy::PolicyEngine;
 
 /// Upstream TCP connect timeout per address (undici `connect.timeout`)
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,7 +26,12 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle pooled connections per origin (`DEFAULT_SHARED_UPSTREAM_CONNECTIONS_PER_ORIGIN`)
 const POOL_MAX_IDLE_PER_HOST: usize = 16;
 
-pub type UpstreamClient = Client<HttpsConnector<GuardedConnector>, HookBody>;
+/// Max upstream response head size in `bytes` (hyper's default buffer limit)
+const MAX_RESPONSE_HEAD_BYTES: usize = 8192 + 4096 * 100;
+/// Max upstream response header lines
+const MAX_RESPONSE_HEADERS: usize = 1024;
+
+pub type UpstreamClient = Client;
 
 /// Upstream TLS trust configuration.
 #[derive(Debug, Clone, Default)]
@@ -40,25 +41,41 @@ pub struct TrustConfig {
     pub extra_pems: Vec<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum TrustError {
-    #[error("invalid upstream CA certificate: {0}")]
     Pem(String),
-    #[error(transparent)]
-    Tls(#[from] rustls::Error),
+    Tls(rustls::Error),
 }
 
-/// Builds the upstream rustls client config (without ALPN; the pooled client
-/// adds `http/1.1`, WebSocket tunnels set it themselves).
+impl From<rustls::Error> for TrustError {
+    fn from(e: rustls::Error) -> Self {
+        TrustError::Tls(e)
+    }
+}
+
+impl std::fmt::Display for TrustError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustError::Pem(e) => write!(f, "invalid upstream CA certificate: {e}"),
+            TrustError::Tls(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TrustError {}
+
+/// Builds the upstream rustls client config (without ALPN).
 pub fn client_tls_config(trust: &TrustConfig) -> Result<ClientConfig, TrustError> {
     let mut roots = rustls::RootCertStore::empty();
     if trust.webpki_roots {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
     if trust.system_roots {
-        let native = rustls_native_certs::load_native_certs();
-        for cert in native.certs {
-            let _ = roots.add(cert);
+        // unparsable or unsupported system certificates are skipped
+        for pem in crate::system_roots::load() {
+            for cert in CertificateDer::pem_slice_iter(&pem).flatten() {
+                let _ = roots.add(cert);
+            }
         }
     }
     for pem in &trust.extra_pems {
@@ -76,11 +93,18 @@ pub fn client_tls_config(trust: &TrustConfig) -> Result<ClientConfig, TrustError
 }
 
 /// Connection refused by the ip policy at connect time.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
+#[derive(Debug)]
 pub struct ConnectBlocked(pub Blocked);
 
-/// Resolves the URI host, filters the addresses through the ip policy and
+impl std::fmt::Display for ConnectBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for ConnectBlocked {}
+
+/// Resolves the target host, filters the addresses through the ip policy and
 /// connects to the first reachable allowed address.
 #[derive(Clone)]
 pub struct GuardedConnector {
@@ -93,23 +117,12 @@ impl GuardedConnector {
     }
 }
 
-impl tower_service::Service<Uri> for GuardedConnector {
-    type Response = TokioIo<TcpStream>;
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        let policy = self.policy.clone();
+impl Connect for GuardedConnector {
+    fn connect<'a>(&'a self, target: &'a Target) -> ConnectFuture<'a> {
         Box::pin(async move {
-            let host = uri.host().ok_or("missing host")?.to_string();
-            let https = uri.scheme_str() == Some("https");
-            let protocol = if https { "https" } else { "http" };
-            let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
-            let allowed = match policy.allowed_addresses(&host, protocol, port).await {
+            let host = &target.host;
+            let protocol = if target.https { "https" } else { "http" };
+            let allowed = match self.policy.allowed_addresses(host, protocol, target.port).await {
                 Ok(a) => a,
                 Err(PipelineError::Blocked(b)) => {
                     return Err(Box::new(ConnectBlocked(b)) as BoxError);
@@ -117,13 +130,13 @@ impl tower_service::Service<Uri> for GuardedConnector {
                 Err(e) => return Err(e.to_string().into()),
             };
             if allowed.is_empty() {
-                tracing::debug!(target: "gondolin::egress", "http connect blocked by policy {host}");
+                gondolin_log::debug!(target: "gondolin::egress", "http connect blocked by policy {host}");
                 return Err(Box::new(ConnectBlocked(Blocked::forbidden(format!(
                     "blocked by policy: {host}"
                 )))) as BoxError);
             }
-            let stream = connect_any(&allowed, port).await?;
-            Ok(TokioIo::new(stream))
+            let stream = connect_any(&allowed, target.port).await?;
+            Ok(Box::new(stream) as gondolin_http::BoxIo)
         })
     }
 }
@@ -148,19 +161,20 @@ async fn connect_any(addrs: &[IpAddr], port: u16) -> std::io::Result<TcpStream> 
     Err(last_err.unwrap_or_else(|| std::io::Error::other("no addresses")))
 }
 
-/// Builds the pooled upstream client.
-pub fn build_client(policy: Arc<PolicyEngine>, tls: ClientConfig) -> UpstreamClient {
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls)
-        .https_or_http()
-        .enable_http1()
-        .wrap_connector(GuardedConnector::new(policy));
-    Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
-        .pool_timer(TokioTimer::new())
-        .http1_max_headers(1024)
-        .build(https)
+/// Builds the pooled upstream client (`tls` with ALPN `http/1.1`).
+pub fn build_client(policy: Arc<PolicyEngine>, tls: Arc<ClientConfig>) -> UpstreamClient {
+    Client::new(
+        Arc::new(GuardedConnector::new(policy)),
+        Some(tls),
+        HttpClientConfig {
+            limits: HeadLimits {
+                max_bytes: MAX_RESPONSE_HEAD_BYTES,
+                max_headers: MAX_RESPONSE_HEADERS,
+            },
+            idle_timeout: POOL_IDLE_TIMEOUT,
+            max_idle_per_target: POOL_MAX_IDLE_PER_HOST,
+        },
+    )
 }
 
 /// A raw upstream stream (plain TCP or TLS) for WebSocket tunnels.
@@ -180,12 +194,7 @@ pub async fn connect_raw(
     if !https {
         return Ok(Box::new(stream));
     }
-    let host = bare_host(hostname);
-    let name = match host.parse::<IpAddr>() {
-        Ok(ip) => ServerName::IpAddress(ip.into()),
-        Err(_) => ServerName::try_from(host.to_string())?,
-    };
-    let connector = tokio_rustls::TlsConnector::from(tls.clone());
-    let tls_stream = connector.connect(name, stream).await?;
+    let name = gondolin_http::tls::server_name(hostname)?;
+    let tls_stream = gondolin_http::tls::connect(tls.clone(), name, stream).await?;
     Ok(Box::new(tls_stream))
 }

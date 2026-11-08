@@ -7,18 +7,21 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-serde.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-flate2 = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+gondolin-log.workspace = true
+gondolin-wire.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+miniz_oxide = "0.9"
+bytes.workspace = true
+gondolin-http.workspace = true
 ring = "0.17"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-native-certs = "0.8"
-serde_json = { version = "1", features = ["preserve_order"] }
-tar = { version = "0.4", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 
 [dev-dependencies]
+# builds and inspects JSON documents in tests
+serde_json = "1"
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
 tempfile = "3"
+# reference writer for archives in tests
+flate2 = "1"
+tar = { version = "0.4", default-features = false }

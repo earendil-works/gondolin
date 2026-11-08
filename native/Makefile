@@ -16,7 +16,7 @@ dist:
 	@./scripts/build-release.sh $(if $(EXAMPLES),--examples) $(TARGETS)
 
 # fmt + clippy (warnings are errors)
-check: fmt-check clippy
+check: fmt-check clippy deps
 
 lint: check
 
@@ -25,6 +25,10 @@ fmt-check:
 
 clippy:
 	@$(CARGO) clippy --workspace --all-targets --examples -- -D warnings
+
+# runtime crates of the gondolin binary against native/deps-budget
+deps:
+	@./scripts/count-deps.sh
 
 test:
 	@$(CARGO) test --workspace
@@ -46,7 +50,7 @@ clean:
 
 # cargo-fuzz targets for the guest-facing parsers (needs nightly + cargo-fuzz)
 # FUZZ_TARGETS="a b" to restrict, FUZZ_TIME seconds per target
-FUZZ_TARGETS ?= netstack_parse netstack_stack egress_flow egress_policy tls_client_hello wire_guest sshproxy_flow sshproxy_parse
+FUZZ_TARGETS ?= netstack_parse netstack_stack egress_flow egress_policy http_codec http_conn url_parse x509_parse tls_client_hello wire_guest sshproxy_flow sshproxy_parse ssh_transport ssh_keys wire_cbor wire_json assets_tar assets_gzip
 FUZZ_TIME ?= 120
 fuzz:
 	@cd fuzz && for t in $(FUZZ_TARGETS); do \

@@ -319,9 +319,20 @@ fn flush_does_not_fsync_host_files() {
     let mut c = Client::new(cfg(vec![mount("/", MountSource::Host { root })]), FakeBackend::new());
     let (n, fh) = c.create(1, "f");
     assert_eq!(c.write(n, fh, 0, b"x"), 0);
+    // relative to a request that never touches the disk, so slow (emulated)
+    // machines don't fail it: 200 fsyncs cost far more than 200 getattrs
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        assert_eq!(c.call(GETATTR, n, &[0u8; 16]).0, 0);
+    }
+    let baseline = started.elapsed();
     let started = std::time::Instant::now();
     for _ in 0..200 {
         assert_eq!(c.fh_op(FLUSH, n, fh), 0);
     }
-    assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+    let flushes = started.elapsed();
+    assert!(
+        flushes < baseline * 5 + std::time::Duration::from_millis(100),
+        "200 flushes {flushes:?}, 200 getattrs {baseline:?}"
+    );
 }

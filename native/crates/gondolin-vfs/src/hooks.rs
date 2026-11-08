@@ -8,10 +8,10 @@
 //! `rename`, `link`, `chmod`, `truncate`, `statfs` and handle ops `read`,
 //! `write`, `stat`, `truncate`, `release`.
 
+use crate::BoxFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
 use gondolin_proto::vfs::{HookContext, VfsEvent};
 use tokio::sync::mpsc;
 
@@ -122,117 +122,140 @@ impl HookedProvider {
     }
 }
 
-#[async_trait]
 impl Provider for HookedProvider {
     fn readonly(&self) -> bool {
         self.inner.readonly()
     }
 
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        self.hooks.run(ctx("lstat", path), self.inner.lstat(path)).await
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.hooks.run(ctx("lstat", path), self.inner.lstat(path)).await })
     }
 
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        self.hooks.run(ctx("stat", path), self.inner.stat(path)).await
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.hooks.run(ctx("stat", path), self.inner.stat(path)).await })
     }
 
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        self.hooks.run(ctx("readdir", path), self.inner.readdir(path)).await
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(
+            async move { self.hooks.run(ctx("readdir", path), self.inner.readdir(path)).await },
+        )
     }
 
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        let c = HookContext {
-            flags: Some(flags.as_node_str().into()),
-            mode: Some(mode),
-            ..ctx("open", path)
-        };
-        let handle = self.hooks.run(c, self.inner.open(path, flags, mode)).await?;
-        Ok(Arc::new(HookedHandle {
-            inner: handle,
-            hooks: self.hooks.clone(),
-            path: path.to_string(),
-            append: flags.append,
-        }))
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move {
+            let c = HookContext {
+                flags: Some(flags.as_node_str().into()),
+                mode: Some(mode),
+                ..ctx("open", path)
+            };
+            let handle = self.hooks.run(c, self.inner.open(path, flags, mode)).await?;
+            Ok::<Handle, crate::VfsError>(Arc::new(HookedHandle {
+                inner: handle,
+                hooks: self.hooks.clone(),
+                path: path.to_string(),
+                append: flags.append,
+            }))
+        })
     }
 
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        let c = HookContext { mode: Some(mode), ..ctx("mkdir", path) };
-        self.hooks.run(c, self.inner.mkdir(path, mode, recursive)).await
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext { mode: Some(mode), ..ctx("mkdir", path) };
+            self.hooks.run(c, self.inner.mkdir(path, mode, recursive)).await
+        })
     }
 
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        self.hooks.run(ctx("rmdir", path), self.inner.rmdir(path)).await
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.hooks.run(ctx("rmdir", path), self.inner.rmdir(path)).await })
     }
 
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        self.hooks.run(ctx("unlink", path), self.inner.unlink(path)).await
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.hooks.run(ctx("unlink", path), self.inner.unlink(path)).await })
     }
 
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        let c = HookContext {
-            op: "rename".into(),
-            old_path: Some(from.into()),
-            new_path: Some(to.into()),
-            ..Default::default()
-        };
-        self.hooks.run(c, self.inner.rename(from, to)).await
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext {
+                op: "rename".into(),
+                old_path: Some(from.into()),
+                new_path: Some(to.into()),
+                ..Default::default()
+            };
+            self.hooks.run(c, self.inner.rename(from, to)).await
+        })
     }
 
-    async fn link(&self, from: &str, to: &str) -> VfsResult<()> {
-        let c = HookContext {
-            op: "link".into(),
-            old_path: Some(from.into()),
-            new_path: Some(to.into()),
-            ..Default::default()
-        };
-        self.hooks.run(c, self.inner.link(from, to)).await
+    fn link<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext {
+                op: "link".into(),
+                old_path: Some(from.into()),
+                new_path: Some(to.into()),
+                ..Default::default()
+            };
+            self.hooks.run(c, self.inner.link(from, to)).await
+        })
     }
 
-    async fn symlink(&self, target: &str, path: &str) -> VfsResult<()> {
-        self.inner.symlink(target, path).await
+    fn symlink<'a>(&'a self, target: &'a str, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.symlink(target, path).await })
     }
 
-    async fn readlink(&self, path: &str) -> VfsResult<String> {
-        self.inner.readlink(path).await
+    fn readlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move { self.inner.readlink(path).await })
     }
 
-    async fn chmod(&self, path: &str, mode: u32) -> VfsResult<()> {
-        let c = HookContext { mode: Some(mode), ..ctx("chmod", path) };
-        self.hooks.run(c, self.inner.chmod(path, mode)).await
+    fn chmod<'a>(&'a self, path: &'a str, mode: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext { mode: Some(mode), ..ctx("chmod", path) };
+            self.hooks.run(c, self.inner.chmod(path, mode)).await
+        })
     }
 
-    async fn truncate(&self, path: &str, size: u64) -> VfsResult<()> {
-        let c = HookContext { size: Some(size), ..ctx("truncate", path) };
-        self.hooks.run(c, self.inner.truncate(path, size)).await
+    fn truncate<'a>(&'a self, path: &'a str, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext { size: Some(size), ..ctx("truncate", path) };
+            self.hooks.run(c, self.inner.truncate(path, size)).await
+        })
     }
 
-    async fn access(&self, path: &str, mask: u32) -> VfsResult<()> {
-        self.inner.access(path, mask).await
+    fn access<'a>(&'a self, path: &'a str, mask: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.access(path, mask).await })
     }
 
-    async fn utimes(
-        &self,
-        path: &str,
+    fn utimes<'a>(
+        &'a self,
+        path: &'a str,
         atime_ms: Option<Option<i64>>,
         mtime_ms: Option<Option<i64>>,
-    ) -> VfsResult<()> {
-        self.inner.utimes(path, atime_ms, mtime_ms).await
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.utimes(path, atime_ms, mtime_ms).await })
     }
 
-    async fn statfs(&self, path: &str) -> VfsResult<StatFs> {
-        self.hooks.run(ctx("statfs", path), self.inner.statfs(path)).await
+    fn statfs<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<StatFs>> {
+        Box::pin(async move { self.hooks.run(ctx("statfs", path), self.inner.statfs(path)).await })
     }
 
-    async fn realpath(&self, path: &str) -> VfsResult<String> {
-        self.inner.realpath(path).await
+    fn realpath<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move { self.inner.realpath(path).await })
     }
 
     fn invalidate(&self, path: Option<&str>) {
         self.inner.invalidate(path)
     }
 
-    async fn close(&self) {
-        self.inner.close().await
+    fn close<'a>(&'a self) -> BoxFuture<'a, ()> {
+        Box::pin(async move { self.inner.close().await })
     }
 }
 
@@ -243,61 +266,68 @@ struct HookedHandle {
     append: bool,
 }
 
-#[async_trait]
 impl FileHandle for HookedHandle {
-    async fn read(&self, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        let c = HookContext {
-            offset: Some(offset),
-            length: Some(len as u64),
-            ..ctx("read", &self.path)
-        };
-        self.hooks.before(&c).await?;
-        let result = self.inner.read(offset, len).await;
-        let bytes = result.as_ref().ok().map(|d| d.len() as u64);
-        self.hooks.after(c, &result, bytes);
-        result
+    fn read<'a>(&'a self, offset: u64, len: usize) -> BoxFuture<'a, VfsResult<Vec<u8>>> {
+        Box::pin(async move {
+            let c = HookContext {
+                offset: Some(offset),
+                length: Some(len as u64),
+                ..ctx("read", &self.path)
+            };
+            self.hooks.before(&c).await?;
+            let result = self.inner.read(offset, len).await;
+            let bytes = result.as_ref().ok().map(|d| d.len() as u64);
+            self.hooks.after(c, &result, bytes);
+            result
+        })
     }
 
-    async fn write(&self, offset: u64, data: &[u8]) -> VfsResult<usize> {
-        // appends carry no offset, like the node engine's `position: null`
-        let c = HookContext {
-            offset: if self.append { None } else { Some(offset) },
-            length: Some(data.len() as u64),
-            ..ctx("write", &self.path)
-        };
-        self.hooks.before(&c).await?;
-        let result = self.inner.write(offset, data).await;
-        let bytes = result.as_ref().ok().map(|n| *n as u64);
-        self.hooks.after(c, &result, bytes);
-        result
+    fn write<'a>(&'a self, offset: u64, data: &'a [u8]) -> BoxFuture<'a, VfsResult<usize>> {
+        Box::pin(async move {
+            // appends carry no offset, like the node engine's `position: null`
+            let c = HookContext {
+                offset: if self.append { None } else { Some(offset) },
+                length: Some(data.len() as u64),
+                ..ctx("write", &self.path)
+            };
+            self.hooks.before(&c).await?;
+            let result = self.inner.write(offset, data).await;
+            let bytes = result.as_ref().ok().map(|n| *n as u64);
+            self.hooks.after(c, &result, bytes);
+            result
+        })
     }
 
-    async fn stat(&self) -> VfsResult<Attr> {
-        self.hooks.run(ctx("stat", &self.path), self.inner.stat()).await
+    fn stat<'a>(&'a self) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.hooks.run(ctx("stat", &self.path), self.inner.stat()).await })
     }
 
-    async fn truncate(&self, size: u64) -> VfsResult<()> {
-        let c = HookContext { size: Some(size), ..ctx("truncate", &self.path) };
-        self.hooks.run(c, self.inner.truncate(size)).await
+    fn truncate<'a>(&'a self, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = HookContext { size: Some(size), ..ctx("truncate", &self.path) };
+            self.hooks.run(c, self.inner.truncate(size)).await
+        })
     }
 
-    async fn sync(&self) -> VfsResult<()> {
-        self.inner.sync().await
+    fn sync<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.sync().await })
     }
 
-    async fn flush(&self) -> VfsResult<()> {
-        self.inner.flush().await
+    fn flush<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move { self.inner.flush().await })
     }
 
-    async fn close(&self) -> VfsResult<()> {
-        let c = ctx("release", &self.path);
-        if let Err(e) = self.hooks.before(&c).await {
-            // a denied release must not leak the handle
-            let _ = self.inner.close().await;
-            return Err(e);
-        }
-        let result = self.inner.close().await;
-        self.hooks.after(c, &result, None);
-        result
+    fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let c = ctx("release", &self.path);
+            if let Err(e) = self.hooks.before(&c).await {
+                // a denied release must not leak the handle
+                let _ = self.inner.close().await;
+                return Err(e);
+            }
+            let result = self.inner.close().await;
+            self.hooks.after(c, &result, None);
+            result
+        })
     }
 }

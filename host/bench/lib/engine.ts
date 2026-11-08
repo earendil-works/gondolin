@@ -5,24 +5,103 @@ import os from "node:os";
 import { VM, type VMOptions } from "../../src/index.ts";
 import { nsToMs, processTree, readProcess } from "./harness.ts";
 
-export type EngineName = "node" | "native";
+/**
+ * Engine under test. `native-virtiofs` is the native engine with
+ * `GONDOLIN_VIRTIOFS=1` and a vhost-user capable QEMU first on `PATH`
+ * (`GONDOLIN_BENCH_VIRTIOFS_QEMU_DIR`, default `/tmp/qemu-vu/qemu-10.2.1/build`).
+ * `native-prev*` run the binary in `GONDOLIN_BENCH_PREV_BIN` (an earlier
+ * build) instead of `GONDOLIN_NATIVE_BIN`, to compare builds side by side.
+ */
+export type EngineName =
+  | "node"
+  | "native"
+  | "native-virtiofs"
+  | "native-prev"
+  | "native-prev-virtiofs";
+
+const ENGINE_NAMES: EngineName[] = [
+  "node",
+  "native",
+  "native-virtiofs",
+  "native-prev",
+  "native-prev-virtiofs",
+];
+
+/** Whether an engine variant serves the VFS over virtio-fs */
+export function isVirtiofsEngine(engine: EngineName): boolean {
+  return engine.endsWith("-virtiofs");
+}
 
 export function resolveEngine(flag: string | undefined): EngineName {
   const value = flag ?? process.env.GONDOLIN_ENGINE ?? "node";
-  if (value !== "node" && value !== "native") {
-    throw new Error(`unknown engine '${value}' (expected node or native)`);
+  if (!ENGINE_NAMES.includes(value as EngineName)) {
+    throw new Error(
+      `unknown engine '${value}' (expected ${ENGINE_NAMES.join(", ")})`,
+    );
   }
-  return value;
+  return value as EngineName;
 }
 
 let currentEngine: EngineName = "node";
+const baseEnv = {
+  PATH: process.env.PATH,
+  GONDOLIN_VIRTIOFS: process.env.GONDOLIN_VIRTIOFS,
+  GONDOLIN_NATIVE_BIN: process.env.GONDOLIN_NATIVE_BIN,
+};
+
+export function virtiofsQemuDir(): string {
+  return (
+    process.env.GONDOLIN_BENCH_VIRTIOFS_QEMU_DIR ??
+    "/tmp/qemu-vu/qemu-10.2.1/build"
+  );
+}
+
+function restoreEnv(name: keyof typeof baseEnv) {
+  if (baseEnv[name] === undefined) delete process.env[name];
+  else process.env[name] = baseEnv[name];
+}
 
 export function setEngine(engine: EngineName) {
   currentEngine = engine;
+  // The daemon inherits the environment when a VM is created.
+  restoreEnv("PATH");
+  restoreEnv("GONDOLIN_VIRTIOFS");
+  restoreEnv("GONDOLIN_NATIVE_BIN");
+  if (engine.startsWith("native-prev")) {
+    const prev = process.env.GONDOLIN_BENCH_PREV_BIN;
+    if (!prev) throw new Error(`${engine} needs GONDOLIN_BENCH_PREV_BIN`);
+    process.env.GONDOLIN_NATIVE_BIN = prev;
+  }
+  if (isVirtiofsEngine(engine)) {
+    process.env.PATH = `${virtiofsQemuDir()}:${baseEnv.PATH ?? ""}`;
+    process.env.GONDOLIN_VIRTIOFS = "1";
+  }
 }
 
 export function getEngine(): EngineName {
   return currentEngine;
+}
+
+/** QEMU version on the current `PATH` */
+export function qemuVersion(): string | null {
+  const qemu =
+    os.arch() === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  return tryRun(qemu, ["--version"])?.split("\n")[0] ?? null;
+}
+
+/** QEMU binary path on the current `PATH` */
+export function qemuPath(): string | null {
+  const qemu =
+    os.arch() === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  return tryRun("/bin/sh", ["-c", `command -v ${qemu}`]);
+}
+
+/** Guest filesystem transport of a running VM (`virtiofs` or `sandboxfs`) */
+export async function guestVfsTransport(vm: VM): Promise<string> {
+  const mounts = await sh(vm, "cat /proc/mounts");
+  if (/\svirtiofs\s/.test(mounts)) return "virtiofs";
+  if (/fuse\.sandboxfs/.test(mounts)) return "sandboxfs";
+  return "unknown";
 }
 
 /**
@@ -30,12 +109,13 @@ export function getEngine(): EngineName {
  * the default (`auto`) would pick the native engine when it is available.
  */
 export async function createVm(options: VMOptions = {}): Promise<VM> {
+  const engine = currentEngine === "node" ? "node" : "native";
   const opts: VMOptions = {
     ...options,
     sandbox: { console: "none", ...options.sandbox },
-    engine: currentEngine,
+    engine,
   };
-  if (currentEngine === "node") return VM.create(opts);
+  if (engine === "node") return VM.create(opts);
   const vm = await VM.create(opts);
   await assertNativeEngine(vm);
   return vm;

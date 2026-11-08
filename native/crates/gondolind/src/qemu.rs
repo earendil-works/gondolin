@@ -199,8 +199,11 @@ pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
         return *s;
     }
     let disk = gondolin_assets::store::gondolin_cache_dir().join("qemu-virtiofs.json");
-    let mut on_disk: HashMap<String, (bool, bool, Option<String>)> =
-        std::fs::read(&disk).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut on_disk: HashMap<String, (bool, bool, Option<String>)> = std::fs::read_to_string(&disk)
+        .ok()
+        .and_then(|t| gondolin_wire::json::parse(&t).ok())
+        .and_then(|v| gondolin_wire::FromValue::from_value(&v).ok())
+        .unwrap_or_default();
     let support = if let Some((pci, mmio, backend)) = on_disk.get(&key) {
         VirtioFsSupport {
             pci: *pci,
@@ -223,7 +226,8 @@ pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
         if let Some(parent) = disk.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_vec(&on_disk) {
+        let json = gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(&on_disk));
+        {
             let tmp = disk.with_extension(format!("json.{}", std::process::id()));
             if std::fs::write(&tmp, json).is_ok() {
                 let _ = std::fs::rename(&tmp, &disk);

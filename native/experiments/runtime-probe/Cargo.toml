@@ -1,0 +1,16 @@
+[package]
+name = "runtime-probe-experiment"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway measurements for native/docs/runtime-without-tokio.md (threads vs tasks vs poll loop)"
+
+# Not part of the native workspace (so `make check` is unaffected): its own root.
+[workspace]
+
+[dependencies]
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync"] }
+
+[profile.release]
+debug = 1

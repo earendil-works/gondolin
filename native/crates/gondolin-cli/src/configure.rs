@@ -9,11 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
 use gondolin_assets::{Arch, Assets, ProgressEvent, ResolvedImage, RootfsMode};
 use gondolin_proto::session::{RootDisk, VmConfig};
+use gondolin_wire::Value as Json;
 use gondolin_wire::Value;
-use serde_json::{Map, Value as Json, json};
 
 use crate::args::{CommonOptions, parse_disk_size};
 use crate::netcfg;
@@ -211,7 +210,15 @@ pub async fn prepare(
                     }
                     image
                 }
-                None => resolve_image(Some(&required)).await?,
+                None => {
+                    // like node's checkpoint resume: the guest dir or checkout
+                    // first when it is that build
+                    let progress = progress_printer();
+                    Assets::from_env()
+                        .resolve_build_id(&required, Some(&progress))
+                        .await
+                        .map_err(|e| e.to_string())?
+                }
             }
         }
         None => resolve_image(common.image.as_deref()).await?,
@@ -362,14 +369,18 @@ pub fn prepare_with_image(
             return Err(format!("Host path is not a directory: {}", m.host_path));
         }
         let root = std::fs::canonicalize(&resolved).map_err(|e| e.to_string())?;
-        let layers = if m.readonly { json!([{ "kind": "readonly" }]) } else { json!([]) };
+        let layers = if m.readonly {
+            gondolin_wire::value!([{ "kind": "readonly" }])
+        } else {
+            gondolin_wire::value!([])
+        };
         add(
             m.guest_path.clone(),
-            json!({ "kind": "host", "root": root.display().to_string(), "layers": layers }),
+            gondolin_wire::value!({ "kind": "host", "root": root.display().to_string(), "layers": layers }),
         )?;
     }
     for p in &common.memory_mounts {
-        add(p.clone(), json!({ "kind": "memory", "layers": [] }))?;
+        add(p.clone(), gondolin_wire::value!({ "kind": "memory", "layers": [] }))?;
     }
     // normalise and reject duplicates (`normalizeMountMap`)
     let mut user: Vec<(String, Json)> = Vec::new();
@@ -390,36 +401,36 @@ pub fn prepare_with_image(
         }
         table.push((
             MITM_MOUNT.into(),
-            json!({ "kind": "static", "layers": [], "files": { "/ca.crt": b64(pem.as_bytes()) } }),
+            gondolin_wire::value!({ "kind": "static", "layers": [], "files": { "/ca.crt": b64(pem.as_bytes()) } }),
         ));
     }
     if !user_paths.contains(&ETC_MOUNT) {
-        table.push((ETC_MOUNT.into(), json!({ "kind": "etc" })));
+        table.push((ETC_MOUNT.into(), gondolin_wire::value!({ "kind": "etc" })));
     }
     let mut next_mount_id = 1u32;
     let mut etc_mount_id = None;
     let mut mount_list = Vec::new();
     for (path, mount) in &table {
-        let mut obj = Map::new();
-        obj.insert("path".into(), json!(path));
-        if mount["kind"] == "etc" {
+        let mut obj = Json::map();
+        obj.insert("path", path.as_str());
+        if mount["kind"].as_text() == Some("etc") {
             etc_mount_id = Some(next_mount_id);
-            obj.insert("kind".into(), json!("object"));
-            obj.insert("mount_id".into(), json!(next_mount_id));
-            obj.insert("writable".into(), json!(true));
-            obj.insert("enumeration".into(), json!("list"));
-            obj.insert("commit".into(), json!("write"));
+            obj.insert("kind", "object");
+            obj.insert("mount_id", next_mount_id);
+            obj.insert("writable", true);
+            obj.insert("enumeration", "list");
+            obj.insert("commit", "write");
             obj.insert(
-                "cache".into(),
-                json!({ "ttl_ms": 1000, "max_bytes": 268435456u64, "revalidate_open": true, "inline_max_bytes": 0 }),
+                "cache",
+                gondolin_wire::value!({ "ttl_ms": 1000, "max_bytes": 268435456u64, "revalidate_open": true, "inline_max_bytes": 0 }),
             );
-            obj.insert("max_file_bytes".into(), json!(MAX_LISTENERS_FILE_BYTES));
-            obj.insert("layers".into(), json!([]));
+            obj.insert("max_file_bytes", MAX_LISTENERS_FILE_BYTES);
+            obj.insert("layers", gondolin_wire::value!([]));
             next_mount_id += 1;
-        } else if let Json::Object(m) = mount {
-            obj.extend(m.clone());
+        } else if let Some(m) = mount.as_map() {
+            obj.as_map_mut().unwrap().extend(m.iter().cloned());
         }
-        mount_list.push(Json::Object(obj));
+        mount_list.push(obj);
     }
     let mut binds: Vec<String> =
         table.iter().map(|(p, _)| p.clone()).filter(|p| p != "/").collect();
@@ -429,7 +440,7 @@ pub fn prepare_with_image(
         Some("1" | "true" | "on") => "virtiofs",
         _ => "auto",
     };
-    let vfs = json!({
+    let vfs = gondolin_wire::value!({
         "mode": "native",
         "fuse_mount": FUSE_MOUNT,
         "binds": binds,
@@ -451,19 +462,17 @@ pub fn prepare_with_image(
     )?;
 
     // --- payload (buildNativeConfigure)
-    let mut vm_json = serde_json::to_value(&vm).map_err(|e| e.to_string())?;
-    if let Some(disk) = vm_json.get_mut("root_disk").and_then(Json::as_object_mut) {
+    let mut vm_json = gondolin_wire::ToValue::to_value(&vm);
+    if let Some(disk) = vm_json.get_mut("root_disk") {
         disk.remove("mode");
         disk.remove("size");
     }
-    if let Some(obj) = vm_json.as_object_mut() {
-        obj.remove("image");
-        obj.remove("arch");
-        if krun {
-            obj.remove("idle_pause_ms");
-        }
+    vm_json.remove("image");
+    vm_json.remove("arch");
+    if krun {
+        vm_json.remove("idle_pause_ms");
     }
-    let configure = json!({
+    let configure = gondolin_wire::value!({
         "vm": vm_json,
         "limits": {
             "max_stdin_bytes": 65536,
@@ -501,48 +510,25 @@ fn mitm_dir(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     env("GONDOLIN_MITM_CERT_DIR").map(PathBuf::from).unwrap_or_else(gondolind::mitm_ca::default_dir)
 }
 
-/// `{ "$base64": ... }`
+/// A byte string value.
 pub fn b64(bytes: &[u8]) -> Json {
-    json!({ "$base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
+    Json::Bytes(bytes.to_vec())
 }
 
-/// JSON (with `$base64` byte strings) to CBOR.
+/// The payload as sent to the session (the JSON model is the CBOR model;
+/// byte strings print as `{ "$base64": ... }`).
 pub fn json_to_cbor(v: &Json) -> Value {
-    match v {
-        Json::Null => Value::Null,
-        Json::Bool(b) => Value::Bool(*b),
-        Json::Number(n) => {
-            if let Some(u) = n.as_u64() {
-                Value::Integer(u.into())
-            } else if let Some(i) = n.as_i64() {
-                Value::Integer(i.into())
-            } else {
-                Value::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        Json::String(s) => Value::Text(s.clone()),
-        Json::Array(a) => Value::Array(a.iter().map(json_to_cbor).collect()),
-        Json::Object(o) => {
-            if o.len() == 1
-                && let Some(Json::String(s)) = o.get("$base64")
-            {
-                return Value::Bytes(
-                    base64::engine::general_purpose::STANDARD.decode(s).unwrap_or_default(),
-                );
-            }
-            Value::Map(o.iter().map(|(k, v)| (Value::Text(k.clone()), json_to_cbor(v))).collect())
-        }
-    }
+    v.clone()
 }
 
 /// The `--print-configure` output: secrets redacted like the Node CLI.
 pub fn printable(prepared: &Prepared) -> Json {
     fn redact(v: &mut Json) {
         match v {
-            Json::Object(o) => {
+            Json::Map(o) => {
                 for (k, v) in o.iter_mut() {
-                    if matches!(k.as_str(), "key_pem" | "value" | "revoked_values") {
-                        *v = json!("<redacted>");
+                    if matches!(k.as_text(), Some("key_pem" | "value" | "revoked_values")) {
+                        *v = Json::Text("<redacted>".into());
                     } else {
                         redact(v);
                     }
@@ -554,7 +540,7 @@ pub fn printable(prepared: &Prepared) -> Json {
     }
     let mut configure = prepared.configure.clone();
     redact(&mut configure);
-    json!({ "configure": configure, "env": prepared.env })
+    gondolin_wire::value!({ "configure": configure, "env": prepared.env })
 }
 
 #[cfg(test)]
@@ -577,7 +563,7 @@ mod tests {
 
     #[test]
     fn cbor_bytes() {
-        let v = json_to_cbor(&json!({ "a": b64(b"xy"), "n": -1, "f": 1.5 }));
+        let v = json_to_cbor(&gondolin_wire::value!({ "a": b64(b"xy"), "n": -1, "f": 1.5 }));
         let m = v.as_map().unwrap();
         assert_eq!(m[0].1, Value::Bytes(b"xy".to_vec()));
         assert_eq!(m[1].1, Value::Integer((-1).into()));

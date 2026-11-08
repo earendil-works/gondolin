@@ -19,14 +19,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use gondolin_netstack::{DnsConfig, DnsMode, FlowMeta, SyntheticHostMapping, TcpFlow};
-use russh::keys::PrivateKey;
+use gondolin_netstack::{BoxFuture, DnsConfig, DnsMode, FlowMeta, SyntheticHostMapping, TcpFlow};
+
+/// Standard base64 (gondolin-wire's codec; padding optional when decoding).
+pub(crate) mod b64 {
+    pub fn encode(data: impl AsRef<[u8]>) -> String {
+        gondolin_wire::base64::encode(data.as_ref())
+    }
+
+    pub fn decode(text: impl AsRef<[u8]>) -> Result<Vec<u8>, ()> {
+        std::str::from_utf8(text.as_ref()).ok().and_then(gondolin_wire::base64::decode).ok_or(())
+    }
+}
 
 pub mod git;
 pub mod known_hosts;
-mod pump;
 mod server;
+pub mod ssh;
 pub mod targets;
 mod upstream;
 
@@ -35,28 +44,34 @@ pub use gondolin_proto::net::{
 };
 
 use crate::known_hosts::KnownHosts;
+use crate::ssh::PrivateKey;
 use crate::targets::{TargetPattern, match_hostname, parse_target_pattern, parse_targets};
 
 /// Invalid SSH egress configuration (messages match the node engine).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshConfigError(pub String);
+
+impl std::fmt::Display for SshConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SshConfigError {}
 
 /// Controller callbacks (`ssh.execPolicy`, `ssh.hostVerifier`); gondolind
 /// forwards them as `ssh_hook_call` requests. Only called for the hooks the
 /// configuration declares.
-#[async_trait]
 pub trait SshHooks: Send + Sync + 'static {
-    async fn ssh_hook_call(&self, call: SshHookCall) -> Result<SshHookResult, String>;
+    fn ssh_hook_call(&self, call: SshHookCall) -> BoxFuture<'_, Result<SshHookResult, String>>;
 }
 
 /// [`SshHooks`] for configurations without controller hooks.
 pub struct NoSshHooks;
 
-#[async_trait]
 impl SshHooks for NoSshHooks {
-    async fn ssh_hook_call(&self, _call: SshHookCall) -> Result<SshHookResult, String> {
-        Err("no ssh hooks registered".into())
+    fn ssh_hook_call(&self, _call: SshHookCall) -> BoxFuture<'_, Result<SshHookResult, String>> {
+        Box::pin(async { Err("no ssh hooks registered".into()) })
     }
 }
 
@@ -89,7 +104,7 @@ pub(crate) struct Credential {
     pattern: String,
     port: u16,
     username: Option<String>,
-    key: Arc<PrivateKey>,
+    key: PrivateKey,
 }
 
 pub(crate) enum HostVerifier {
@@ -106,7 +121,7 @@ pub(crate) struct Inner {
     verifier: HostVerifier,
     hooks: Arc<dyn SshHooks>,
     exec_policy_hook: bool,
-    server_config: Arc<russh::server::Config>,
+    server_config: (ssh::transport::TransportConfig, ssh::session::SessionConfig),
     max_per_flow: usize,
     max_total: usize,
     ready_timeout: Duration,
@@ -150,15 +165,14 @@ impl SshProxy {
             let Some(target) = parse_target_pattern(&raw.host) else {
                 continue;
             };
-            let key = russh::keys::decode_secret_key(&raw.private_key, raw.passphrase.as_deref())
-                .map_err(|e| {
-                SshConfigError(format!("invalid ssh credential for {}: {e}", raw.host))
-            })?;
+            let key = ssh::decode_secret_key(&raw.private_key, raw.passphrase.as_deref()).map_err(
+                |e| SshConfigError(format!("invalid ssh credential for {}: {e}", raw.host)),
+            )?;
             credentials.push(Credential {
                 pattern: target.pattern,
                 port: target.port,
                 username: raw.username.clone(),
-                key: Arc::new(key),
+                key,
             });
         }
         let agent = config.agent.as_ref().filter(|a| !a.is_empty()).map(PathBuf::from);
@@ -198,7 +212,7 @@ impl SshProxy {
         }
 
         let host_key = match &config.host_key {
-            Some(pem) => russh::keys::decode_secret_key(pem, None)
+            Some(pem) => ssh::decode_secret_key(pem, None)
                 .map_err(|e| SshConfigError(format!("invalid ssh.hostKey: {e}")))?,
             None => server::ephemeral_host_key()?,
         };
@@ -339,7 +353,7 @@ mod tests {
     fn credentials_match_by_pattern_and_port() {
         let kh = known_hosts_file();
         let key = server::ephemeral_host_key().unwrap();
-        let pem = key.to_openssh(russh::keys::ssh_key::LineEnding::LF).unwrap().to_string();
+        let pem = key.to_openssh();
         let mut cfg = config(&["github.com", "*.example.com:2222"], &kh);
         cfg.agent = None;
         cfg.credentials = vec![SshCredential {

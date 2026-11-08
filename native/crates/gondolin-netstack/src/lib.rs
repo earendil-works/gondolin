@@ -19,7 +19,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod config;
@@ -126,11 +125,42 @@ impl fmt::Debug for TcpFlow {
 /// Receives guest TCP connections; implemented by `gondolin-egress`.
 ///
 /// Each call runs on its own tokio task.
-#[async_trait]
 pub trait FlowHandler: Send + Sync + 'static {
     /// Handles one connection until it is done. Dropping the stream closes it.
-    async fn handle_tcp(&self, flow: TcpFlow);
+    fn handle_tcp(&self, flow: TcpFlow) -> BoxFuture<'_, ()>;
 }
+
+/// Runs both futures until the first completes; the other is dropped
+/// (`tokio::select!` without the macros feature). The polling order
+/// alternates: with a fixed order, a first future that always has work would
+/// use up tokio's cooperative budget on every poll and starve the second.
+pub async fn race<T>(
+    a: impl std::future::Future<Output = T>,
+    b: impl std::future::Future<Output = T>,
+) -> T {
+    use std::task::Poll;
+    let mut a = std::pin::pin!(a);
+    let mut b = std::pin::pin!(b);
+    let mut a_first = true;
+    std::future::poll_fn(|cx| {
+        a_first = !a_first;
+        if a_first {
+            if let Poll::Ready(v) = a.as_mut().poll(cx) {
+                return Poll::Ready(v);
+            }
+            b.as_mut().poll(cx)
+        } else {
+            if let Poll::Ready(v) = b.as_mut().poll(cx) {
+                return Poll::Ready(v);
+            }
+            a.as_mut().poll(cx)
+        }
+    })
+    .await
+}
+
+/// A boxed, sendable future (the async trait methods of the native crates).
+pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Looks up the hostname a synthetic DNS answer mapped to `ip` (per-host mode).
 pub trait SyntheticHostLookup: Send + Sync + 'static {

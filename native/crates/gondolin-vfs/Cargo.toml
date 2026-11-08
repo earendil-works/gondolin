@@ -9,16 +9,11 @@ publish.workspace = true
 [dependencies]
 gondolin-wire.workspace = true
 gondolin-proto.workspace = true
-async-trait.workspace = true
-bytes.workspace = true
-serde.workspace = true
-serde_bytes.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
+gondolin-log.workspace = true
 gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 libc = "0.2"
-rustix = { version = "1", features = ["fs", "process", "std"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
 tempfile = "3"

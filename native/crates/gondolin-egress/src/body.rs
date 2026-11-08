@@ -7,27 +7,54 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http_body::{Body, Frame, SizeHint};
-use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty, Full};
+use gondolin_http::{Body, SizeHint};
 
 use crate::error::{Blocked, BoxError};
 
 /// Body type used between pipeline stages and hooks.
-pub type HookBody = BoxBody<Bytes, BoxError>;
+pub type HookBody = gondolin_http::BoxBody;
+
+type Data = Poll<Option<Result<Bytes, BoxError>>>;
 
 pub fn empty() -> HookBody {
-    Empty::new().map_err(|e| match e {}).boxed()
+    HookBody::empty()
 }
 
 pub fn full(data: impl Into<Bytes>) -> HookBody {
-    Full::new(data.into()).map_err(|e| match e {}).boxed()
+    HookBody::full(data)
+}
+
+/// Keeps `guard` alive as long as the body (e.g. a concurrency permit).
+pub fn with_guard<G: Send + Unpin + 'static>(body: HookBody, guard: G) -> HookBody {
+    struct Guarded<G> {
+        body: HookBody,
+        _guard: G,
+    }
+    impl<G: Send + Unpin> Body for Guarded<G> {
+        fn poll_data(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Data {
+            Pin::new(&mut self.get_mut().body).poll_data(cx)
+        }
+        fn is_end_stream(&self) -> bool {
+            self.body.is_end_stream()
+        }
+        fn size_hint(&self) -> SizeHint {
+            self.body.size_hint()
+        }
+    }
+    HookBody::new(Guarded { body, _guard: guard })
 }
 
 /// Error raised by [`LimitedBody`] when the limit is exceeded.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
+#[derive(Debug)]
 pub struct BodyLimitExceeded(pub Blocked);
+
+impl std::fmt::Display for BodyLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for BodyLimitExceeded {}
 
 /// Fails with [`BodyLimitExceeded`] once more than `limit` bytes were read.
 pub struct LimitedBody<B> {
@@ -42,36 +69,22 @@ impl<B> LimitedBody<B> {
     }
 }
 
-impl<B> Body for LimitedBody<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-    B::Error: Into<BoxError>,
-{
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+impl<B: Body + Unpin> Body for LimitedBody<B> {
+    fn poll_data(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Data {
         let this = &mut *self;
-        match Pin::new(&mut this.inner).poll_frame(cx) {
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    let len = data.len() as u64;
-                    if len > this.remaining {
-                        let err = this.error.take().unwrap_or_else(|| {
-                            Blocked::new(413, "Payload Too Large", "body too large")
-                        });
-                        return Poll::Ready(Some(Err(Box::new(BodyLimitExceeded(err)))));
-                    }
-                    this.remaining -= len;
+        match Pin::new(&mut this.inner).poll_data(cx) {
+            Poll::Ready(Some(Ok(data))) => {
+                let len = data.len() as u64;
+                if len > this.remaining {
+                    let err = this.error.take().unwrap_or_else(|| {
+                        Blocked::new(413, "Payload Too Large", "body too large")
+                    });
+                    return Poll::Ready(Some(Err(Box::new(BodyLimitExceeded(err)))));
                 }
-                Poll::Ready(Some(Ok(frame)))
+                this.remaining -= len;
+                Poll::Ready(Some(Ok(data)))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            other => other,
         }
     }
 
@@ -105,18 +118,27 @@ pub fn find_blocked(err: &(dyn std::error::Error + 'static)) -> Option<Blocked> 
 }
 
 /// Errors of [`BodyHandle::pull`].
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum PullError {
     /// retained bytes would exceed the limit
-    #[error(transparent)]
     Limit(Blocked),
     /// reading the underlying body failed
-    #[error("body read failed: {0}")]
     Read(String),
     /// the pipeline already took the body back (decision made)
-    #[error("body stream released")]
     Released,
 }
+
+impl std::fmt::Display for PullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PullError::Limit(b) => b.fmt(f),
+            PullError::Read(e) => write!(f, "body read failed: {e}"),
+            PullError::Released => f.write_str("body stream released"),
+        }
+    }
+}
+
+impl std::error::Error for PullError {}
 
 struct PullState {
     source: Option<HookBody>,
@@ -147,11 +169,8 @@ async fn read_next(state: &mut PullState) -> Result<bool, PullError> {
             state.eof = true;
             return Ok(false);
         };
-        match source.frame().await {
-            Some(Ok(frame)) => {
-                let Ok(data) = frame.into_data() else {
-                    continue;
-                };
+        match source.data().await {
+            Some(Ok(data)) => {
                 if data.is_empty() {
                     continue;
                 }
@@ -180,6 +199,16 @@ async fn read_next(state: &mut PullState) -> Result<bool, PullError> {
                 return Ok(false);
             }
         }
+    }
+}
+
+/// Polls `fut` once; `None` when it is not ready.
+fn now_or_never<F: Future>(fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
     }
 }
 
@@ -270,7 +299,6 @@ impl BodyHandle {
     /// data that is already available. Returns the bytes read so far and
     /// whether that is the whole body.
     pub async fn prefetch(&self, max: usize, wait: bool) -> Result<(Bytes, bool), PullError> {
-        use futures_util::FutureExt;
         let mut state = self.state.lock().await;
         if state.released {
             return Err(PullError::Released);
@@ -281,7 +309,7 @@ impl BodyHandle {
                     break;
                 }
             } else if state.retained_bytes == 0 {
-                match read_next(&mut state).now_or_never() {
+                match now_or_never(read_next(&mut state)) {
                     Some(Ok(true)) => {}
                     Some(Ok(false)) => break,
                     Some(Err(e)) => return Err(e),
@@ -354,7 +382,7 @@ impl PullableBody {
         drop(state);
         match (pulled, source) {
             (false, Some(source)) => source,
-            (_, source) => ReplayBody { retained: retained.into(), rest: source }.boxed(),
+            (_, source) => HookBody::new(ReplayBody { retained: retained.into(), rest: source }),
         }
     }
 
@@ -373,18 +401,12 @@ struct ReplayBody {
 }
 
 impl Body for ReplayBody {
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+    fn poll_data(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Data {
         if let Some(chunk) = self.retained.pop_front() {
-            return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            return Poll::Ready(Some(Ok(chunk)));
         }
         match self.rest.as_mut() {
-            Some(rest) => Pin::new(rest).poll_frame(cx),
+            Some(rest) => Pin::new(rest).poll_data(cx),
             None => Poll::Ready(None),
         }
     }
@@ -395,14 +417,8 @@ impl Body for ReplayBody {
 
     fn size_hint(&self) -> SizeHint {
         let retained: u64 = self.retained.iter().map(|b| b.len() as u64).sum();
-        let rest =
-            self.rest.as_ref().map(|r| r.size_hint()).unwrap_or_else(|| SizeHint::with_exact(0));
-        let mut hint = SizeHint::new();
-        if let Some(u) = rest.upper() {
-            hint.set_upper(u + retained);
-        }
-        hint.set_lower(rest.lower() + retained);
-        hint
+        let rest = self.rest.as_ref().map(|r| r.size_hint()).unwrap_or(SizeHint::exact(0));
+        SizeHint { lower: rest.lower + retained, upper: rest.upper.map(|u| u + retained) }
     }
 }
 
@@ -444,21 +460,13 @@ impl RecordingBody {
 }
 
 impl Body for RecordingBody {
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+    fn poll_data(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Data {
         let limit = self.limit;
-        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        let polled = Pin::new(&mut self.inner).poll_data(cx);
         let mut rec = self.record.lock().unwrap();
         match &polled {
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref()
-                    && !rec.overflowed
-                {
+            Poll::Ready(Some(Ok(data))) => {
+                if !rec.overflowed {
                     if rec.bytes + data.len() as u64 > limit {
                         rec.overflowed = true;
                         rec.chunks.clear();
@@ -467,7 +475,7 @@ impl Body for RecordingBody {
                         rec.chunks.push(data.clone());
                     }
                 }
-                // hyper stops polling once a length-delimited body reports its end
+                // the client stops polling once a length-delimited body reports its end
                 if self.inner.is_end_stream() {
                     rec.complete = true;
                 }
@@ -502,28 +510,18 @@ impl<B> IdleTimeoutBody<B> {
     }
 }
 
-impl<B> Body for IdleTimeoutBody<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-    B::Error: Into<BoxError>,
-{
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+impl<B: Body + Unpin> Body for IdleTimeoutBody<B> {
+    fn poll_data(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Data {
         let this = &mut *self;
         if !this.waiting {
             // the reader may have paused (guest backpressure): time only our wait
             this.sleep.as_mut().reset(tokio::time::Instant::now() + this.timeout);
             this.waiting = true;
         }
-        match Pin::new(&mut this.inner).poll_frame(cx) {
-            Poll::Ready(frame) => {
+        match Pin::new(&mut this.inner).poll_data(cx) {
+            Poll::Ready(data) => {
                 this.waiting = false;
-                Poll::Ready(frame.map(|f| f.map_err(Into::into)))
+                Poll::Ready(data)
             }
             Poll::Pending => match this.sleep.as_mut().poll(cx) {
                 Poll::Ready(()) => Poll::Ready(Some(Err("upstream body timeout".into()))),
@@ -546,15 +544,15 @@ mod tests {
     use super::*;
 
     fn chunks(parts: &[&'static str]) -> HookBody {
-        let frames: Vec<Result<Frame<Bytes>, BoxError>> =
-            parts.iter().map(|p| Ok(Frame::data(Bytes::from_static(p.as_bytes())))).collect();
-        http_body_util::StreamBody::new(futures_util::stream::iter(frames)).boxed()
+        gondolin_http::body::from_chunks(
+            parts.iter().map(|p| Bytes::from_static(p.as_bytes())).collect(),
+        )
     }
 
     #[tokio::test]
     async fn unpulled_body_passes_through() {
         let body = PullableBody::new(chunks(&["ab", "cd"]), 10, Blocked::bad_gateway("x"));
-        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        let out = body.into_body().await.collect().await.unwrap();
         assert_eq!(&out[..], b"abcd");
     }
 
@@ -564,7 +562,7 @@ mod tests {
         let handle = body.handle();
         assert_eq!(&handle.pull(3).await.unwrap().unwrap()[..], b"hel");
         assert_eq!(&handle.pull(10).await.unwrap().unwrap()[..], b"lo");
-        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        let out = body.into_body().await.collect().await.unwrap();
         assert_eq!(&out[..], b"hello world");
         assert!(matches!(handle.pull(1).await, Err(PullError::Released)));
     }
@@ -578,7 +576,7 @@ mod tests {
         assert!(handle.pull_at(11, 100).await.unwrap().is_none());
         assert_eq!(&handle.pull_at(2, 2).await.unwrap().unwrap()[..], b"ll");
         assert!(handle.pull_at(50, 1).await.is_err());
-        let out = body.into_body().await.collect().await.unwrap().to_bytes();
+        let out = body.into_body().await.collect().await.unwrap();
         assert_eq!(&out[..], b"hello world");
     }
 
@@ -594,10 +592,10 @@ mod tests {
     #[tokio::test]
     async fn recording() {
         let (rec, record) = RecordingBody::new(chunks(&["ab", "cd"]), 10);
-        let _ = rec.boxed().collect().await.unwrap();
+        let _ = HookBody::new(rec).collect().await.unwrap();
         assert_eq!(&record.lock().unwrap().complete_body().unwrap()[..], b"abcd");
         let (rec, record) = RecordingBody::new(chunks(&["ab", "cd"]), 3);
-        let _ = rec.boxed().collect().await.unwrap();
+        let _ = HookBody::new(rec).collect().await.unwrap();
         assert!(record.lock().unwrap().complete_body().is_none());
     }
 }

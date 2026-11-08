@@ -5,9 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
-
 use crate::targets::wildcard_match;
 
 #[derive(Debug, Clone)]
@@ -122,7 +119,7 @@ fn parse(content: &str) -> Vec<Entry> {
         else {
             continue;
         };
-        let Ok(key) = B64.decode(key_b64) else {
+        let Ok(key) = crate::b64::decode(key_b64) else {
             continue;
         };
         if key.is_empty() {
@@ -173,7 +170,7 @@ fn pattern_matches(candidate: &str, pattern: &str) -> bool {
         let Some((salt, mac)) = hashed.split_once('|') else {
             return false;
         };
-        let (Ok(salt), Ok(expected)) = (B64.decode(salt), B64.decode(mac)) else {
+        let (Ok(salt), Ok(expected)) = (crate::b64::decode(salt), crate::b64::decode(mac)) else {
             return false;
         };
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &salt);
@@ -196,7 +193,7 @@ mod tests {
         b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn line(hosts: &str, key: &[u8]) -> String {
-        format!("{hosts} ssh-ed25519 {}\n", B64.encode(key))
+        format!("{hosts} ssh-ed25519 {}\n", crate::b64::encode(key))
     }
 
     #[test]
@@ -237,7 +234,8 @@ mod tests {
         let salt = b"0123456789abcdef0123";
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, salt);
         let tag = ring::hmac::sign(&key, b"[git.example.com]:2222");
-        let pattern = format!("|1|{}|{}", B64.encode(salt), B64.encode(tag.as_ref()));
+        let pattern =
+            format!("|1|{}|{}", crate::b64::encode(salt), crate::b64::encode(tag.as_ref()));
         let kh = KnownHosts::parse(&line(&pattern, KEY_A));
         assert!(kh.verify("git.example.com", KEY_A, 2222));
         assert!(!kh.verify("git.example.com", KEY_A, 22));
@@ -248,13 +246,15 @@ mod tests {
     fn revoked_keys_are_rejected() {
         let kh = KnownHosts::parse(&format!(
             "@revoked * ssh-ed25519 {}\n{}",
-            B64.encode(KEY_A),
+            crate::b64::encode(KEY_A),
             line("github.com", KEY_A)
         ));
         assert!(!kh.verify("github.com", KEY_A, 22));
         // cert-authority lines never match a plain key
-        let kh =
-            KnownHosts::parse(&format!("@cert-authority * ssh-ed25519 {}\n", B64.encode(KEY_B)));
+        let kh = KnownHosts::parse(&format!(
+            "@cert-authority * ssh-ed25519 {}\n",
+            crate::b64::encode(KEY_B)
+        ));
         assert!(!kh.verify("github.com", KEY_B, 22));
     }
 

@@ -4,32 +4,34 @@
 
 use std::time::Duration;
 
-use http::{Request, Response};
-use http_body_util::{BodyExt, Empty};
-use hyper::body::Bytes;
-use hyper::ext::ReasonPhrase;
-use hyper_util::rt::TokioIo;
-use url::Url;
+use gondolin_http::client::Connection;
+use gondolin_http::server::{OnUpgrade, Response};
+use gondolin_http::url::Url;
+use gondolin_http::{BoxBody, HeadLimits, Version};
 
 use crate::Shared;
-use crate::body::HookBody;
 use crate::error::{Blocked, PipelineError};
-use crate::headers::{WEBSOCKET_UPGRADE_HEADER_NAMES, latin1, response_headers, to_header_map};
+use crate::headers::{WEBSOCKET_UPGRADE_HEADER_NAMES, response_headers, to_wire_headers};
 use crate::hooks::{RequestHead, ResponseHead};
 use crate::http::{
     ReqBody, ReqCtx, RequestHookOutcome, apply_request_hooks, guest_response,
-    normalize_hook_response, url_protocol,
+    normalize_hook_response, status_text, url_protocol, wire_response,
 };
 use crate::upstream::connect_raw;
+
+/// Limits for the upstream handshake response head
+const UPSTREAM_HEAD_LIMITS: HeadLimits =
+    HeadLimits { max_bytes: 8192 + 4096 * 100, max_headers: 1024 };
 
 pub(crate) async fn handle_websocket(
     shared: &Shared,
     ctx: &ReqCtx,
-    req: &mut Request<()>,
+    version: Version,
+    upgrade: Option<OnUpgrade>,
     base: RequestHead,
     prechecked: bool,
-) -> Result<Response<HookBody>, PipelineError> {
-    if req.version() != http::Version::HTTP_11 {
+) -> Result<Response, PipelineError> {
+    if version != Version::Http11 {
         return Err(
             Blocked::new(501, "Not Implemented", "websocket upgrade requires HTTP/1.1").into()
         );
@@ -92,14 +94,6 @@ pub(crate) async fn handle_websocket(
     .await?
     .map_err(|e| PipelineError::Other(e.to_string()))?;
 
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(TokioIo::new(io))
-            .await
-            .map_err(|e| PipelineError::Other(e.to_string()))?;
-    tokio::spawn(async move {
-        let _ = conn.with_upgrades().await;
-    });
-
     let mut headers = hooked.headers.clone();
     if hooked.header("host").is_none() {
         let host = match url.port() {
@@ -114,67 +108,55 @@ pub(crate) async fn handle_websocket(
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_string(),
     };
-    let mut upstream_req = Request::new(Empty::<Bytes>::new());
-    *upstream_req.uri_mut() = target.parse().map_err(|_| Blocked::bad_request("invalid url"))?;
-    *upstream_req.headers_mut() = to_header_map(&headers);
+    if target.is_empty() || !target.starts_with('/') {
+        return Err(Blocked::bad_request("invalid url").into());
+    }
 
     let header_timeout = Duration::from_millis(shared.limits.websocket_header_timeout_ms);
-    let mut upstream_resp = with_timeout(header_timeout, sender.send_request(upstream_req), || {
+    let wire_headers = to_wire_headers(&headers);
+    let send = gondolin_http::client::send(
+        Connection::new(io),
+        "GET",
+        &target,
+        &wire_headers,
+        BoxBody::empty(),
+        &UPSTREAM_HEAD_LIMITS,
+        None,
+    );
+    let upstream_resp = with_timeout(header_timeout, send, || {
         format!("websocket upstream header timeout after {}ms", header_timeout.as_millis())
     })
     .await?
     .map_err(|e| PipelineError::Other(e.to_string()))?;
 
-    let status = upstream_resp.status();
+    let status = upstream_resp.head.status;
     let head = ResponseHead {
-        status: status.as_u16(),
-        status_text: upstream_resp
-            .extensions()
-            .get::<ReasonPhrase>()
-            .map(|r| latin1(r.as_bytes()))
-            .unwrap_or_else(|| status.canonical_reason().unwrap_or("OK").to_string()),
-        headers: response_headers(upstream_resp.headers()),
+        status,
+        status_text: status_text(status, &upstream_resp.head.reason),
+        headers: response_headers(&upstream_resp.head.headers),
     };
 
-    if status != http::StatusCode::SWITCHING_PROTOCOLS {
-        let body: HookBody = upstream_resp.into_body().map_err(Into::into).boxed();
-        let mut resp = raw_response(&head, body);
-        resp.headers_mut()
-            .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
-        return Ok(resp);
-    }
+    let (Some(upstream), Some(guest_upgrade)) = (upstream_resp.upgraded, upgrade) else {
+        // forwarded as received (no hop-by-hop stripping)
+        let mut head = head;
+        head.set_header("connection", "close");
+        return Ok(wire_response(&head, upstream_resp.body.boxed()));
+    };
 
-    let upstream_upgrade = hyper::upgrade::on(&mut upstream_resp);
-    let guest_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
-        let (guest, upstream) = match tokio::try_join!(guest_upgrade, upstream_upgrade) {
-            Ok(pair) => pair,
+        let mut guest = match guest_upgrade.await {
+            Ok(io) => io,
             Err(err) => {
-                tracing::debug!(target: "gondolin::egress", "websocket upgrade failed: {err}");
+                gondolin_log::debug!(target: "gondolin::egress", "websocket upgrade failed: {err}");
                 return;
             }
         };
-        let mut guest = TokioIo::new(guest);
-        let mut upstream = TokioIo::new(upstream);
+        let mut upstream = upstream;
         if let Err(err) = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
-            tracing::debug!(target: "gondolin::egress", "websocket tunnel ended: {err}");
+            gondolin_log::debug!(target: "gondolin::egress", "websocket tunnel ended: {err}");
         }
     });
-    Ok(raw_response(&head, crate::body::empty()))
-}
-
-/// Upstream handshake response forwarded as received (no hop-by-hop stripping).
-fn raw_response(head: &ResponseHead, body: HookBody) -> Response<HookBody> {
-    let mut resp = Response::new(body);
-    *resp.status_mut() =
-        http::StatusCode::from_u16(head.status).unwrap_or(http::StatusCode::BAD_GATEWAY);
-    *resp.headers_mut() = to_header_map(&head.headers);
-    if resp.status().canonical_reason() != Some(head.status_text.as_str())
-        && let Ok(reason) = ReasonPhrase::try_from(head.status_text.as_bytes().to_vec())
-    {
-        resp.extensions_mut().insert(reason);
-    }
-    resp
+    Ok(wire_response(&head, crate::body::empty()))
 }
 
 async fn with_timeout<F: std::future::Future>(

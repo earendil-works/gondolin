@@ -6,10 +6,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use gondolin_wire::{Envelope, Value};
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bootcfg::SandboxFsConfig;
@@ -69,66 +67,66 @@ impl FsPortHandler {
     }
 }
 
-#[derive(Serialize)]
-struct FsResponse<'a> {
-    op: &'a str,
-    err: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    res: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+gondolin_wire::wire_encode! {
+    struct FsResponse<'a> {
+        op: &'a str,
+        err: i64,
+        res: Option<Value>,
+        message: Option<String>,
+    }
 }
 
-#[async_trait]
 impl PortHandler for FsPortHandler {
-    async fn frame(&self, frame: Bytes) -> Result<(), String> {
-        let msg: Value = gondolin_wire::decode(&frame).map_err(|e| e.to_string())?;
-        let f = Fields::of(&msg);
-        let t = f.text("t").unwrap_or("");
-        let id = fields::request_id(f.get("id"));
-        let p = f.get("p").cloned().unwrap_or(Value::Null);
-        let pf = Fields::of(&p);
-        let op = pf.text("op").unwrap_or("").to_string();
-        if let Some(ctl) = &self.debug {
-            let id_text = id.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
-            let extra = if t == "fs_request" { format!(" op={op}") } else { String::new() };
-            let log = gondolin_proto::session::Log {
-                component: "protocol".into(),
-                message: format!("virtiofs rx t={t} id={id_text}{extra}"),
+    fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let msg: Value = gondolin_wire::decode_guest(&frame).map_err(|e| e.to_string())?;
+            let f = Fields::of(&msg);
+            let t = f.text("t").unwrap_or("");
+            let id = fields::request_id(f.get("id"));
+            let p = f.get("p").cloned().unwrap_or(Value::Null);
+            let pf = Fields::of(&p);
+            let op = pf.text("op").unwrap_or("").to_string();
+            if let Some(ctl) = &self.debug {
+                let id_text = id.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
+                let extra = if t == "fs_request" { format!(" op={op}") } else { String::new() };
+                let log = gondolin_proto::session::Log {
+                    component: "protocol".into(),
+                    message: format!("virtiofs rx t={t} id={id_text}{extra}"),
+                };
+                ctl.send(gondolin_proto::session::LOG, 0, &log);
+            }
+            let Some(id) = id else { return Ok(()) };
+            if t != "fs_request" {
+                return Ok(());
+            }
+            let req = pf.get("req").cloned().unwrap_or(Value::Map(vec![]));
+
+            let (tx, rx) = oneshot::channel();
+            let _ = self.events.send(Event::VfsBegin(tx));
+            let reply = match rx.await {
+                // a panicking request fails with EIO; sandboxfs keeps serving
+                Ok(Ok(())) => match crate::panics::CatchUnwind::new(self.serve(&op, req)).await {
+                    Ok(reply) => reply,
+                    Err(panic) => FsReply::error(errno::EIO, format!("internal error: {panic}")),
+                },
+                Ok(Err(err)) => FsReply::error(errno::EIO, err),
+                Err(_) => FsReply::error(errno::EIO, "session closed"),
             };
-            ctl.send(gondolin_proto::session::LOG, 0, &log);
-        }
-        let Some(id) = id else { return Ok(()) };
-        if t != "fs_request" {
-            return Ok(());
-        }
-        let req = pf.get("req").cloned().unwrap_or(Value::Map(vec![]));
+            let _ = self.events.send(Event::VfsEnd);
 
-        let (tx, rx) = oneshot::channel();
-        let _ = self.events.send(Event::VfsBegin(tx));
-        let reply = match rx.await {
-            // a panicking request fails with EIO; sandboxfs keeps serving
-            Ok(Ok(())) => match crate::panics::CatchUnwind::new(self.serve(&op, req)).await {
-                Ok(reply) => reply,
-                Err(panic) => FsReply::error(errno::EIO, format!("internal error: {panic}")),
-            },
-            Ok(Err(err)) => FsReply::error(errno::EIO, err),
-            Err(_) => FsReply::error(errno::EIO, "session closed"),
-        };
-        let _ = self.events.send(Event::VfsEnd);
-
-        let response = Envelope::new(
-            "fs_response",
-            u64::from(id),
-            FsResponse { op: &op, err: reply.err, res: reply.res, message: reply.message },
-        );
-        if !self.outbox.send(&response) {
-            let _ = self.events.send(Event::PortError {
-                port: "fs",
-                message: "virtio bridge queue exceeded".into(),
-            });
-        }
-        Ok(())
+            let response = Envelope::new(
+                "fs_response",
+                u64::from(id),
+                FsResponse { op: &op, err: reply.err, res: reply.res, message: reply.message },
+            );
+            if !self.outbox.send(&response) {
+                let _ = self.events.send(Event::PortError {
+                    port: "fs",
+                    message: "virtio bridge queue exceeded".into(),
+                });
+            }
+            Ok(())
+        })
     }
 
     fn error(&self, message: String) {

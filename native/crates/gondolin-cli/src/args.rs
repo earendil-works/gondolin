@@ -280,7 +280,7 @@ pub fn parse_vmm(value: &str) -> std::result::Result<String, String> {
 
 /// `parseDiskSizeToBytes`
 pub fn parse_disk_size(value: &str) -> std::result::Result<u64, String> {
-    let quoted = serde_json::to_string(value).unwrap_or_default();
+    let quoted = gondolin_wire::json::quote(value);
     let trimmed = value.trim();
     let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
     let (num, rest) = trimmed.split_at(digits);
@@ -311,7 +311,7 @@ pub fn parse_disk_size(value: &str) -> std::result::Result<u64, String> {
         _ => {
             return Err(format!(
                 "invalid disk size suffix: {} (expected K/M/G/T/P/E)",
-                serde_json::to_string(suffix_raw).unwrap_or_default()
+                gondolin_wire::json::quote(suffix_raw)
             ));
         }
     };

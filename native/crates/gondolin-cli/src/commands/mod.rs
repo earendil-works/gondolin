@@ -118,13 +118,7 @@ pub async fn run(mut args: Vec<String>) -> i32 {
 
 /// Resolves when the process gets SIGINT, SIGTERM or SIGHUP.
 pub async fn termination() -> i32 {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate()).expect("signal handler");
-    let mut hup = signal(SignalKind::hangup()).expect("signal handler");
-    let mut int = signal(SignalKind::interrupt()).expect("signal handler");
-    tokio::select! {
-        _ = term.recv() => 143,
-        _ = hup.recv() => 129,
-        _ = int.recv() => 130,
-    }
+    let mut rx = crate::signals::subscribe(&[libc::SIGTERM, libc::SIGHUP, libc::SIGINT]);
+    // the shell's convention: 128 + signal number
+    128 + rx.recv().await
 }

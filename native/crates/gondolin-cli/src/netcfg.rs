@@ -5,7 +5,7 @@
 use gondolin_egress::cli_policy::{
     CompileCtx, DnsFlags, NetFlags, SecretFlag, SshCredentialFlag, SshFlags, compile_cli_net,
 };
-use serde_json::Value as Json;
+use gondolin_wire::Value as Json;
 
 use crate::args::CommonOptions;
 

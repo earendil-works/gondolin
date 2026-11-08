@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use serde_json::json;
-
 use super::{parse_failure, render_error, usage};
 use crate::args::parse_snapshot;
 use crate::checkpoint;
@@ -34,7 +32,9 @@ async fn snapshot(args: &crate::args::SnapshotArgs) -> Result<(), String> {
     let path = checkpoint::snapshot_path(args.output.as_deref(), args.name.as_deref())?;
     let path_str = path.display().to_string();
     let mut client = IpcClient::connect(&session.info.socket_path).await?;
-    client.send(&json!({ "type": "snapshot", "id": REQUEST_ID, "path": path_str })).await?;
+    client
+        .send(&gondolin_wire::value!({ "type": "snapshot", "id": REQUEST_ID, "path": path_str }))
+        .await?;
     let result_path = loop {
         match next_message(&mut client.reader).await {
             Ok(Some(ServerMessage::Json(v))) => match v["type"].as_str() {

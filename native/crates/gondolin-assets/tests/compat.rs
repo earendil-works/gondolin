@@ -133,3 +133,25 @@ fn node_engine_reads_native_store() {
     assert_eq!(ts["compat/img:1"]["buildId"], imported.build_id.as_str());
     assert_eq!(ts[&imported.build_id]["arch"], "aarch64");
 }
+
+/// The registry cache this machine's engines wrote (node's
+/// `JSON.stringify(cache, null, 2)` or ours) re-encodes to the same bytes.
+#[test]
+fn registry_cache_reencodes_byte_identical() {
+    use gondolin_assets::registry::{REGISTRY_CACHE_FILE, load_cache, save_cache};
+    let store = gondolin_assets::Store::from_env();
+    let path = store.root().join(REGISTRY_CACHE_FILE);
+    let Ok(original) = std::fs::read_to_string(&path) else {
+        eprintln!("skipping: no {}", path.display());
+        return;
+    };
+    let url = gondolin_wire::json::parse(&original)
+        .ok()
+        .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string))
+        .unwrap();
+    let cache = load_cache(store.root(), &url).expect("cache loads");
+    let out = tempfile::tempdir().unwrap();
+    save_cache(out.path(), &cache).unwrap();
+    let again = std::fs::read_to_string(out.path().join(REGISTRY_CACHE_FILE)).unwrap();
+    assert!(again == original, "re-encoded cache differs:\n{again}\n---\n{original}");
+}

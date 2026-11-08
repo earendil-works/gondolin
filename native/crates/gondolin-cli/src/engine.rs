@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use gondolin_wire::ToValue;
 use gondolin_wire::{Envelope, RawEnvelope, Value};
 use gondolind::embed::{Embedded, EmbeddedSender};
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// A result error (`ok: false` or a lost session).
@@ -78,7 +78,7 @@ pub fn get_text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 pub fn get_int(v: &Value, key: &str) -> Option<i128> {
-    get(v, key)?.as_integer().map(i128::from)
+    get(v, key)?.as_integer()
 }
 
 /// The controller side of an embedded session.
@@ -154,17 +154,13 @@ impl Engine {
     }
 
     /// Sends an unsolicited message.
-    pub async fn send<P: Serialize + ?Sized>(&self, t: &str, p: &P) -> bool {
+    pub async fn send<P: ToValue + ?Sized>(&self, t: &str, p: &P) -> bool {
         let Ok(p) = gondolin_wire::to_value(p) else { return false };
         self.sender.send(Envelope::new(t, 0, p)).await
     }
 
     /// Sends a request and waits for its `<t>_result`.
-    pub async fn request<P: Serialize + ?Sized>(
-        &self,
-        t: &str,
-        p: &P,
-    ) -> Result<Value, EngineError> {
+    pub async fn request<P: ToValue + ?Sized>(&self, t: &str, p: &P) -> Result<Value, EngineError> {
         let p = gondolin_wire::to_value(p)
             .map_err(|e| EngineError { code: "invalid".into(), message: e.to_string() })?;
         self.request_value(t, p).await
@@ -210,7 +206,8 @@ impl Engine {
         let id = self.next_fwd.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
         self.fwd.lock().unwrap().insert((channel.to_string(), id), tx);
-        let p = serde_json::json!({ "channel": channel, "stream": id, "host": host, "port": port });
+        let p =
+            gondolin_wire::value!({ "channel": channel, "stream": id, "host": host, "port": port });
         if !self.send("fwd_open", &crate::configure::json_to_cbor(&p)).await {
             self.fwd_forget(channel, id);
         }
@@ -231,7 +228,7 @@ impl Engine {
     pub async fn shutdown(&self) {
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            self.request("shutdown", &serde_json::Map::new()),
+            self.request("shutdown", &gondolin_wire::Value::map()),
         )
         .await;
         let reader = self.reader.lock().unwrap().take();

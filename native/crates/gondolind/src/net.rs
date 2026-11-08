@@ -8,18 +8,15 @@
 //! hooks go out as `hook_call` / `body_pull` / `ssh_hook_call` requests, and
 //! open guest flows are reported as activity (no idle pause while connected).
 
-use std::net::Ipv4Addr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use async_trait::async_trait;
 use gondolin_egress::{ControllerLink, Egress, RemoteHooks};
 use gondolin_netstack::{FlowHandler, NetStack, TcpFlow};
 use gondolin_proto::net::{
     self as proto, BodyChunk, BodyPull, BodyRelease, HookCall, HookDecision, PolicyUpdate,
 };
 use gondolin_wire::{Value, from_value, to_value};
-use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
@@ -27,61 +24,98 @@ use crate::controller::{CallError, Controller, ControllerHandler};
 use crate::session::ActivityHandle;
 use crate::subsystem::{NetBackend, NetSetup, SubsystemContext};
 
-/// `configure.net`: egress fields at the top level, the stack under `stack`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ConfigureNet {
-    /// policy, hook registrations, HTTP limits, MITM CA, `tcp_hosts`, `ssh`, upstream trust
-    #[serde(flatten)]
-    pub egress: proto::NetConfig,
-    /// addresses, DNS (already resolved by the controller: per-host mapping
-    /// auto default, trusted servers) and stack limits
-    #[serde(default)]
-    pub stack: gondolin_netstack::NetConfig,
-    /// IPv4 resolvers standing in for the daemon host's (`trusted` default and
-    /// `open` DHCP advertisement); the controller sends `dns.getServers()` when
-    /// the daemon runs locally, absent: the daemon's `/etc/resolv.conf`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_resolvers: Option<Vec<String>>,
-    /// daemon-side MITM CA directory used when `mitm` is absent (remote
-    /// controllers); absent: `<cache>/gondolin/ssl` like the node engine
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mitm_dir: Option<String>,
+gondolin_wire::wire_struct! {
+    /// `configure.net`: egress fields at the top level, the stack under `stack`.
+    #[derive(Debug, Clone, Default)]
+    pub struct ConfigureNet {
+        /// policy, hook registrations, HTTP limits, MITM CA, `tcp_hosts`, `ssh`, upstream trust
+        pub egress: proto::NetConfig => flatten,
+        /// addresses, DNS (already resolved by the controller: per-host mapping
+        /// auto default, trusted servers) and stack limits
+        pub stack: gondolin_netstack::NetConfig = Default::default(),
+        /// IPv4 resolvers standing in for the daemon host's (`trusted` default and
+        /// `open` DHCP advertisement); the controller sends `dns.getServers()` when
+        /// the daemon runs locally, absent: the daemon's `/etc/resolv.conf`
+        pub system_resolvers: Option<Vec<String>>,
+        /// daemon-side MITM CA directory used when `mitm` is absent (remote
+        /// controllers); absent: `<cache>/gondolin/ssl` like the node engine
+        pub mitm_dir: Option<String>,
+    }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum NetError {
-    #[error(transparent)]
-    Stack(#[from] gondolin_netstack::NetStackError),
-    #[error(transparent)]
-    Egress(#[from] gondolin_egress::EgressError),
-    #[error(transparent)]
-    Ssh(#[from] gondolin_sshproxy::SshConfigError),
+    Stack(gondolin_netstack::NetStackError),
+    Egress(gondolin_egress::EgressError),
+    Ssh(gondolin_sshproxy::SshConfigError),
+}
+
+impl std::fmt::Display for NetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetError::Stack(e) => e.fmt(f),
+            NetError::Egress(e) => e.fmt(f),
+            NetError::Ssh(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for NetError {}
+
+impl From<gondolin_netstack::NetStackError> for NetError {
+    fn from(e: gondolin_netstack::NetStackError) -> Self {
+        NetError::Stack(e)
+    }
+}
+
+impl From<gondolin_egress::EgressError> for NetError {
+    fn from(e: gondolin_egress::EgressError) -> Self {
+        NetError::Egress(e)
+    }
+}
+
+impl From<gondolin_sshproxy::SshConfigError> for NetError {
+    fn from(e: gondolin_sshproxy::SshConfigError) -> Self {
+        NetError::Ssh(e)
+    }
 }
 
 /// Daemon→controller requests, provided by the dispatcher.
-#[async_trait]
 pub trait ControllerRequests: Send + Sync + 'static {
     /// Sends request `t` and returns the payload of its `<t>_result` (with
     /// `ok: true`); `Err` carries the failure message (`ok: false` or transport).
-    async fn request(&self, t: &'static str, payload: Value) -> Result<Value, String>;
+    fn request<'a>(
+        &'a self,
+        t: &'static str,
+        payload: Value,
+    ) -> crate::BoxFuture<'a, Result<Value, String>>;
     /// Sends a message that has no reply.
     fn notify(&self, t: &'static str, payload: Value);
 }
 
 struct Link<R>(Arc<R>);
 
-#[async_trait]
 impl<R: ControllerRequests> ControllerLink for Link<R> {
-    async fn hook_call(&self, call: HookCall) -> Result<HookDecision, String> {
-        let payload = to_value(&call).map_err(|e| e.to_string())?;
-        let result = self.0.request(proto::types::HOOK_CALL, payload).await?;
-        from_value(result).map_err(|e| format!("invalid hook_call_result: {e}"))
+    fn hook_call<'a>(
+        &'a self,
+        call: HookCall,
+    ) -> gondolin_egress::BoxFuture<'a, Result<HookDecision, String>> {
+        Box::pin(async move {
+            let payload = to_value(&call).map_err(|e| e.to_string())?;
+            let result = self.0.request(proto::types::HOOK_CALL, payload).await?;
+            from_value(result).map_err(|e| format!("invalid hook_call_result: {e}"))
+        })
     }
 
-    async fn body_pull(&self, pull: BodyPull) -> Result<BodyChunk, String> {
-        let payload = to_value(&pull).map_err(|e| e.to_string())?;
-        let result = self.0.request(proto::types::BODY_PULL, payload).await?;
-        from_value(result).map_err(|e| format!("invalid body_pull_result: {e}"))
+    fn body_pull<'a>(
+        &'a self,
+        pull: BodyPull,
+    ) -> gondolin_egress::BoxFuture<'a, Result<BodyChunk, String>> {
+        Box::pin(async move {
+            let payload = to_value(&pull).map_err(|e| e.to_string())?;
+            let result = self.0.request(proto::types::BODY_PULL, payload).await?;
+            from_value(result).map_err(|e| format!("invalid body_pull_result: {e}"))
+        })
     }
 
     fn body_release(&self, stream: u64) {
@@ -94,15 +128,16 @@ impl<R: ControllerRequests> ControllerLink for Link<R> {
 /// `ssh.execPolicy` / `ssh.hostVerifier` as `ssh_hook_call` requests.
 struct ControllerSshHooks<R>(Arc<R>);
 
-#[async_trait]
 impl<R: ControllerRequests> gondolin_sshproxy::SshHooks for ControllerSshHooks<R> {
-    async fn ssh_hook_call(
+    fn ssh_hook_call(
         &self,
         call: gondolin_sshproxy::SshHookCall,
-    ) -> Result<gondolin_sshproxy::SshHookResult, String> {
-        let payload = to_value(&call).map_err(|e| e.to_string())?;
-        let result = self.0.request(proto::types::SSH_HOOK_CALL, payload).await?;
-        from_value(result).map_err(|e| format!("invalid ssh_hook_call_result: {e}"))
+    ) -> gondolin_netstack::BoxFuture<'_, Result<gondolin_sshproxy::SshHookResult, String>> {
+        Box::pin(async move {
+            let payload = to_value(&call).map_err(|e| e.to_string())?;
+            let result = self.0.request(proto::types::SSH_HOOK_CALL, payload).await?;
+            from_value(result).map_err(|e| format!("invalid ssh_hook_call_result: {e}"))
+        })
     }
 }
 
@@ -126,19 +161,20 @@ impl Drop for FlowGuard<'_> {
     }
 }
 
-#[async_trait]
 impl FlowHandler for ActivityFlows {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        if self.open.fetch_add(1, Ordering::SeqCst) == 0
-            && let Some(activity) = &self.activity
-        {
-            activity.set("net", true);
-        }
-        let _guard = FlowGuard(self);
-        if flow.meta.dst.port() == 9 {
-            crate::panics::test_panic(crate::panics::TestPanic::Flow);
-        }
-        self.inner.handle_tcp(flow).await;
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.open.fetch_add(1, Ordering::SeqCst) == 0
+                && let Some(activity) = &self.activity
+            {
+                activity.set("net", true);
+            }
+            let _guard = FlowGuard(self);
+            if flow.meta.dst.port() == 9 {
+                crate::panics::test_panic(crate::panics::TestPanic::Flow);
+            }
+            self.inner.handle_tcp(flow).await;
+        })
     }
 }
 
@@ -247,14 +283,19 @@ impl Net {
     }
 }
 
-#[async_trait]
 impl ControllerRequests for Controller {
-    async fn request(&self, t: &'static str, payload: Value) -> Result<Value, String> {
-        match Controller::request(self, t, &payload).await {
-            Ok(v) => Ok(v),
-            Err(CallError::Remote(e)) => Err(e.message),
-            Err(e) => Err(e.to_string()),
-        }
+    fn request<'a>(
+        &'a self,
+        t: &'static str,
+        payload: Value,
+    ) -> crate::BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            match Controller::request(self, t, &payload).await {
+                Ok(v) => Ok(v),
+                Err(CallError::Remote(e)) => Err(e.message),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn notify(&self, t: &'static str, payload: Value) {
@@ -262,72 +303,80 @@ impl ControllerRequests for Controller {
     }
 }
 
-#[async_trait]
 impl NetBackend for Net {
-    async fn serve(&self, stream: UnixStream) {
-        match crate::panics::CatchUnwind::new(self.stack.serve(stream)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::debug!(target: "gondolin::net", "netdev connection ended: {err}");
+    fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            match crate::panics::CatchUnwind::new(self.stack.serve(stream)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    gondolin_log::debug!(target: "gondolin::net", "netdev connection ended: {err}");
+                }
+                // the stack driver owns the flow table and the smoltcp state
+                // (flow handlers are contained separately): fail closed
+                Err(panic) => {
+                    crate::panics::fail_closed(&format!("network stack panicked: {panic}"))
+                }
             }
-            // the stack driver owns the flow table and the smoltcp state
-            // (flow handlers are contained separately): fail closed
-            Err(panic) => crate::panics::fail_closed(&format!("network stack panicked: {panic}")),
-        }
+        })
     }
 }
 
 /// Routes the network area's controller messages to [`Net`].
 struct NetMessages(Arc<Net>);
 
-#[async_trait]
 impl ControllerHandler for NetMessages {
-    async fn handle(&self, msg: gondolin_wire::RawEnvelope, ctl: &Arc<Controller>) {
-        if self.0.handle_notification(&msg.t, msg.p.clone()) {
-            return;
-        }
-        // body pulls wait for guest/upstream data: never block the reader
-        let net = self.0.clone();
-        let ctl = ctl.clone();
-        tokio::spawn(async move {
-            let t = msg.t.clone();
-            let handled = crate::panics::CatchUnwind::new(net.handle_request(&t, msg.p)).await;
-            let handled = match handled {
-                Ok(handled) => handled,
-                Err(panic) => {
-                    if msg.id != 0 {
-                        ctl.reply_err(
-                            &msg.t,
-                            msg.id,
-                            "internal_error",
-                            &format!("internal error: {panic}"),
-                        );
-                    }
-                    return;
-                }
-            };
-            match handled {
-                Some(Ok(value)) => {
-                    let fields = match value {
-                        Value::Map(entries) => entries,
-                        _ => Vec::new(),
-                    };
-                    if msg.id != 0 {
-                        ctl.reply_ok(&msg.t, msg.id, fields);
-                    }
-                }
-                Some(Err(message)) => {
-                    if msg.id != 0 {
-                        ctl.reply_err(&msg.t, msg.id, "net_error", &message);
-                    }
-                }
-                None => {
-                    if msg.id != 0 {
-                        ctl.reply_err(&msg.t, msg.id, "unsupported", "unsupported message");
-                    }
-                }
+    fn handle<'a>(
+        &'a self,
+        msg: gondolin_wire::RawEnvelope,
+        ctl: &'a Arc<Controller>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if self.0.handle_notification(&msg.t, msg.p.clone()) {
+                return;
             }
-        });
+            // body pulls wait for guest/upstream data: never block the reader
+            let net = self.0.clone();
+            let ctl = ctl.clone();
+            tokio::spawn(async move {
+                let t = msg.t.clone();
+                let handled = crate::panics::CatchUnwind::new(net.handle_request(&t, msg.p)).await;
+                let handled = match handled {
+                    Ok(handled) => handled,
+                    Err(panic) => {
+                        if msg.id != 0 {
+                            ctl.reply_err(
+                                &msg.t,
+                                msg.id,
+                                "internal_error",
+                                &format!("internal error: {panic}"),
+                            );
+                        }
+                        return;
+                    }
+                };
+                match handled {
+                    Some(Ok(value)) => {
+                        let fields = match value {
+                            Value::Map(entries) => entries,
+                            _ => Vec::new(),
+                        };
+                        if msg.id != 0 {
+                            ctl.reply_ok(&msg.t, msg.id, fields);
+                        }
+                    }
+                    Some(Err(message)) => {
+                        if msg.id != 0 {
+                            ctl.reply_err(&msg.t, msg.id, "net_error", &message);
+                        }
+                    }
+                    None => {
+                        if msg.id != 0 {
+                            ctl.reply_err(&msg.t, msg.id, "unsupported", "unsupported message");
+                        }
+                    }
+                }
+            });
+        })
     }
 }
 
@@ -379,16 +428,21 @@ mod tests {
         notes: Mutex<Vec<&'static str>>,
     }
 
-    #[async_trait]
     impl ControllerRequests for Fake {
-        async fn request(&self, t: &'static str, payload: Value) -> Result<Value, String> {
-            self.requests.lock().unwrap().push((t, payload));
-            // `hook_call_result` with `ok` next to the decision fields
-            Ok(Value::Map(vec![
-                (Value::Text("ok".into()), Value::Bool(true)),
-                (Value::Text("action".into()), Value::Text("allowed".into())),
-                (Value::Text("allowed".into()), Value::Bool(false)),
-            ]))
+        fn request<'a>(
+            &'a self,
+            t: &'static str,
+            payload: Value,
+        ) -> crate::BoxFuture<'a, Result<Value, String>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push((t, payload));
+                // `hook_call_result` with `ok` next to the decision fields
+                Ok(Value::Map(vec![
+                    (Value::Text("ok".into()), Value::Bool(true)),
+                    (Value::Text("action".into()), Value::Text("allowed".into())),
+                    (Value::Text("allowed".into()), Value::Bool(false)),
+                ]))
+            })
         }
 
         fn notify(&self, t: &'static str, _payload: Value) {
@@ -396,14 +450,14 @@ mod tests {
         }
     }
 
-    fn decode_config(value: serde_json::Value) -> ConfigureNet {
+    fn decode_config(value: Value) -> ConfigureNet {
         let bytes = gondolin_wire::encode(&value).unwrap();
         gondolin_wire::decode(&bytes).unwrap()
     }
 
     #[test]
     fn configure_net_shape() {
-        let cfg = decode_config(serde_json::json!({
+        let cfg = decode_config(gondolin_wire::value!({
             "policy": { "allow_websockets": false, "rules": { "allowed_hosts": ["example.com"] } },
             "hooks": { "is_ip_allowed": true },
             "limits": { "max_request_body_bytes": 10 },
@@ -420,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn builds_and_routes_messages() {
-        let cfg = decode_config(serde_json::json!({
+        let cfg = decode_config(gondolin_wire::value!({
             "hooks": { "is_request_allowed": true },
             "system_resolvers": ["10.0.0.53"],
             "stack": { "dns": { "mode": "trusted" } },
@@ -458,15 +512,15 @@ mod tests {
 
     #[test]
     fn ssh_requires_per_host_dns() {
-        let ssh = serde_json::json!({
+        let ssh = gondolin_wire::value!({
             "allowed_hosts": ["github.com"],
             "agent": "/tmp/agent.sock",
             "host_verifier_hook": true,
         });
-        let cfg = decode_config(serde_json::json!({ "ssh": ssh.clone() }));
+        let cfg = decode_config(gondolin_wire::value!({ "ssh": ssh.clone() }));
         let res = Net::new(cfg, Arc::new(Fake::default()));
         assert!(matches!(res, Err(NetError::Ssh(_))), "{:?}", res.err());
-        let cfg = decode_config(serde_json::json!({
+        let cfg = decode_config(gondolin_wire::value!({
             "ssh": ssh,
             "stack": { "dns": { "synthetic_host_mapping": "per-host" } },
         }));
@@ -475,7 +529,7 @@ mod tests {
 
     #[test]
     fn trusted_mode_without_resolvers_fails_fast() {
-        let cfg = decode_config(serde_json::json!({
+        let cfg = decode_config(gondolin_wire::value!({
             "system_resolvers": [],
             "stack": { "dns": { "mode": "trusted" } },
         }));

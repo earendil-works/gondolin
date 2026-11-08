@@ -14,12 +14,12 @@
 //!   every write/truncate is forwarded before the guest gets its reply;
 //! - metadata mutations (mkdir, unlink, rename, ...) are forwarded at once.
 
+use crate::BoxFuture;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use gondolin_proto::vfs::{
     CommitMode, EntryKind, Enumeration, ObjectDirEntry, ObjectMountConfig, ObjectStat, VfsCall,
     VfsCallResult, VfsOp,
@@ -413,7 +413,7 @@ impl Inner {
         let r = self
             .call(VfsOp::ReadFile { path: path.to_string(), offset: start, length: Some(want) })
             .await?;
-        let data = r.data.map(|d| d.into_vec()).unwrap_or_default();
+        let data = r.data.unwrap_or_default();
         if (data.len() as u64) < want {
             // the file shrank on the controller side
             c.backend_size = start + data.len() as u64;
@@ -449,7 +449,7 @@ impl Inner {
             let r = self
                 .call(VfsOp::ReadFile { path: path.to_string(), offset: start, length: Some(want) })
                 .await?;
-            data = r.data.map(|d| d.into_vec()).unwrap_or_default();
+            data = r.data.unwrap_or_default();
             if (data.len() as u64) < want {
                 // the file shrank on the controller side
                 c.backend_size = start + data.len() as u64;
@@ -635,448 +635,485 @@ impl Inner {
     }
 }
 
-#[async_trait]
 impl Provider for ObjectProvider {
     fn readonly(&self) -> bool {
         !self.inner.cfg.writable
     }
 
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        self.inner.lstat(&vpath::normalize(path)).await
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move { self.inner.lstat(&vpath::normalize(path)).await })
     }
 
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        let resolved = self.inner.resolve(path).await?;
-        self.inner.lstat(&resolved).await
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let resolved = self.inner.resolve(path).await?;
+            self.inner.lstat(&resolved).await
+        })
     }
 
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        let inner = &self.inner;
-        let p = inner.resolve(path).await?;
-        let attr = inner.lstat(&p).await?;
-        if !attr.is_dir() {
-            return Err(VfsError::op(errno::ENOTDIR, "scandir", path));
-        }
-        let mut entries: Vec<ObjectDirEntry> = match inner.cfg.enumeration {
-            Enumeration::None => Vec::new(),
-            Enumeration::Materialized => {
-                let st = inner.state.lock().unwrap();
-                let prefix = if p == "/" { "/".to_string() } else { format!("{p}/") };
-                st.known
-                    .range(prefix.clone()..)
-                    .take_while(|k| k.starts_with(&prefix))
-                    .filter(|k| !k[prefix.len()..].contains('/'))
-                    .map(|k| {
-                        let kind = st
-                            .stats
-                            .get(k.as_str())
-                            .and_then(|e| e.stat.as_ref().map(|s| s.kind))
-                            .unwrap_or(EntryKind::Dir);
-                        ObjectDirEntry { name: k[prefix.len()..].to_string(), kind }
-                    })
-                    .collect()
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let p = inner.resolve(path).await?;
+            let attr = inner.lstat(&p).await?;
+            if !attr.is_dir() {
+                return Err(VfsError::op(errno::ENOTDIR, "scandir", path));
             }
-            Enumeration::List => {
-                let cached = {
+            let mut entries: Vec<ObjectDirEntry> = match inner.cfg.enumeration {
+                Enumeration::None => Vec::new(),
+                Enumeration::Materialized => {
                     let st = inner.state.lock().unwrap();
-                    st.dirs.get(&p).filter(|d| inner.fresh(d.at)).map(|d| d.entries.clone())
+                    let prefix = if p == "/" { "/".to_string() } else { format!("{p}/") };
+                    st.known
+                        .range(prefix.clone()..)
+                        .take_while(|k| k.starts_with(&prefix))
+                        .filter(|k| !k[prefix.len()..].contains('/'))
+                        .map(|k| {
+                            let kind = st
+                                .stats
+                                .get(k.as_str())
+                                .and_then(|e| e.stat.as_ref().map(|s| s.kind))
+                                .unwrap_or(EntryKind::Dir);
+                            ObjectDirEntry { name: k[prefix.len()..].to_string(), kind }
+                        })
+                        .collect()
+                }
+                Enumeration::List => {
+                    let cached = {
+                        let st = inner.state.lock().unwrap();
+                        st.dirs.get(&p).filter(|d| inner.fresh(d.at)).map(|d| d.entries.clone())
+                    };
+                    match cached {
+                        Some(e) => e,
+                        None => {
+                            let r = inner.call(VfsOp::Readdir { path: p.clone() }).await?;
+                            let entries = r.entries.unwrap_or_default();
+                            let mut st = inner.state.lock().unwrap();
+                            st.dirs.insert(
+                                p.clone(),
+                                DirCache { entries: entries.clone(), at: Instant::now() },
+                            );
+                            entries
+                        }
+                    }
+                }
+            };
+            // files created locally and not committed yet
+            if inner.cfg.enumeration != Enumeration::None {
+                let nodes: Vec<(String, Arc<FileNode>)> = {
+                    let st = inner.state.lock().unwrap();
+                    st.files
+                        .iter()
+                        .filter(|(k, _)| vpath::parent(k) == p && k.as_str() != "/")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
                 };
-                match cached {
-                    Some(e) => e,
-                    None => {
-                        let r = inner.call(VfsOp::Readdir { path: p.clone() }).await?;
-                        let entries = r.entries.unwrap_or_default();
-                        let mut st = inner.state.lock().unwrap();
-                        st.dirs.insert(
-                            p.clone(),
-                            DirCache { entries: entries.clone(), at: Instant::now() },
-                        );
-                        entries
+                for (k, node) in nodes {
+                    let c = node.content.lock().await;
+                    let name = vpath::basename(&k).to_string();
+                    if c.is_new && !c.unlinked && !entries.iter().any(|e| e.name == name) {
+                        entries.push(ObjectDirEntry { name, kind: EntryKind::File });
                     }
                 }
             }
-        };
-        // files created locally and not committed yet
-        if inner.cfg.enumeration != Enumeration::None {
-            let nodes: Vec<(String, Arc<FileNode>)> = {
-                let st = inner.state.lock().unwrap();
-                st.files
-                    .iter()
-                    .filter(|(k, _)| vpath::parent(k) == p && k.as_str() != "/")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            };
-            for (k, node) in nodes {
-                let c = node.content.lock().await;
-                let name = vpath::basename(&k).to_string();
-                if c.is_new && !c.unlinked && !entries.iter().any(|e| e.name == name) {
-                    entries.push(ObjectDirEntry { name, kind: EntryKind::File });
-                }
-            }
-        }
-        Ok(entries.into_iter().map(|e| DirEntry { name: e.name, kind: Some(e.kind) }).collect())
+            Ok(entries.into_iter().map(|e| DirEntry { name: e.name, kind: Some(e.kind) }).collect())
+        })
     }
 
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        let inner = &self.inner;
-        if flags.is_write() {
-            self.check_writable("open", path)?;
-        }
-        let p = match inner.resolve(path).await {
-            Ok(p) => p,
-            Err(e) if e.is(errno::ENOENT) && flags.create => vpath::normalize(path),
-            Err(e) => return Err(e),
-        };
-        let existing = inner.state.lock().unwrap().files.get(&p).cloned();
-        let node = match existing {
-            Some(node) => {
-                let (busy, usable, size, mtime, fetched) = {
-                    let c = node.content.lock().await;
-                    (
-                        c.dirty || node.open.load(Ordering::Relaxed) > 0,
-                        !c.unlinked && !c.stale,
-                        c.size,
-                        c.mtime_ms,
-                        c.fetched,
-                    )
-                };
-                let reuse = if busy {
-                    usable
-                } else if !usable {
-                    false
-                } else if inner.cfg.cache.revalidate_open {
-                    // a fresh stat decides whether the cached content is current
-                    inner.state.lock().unwrap().stats.remove(&p);
-                    match inner.lstat(&p).await {
-                        Ok(a) => a.size == size && a.mtime_ms == mtime,
-                        Err(_) => false,
-                    }
-                } else {
-                    inner.fresh(fetched)
-                };
-                if reuse { Some(node) } else { None }
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            if flags.is_write() {
+                self.check_writable("open", path)?;
             }
-            None => {
-                if inner.cfg.cache.revalidate_open {
-                    inner.state.lock().unwrap().stats.remove(&p);
+            let p = match inner.resolve(path).await {
+                Ok(p) => p,
+                Err(e) if e.is(errno::ENOENT) && flags.create => vpath::normalize(path),
+                Err(e) => return Err(e),
+            };
+            let existing = inner.state.lock().unwrap().files.get(&p).cloned();
+            let node = match existing {
+                Some(node) => {
+                    let (busy, usable, size, mtime, fetched) = {
+                        let c = node.content.lock().await;
+                        (
+                            c.dirty || node.open.load(Ordering::Relaxed) > 0,
+                            !c.unlinked && !c.stale,
+                            c.size,
+                            c.mtime_ms,
+                            c.fetched,
+                        )
+                    };
+                    let reuse = if busy {
+                        usable
+                    } else if !usable {
+                        false
+                    } else if inner.cfg.cache.revalidate_open {
+                        // a fresh stat decides whether the cached content is current
+                        inner.state.lock().unwrap().stats.remove(&p);
+                        match inner.lstat(&p).await {
+                            Ok(a) => a.size == size && a.mtime_ms == mtime,
+                            Err(_) => false,
+                        }
+                    } else {
+                        inner.fresh(fetched)
+                    };
+                    if reuse { Some(node) } else { None }
                 }
-                None
-            }
-        };
-        let node = match node {
-            Some(node) => node,
-            None => {
-                let content = match inner.lstat(&p).await {
-                    Ok(attr) => {
-                        if attr.is_dir() {
-                            return Err(VfsError::op(errno::EISDIR, "open", path));
-                        }
-                        Content {
-                            size: attr.size,
-                            backend_size: attr.size,
-                            chunks: BTreeMap::new(),
-                            dirty: false,
-                            is_new: false,
-                            unlinked: false,
-                            perm: attr.perm(),
-                            mtime_ms: attr.mtime_ms,
-                            fetched: Instant::now(),
-                            stale: false,
-                            read_end: 0,
-                            readahead: 1,
-                        }
+                None => {
+                    if inner.cfg.cache.revalidate_open {
+                        inner.state.lock().unwrap().stats.remove(&p);
                     }
-                    Err(e) if e.is(errno::ENOENT) && flags.create => {
-                        let perm = mode & 0o7777;
-                        let commit_now = inner.cfg.commit == CommitMode::Write;
-                        if commit_now {
-                            inner
-                                .call(VfsOp::WriteFile {
-                                    path: p.clone(),
-                                    data: Vec::new(),
-                                    offset: 0,
-                                    last: true,
-                                    mode: Some(perm),
-                                })
-                                .await?;
+                    None
+                }
+            };
+            let node = match node {
+                Some(node) => node,
+                None => {
+                    let content = match inner.lstat(&p).await {
+                        Ok(attr) => {
+                            if attr.is_dir() {
+                                return Err(VfsError::op(errno::EISDIR, "open", path));
+                            }
+                            Content {
+                                size: attr.size,
+                                backend_size: attr.size,
+                                chunks: BTreeMap::new(),
+                                dirty: false,
+                                is_new: false,
+                                unlinked: false,
+                                perm: attr.perm(),
+                                mtime_ms: attr.mtime_ms,
+                                fetched: Instant::now(),
+                                stale: false,
+                                read_end: 0,
+                                readahead: 1,
+                            }
                         }
+                        Err(e) if e.is(errno::ENOENT) && flags.create => {
+                            let perm = mode & 0o7777;
+                            let commit_now = inner.cfg.commit == CommitMode::Write;
+                            if commit_now {
+                                inner
+                                    .call(VfsOp::WriteFile {
+                                        path: p.clone(),
+                                        data: Vec::new(),
+                                        offset: 0,
+                                        last: true,
+                                        mode: Some(perm),
+                                    })
+                                    .await?;
+                            }
+                            inner.forget(&p, false);
+                            let mut st = inner.state.lock().unwrap();
+                            inner.remember(&mut st, &p);
+                            drop(st);
+                            Content {
+                                size: 0,
+                                backend_size: 0,
+                                chunks: BTreeMap::new(),
+                                dirty: !commit_now,
+                                is_new: !commit_now,
+                                unlinked: false,
+                                perm,
+                                mtime_ms: now_ms(),
+                                fetched: Instant::now(),
+                                stale: false,
+                                read_end: 0,
+                                readahead: 1,
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    let node = Arc::new(FileNode {
+                        path: Mutex::new(p.clone()),
+                        content: tokio::sync::Mutex::new(content),
+                        open: AtomicU64::new(0),
+                        last_used: AtomicU64::new(0),
+                    });
+                    inner.state.lock().unwrap().files.insert(p.clone(), node.clone());
+                    node
+                }
+            };
+            if flags.truncate {
+                let mut c = node.content.lock().await;
+                if c.size != 0 {
+                    if inner.cfg.commit == CommitMode::Write {
+                        inner.call(VfsOp::Truncate { path: p.clone(), size: 0 }).await?;
                         inner.forget(&p, false);
-                        let mut st = inner.state.lock().unwrap();
-                        inner.remember(&mut st, &p);
-                        drop(st);
-                        Content {
-                            size: 0,
-                            backend_size: 0,
-                            chunks: BTreeMap::new(),
-                            dirty: !commit_now,
-                            is_new: !commit_now,
-                            unlinked: false,
-                            perm,
-                            mtime_ms: now_ms(),
-                            fetched: Instant::now(),
-                            stale: false,
-                            read_end: 0,
-                            readahead: 1,
-                        }
+                    } else {
+                        c.dirty = true;
                     }
-                    Err(e) => return Err(e),
-                };
-                let node = Arc::new(FileNode {
-                    path: Mutex::new(p.clone()),
-                    content: tokio::sync::Mutex::new(content),
-                    open: AtomicU64::new(0),
-                    last_used: AtomicU64::new(0),
-                });
-                inner.state.lock().unwrap().files.insert(p.clone(), node.clone());
-                node
-            }
-        };
-        if flags.truncate {
-            let mut c = node.content.lock().await;
-            if c.size != 0 {
-                if inner.cfg.commit == CommitMode::Write {
-                    inner.call(VfsOp::Truncate { path: p.clone(), size: 0 }).await?;
-                    inner.forget(&p, false);
-                } else {
+                    c.set_size(0);
+                    c.mtime_ms = now_ms();
+                } else if inner.cfg.commit == CommitMode::Close {
+                    // `w` on an existing empty file still rewrites it on close
                     c.dirty = true;
                 }
-                c.set_size(0);
-                c.mtime_ms = now_ms();
-            } else if inner.cfg.commit == CommitMode::Close {
-                // `w` on an existing empty file still rewrites it on close
-                c.dirty = true;
             }
-        }
-        node.open.fetch_add(1, Ordering::Relaxed);
-        inner.touch(&node);
-        Ok(Arc::new(ObjectHandle {
-            inner: inner.clone(),
-            node,
-            flags,
-            wrote: AtomicU64::new(0),
-            closed: Mutex::new(false),
-        }))
+            node.open.fetch_add(1, Ordering::Relaxed);
+            inner.touch(&node);
+            Ok::<Handle, VfsError>(Arc::new(ObjectHandle {
+                inner: inner.clone(),
+                node,
+                flags,
+                wrote: AtomicU64::new(0),
+                closed: Mutex::new(false),
+            }))
+        })
     }
 
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        self.check_writable("mkdir", path)?;
-        let p = vpath::normalize(path);
-        let inner = &self.inner;
-        if recursive {
-            let mut current = String::from("/");
-            for comp in vpath::components(&p).map(str::to_string).collect::<Vec<_>>() {
-                current = vpath::join(&current, &comp);
-                match inner.lstat(&current).await {
-                    Ok(a) if a.is_dir() => continue,
-                    Ok(_) => return Err(VfsError::op(errno::ENOTDIR, "mkdir", path)),
-                    Err(e) if e.is(errno::ENOENT) => {}
-                    Err(e) => return Err(e),
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("mkdir", path)?;
+            let p = vpath::normalize(path);
+            let inner = &self.inner;
+            if recursive {
+                let mut current = String::from("/");
+                for comp in vpath::components(&p).map(str::to_string).collect::<Vec<_>>() {
+                    current = vpath::join(&current, &comp);
+                    match inner.lstat(&current).await {
+                        Ok(a) if a.is_dir() => continue,
+                        Ok(_) => return Err(VfsError::op(errno::ENOTDIR, "mkdir", path)),
+                        Err(e) if e.is(errno::ENOENT) => {}
+                        Err(e) => return Err(e),
+                    }
+                    inner
+                        .call(VfsOp::Mkdir { path: current.clone(), mode: Some(mode & 0o7777) })
+                        .await?;
+                    inner.forget(&current, false);
+                    let mut st = inner.state.lock().unwrap();
+                    inner.remember(&mut st, &current);
                 }
-                inner
-                    .call(VfsOp::Mkdir { path: current.clone(), mode: Some(mode & 0o7777) })
-                    .await?;
-                inner.forget(&current, false);
-                let mut st = inner.state.lock().unwrap();
-                inner.remember(&mut st, &current);
-            }
-            return Ok(());
-        }
-        let res = inner.call(VfsOp::Mkdir { path: p.clone(), mode: Some(mode & 0o7777) }).await;
-        inner.forget(&p, false);
-        res?;
-        let mut st = inner.state.lock().unwrap();
-        inner.remember(&mut st, &p);
-        Ok(())
-    }
-
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        self.check_writable("rmdir", path)?;
-        let p = vpath::normalize(path);
-        let res = self.inner.call(VfsOp::Rmdir { path: p.clone() }).await;
-        self.inner.forget(&p, true);
-        res?;
-        self.inner.state.lock().unwrap().known.retain(|k| !vpath::is_under(k, &p));
-        Ok(())
-    }
-
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        self.check_writable("unlink", path)?;
-        let p = vpath::normalize(path);
-        let inner = &self.inner;
-        let node = inner.state.lock().unwrap().files.get(&p).cloned();
-        if let Some(node) = &node {
-            let mut c = node.content.lock().await;
-            if c.is_new && !c.unlinked {
-                // never reached the controller
-                c.unlinked = true;
-                drop(c);
-                let mut st = inner.state.lock().unwrap();
-                st.files.remove(&p);
-                st.known.remove(&p);
                 return Ok(());
             }
-        }
-        let res = inner.call(VfsOp::Unlink { path: p.clone() }).await;
-        inner.forget(&p, false);
-        res?;
-        let mut st = inner.state.lock().unwrap();
-        if let Some(node) = st.files.remove(&p)
-            && let Ok(mut c) = node.content.try_lock()
-        {
-            c.unlinked = true;
-        }
-        st.known.remove(&p);
-        Ok(())
+            let res = inner.call(VfsOp::Mkdir { path: p.clone(), mode: Some(mode & 0o7777) }).await;
+            inner.forget(&p, false);
+            res?;
+            let mut st = inner.state.lock().unwrap();
+            inner.remember(&mut st, &p);
+            Ok(())
+        })
     }
 
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.check_writable("rename", from)?;
-        let (a, b) = (vpath::normalize(from), vpath::normalize(to));
-        let inner = &self.inner;
-        let local_only = {
-            let node = inner.state.lock().unwrap().files.get(&a).cloned();
-            match node {
-                Some(n) => n.content.lock().await.is_new,
-                None => false,
-            }
-        };
-        if !local_only {
-            let res = inner.call(VfsOp::Rename { from: a.clone(), to: b.clone() }).await;
-            inner.forget(&a, true);
-            inner.forget(&b, true);
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("rmdir", path)?;
+            let p = vpath::normalize(path);
+            let res = self.inner.call(VfsOp::Rmdir { path: p.clone() }).await;
+            self.inner.forget(&p, true);
             res?;
-        }
-        let mut st = inner.state.lock().unwrap();
-        // move local file nodes along (dirty contents commit to the new path)
-        let moved: Vec<String> =
-            st.files.keys().filter(|k| vpath::is_under(k, &a)).cloned().collect();
-        let replaced: Vec<String> = st
-            .files
-            .keys()
-            .filter(|k| vpath::is_under(k, &b) && !vpath::is_under(k, &a))
-            .cloned()
-            .collect();
-        for k in replaced {
-            if let Some(node) = st.files.remove(&k)
+            self.inner.state.lock().unwrap().known.retain(|k| !vpath::is_under(k, &p));
+            Ok(())
+        })
+    }
+
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("unlink", path)?;
+            let p = vpath::normalize(path);
+            let inner = &self.inner;
+            let node = inner.state.lock().unwrap().files.get(&p).cloned();
+            if let Some(node) = &node {
+                let mut c = node.content.lock().await;
+                if c.is_new && !c.unlinked {
+                    // never reached the controller
+                    c.unlinked = true;
+                    drop(c);
+                    let mut st = inner.state.lock().unwrap();
+                    st.files.remove(&p);
+                    st.known.remove(&p);
+                    return Ok(());
+                }
+            }
+            let res = inner.call(VfsOp::Unlink { path: p.clone() }).await;
+            inner.forget(&p, false);
+            res?;
+            let mut st = inner.state.lock().unwrap();
+            if let Some(node) = st.files.remove(&p)
                 && let Ok(mut c) = node.content.try_lock()
             {
                 c.unlinked = true;
             }
-        }
-        for k in moved {
-            if let Some(node) = st.files.remove(&k) {
-                let nk = format!("{b}{}", &k[a.len()..]);
-                *node.path.lock().unwrap() = nk.clone();
-                st.files.insert(nk, node);
+            st.known.remove(&p);
+            Ok(())
+        })
+    }
+
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("rename", from)?;
+            let (a, b) = (vpath::normalize(from), vpath::normalize(to));
+            let inner = &self.inner;
+            let local_only = {
+                let node = inner.state.lock().unwrap().files.get(&a).cloned();
+                match node {
+                    Some(n) => n.content.lock().await.is_new,
+                    None => false,
+                }
+            };
+            if !local_only {
+                let res = inner.call(VfsOp::Rename { from: a.clone(), to: b.clone() }).await;
+                inner.forget(&a, true);
+                inner.forget(&b, true);
+                res?;
             }
-        }
-        let known: Vec<String> =
-            st.known.iter().filter(|k| vpath::is_under(k, &a)).cloned().collect();
-        for k in known {
-            st.known.remove(&k);
-            st.known.insert(format!("{b}{}", &k[a.len()..]));
-        }
-        drop(st);
-        if local_only {
-            inner.forget(&a, false);
-            inner.forget(&b, false);
-        }
-        let mut st = inner.state.lock().unwrap();
-        inner.remember(&mut st, &b);
-        Ok(())
-    }
-
-    async fn link(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.check_writable("link", to)?;
-        let (a, b) = (vpath::normalize(from), vpath::normalize(to));
-        let res = self.inner.call(VfsOp::Link { from: a.clone(), to: b.clone() }).await;
-        self.inner.forget(&a, false);
-        self.inner.forget(&b, false);
-        res.map(|_| ())
-    }
-
-    async fn symlink(&self, target: &str, path: &str) -> VfsResult<()> {
-        self.check_writable("symlink", path)?;
-        let p = vpath::normalize(path);
-        let res =
-            self.inner.call(VfsOp::Symlink { target: target.to_string(), path: p.clone() }).await;
-        self.inner.forget(&p, false);
-        res?;
-        let mut st = self.inner.state.lock().unwrap();
-        self.inner.remember(&mut st, &p);
-        Ok(())
-    }
-
-    async fn readlink(&self, path: &str) -> VfsResult<String> {
-        let p = vpath::normalize(path);
-        let r = self.inner.call(VfsOp::Readlink { path: p.clone() }).await?;
-        r.target.ok_or_else(|| VfsError::op(errno::EIO, "readlink", &p))
-    }
-
-    async fn chmod(&self, path: &str, mode: u32) -> VfsResult<()> {
-        self.check_writable("chmod", path)?;
-        let p = self.inner.resolve(path).await?;
-        let node = self.inner.state.lock().unwrap().files.get(&p).cloned();
-        if let Some(node) = node {
-            let mut c = node.content.lock().await;
-            c.perm = mode & 0o7777;
-            if c.is_new {
-                return Ok(());
+            let mut st = inner.state.lock().unwrap();
+            // move local file nodes along (dirty contents commit to the new path)
+            let moved: Vec<String> =
+                st.files.keys().filter(|k| vpath::is_under(k, &a)).cloned().collect();
+            let replaced: Vec<String> = st
+                .files
+                .keys()
+                .filter(|k| vpath::is_under(k, &b) && !vpath::is_under(k, &a))
+                .cloned()
+                .collect();
+            for k in replaced {
+                if let Some(node) = st.files.remove(&k)
+                    && let Ok(mut c) = node.content.try_lock()
+                {
+                    c.unlinked = true;
+                }
             }
-        }
-        let res = self.inner.call(VfsOp::Chmod { path: p.clone(), mode: mode & 0o7777 }).await;
-        self.inner.forget(&p, false);
-        res.map(|_| ())
+            for k in moved {
+                if let Some(node) = st.files.remove(&k) {
+                    let nk = format!("{b}{}", &k[a.len()..]);
+                    *node.path.lock().unwrap() = nk.clone();
+                    st.files.insert(nk, node);
+                }
+            }
+            let known: Vec<String> =
+                st.known.iter().filter(|k| vpath::is_under(k, &a)).cloned().collect();
+            for k in known {
+                st.known.remove(&k);
+                st.known.insert(format!("{b}{}", &k[a.len()..]));
+            }
+            drop(st);
+            if local_only {
+                inner.forget(&a, false);
+                inner.forget(&b, false);
+            }
+            let mut st = inner.state.lock().unwrap();
+            inner.remember(&mut st, &b);
+            Ok(())
+        })
     }
 
-    async fn truncate(&self, path: &str, size: u64) -> VfsResult<()> {
-        self.check_writable("truncate", path)?;
-        self.inner.check_size(size, "truncate", path)?;
-        let p = self.inner.resolve(path).await?;
-        let node = self.inner.state.lock().unwrap().files.get(&p).cloned();
-        if let Some(node) = node {
-            let mut c = node.content.lock().await;
-            if c.dirty || node.open.load(Ordering::Relaxed) > 0 {
-                if self.inner.cfg.commit == CommitMode::Write || !c.dirty {
-                    if !c.is_new {
-                        self.inner.call(VfsOp::Truncate { path: p.clone(), size }).await?;
-                    }
-                    self.inner.forget(&p, false);
-                    c.set_size(size);
-                    c.backend_size = c.backend_size.min(size);
+    fn link<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("link", to)?;
+            let (a, b) = (vpath::normalize(from), vpath::normalize(to));
+            let res = self.inner.call(VfsOp::Link { from: a.clone(), to: b.clone() }).await;
+            self.inner.forget(&a, false);
+            self.inner.forget(&b, false);
+            res.map(|_| ())
+        })
+    }
+
+    fn symlink<'a>(&'a self, target: &'a str, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("symlink", path)?;
+            let p = vpath::normalize(path);
+            let res = self
+                .inner
+                .call(VfsOp::Symlink { target: target.to_string(), path: p.clone() })
+                .await;
+            self.inner.forget(&p, false);
+            res?;
+            let mut st = self.inner.state.lock().unwrap();
+            self.inner.remember(&mut st, &p);
+            Ok(())
+        })
+    }
+
+    fn readlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let p = vpath::normalize(path);
+            let r = self.inner.call(VfsOp::Readlink { path: p.clone() }).await?;
+            r.target.ok_or_else(|| VfsError::op(errno::EIO, "readlink", &p))
+        })
+    }
+
+    fn chmod<'a>(&'a self, path: &'a str, mode: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("chmod", path)?;
+            let p = self.inner.resolve(path).await?;
+            let node = self.inner.state.lock().unwrap().files.get(&p).cloned();
+            if let Some(node) = node {
+                let mut c = node.content.lock().await;
+                c.perm = mode & 0o7777;
+                if c.is_new {
                     return Ok(());
                 }
-                c.set_size(size);
-                c.mtime_ms = now_ms();
-                return Ok(());
             }
-        }
-        let res = self.inner.call(VfsOp::Truncate { path: p.clone(), size }).await;
-        self.inner.forget(&p, false);
-        self.inner.state.lock().unwrap().files.remove(&p);
-        res.map(|_| ())
+            let res = self.inner.call(VfsOp::Chmod { path: p.clone(), mode: mode & 0o7777 }).await;
+            self.inner.forget(&p, false);
+            res.map(|_| ())
+        })
     }
 
-    async fn realpath(&self, path: &str) -> VfsResult<String> {
-        self.inner.resolve(path).await
+    fn truncate<'a>(&'a self, path: &'a str, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("truncate", path)?;
+            self.inner.check_size(size, "truncate", path)?;
+            let p = self.inner.resolve(path).await?;
+            let node = self.inner.state.lock().unwrap().files.get(&p).cloned();
+            if let Some(node) = node {
+                let mut c = node.content.lock().await;
+                if c.dirty || node.open.load(Ordering::Relaxed) > 0 {
+                    if self.inner.cfg.commit == CommitMode::Write || !c.dirty {
+                        if !c.is_new {
+                            self.inner.call(VfsOp::Truncate { path: p.clone(), size }).await?;
+                        }
+                        self.inner.forget(&p, false);
+                        c.set_size(size);
+                        c.backend_size = c.backend_size.min(size);
+                        return Ok(());
+                    }
+                    c.set_size(size);
+                    c.mtime_ms = now_ms();
+                    return Ok(());
+                }
+            }
+            let res = self.inner.call(VfsOp::Truncate { path: p.clone(), size }).await;
+            self.inner.forget(&p, false);
+            self.inner.state.lock().unwrap().files.remove(&p);
+            res.map(|_| ())
+        })
+    }
+
+    fn realpath<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move { self.inner.resolve(path).await })
     }
 
     fn invalidate(&self, path: Option<&str>) {
         self.invalidate_path(path)
     }
 
-    async fn close(&self) {
-        let nodes: Vec<Arc<FileNode>> =
-            self.inner.state.lock().unwrap().files.values().cloned().collect();
-        for node in nodes {
-            let mut c = node.content.lock().await;
-            if let Err(e) = self.inner.commit(&node, &mut c).await {
-                tracing::warn!(
-                    "vfs: object mount {} commit failed at shutdown: {e}",
-                    self.inner.cfg.mount_id
-                );
+    fn close<'a>(&'a self) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let nodes: Vec<Arc<FileNode>> =
+                self.inner.state.lock().unwrap().files.values().cloned().collect();
+            for node in nodes {
+                let mut c = node.content.lock().await;
+                if let Err(e) = self.inner.commit(&node, &mut c).await {
+                    gondolin_log::warn!(
+                        "vfs: object mount {} commit failed at shutdown: {e}",
+                        self.inner.cfg.mount_id
+                    );
+                }
             }
-        }
+        })
     }
 }
 
@@ -1099,136 +1136,149 @@ impl ObjectHandle {
     }
 }
 
-#[async_trait]
 impl FileHandle for ObjectHandle {
-    async fn read(&self, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        self.check_open("read")?;
-        let path = self.path();
-        let mut c = self.node.content.lock().await;
-        let out = self.inner.read_range(&path, &mut c, offset, len).await;
-        drop(c);
-        self.inner.touch(&self.node);
-        self.inner.evict();
-        out
-    }
-
-    async fn write(&self, offset: u64, data: &[u8]) -> VfsResult<usize> {
-        self.check_open("write")?;
-        if !(self.flags.write || self.flags.append) {
-            return Err(VfsError::op(errno::EBADF, "write", ""));
-        }
-        let path = self.path();
-        let mut c = self.node.content.lock().await;
-        let offset = if self.flags.append { c.size } else { offset };
-        let end = offset
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| VfsError::op(errno::EFBIG, "write", &path))?;
-        self.inner.check_size(end, "write", &path)?;
-        if self.inner.cfg.commit == CommitMode::Write && !c.is_new {
-            self.inner
-                .call(VfsOp::Write { path: path.clone(), offset, data: data.to_vec() })
-                .await?;
-            self.inner.forget(&path, false);
-            // keep loaded chunks coherent; unloaded ones are fetched again
-            let first = offset / CHUNK;
-            let last = (end.max(1) - 1) / CHUNK;
-            let all_loaded =
-                (first..=last).all(|i| c.chunks.contains_key(&i) || i * CHUNK >= c.size);
-            if all_loaded {
-                self.inner.write_local(&path, &mut c, offset, data).await?;
-            } else {
-                for i in first..=last {
-                    c.chunks.remove(&i);
-                }
-                if end > c.size {
-                    c.set_size(end);
-                }
-            }
-            c.backend_size = c.backend_size.max(end);
-            c.mtime_ms = now_ms();
-        } else {
-            self.inner.write_local(&path, &mut c, offset, data).await?;
-            c.dirty = true;
-        }
-        self.wrote.fetch_add(data.len() as u64, Ordering::Relaxed);
-        Ok(data.len())
-    }
-
-    async fn stat(&self) -> VfsResult<Attr> {
-        self.check_open("fstat")?;
-        let c = self.node.content.lock().await;
-        let now = now_ms();
-        Ok(Attr {
-            mode: kind_mode(EntryKind::File) | c.perm,
-            size: c.size,
-            nlink: 1,
-            uid: self.inner.uid,
-            gid: self.inner.gid,
-            atime_ms: now,
-            mtime_ms: c.mtime_ms,
-            ctime_ms: c.mtime_ms,
+    fn read<'a>(&'a self, offset: u64, len: usize) -> BoxFuture<'a, VfsResult<Vec<u8>>> {
+        Box::pin(async move {
+            self.check_open("read")?;
+            let path = self.path();
+            let mut c = self.node.content.lock().await;
+            let out = self.inner.read_range(&path, &mut c, offset, len).await;
+            drop(c);
+            self.inner.touch(&self.node);
+            self.inner.evict();
+            out
         })
     }
 
-    async fn truncate(&self, size: u64) -> VfsResult<()> {
-        self.check_open("ftruncate")?;
-        if !(self.flags.write || self.flags.append) {
-            return Err(VfsError::op(errno::EBADF, "ftruncate", ""));
-        }
-        let path = self.path();
-        self.inner.check_size(size, "ftruncate", &path)?;
-        let mut c = self.node.content.lock().await;
-        if self.inner.cfg.commit == CommitMode::Write && !c.is_new {
-            self.inner.call(VfsOp::Truncate { path: path.clone(), size }).await?;
-            self.inner.forget(&path, false);
-            c.set_size(size);
-        } else {
-            c.set_size(size);
-            c.dirty = true;
-        }
-        c.mtime_ms = now_ms();
-        Ok(())
+    fn write<'a>(&'a self, offset: u64, data: &'a [u8]) -> BoxFuture<'a, VfsResult<usize>> {
+        Box::pin(async move {
+            self.check_open("write")?;
+            if !(self.flags.write || self.flags.append) {
+                return Err(VfsError::op(errno::EBADF, "write", ""));
+            }
+            let path = self.path();
+            let mut c = self.node.content.lock().await;
+            let offset = if self.flags.append { c.size } else { offset };
+            let end = offset
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| VfsError::op(errno::EFBIG, "write", &path))?;
+            self.inner.check_size(end, "write", &path)?;
+            if self.inner.cfg.commit == CommitMode::Write && !c.is_new {
+                self.inner
+                    .call(VfsOp::Write { path: path.clone(), offset, data: data.to_vec() })
+                    .await?;
+                self.inner.forget(&path, false);
+                // keep loaded chunks coherent; unloaded ones are fetched again
+                let first = offset / CHUNK;
+                let last = (end.max(1) - 1) / CHUNK;
+                let all_loaded =
+                    (first..=last).all(|i| c.chunks.contains_key(&i) || i * CHUNK >= c.size);
+                if all_loaded {
+                    self.inner.write_local(&path, &mut c, offset, data).await?;
+                } else {
+                    for i in first..=last {
+                        c.chunks.remove(&i);
+                    }
+                    if end > c.size {
+                        c.set_size(end);
+                    }
+                }
+                c.backend_size = c.backend_size.max(end);
+                c.mtime_ms = now_ms();
+            } else {
+                self.inner.write_local(&path, &mut c, offset, data).await?;
+                c.dirty = true;
+            }
+            self.wrote.fetch_add(data.len() as u64, Ordering::Relaxed);
+            Ok(data.len())
+        })
     }
 
-    async fn sync(&self) -> VfsResult<()> {
-        self.check_open("fsync")?;
-        let mut c = self.node.content.lock().await;
-        self.inner.commit(&self.node, &mut c).await
+    fn stat<'a>(&'a self) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            self.check_open("fstat")?;
+            let c = self.node.content.lock().await;
+            let now = now_ms();
+            Ok(Attr {
+                mode: kind_mode(EntryKind::File) | c.perm,
+                size: c.size,
+                nlink: 1,
+                uid: self.inner.uid,
+                gid: self.inner.gid,
+                atime_ms: now,
+                mtime_ms: c.mtime_ms,
+                ctime_ms: c.mtime_ms,
+            })
+        })
     }
 
-    async fn flush(&self) -> VfsResult<()> {
-        if !(self.flags.write || self.flags.append) {
-            return Ok(());
-        }
-        self.sync().await
+    fn truncate<'a>(&'a self, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_open("ftruncate")?;
+            if !(self.flags.write || self.flags.append) {
+                return Err(VfsError::op(errno::EBADF, "ftruncate", ""));
+            }
+            let path = self.path();
+            self.inner.check_size(size, "ftruncate", &path)?;
+            let mut c = self.node.content.lock().await;
+            if self.inner.cfg.commit == CommitMode::Write && !c.is_new {
+                self.inner.call(VfsOp::Truncate { path: path.clone(), size }).await?;
+                self.inner.forget(&path, false);
+                c.set_size(size);
+            } else {
+                c.set_size(size);
+                c.dirty = true;
+            }
+            c.mtime_ms = now_ms();
+            Ok(())
+        })
     }
 
-    async fn close(&self) -> VfsResult<()> {
-        {
-            let mut closed = self.closed.lock().unwrap();
-            if *closed {
+    fn sync<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_open("fsync")?;
+            let mut c = self.node.content.lock().await;
+            self.inner.commit(&self.node, &mut c).await
+        })
+    }
+
+    fn flush<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            if !(self.flags.write || self.flags.append) {
                 return Ok(());
             }
-            *closed = true;
-        }
-        let writer = self.flags.write || self.flags.append;
-        let result = if writer {
-            let mut c = self.node.content.lock().await;
-            let r = self.inner.commit(&self.node, &mut c).await;
-            if let Err(e) = &r {
-                tracing::warn!(
-                    "vfs: object mount {} commit of {} failed: {e}",
-                    self.inner.cfg.mount_id,
-                    self.node.path.lock().unwrap()
-                );
+            self.sync().await
+        })
+    }
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            {
+                let mut closed = self.closed.lock().unwrap();
+                if *closed {
+                    return Ok(());
+                }
+                *closed = true;
             }
-            r
-        } else {
-            Ok(())
-        };
-        self.node.open.fetch_sub(1, Ordering::Relaxed);
-        self.inner.evict();
-        result
+            let writer = self.flags.write || self.flags.append;
+            let result = if writer {
+                let mut c = self.node.content.lock().await;
+                let r = self.inner.commit(&self.node, &mut c).await;
+                if let Err(e) = &r {
+                    gondolin_log::warn!(
+                        "vfs: object mount {} commit of {} failed: {e}",
+                        self.inner.cfg.mount_id,
+                        self.node.path.lock().unwrap()
+                    );
+                }
+                r
+            } else {
+                Ok(())
+            };
+            self.node.open.fetch_sub(1, Ordering::Relaxed);
+            self.inner.evict();
+            result
+        })
     }
 }
 

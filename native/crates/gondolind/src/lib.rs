@@ -26,6 +26,7 @@ pub mod mitm_ca;
 pub mod net;
 pub mod net_relay;
 mod netlog;
+pub(crate) mod ordmap;
 pub mod panics;
 pub mod qemu;
 pub mod qmp;
@@ -34,6 +35,7 @@ pub mod session;
 mod stdio;
 pub mod subsystem;
 pub mod tcpfwd;
+pub mod util;
 pub mod vfs;
 pub mod vfs_port;
 pub mod vfs_proxy;
@@ -54,6 +56,9 @@ use gondolin_proto::session::{HELLO, Hello};
 use crate::controller::{Controller, Dispatcher};
 use crate::qemu::HostInfo;
 use crate::session::Session;
+
+/// A boxed future (async methods of object-safe traits).
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Optional features announced in `hello`.
 const FEATURES: &[&str] = &[
@@ -235,21 +240,21 @@ fn print_qemu_args() -> i32 {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return 1;
     }
-    let json: serde_json::Value = match serde_json::from_str(&input) {
+    let json = match gondolin_wire::json::parse(&input) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("invalid JSON: {err}");
             return 1;
         }
     };
-    let vm: gondolin_proto::session::VmConfig = match serde_json::from_value(json["vm"].clone()) {
+    let vm: gondolin_proto::session::VmConfig = match gondolin_wire::from_value(&json["vm"]) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("invalid vm config: {err}");
             return 1;
         }
     };
-    let s = |key: &str| json[key].as_str().map(str::to_string);
+    let s = |key: &str| json[key].as_text().map(str::to_string);
     let chardevs = qemu::ChardevPaths {
         control: s("control").unwrap_or_default().into(),
         fs: s("fs").unwrap_or_default().into(),
@@ -269,6 +274,6 @@ fn print_qemu_args() -> i32 {
         virtiofs: None,
         host: &host,
     });
-    println!("{}", serde_json::to_string(&args).unwrap());
+    println!("{}", gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(&args)));
     0
 }

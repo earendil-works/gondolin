@@ -3,10 +3,9 @@
 //! `MemoryProvider` semantics: symlinks resolve inside the provider, hard
 //! links share one node, creating a file creates missing parents.
 
+use crate::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 
 use crate::error::{VfsError, VfsResult, errno};
 use crate::provider::{FileHandle, Handle, Provider};
@@ -64,7 +63,7 @@ impl Default for MemoryProvider {
 fn process_ids() -> (u32, u32) {
     #[cfg(unix)]
     {
-        (rustix::process::getuid().as_raw(), rustix::process::getgid().as_raw())
+        (crate::sys::getuid(), crate::sys::getgid())
     }
     #[cfg(not(unix))]
     {
@@ -352,246 +351,289 @@ impl Inner {
     }
 }
 
-#[async_trait]
 impl Provider for MemoryProvider {
     fn readonly(&self) -> bool {
         self.readonly
     }
 
-    async fn lstat(&self, path: &str) -> VfsResult<Attr> {
-        let inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, false, "lstat")?;
-        Ok(inner.attr(id))
+    fn lstat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, false, "lstat")?;
+            Ok(inner.attr(id))
+        })
     }
 
-    async fn stat(&self, path: &str) -> VfsResult<Attr> {
-        let inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, true, "stat")?;
-        Ok(inner.attr(id))
+    fn stat<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            let inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, true, "stat")?;
+            Ok(inner.attr(id))
+        })
     }
 
-    async fn readdir(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        let inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, true, "scandir")?;
-        let children =
-            inner.children(id).ok_or_else(|| VfsError::op(errno::ENOTDIR, "scandir", path))?;
-        Ok(children
-            .iter()
-            .map(|(name, child)| {
-                let kind = match inner.nodes[child].kind {
-                    Kind::File(_) => EntryKind::File,
-                    Kind::Dir(_) => EntryKind::Dir,
-                    Kind::Symlink(_) => EntryKind::Symlink,
-                };
-                DirEntry::new(name.clone(), kind)
-            })
-            .collect())
+    fn readdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<Vec<DirEntry>>> {
+        Box::pin(async move {
+            let inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, true, "scandir")?;
+            let children =
+                inner.children(id).ok_or_else(|| VfsError::op(errno::ENOTDIR, "scandir", path))?;
+            Ok(children
+                .iter()
+                .map(|(name, child)| {
+                    let kind = match inner.nodes[child].kind {
+                        Kind::File(_) => EntryKind::File,
+                        Kind::Dir(_) => EntryKind::Dir,
+                        Kind::Symlink(_) => EntryKind::Symlink,
+                    };
+                    DirEntry::new(name.clone(), kind)
+                })
+                .collect())
+        })
     }
 
-    async fn open(&self, path: &str, flags: OpenFlags, mode: u32) -> VfsResult<Handle> {
-        if flags.is_write() {
-            self.check_writable("open", path)?;
-        }
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.create_file(path, mode, flags.create, "open")?;
-        let node = inner.nodes.get_mut(&id).unwrap();
-        if flags.truncate
-            && let Kind::File(c) = &mut node.kind
-        {
-            c.clear();
-            node.mtime_ms = now_ms();
-        }
-        node.open += 1;
-        Ok(Arc::new(MemoryHandle {
-            inner: self.inner.clone(),
-            id,
-            append: flags.append,
-            writable: flags.write || flags.append,
-            closed: Mutex::new(false),
-        }))
-    }
-
-    async fn mkdir(&self, path: &str, mode: u32, recursive: bool) -> VfsResult<()> {
-        self.check_writable("mkdir", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        if let Ok((id, _)) = inner.lookup(path, true, 0, "mkdir") {
-            if recursive && inner.children(id).is_some() {
-                return Ok(());
+    fn open<'a>(
+        &'a self,
+        path: &'a str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'a, VfsResult<Handle>> {
+        Box::pin(async move {
+            if flags.is_write() {
+                self.check_writable("open", path)?;
             }
-            return Err(VfsError::op(errno::EEXIST, "mkdir", path));
-        }
-        if inner.lookup(path, false, 0, "mkdir").is_ok() {
-            // dangling symlink
-            return Err(VfsError::op(errno::EEXIST, "mkdir", path));
-        }
-        if recursive {
-            inner.mkdir_p(path, mode & 0o7777, "mkdir")?;
-            return Ok(());
-        }
-        let (dir, name) = inner.parent_dir(path, false, "mkdir")?;
-        let id = inner.alloc(Node::new(Kind::Dir(BTreeMap::new()), mode & 0o7777));
-        inner.children_mut(dir).unwrap().insert(name, id);
-        Ok(())
-    }
-
-    async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        self.check_writable("rmdir", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, false, "rmdir")?;
-        match inner.children(id) {
-            None => return Err(VfsError::op(errno::ENOTDIR, "rmdir", path)),
-            Some(c) if !c.is_empty() => return Err(VfsError::op(errno::ENOTEMPTY, "rmdir", path)),
-            Some(_) => {}
-        }
-        if id == ROOT {
-            return Err(VfsError::op(errno::EBUSY, "rmdir", path));
-        }
-        let (dir, name) = inner.parent_dir(path, false, "rmdir")?;
-        inner.children_mut(dir).unwrap().remove(&name);
-        inner.unref(id);
-        Ok(())
-    }
-
-    async fn unlink(&self, path: &str) -> VfsResult<()> {
-        self.check_writable("unlink", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, false, "unlink")?;
-        if inner.children(id).is_some() {
-            return Err(VfsError::op(errno::EISDIR, "unlink", path));
-        }
-        let (dir, name) = inner.parent_dir(path, false, "unlink")?;
-        inner.children_mut(dir).unwrap().remove(&name);
-        inner.unref(id);
-        Ok(())
-    }
-
-    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.check_writable("rename", from)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(from, false, "rename")?;
-        let (old_dir, old_name) = inner.parent_dir(from, false, "rename")?;
-        let (new_dir, new_name) = inner.parent_dir(to, true, "rename")?;
-        let src_is_dir = inner.children(id).is_some();
-        if src_is_dir
-            && inner.is_ancestor(id, &vpath::normalize(vpath::parent(&vpath::normalize(to))))
-        {
-            return Err(VfsError::op(errno::EINVAL, "rename", from));
-        }
-        let replaced = inner.children(new_dir).unwrap().get(&new_name).copied();
-        if let Some(rid) = replaced {
-            if rid == id {
-                return Ok(());
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.create_file(path, mode, flags.create, "open")?;
+            let node = inner.nodes.get_mut(&id).unwrap();
+            if flags.truncate
+                && let Kind::File(c) = &mut node.kind
+            {
+                c.clear();
+                node.mtime_ms = now_ms();
             }
-            match (src_is_dir, inner.children(rid)) {
-                (false, Some(_)) => return Err(VfsError::op(errno::EISDIR, "rename", to)),
-                (true, None) => return Err(VfsError::op(errno::ENOTDIR, "rename", to)),
-                (true, Some(c)) if !c.is_empty() => {
-                    return Err(VfsError::op(errno::ENOTEMPTY, "rename", to));
+            node.open += 1;
+            Ok::<Handle, VfsError>(Arc::new(MemoryHandle {
+                inner: self.inner.clone(),
+                id,
+                append: flags.append,
+                writable: flags.write || flags.append,
+                closed: Mutex::new(false),
+            }))
+        })
+    }
+
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a str,
+        mode: u32,
+        recursive: bool,
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("mkdir", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            if let Ok((id, _)) = inner.lookup(path, true, 0, "mkdir") {
+                if recursive && inner.children(id).is_some() {
+                    return Ok(());
                 }
-                _ => {}
+                return Err(VfsError::op(errno::EEXIST, "mkdir", path));
             }
-        }
-        inner.children_mut(old_dir).unwrap().remove(&old_name);
-        inner.children_mut(new_dir).unwrap().insert(new_name, id);
-        if let Some(rid) = replaced {
-            inner.unref(rid);
-        }
-        if let Some(node) = inner.nodes.get_mut(&id) {
+            if inner.lookup(path, false, 0, "mkdir").is_ok() {
+                // dangling symlink
+                return Err(VfsError::op(errno::EEXIST, "mkdir", path));
+            }
+            if recursive {
+                inner.mkdir_p(path, mode & 0o7777, "mkdir")?;
+                return Ok(());
+            }
+            let (dir, name) = inner.parent_dir(path, false, "mkdir")?;
+            let id = inner.alloc(Node::new(Kind::Dir(BTreeMap::new()), mode & 0o7777));
+            inner.children_mut(dir).unwrap().insert(name, id);
+            Ok(())
+        })
+    }
+
+    fn rmdir<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("rmdir", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, false, "rmdir")?;
+            match inner.children(id) {
+                None => return Err(VfsError::op(errno::ENOTDIR, "rmdir", path)),
+                Some(c) if !c.is_empty() => {
+                    return Err(VfsError::op(errno::ENOTEMPTY, "rmdir", path));
+                }
+                Some(_) => {}
+            }
+            if id == ROOT {
+                return Err(VfsError::op(errno::EBUSY, "rmdir", path));
+            }
+            let (dir, name) = inner.parent_dir(path, false, "rmdir")?;
+            inner.children_mut(dir).unwrap().remove(&name);
+            inner.unref(id);
+            Ok(())
+        })
+    }
+
+    fn unlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("unlink", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, false, "unlink")?;
+            if inner.children(id).is_some() {
+                return Err(VfsError::op(errno::EISDIR, "unlink", path));
+            }
+            let (dir, name) = inner.parent_dir(path, false, "unlink")?;
+            inner.children_mut(dir).unwrap().remove(&name);
+            inner.unref(id);
+            Ok(())
+        })
+    }
+
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("rename", from)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(from, false, "rename")?;
+            let (old_dir, old_name) = inner.parent_dir(from, false, "rename")?;
+            let (new_dir, new_name) = inner.parent_dir(to, true, "rename")?;
+            let src_is_dir = inner.children(id).is_some();
+            if src_is_dir
+                && inner.is_ancestor(id, &vpath::normalize(vpath::parent(&vpath::normalize(to))))
+            {
+                return Err(VfsError::op(errno::EINVAL, "rename", from));
+            }
+            let replaced = inner.children(new_dir).unwrap().get(&new_name).copied();
+            if let Some(rid) = replaced {
+                if rid == id {
+                    return Ok(());
+                }
+                match (src_is_dir, inner.children(rid)) {
+                    (false, Some(_)) => return Err(VfsError::op(errno::EISDIR, "rename", to)),
+                    (true, None) => return Err(VfsError::op(errno::ENOTDIR, "rename", to)),
+                    (true, Some(c)) if !c.is_empty() => {
+                        return Err(VfsError::op(errno::ENOTEMPTY, "rename", to));
+                    }
+                    _ => {}
+                }
+            }
+            inner.children_mut(old_dir).unwrap().remove(&old_name);
+            inner.children_mut(new_dir).unwrap().insert(new_name, id);
+            if let Some(rid) = replaced {
+                inner.unref(rid);
+            }
+            if let Some(node) = inner.nodes.get_mut(&id) {
+                node.ctime_ms = now_ms();
+            }
+            Ok(())
+        })
+    }
+
+    fn link<'a>(&'a self, from: &'a str, to: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("link", to)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(from, true, "link")?;
+            if inner.children(id).is_some() {
+                return Err(VfsError::op(errno::EISDIR, "link", from));
+            }
+            if inner.resolve(to, false, "link").is_ok() {
+                return Err(VfsError::op(errno::EEXIST, "link", to));
+            }
+            let (dir, name) = inner.parent_dir(to, true, "link")?;
+            inner.children_mut(dir).unwrap().insert(name, id);
+            let node = inner.nodes.get_mut(&id).unwrap();
+            node.nlink += 1;
             node.ctime_ms = now_ms();
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn link(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.check_writable("link", to)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(from, true, "link")?;
-        if inner.children(id).is_some() {
-            return Err(VfsError::op(errno::EISDIR, "link", from));
-        }
-        if inner.resolve(to, false, "link").is_ok() {
-            return Err(VfsError::op(errno::EEXIST, "link", to));
-        }
-        let (dir, name) = inner.parent_dir(to, true, "link")?;
-        inner.children_mut(dir).unwrap().insert(name, id);
-        let node = inner.nodes.get_mut(&id).unwrap();
-        node.nlink += 1;
-        node.ctime_ms = now_ms();
-        Ok(())
+    fn symlink<'a>(&'a self, target: &'a str, path: &'a str) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("symlink", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            if inner.resolve(path, false, "symlink").is_ok() {
+                return Err(VfsError::op(errno::EEXIST, "symlink", path));
+            }
+            let (dir, name) = inner.parent_dir(path, true, "symlink")?;
+            let id = inner.alloc(Node::new(Kind::Symlink(target.to_string()), 0o777));
+            inner.children_mut(dir).unwrap().insert(name, id);
+            Ok(())
+        })
     }
 
-    async fn symlink(&self, target: &str, path: &str) -> VfsResult<()> {
-        self.check_writable("symlink", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        if inner.resolve(path, false, "symlink").is_ok() {
-            return Err(VfsError::op(errno::EEXIST, "symlink", path));
-        }
-        let (dir, name) = inner.parent_dir(path, true, "symlink")?;
-        let id = inner.alloc(Node::new(Kind::Symlink(target.to_string()), 0o777));
-        inner.children_mut(dir).unwrap().insert(name, id);
-        Ok(())
+    fn readlink<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, false, "readlink")?;
+            match &inner.nodes[&id].kind {
+                Kind::Symlink(t) => Ok(t.clone()),
+                _ => Err(VfsError::op(errno::EINVAL, "readlink", path)),
+            }
+        })
     }
 
-    async fn readlink(&self, path: &str) -> VfsResult<String> {
-        let inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, false, "readlink")?;
-        match &inner.nodes[&id].kind {
-            Kind::Symlink(t) => Ok(t.clone()),
-            _ => Err(VfsError::op(errno::EINVAL, "readlink", path)),
-        }
+    fn chmod<'a>(&'a self, path: &'a str, mode: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("chmod", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, true, "chmod")?;
+            let node = inner.nodes.get_mut(&id).unwrap();
+            node.perm = mode & 0o7777;
+            node.ctime_ms = now_ms();
+            Ok(())
+        })
     }
 
-    async fn chmod(&self, path: &str, mode: u32) -> VfsResult<()> {
-        self.check_writable("chmod", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, true, "chmod")?;
-        let node = inner.nodes.get_mut(&id).unwrap();
-        node.perm = mode & 0o7777;
-        node.ctime_ms = now_ms();
-        Ok(())
-    }
-
-    async fn utimes(
-        &self,
-        path: &str,
+    fn utimes<'a>(
+        &'a self,
+        path: &'a str,
         _atime_ms: Option<Option<i64>>,
         mtime_ms: Option<Option<i64>>,
-    ) -> VfsResult<()> {
-        self.check_writable("utimes", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, true, "utimes")?;
-        let node = inner.nodes.get_mut(&id).unwrap();
-        if let Some(m) = mtime_ms {
-            node.mtime_ms = m.unwrap_or_else(now_ms);
-        }
-        node.ctime_ms = now_ms();
-        Ok(())
-    }
-
-    async fn truncate(&self, path: &str, size: u64) -> VfsResult<()> {
-        self.check_writable("truncate", path)?;
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.resolve(path, true, "truncate")?;
-        let node = inner.nodes.get_mut(&id).unwrap();
-        match &mut node.kind {
-            Kind::File(c) => {
-                c.resize(size as usize, 0);
-                node.mtime_ms = now_ms();
-                Ok(())
+    ) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("utimes", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, true, "utimes")?;
+            let node = inner.nodes.get_mut(&id).unwrap();
+            if let Some(m) = mtime_ms {
+                node.mtime_ms = m.unwrap_or_else(now_ms);
             }
-            Kind::Dir(_) => Err(VfsError::op(errno::EISDIR, "truncate", path)),
-            Kind::Symlink(_) => Err(VfsError::op(errno::EINVAL, "truncate", path)),
-        }
+            node.ctime_ms = now_ms();
+            Ok(())
+        })
     }
 
-    async fn access(&self, path: &str, _mask: u32) -> VfsResult<()> {
-        // VirtualProvider's default: existence only
-        self.stat(path).await.map(|_| ())
+    fn truncate<'a>(&'a self, path: &'a str, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.check_writable("truncate", path)?;
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.resolve(path, true, "truncate")?;
+            let node = inner.nodes.get_mut(&id).unwrap();
+            match &mut node.kind {
+                Kind::File(c) => {
+                    c.resize(size as usize, 0);
+                    node.mtime_ms = now_ms();
+                    Ok(())
+                }
+                Kind::Dir(_) => Err(VfsError::op(errno::EISDIR, "truncate", path)),
+                Kind::Symlink(_) => Err(VfsError::op(errno::EINVAL, "truncate", path)),
+            }
+        })
     }
 
-    async fn realpath(&self, path: &str) -> VfsResult<String> {
-        let inner = self.inner.lock().unwrap();
-        inner.lookup(path, true, 0, "realpath").map(|(_, p)| p)
+    fn access<'a>(&'a self, path: &'a str, _mask: u32) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            // VirtualProvider's default: existence only
+            self.stat(path).await.map(|_| ())
+        })
+    }
+
+    fn realpath<'a>(&'a self, path: &'a str) -> BoxFuture<'a, VfsResult<String>> {
+        Box::pin(async move {
+            let inner = self.inner.lock().unwrap();
+            inner.lookup(path, true, 0, "realpath").map(|(_, p)| p)
+        })
     }
 }
 
@@ -615,81 +657,90 @@ impl MemoryHandle {
     }
 }
 
-#[async_trait]
 impl FileHandle for MemoryHandle {
-    async fn read(&self, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        self.with_content("read", |node| match &node.kind {
-            Kind::File(c) => {
-                let start = (offset as usize).min(c.len());
-                let end = start.saturating_add(len).min(c.len());
-                Ok(c[start..end].to_vec())
-            }
-            _ => Err(VfsError::op(errno::EISDIR, "read", "")),
-        })
-    }
-
-    async fn write(&self, offset: u64, data: &[u8]) -> VfsResult<usize> {
-        if !self.writable {
-            return Err(VfsError::op(errno::EBADF, "write", ""));
-        }
-        let append = self.append;
-        self.with_content("write", |node| match &mut node.kind {
-            Kind::File(c) => {
-                let pos = if append { c.len() } else { offset as usize };
-                let end = pos
-                    .checked_add(data.len())
-                    .ok_or_else(|| VfsError::op(errno::EFBIG, "write", ""))?;
-                if end > c.len() {
-                    c.resize(end, 0);
+    fn read<'a>(&'a self, offset: u64, len: usize) -> BoxFuture<'a, VfsResult<Vec<u8>>> {
+        Box::pin(async move {
+            self.with_content("read", |node| match &node.kind {
+                Kind::File(c) => {
+                    let start = (offset as usize).min(c.len());
+                    let end = start.saturating_add(len).min(c.len());
+                    Ok(c[start..end].to_vec())
                 }
-                c[pos..end].copy_from_slice(data);
-                node.mtime_ms = now_ms();
-                Ok(data.len())
-            }
-            _ => Err(VfsError::op(errno::EISDIR, "write", "")),
+                _ => Err(VfsError::op(errno::EISDIR, "read", "")),
+            })
         })
     }
 
-    async fn stat(&self) -> VfsResult<Attr> {
-        if *self.closed.lock().unwrap() {
-            return Err(VfsError::op(errno::EBADF, "fstat", ""));
-        }
-        let inner = self.inner.lock().unwrap();
-        if !inner.nodes.contains_key(&self.id) {
-            return Err(VfsError::op(errno::EBADF, "fstat", ""));
-        }
-        Ok(inner.attr(self.id))
-    }
-
-    async fn truncate(&self, size: u64) -> VfsResult<()> {
-        self.with_content("ftruncate", |node| match &mut node.kind {
-            Kind::File(c) => {
-                c.resize(size as usize, 0);
-                node.mtime_ms = now_ms();
-                Ok(())
+    fn write<'a>(&'a self, offset: u64, data: &'a [u8]) -> BoxFuture<'a, VfsResult<usize>> {
+        Box::pin(async move {
+            if !self.writable {
+                return Err(VfsError::op(errno::EBADF, "write", ""));
             }
-            _ => Err(VfsError::op(errno::EISDIR, "ftruncate", "")),
+            let append = self.append;
+            self.with_content("write", |node| match &mut node.kind {
+                Kind::File(c) => {
+                    let pos = if append { c.len() } else { offset as usize };
+                    let end = pos
+                        .checked_add(data.len())
+                        .ok_or_else(|| VfsError::op(errno::EFBIG, "write", ""))?;
+                    if end > c.len() {
+                        c.resize(end, 0);
+                    }
+                    c[pos..end].copy_from_slice(data);
+                    node.mtime_ms = now_ms();
+                    Ok(data.len())
+                }
+                _ => Err(VfsError::op(errno::EISDIR, "write", "")),
+            })
         })
     }
 
-    async fn close(&self) -> VfsResult<()> {
-        let mut closed = self.closed.lock().unwrap();
-        if *closed {
-            return Ok(());
-        }
-        *closed = true;
-        let mut inner = self.inner.lock().unwrap();
-        let remove = match inner.nodes.get_mut(&self.id) {
-            Some(node) => {
-                node.open = node.open.saturating_sub(1);
-                node.open == 0 && node.nlink == 0
+    fn stat<'a>(&'a self) -> BoxFuture<'a, VfsResult<Attr>> {
+        Box::pin(async move {
+            if *self.closed.lock().unwrap() {
+                return Err(VfsError::op(errno::EBADF, "fstat", ""));
             }
-            None => false,
-        };
-        if remove {
-            inner.nodes.remove(&self.id);
-        }
-        Ok(())
+            let inner = self.inner.lock().unwrap();
+            if !inner.nodes.contains_key(&self.id) {
+                return Err(VfsError::op(errno::EBADF, "fstat", ""));
+            }
+            Ok(inner.attr(self.id))
+        })
+    }
+
+    fn truncate<'a>(&'a self, size: u64) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            self.with_content("ftruncate", |node| match &mut node.kind {
+                Kind::File(c) => {
+                    c.resize(size as usize, 0);
+                    node.mtime_ms = now_ms();
+                    Ok(())
+                }
+                _ => Err(VfsError::op(errno::EISDIR, "ftruncate", "")),
+            })
+        })
+    }
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
+        Box::pin(async move {
+            let mut closed = self.closed.lock().unwrap();
+            if *closed {
+                return Ok(());
+            }
+            *closed = true;
+            let mut inner = self.inner.lock().unwrap();
+            let remove = match inner.nodes.get_mut(&self.id) {
+                Some(node) => {
+                    node.open = node.open.saturating_sub(1);
+                    node.open == 0 && node.nlink == 0
+                }
+                None => false,
+            };
+            if remove {
+                inner.nodes.remove(&self.id);
+            }
+            Ok(())
+        })
     }
 }
 

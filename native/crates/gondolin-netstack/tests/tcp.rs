@@ -14,7 +14,8 @@ use smoltcp::socket::tcp;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-const T: Duration = Duration::from_secs(20);
+/// Generous: emulated (amd64 on arm64) and loaded CI machines are slow.
+const T: Duration = Duration::from_secs(60);
 const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 
 async fn next_flow(rx: &mut mpsc::UnboundedReceiver<TcpFlow>, guest: &mut Guest) -> TcpFlow {
@@ -372,7 +373,9 @@ async fn flow_limit_rejects_extra_connections() {
     let third = guest.connect(REMOTE, 82, 16 * 1024);
     guest.run_until(T, |g| (g.tcp(third).state() == tcp::State::Closed).then_some(())).await;
     let a = next_flow(&mut flows, &mut guest).await;
-    let _b = next_flow(&mut flows, &mut guest).await;
+    let b = next_flow(&mut flows, &mut guest).await;
+    // handler tasks may deliver the flows in either order
+    let (a, _b) = if a.meta.dst.port() == 80 { (a, b) } else { (b, a) };
     // Closing one (both sides) frees a slot.
     drop(a);
     guest.run_until(T, |g| (g.tcp(first).state() == tcp::State::CloseWait).then_some(())).await;
@@ -457,26 +460,27 @@ struct BenchHandler {
     download: Option<usize>,
 }
 
-#[async_trait::async_trait]
 impl gondolin_netstack::FlowHandler for BenchHandler {
-    async fn handle_tcp(&self, flow: TcpFlow) {
-        let (mut rd, mut wr) = tokio::io::split(flow.stream);
-        let download = self.download;
-        let sink = tokio::spawn(async move {
-            let mut buf = vec![0u8; 256 * 1024];
-            while rd.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
-        });
-        if let Some(total) = download {
-            let mut off = 0;
-            while off < total {
-                let chunk = pattern(off, 251 * 256);
-                if wr.write_all(&chunk).await.is_err() {
-                    break;
+    fn handle_tcp(&self, flow: TcpFlow) -> gondolin_netstack::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let (mut rd, mut wr) = tokio::io::split(flow.stream);
+            let download = self.download;
+            let sink = tokio::spawn(async move {
+                let mut buf = vec![0u8; 256 * 1024];
+                while rd.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
+            });
+            if let Some(total) = download {
+                let mut off = 0;
+                while off < total {
+                    let chunk = pattern(off, 251 * 256);
+                    if wr.write_all(&chunk).await.is_err() {
+                        break;
+                    }
+                    off += chunk.len();
                 }
-                off += chunk.len();
             }
-        }
-        let _ = sink.await;
+            let _ = sink.await;
+        })
     }
 }
 

@@ -8,6 +8,3 @@ publish.workspace = true
 
 [dependencies]
 gondolin-wire.workspace = true
-serde.workspace = true
-serde_bytes.workspace = true
-thiserror.workspace = true

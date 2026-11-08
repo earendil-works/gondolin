@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::ordmap::{OrderedMap, OrderedSet};
 use gondolin_proto::exec::{self as px, ClientId, Stream};
-use indexmap::{IndexMap, IndexSet};
 
 use crate::fields::{self, Fields};
 use crate::guestmsg::{ExecRequest, ExecWindow, PtyResize, StdinData};
@@ -53,25 +53,25 @@ pub(crate) struct PendingOutput {
 #[derive(Debug, Default)]
 pub(crate) struct ExecState {
     /// accepted execs and the client owning them
-    pub inflight: IndexMap<u32, ClientId>,
+    pub inflight: OrderedMap<u32, ClientId>,
     /// admission tokens while a resume is pending
     pub pending_admissions: HashMap<u32, u64>,
     next_admission: u64,
     /// execs accepted but not started because a file operation runs
     pub exec_queue: VecDeque<QueuedExec>,
     /// execs whose `exec_request` was sent to sandboxd
-    pub started_execs: IndexSet<u32>,
+    pub started_execs: OrderedSet<u32>,
     pub stdin_allowed: HashSet<u32>,
-    pub queued_stdin: IndexMap<u32, VecDeque<StdinChunk>>,
+    pub queued_stdin: OrderedMap<u32, VecDeque<StdinChunk>>,
     /// queued stdin per exec in `bytes`
     pub queued_stdin_bytes: HashMap<u32, u64>,
     /// queued stdin across execs in `bytes`
     pub queued_stdin_total: u64,
     /// stdin credit granted by the guest in `bytes`
     pub stdin_credits: HashMap<u32, u64>,
-    pub queued_pty_resize: IndexMap<u32, (u32, u32)>,
+    pub queued_pty_resize: OrderedMap<u32, (u32, u32)>,
     /// output credit not yet forwarded (stdout, stderr) in `bytes`
-    pub pending_windows: IndexMap<u32, (u64, u64)>,
+    pub pending_windows: OrderedMap<u32, (u64, u64)>,
     pub window_flush_scheduled: bool,
     pub io_flush_scheduled: bool,
     /// coalesced guest output not yet sent
@@ -392,7 +392,7 @@ impl Session {
             }
             return false;
         }
-        self.x.queued_stdin.entry(id).or_default().push_back(StdinChunk {
+        self.x.queued_stdin.entry_or_insert_with(id, Default::default).push_back(StdinChunk {
             data: data.to_vec(),
             offset: 0,
             eof,
@@ -485,7 +485,7 @@ impl Session {
         if out == 0 && err == 0 {
             return;
         }
-        let entry = self.x.pending_windows.entry(id).or_insert((0, 0));
+        let entry = self.x.pending_windows.entry_or_insert_with(id, || (0, 0));
         entry.0 = (entry.0 + out).min(u64::from(u32::MAX));
         entry.1 = (entry.1 + err).min(u64::from(u32::MAX));
         self.flush_windows();
@@ -780,5 +780,5 @@ fn describe_exec(f: &Fields<'_>) -> String {
 }
 
 fn json_list(items: &[String]) -> String {
-    serde_json::to_string(items).unwrap_or_default()
+    gondolin_wire::json::to_string(&gondolin_wire::ToValue::to_value(items))
 }

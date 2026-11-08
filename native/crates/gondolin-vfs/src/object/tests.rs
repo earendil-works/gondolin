@@ -1,7 +1,7 @@
 use super::*;
+use crate::BoxFuture;
 use crate::call_result;
 use gondolin_proto::vfs::{ObjectCacheConfig, VfsCallResult};
-use serde_bytes::ByteBuf;
 use std::collections::BTreeMap as Map;
 
 #[derive(Clone)]
@@ -65,9 +65,7 @@ impl FakeBackend {
         match op {
             VfsOp::Stat { path, inline_max } => match entries.get(path) {
                 Some(FakeEntry::File(d, mode)) => VfsCallResult {
-                    data: inline_max
-                        .filter(|max| d.len() as u64 <= *max)
-                        .map(|_| ByteBuf::from(d.clone())),
+                    data: inline_max.filter(|max| d.len() as u64 <= *max).map(|_| d.clone()),
                     stat: Some(ObjectStat {
                         kind: EntryKind::File,
                         size: d.len() as u64,
@@ -121,10 +119,7 @@ impl FakeBackend {
                 Some(FakeEntry::File(d, _)) => {
                     let start = (*offset as usize).min(d.len());
                     let end = length.map(|l| (start + l as usize).min(d.len())).unwrap_or(d.len());
-                    VfsCallResult {
-                        data: Some(ByteBuf::from(d[start..end].to_vec())),
-                        ..Self::ok()
-                    }
+                    VfsCallResult { data: Some(d[start..end].to_vec()), ..Self::ok() }
                 }
                 Some(FakeEntry::Dir) => Self::err("EISDIR"),
                 None => Self::err("ENOENT"),
@@ -219,11 +214,12 @@ impl FakeBackend {
     }
 }
 
-#[async_trait]
 impl ObjectBackend for FakeBackend {
-    async fn call(&self, call: VfsCall) -> VfsResult<VfsCallResult> {
-        self.calls.lock().unwrap().push(call.op.clone());
-        call_result(self.handle(&call.op))
+    fn call<'a>(&'a self, call: VfsCall) -> BoxFuture<'a, VfsResult<VfsCallResult>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(call.op.clone());
+            call_result(self.handle(&call.op))
+        })
     }
 }
 

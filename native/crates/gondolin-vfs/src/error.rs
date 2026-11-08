@@ -262,8 +262,8 @@ impl fmt::Display for VfsError {
 
 impl std::error::Error for VfsError {}
 
-impl From<rustix::io::Errno> for VfsError {
-    fn from(err: rustix::io::Errno) -> Self {
+impl From<crate::sys::Errno> for VfsError {
+    fn from(err: crate::sys::Errno) -> Self {
         let value = errno::from_host(err.raw_os_error());
         VfsError::new(value, errno::name(value))
     }

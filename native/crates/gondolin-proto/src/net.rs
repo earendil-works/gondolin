@@ -6,39 +6,34 @@
 //! omitted when absent; unknown fields are ignored so the controller can add
 //! fields ahead of the daemon.
 
-use serde::{Deserialize, Serialize};
-
 /// Default request body limit in `bytes` (`DEFAULT_MAX_HTTP_BODY_BYTES`)
 pub const DEFAULT_MAX_HTTP_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// Default response body limit in `bytes`
 pub const DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES: u64 = DEFAULT_MAX_HTTP_BODY_BYTES;
 
-/// `configure.net`: everything the egress side needs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetConfig {
-    /// declarative policy (tier 1)
-    pub policy: NetPolicy,
-    /// tier-3 hooks the controller implements
-    pub hooks: HookRegistrations,
-    /// size limits and timeouts
-    pub limits: NetLimits,
-    /// CA used to sign MITM leaf certificates (absent: TLS flows are blocked)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mitm: Option<MitmCaConfig>,
-    /// explicit `tcp.hosts` mappings (raw tunnels, no HTTP mediation)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tcp_hosts: Vec<TcpHostMapping>,
-    /// SSH egress (sniffed `SSH-` banners); absent: SSH is not recognized
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ssh: Option<SshEgressConfig>,
-    /// extra PEM CA certificates trusted for upstream TLS (tests, corporate CAs)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub upstream_ca_pems: Vec<String>,
-    /// whether to also trust the operating system's root store upstream
-    pub use_system_roots: bool,
-    /// whether upstream TLS uses the built-in webpki root set
-    pub use_webpki_roots: bool,
+gondolin_wire::wire_struct! {
+    /// `configure.net`: everything the egress side needs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct NetConfig {
+        /// declarative policy (tier 1)
+        pub policy: NetPolicy = NetConfig::default().policy,
+        /// tier-3 hooks the controller implements
+        pub hooks: HookRegistrations = NetConfig::default().hooks,
+        /// size limits and timeouts
+        pub limits: NetLimits = NetConfig::default().limits,
+        /// CA used to sign MITM leaf certificates (absent: TLS flows are blocked)
+        pub mitm: Option<MitmCaConfig>,
+        /// explicit `tcp.hosts` mappings (raw tunnels, no HTTP mediation)
+        pub tcp_hosts: Vec<TcpHostMapping> = NetConfig::default().tcp_hosts => skip_if Vec::is_empty,
+        /// SSH egress (sniffed `SSH-` banners); absent: SSH is not recognized
+        pub ssh: Option<SshEgressConfig>,
+        /// extra PEM CA certificates trusted for upstream TLS (tests, corporate CAs)
+        pub upstream_ca_pems: Vec<String> = NetConfig::default().upstream_ca_pems => skip_if Vec::is_empty,
+        /// whether to also trust the operating system's root store upstream
+        pub use_system_roots: bool = NetConfig::default().use_system_roots,
+        /// whether upstream TLS uses the built-in webpki root set
+        pub use_webpki_roots: bool = NetConfig::default().use_webpki_roots,
+    }
 }
 
 impl Default for NetConfig {
@@ -57,17 +52,17 @@ impl Default for NetConfig {
     }
 }
 
-/// Declarative network policy. Replaced as a whole by `policy_update`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetPolicy {
-    /// rules compiled from `createHttpHooks()` options; absent when the hooks
-    /// were not created by `createHttpHooks()` (then only the built-in
-    /// internal-range default applies, unless an `is_ip_allowed` hook exists)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rules: Option<HttpRules>,
-    /// whether WebSocket upgrades are tunneled (`allowWebSockets`)
-    pub allow_websockets: bool,
+gondolin_wire::wire_struct! {
+    /// Declarative network policy. Replaced as a whole by `policy_update`.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct NetPolicy {
+        /// rules compiled from `createHttpHooks()` options; absent when the hooks
+        /// were not created by `createHttpHooks()` (then only the built-in
+        /// internal-range default applies, unless an `is_ip_allowed` hook exists)
+        pub rules: Option<HttpRules>,
+        /// whether WebSocket upgrades are tunneled (`allowWebSockets`)
+        pub allow_websockets: bool = NetPolicy::default().allow_websockets,
+    }
 }
 
 impl Default for NetPolicy {
@@ -76,26 +71,26 @@ impl Default for NetPolicy {
     }
 }
 
-/// The `createHttpHooks()` options in evaluated form.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HttpRules {
-    /// normalized allowed host patterns, already merged with
-    /// `allowed_internal_hosts` (`["*"]` when `allowedHosts` was omitted)
-    pub allowed_hosts: Vec<String>,
-    /// normalized host patterns allowed to resolve to internal ranges
-    pub allowed_internal_hosts: Vec<String>,
-    /// whether internal ip ranges are blocked
-    pub block_internal_ranges: bool,
-    /// secrets in definition order
-    pub secrets: Vec<SecretRule>,
-    /// whether placeholders in URL query parameters are replaced
-    pub replace_secrets_in_query: bool,
-    /// placeholder strategy
-    pub placeholder_mode: PlaceholderMode,
-    /// random marker of `shared` mode placeholders (`<marker>.<identifier>`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub marker: Option<String>,
+gondolin_wire::wire_struct! {
+    /// The `createHttpHooks()` options in evaluated form.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct HttpRules {
+        /// normalized allowed host patterns, already merged with
+        /// `allowed_internal_hosts` (`["*"]` when `allowedHosts` was omitted)
+        pub allowed_hosts: Vec<String> = HttpRules::default().allowed_hosts,
+        /// normalized host patterns allowed to resolve to internal ranges
+        pub allowed_internal_hosts: Vec<String> = HttpRules::default().allowed_internal_hosts,
+        /// whether internal ip ranges are blocked
+        pub block_internal_ranges: bool = HttpRules::default().block_internal_ranges,
+        /// secrets in definition order
+        pub secrets: Vec<SecretRule> = HttpRules::default().secrets,
+        /// whether placeholders in URL query parameters are replaced
+        pub replace_secrets_in_query: bool = HttpRules::default().replace_secrets_in_query,
+        /// placeholder strategy
+        pub placeholder_mode: PlaceholderMode = HttpRules::default().placeholder_mode,
+        /// random marker of `shared` mode placeholders (`<marker>.<identifier>`)
+        pub marker: Option<String>,
+    }
 }
 
 impl Default for HttpRules {
@@ -112,76 +107,79 @@ impl Default for HttpRules {
     }
 }
 
-/// Secret placeholder strategy (`secretPlaceholderMode`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaceholderMode {
-    #[default]
-    Shared,
-    Unique,
+gondolin_wire::wire_enum! {
+    /// Secret placeholder strategy (`secretPlaceholderMode`).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum PlaceholderMode {
+        #[default]
+        Shared = "shared",
+        Unique = "unique",
+    }
 }
 
-/// One secret (a `SecretEntry` of `createHttpHooks`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SecretRule {
-    /// env var name
-    pub name: String,
-    /// normalized identifier (`[a-z0-9_-]+`) used by shared placeholders
-    pub identifier: String,
-    /// guest-visible placeholder
-    pub placeholder: String,
-    /// current secret value
-    pub value: String,
-    /// values replaced by rotation, rejected in outgoing requests
-    pub revoked_values: Vec<String>,
-    /// normalized host patterns this secret may be sent to
-    pub hosts: Vec<String>,
-    /// whether the secret was deleted (placeholders become empty strings)
-    pub deleted: bool,
+gondolin_wire::wire_struct! {
+    /// One secret (a `SecretEntry` of `createHttpHooks`).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct SecretRule {
+        /// env var name
+        pub name: String = SecretRule::default().name,
+        /// normalized identifier (`[a-z0-9_-]+`) used by shared placeholders
+        pub identifier: String = SecretRule::default().identifier,
+        /// guest-visible placeholder
+        pub placeholder: String = SecretRule::default().placeholder,
+        /// current secret value
+        pub value: String = SecretRule::default().value,
+        /// values replaced by rotation, rejected in outgoing requests
+        pub revoked_values: Vec<String> = SecretRule::default().revoked_values,
+        /// normalized host patterns this secret may be sent to
+        pub hosts: Vec<String> = SecretRule::default().hosts,
+        /// whether the secret was deleted (placeholders become empty strings)
+        pub deleted: bool = SecretRule::default().deleted,
+    }
 }
 
-/// Which tier-3 hooks the controller has; unregistered phases cost nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HookRegistrations {
-    pub is_request_allowed: bool,
-    pub is_ip_allowed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub on_request: Option<BodyHookRegistration>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub on_response: Option<BodyHookRegistration>,
+gondolin_wire::wire_struct! {
+    /// Which tier-3 hooks the controller has; unregistered phases cost nothing.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct HookRegistrations {
+        pub is_request_allowed: bool = HookRegistrations::default().is_request_allowed,
+        pub is_ip_allowed: bool = HookRegistrations::default().is_ip_allowed,
+        pub on_request: Option<BodyHookRegistration>,
+        pub on_response: Option<BodyHookRegistration>,
+    }
 }
 
-/// Registration of a hook phase that may look at bodies.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BodyHookRegistration {
-    /// whether the hook may pull the body (otherwise no body stream is offered)
-    pub body: bool,
+gondolin_wire::wire_struct! {
+    /// Registration of a hook phase that may look at bodies.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct BodyHookRegistration {
+        /// whether the hook may pull the body (otherwise no body stream is offered)
+        pub body: bool = BodyHookRegistration::default().body,
+    }
 }
 
-/// Limits and timeouts (node engine defaults).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetLimits {
-    /// max request body in `bytes`
-    pub max_request_body_bytes: u64,
-    /// max response body a hook may buffer in `bytes`
-    pub max_response_body_bytes: u64,
-    /// max concurrently bridged HTTP requests
-    pub max_concurrent_requests: u32,
-    /// websocket upstream connect + TLS handshake timeout in `ms`
-    pub websocket_connect_timeout_ms: u64,
-    /// websocket upstream response head timeout in `ms`
-    pub websocket_header_timeout_ms: u64,
-    /// MITM leaf certificate cache size (entries)
-    pub tls_cache_max_entries: u32,
-    /// MITM leaf certificate cache ttl in `ms` (0 disables caching)
-    pub tls_cache_ttl_ms: u64,
-    /// whether guest HTTP connections are kept alive between requests (node:
-    /// one request per connection, `connection: close`)
-    pub guest_keep_alive: bool,
+gondolin_wire::wire_struct! {
+    /// Limits and timeouts (node engine defaults).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct NetLimits {
+        /// max request body in `bytes`
+        pub max_request_body_bytes: u64 = NetLimits::default().max_request_body_bytes,
+        /// max response body a hook may buffer in `bytes`
+        pub max_response_body_bytes: u64 = NetLimits::default().max_response_body_bytes,
+        /// max concurrently bridged HTTP requests
+        pub max_concurrent_requests: u32 = NetLimits::default().max_concurrent_requests,
+        /// websocket upstream connect + TLS handshake timeout in `ms`
+        pub websocket_connect_timeout_ms: u64 = NetLimits::default().websocket_connect_timeout_ms,
+        /// websocket upstream response head timeout in `ms`
+        pub websocket_header_timeout_ms: u64 = NetLimits::default().websocket_header_timeout_ms,
+        /// MITM leaf certificate cache size (entries)
+        pub tls_cache_max_entries: u32 = NetLimits::default().tls_cache_max_entries,
+        /// MITM leaf certificate cache ttl in `ms` (0 disables caching)
+        pub tls_cache_ttl_ms: u64 = NetLimits::default().tls_cache_ttl_ms,
+        /// whether guest HTTP connections are kept alive between requests (node:
+        /// one request per connection, `connection: close`)
+        pub guest_keep_alive: bool = NetLimits::default().guest_keep_alive,
+    }
 }
 
 impl Default for NetLimits {
@@ -199,67 +197,68 @@ impl Default for NetLimits {
     }
 }
 
-/// MITM CA (the controller's cached `ca.crt`/`ca.key`, PEM).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MitmCaConfig {
-    /// CA certificate PEM
-    pub cert_pem: String,
-    /// CA private key PEM (PKCS#1 RSA, PKCS#8 RSA/ECDSA)
-    pub key_pem: String,
+gondolin_wire::wire_struct! {
+    /// MITM CA (the controller's cached `ca.crt`/`ca.key`, PEM).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct MitmCaConfig {
+        /// CA certificate PEM
+        pub cert_pem: String,
+        /// CA private key PEM (PKCS#1 RSA, PKCS#8 RSA/ECDSA)
+        pub key_pem: String,
+    }
 }
 
-/// `tcp.hosts` entry: guest `host[:port]` → upstream `host:port`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TcpHostMapping {
-    /// normalized (lowercase) synthetic hostname
-    pub host: String,
-    /// guest destination port (absent: any port)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-    pub upstream_host: String,
-    pub upstream_port: u16,
+gondolin_wire::wire_struct! {
+    /// `tcp.hosts` entry: guest `host[:port]` → upstream `host:port`.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct TcpHostMapping {
+        /// normalized (lowercase) synthetic hostname
+        pub host: String,
+        /// guest destination port (absent: any port)
+        pub port: Option<u16>,
+        pub upstream_host: String,
+        pub upstream_port: u16,
+    }
 }
 
-/// SSH egress configuration (`VMOptions.ssh`, served by `gondolin-sshproxy`).
-///
-/// Defaults match `host/src/qemu/ssh.ts`. Paths are paths on the daemon's
-/// machine.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SshEgressConfig {
-    /// destination ports on which `SSH-` banners are recognized (the ports of
-    /// `allowed_hosts`; empty: derived from `allowed_hosts`)
-    pub ports: Vec<u16>,
-    /// allowed `HOST[:PORT]` patterns (`*` wildcards, default port 22, `[host]:port` accepted)
-    pub allowed_hosts: Vec<String>,
-    /// upstream private-key credentials, first matching `host` pattern wins
-    pub credentials: Vec<SshCredential>,
-    /// ssh-agent socket path (`$SSH_AUTH_SOCK`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    /// OpenSSH known_hosts files; empty: `~/.ssh/known_hosts` and `/etc/ssh/ssh_known_hosts`
-    pub known_hosts_files: Vec<String>,
-    /// known_hosts contents (remote controllers send the files they read
-    /// locally); when non-empty, used instead of `known_hosts_files`
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub known_hosts: Vec<String>,
-    /// the controller implements `hostVerifier` (`ssh_hook_call` `host_verify`) instead of known_hosts
-    pub host_verifier_hook: bool,
-    /// the controller implements `execPolicy` (`ssh_hook_call` `exec_policy`)
-    pub exec_policy_hook: bool,
-    /// guest-facing host key (OpenSSH or PEM private key); absent: ephemeral Ed25519 key
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host_key: Option<String>,
-    /// max concurrent upstream connections per guest TCP flow
-    pub max_upstream_connections_per_flow: u32,
-    /// max concurrent upstream connections across all flows
-    pub max_upstream_connections_total: u32,
-    /// upstream connect + handshake + auth timeout in `ms`
-    pub upstream_ready_timeout_ms: u64,
-    /// upstream keepalive interval in `ms` (0: disabled)
-    pub upstream_keepalive_interval_ms: u64,
-    /// unanswered upstream keepalives before disconnect
-    pub upstream_keepalive_count_max: u32,
+gondolin_wire::wire_struct! {
+    /// SSH egress configuration (`VMOptions.ssh`, served by `gondolin-sshproxy`).
+    ///
+    /// Defaults match `host/src/qemu/ssh.ts`. Paths are paths on the daemon's
+    /// machine.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SshEgressConfig {
+        /// destination ports on which `SSH-` banners are recognized (the ports of
+        /// `allowed_hosts`; empty: derived from `allowed_hosts`)
+        pub ports: Vec<u16> = SshEgressConfig::default().ports,
+        /// allowed `HOST[:PORT]` patterns (`*` wildcards, default port 22, `[host]:port` accepted)
+        pub allowed_hosts: Vec<String> = SshEgressConfig::default().allowed_hosts,
+        /// upstream private-key credentials, first matching `host` pattern wins
+        pub credentials: Vec<SshCredential> = SshEgressConfig::default().credentials,
+        /// ssh-agent socket path (`$SSH_AUTH_SOCK`)
+        pub agent: Option<String>,
+        /// OpenSSH known_hosts files; empty: `~/.ssh/known_hosts` and `/etc/ssh/ssh_known_hosts`
+        pub known_hosts_files: Vec<String> = SshEgressConfig::default().known_hosts_files,
+        /// known_hosts contents (remote controllers send the files they read
+        /// locally); when non-empty, used instead of `known_hosts_files`
+        pub known_hosts: Vec<String> = SshEgressConfig::default().known_hosts => skip_if Vec::is_empty,
+        /// the controller implements `hostVerifier` (`ssh_hook_call` `host_verify`) instead of known_hosts
+        pub host_verifier_hook: bool = SshEgressConfig::default().host_verifier_hook,
+        /// the controller implements `execPolicy` (`ssh_hook_call` `exec_policy`)
+        pub exec_policy_hook: bool = SshEgressConfig::default().exec_policy_hook,
+        /// guest-facing host key (OpenSSH or PEM private key); absent: ephemeral Ed25519 key
+        pub host_key: Option<String>,
+        /// max concurrent upstream connections per guest TCP flow
+        pub max_upstream_connections_per_flow: u32 = SshEgressConfig::default().max_upstream_connections_per_flow,
+        /// max concurrent upstream connections across all flows
+        pub max_upstream_connections_total: u32 = SshEgressConfig::default().max_upstream_connections_total,
+        /// upstream connect + handshake + auth timeout in `ms`
+        pub upstream_ready_timeout_ms: u64 = SshEgressConfig::default().upstream_ready_timeout_ms,
+        /// upstream keepalive interval in `ms` (0: disabled)
+        pub upstream_keepalive_interval_ms: u64 = SshEgressConfig::default().upstream_keepalive_interval_ms,
+        /// unanswered upstream keepalives before disconnect
+        pub upstream_keepalive_count_max: u32 = SshEgressConfig::default().upstream_keepalive_count_max,
+    }
 }
 
 impl Default for SshEgressConfig {
@@ -283,224 +282,213 @@ impl Default for SshEgressConfig {
     }
 }
 
-/// Upstream private-key credential (`ssh.credentials[pattern]`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SshCredential {
-    /// `HOST[:PORT]` pattern the credential applies to
-    pub host: String,
-    /// upstream username (absent: `git`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    /// private key (OpenSSH, PKCS#1/PKCS#8 PEM)
-    pub private_key: String,
-    /// private key passphrase
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub passphrase: Option<String>,
-}
-
-/// `ssh_hook_call` (d→c request, answered by `ssh_hook_call_result` with
-/// [`SshHookResult`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub enum SshHookCall {
-    /// `ssh.execPolicy(request)`
-    ExecPolicy { request: SshExecRequest },
-    /// `ssh.hostVerifier(hostname, key, port)`
-    HostVerify {
-        hostname: String,
-        port: u16,
-        /// SSH wire encoding of the upstream host key
-        #[serde(with = "serde_bytes")]
-        key: Vec<u8>,
-    },
-}
-
-/// Guest `exec` request (`SshExecRequest`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SshExecRequest {
-    /// target hostname (synthetic DNS mapping)
-    pub hostname: String,
-    pub port: u16,
-    /// username the guest authenticated as
-    pub guest_username: String,
-    /// raw exec command
-    pub command: String,
-    /// guest source address
-    pub src_ip: String,
-    pub src_port: u16,
-}
-
-/// `ssh_hook_call_result` payload (besides `ok`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SshHookResult {
-    /// exec allowed / host key accepted
-    pub allow: bool,
-    /// exit code for a denied exec (absent: 1)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<u32>,
-    /// stderr message for a denied exec (newline appended)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// `policy_update` (c→d): replaces the declarative policy (secret rotation).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PolicyUpdate {
-    pub policy: NetPolicy,
-}
-
-/// Hook phase of a `hook_call`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookPhase {
-    IsRequestAllowed,
-    IsIpAllowed,
-    OnRequest,
-    OnResponse,
-}
-
-/// Request head as plain data.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct WireRequestHead {
-    pub method: String,
-    /// absolute URL
-    pub url: String,
-    /// `[name, value]` pairs, lowercase names
-    pub headers: Vec<(String, String)>,
-    /// daemon body stream id (pull with `body_pull`); absent: no body
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<u64>,
-    /// first bytes of the body, sent inline (pull the rest from offset `len`)
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_bytes")]
-    pub body_prefix: Option<Vec<u8>>,
-    /// whether `body_prefix` is the whole body (no `body_pull` needed)
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub body_complete: bool,
-}
-
-/// Response head as plain data.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct WireResponseHead {
-    pub status: u16,
-    pub status_text: String,
-    /// `[name, value]` pairs, lowercase names, repeated names allowed
-    pub headers: Vec<(String, String)>,
-    /// daemon body stream id; absent: no body
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<u64>,
-    /// first bytes of the body, sent inline (pull the rest from offset `len`)
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_bytes")]
-    pub body_prefix: Option<Vec<u8>>,
-    /// whether `body_prefix` is the whole body (no `body_pull` needed)
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub body_complete: bool,
-}
-
-/// `Option<Vec<u8>>` as an optional CBOR byte string.
-mod opt_bytes {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(bytes) => serde_bytes::serialize(bytes, s),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
-        Ok(Option::<serde_bytes::ByteBuf>::deserialize(d)?.map(serde_bytes::ByteBuf::into_vec))
+gondolin_wire::wire_struct! {
+    /// Upstream private-key credential (`ssh.credentials[pattern]`).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct SshCredential {
+        /// `HOST[:PORT]` pattern the credential applies to
+        pub host: String = SshCredential::default().host,
+        /// upstream username (absent: `git`)
+        pub username: Option<String>,
+        /// private key (OpenSSH, PKCS#1/PKCS#8 PEM)
+        pub private_key: String = SshCredential::default().private_key,
+        /// private key passphrase
+        pub passphrase: Option<String>,
     }
 }
 
-/// Destination ip check info (`HttpIpAllowInfo`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct WireIpInfo {
-    pub hostname: String,
-    pub ip: String,
-    /// 4 or 6
-    pub family: u8,
-    pub port: u16,
-    /// "http" or "https"
-    pub protocol: String,
+gondolin_wire::wire_tagged! {
+    /// `ssh_hook_call` (d→c request, answered by `ssh_hook_call_result` with
+    /// [`SshHookResult`]).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum SshHookCall : "phase" {
+        /// `ssh.execPolicy(request)`
+        ExecPolicy = "exec_policy" { request: SshExecRequest },
+        /// `ssh.hostVerifier(hostname, key, port)`
+        HostVerify = "host_verify" {
+            hostname: String,
+            port: u16,
+            /// SSH wire encoding of the upstream host key
+            key: Vec<u8>,
+        },
+    }
 }
 
-/// `hook_call` (d→c request, answered by `hook_call_result`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HookCall {
-    pub phase: HookPhase,
-    /// request (all phases but `is_ip_allowed`; for `on_response` the final request, without body)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<WireRequestHead>,
-    /// upstream response (`on_response`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response: Option<WireResponseHead>,
-    /// destination (`is_ip_allowed`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ip: Option<WireIpInfo>,
+gondolin_wire::wire_struct! {
+    /// Guest `exec` request (`SshExecRequest`).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct SshExecRequest {
+        /// target hostname (synthetic DNS mapping)
+        pub hostname: String,
+        pub port: u16,
+        /// username the guest authenticated as
+        pub guest_username: String,
+        /// raw exec command
+        pub command: String,
+        /// guest source address
+        pub src_ip: String,
+        pub src_port: u16,
+    }
 }
 
-/// Body of a replaced request/response in a hook decision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WireBody {
-    /// keep the original body (bytes already pulled are replayed by the daemon)
-    Original,
-    /// no body
-    None,
-    /// inline bytes
-    Bytes {
-        #[serde(with = "serde_bytes")]
-        data: Vec<u8>,
-    },
-    /// controller-held stream, pulled by the daemon with `body_pull`
-    Stream { stream: u64 },
+gondolin_wire::wire_struct! {
+    /// `ssh_hook_call_result` payload (besides `ok`).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct SshHookResult {
+        /// exec allowed / host key accepted
+        pub allow: bool = SshHookResult::default().allow,
+        /// exit code for a denied exec (absent: 1)
+        pub exit_code: Option<u32>,
+        /// stderr message for a denied exec (newline appended)
+        pub message: Option<String>,
+    }
 }
 
-/// `hook_call_result` payload (besides `ok`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum HookDecision {
-    /// `is_request_allowed` / `is_ip_allowed` answer
-    Allowed { allowed: bool },
-    /// keep the request/response unchanged (incl. in-place header mutations
-    /// already reflected in `request`/`response` when present)
-    Continue,
-    /// continue with a replaced request (`on_request`)
-    Request { request: WireRequestHead, body: WireBody },
-    /// short-circuit (`on_request`) or replaced response (`on_response`)
-    Response { response: WireResponseHead, body: WireBody },
-    /// reject with an error response (`HttpRequestBlockedError`)
-    Block { status: u16, status_text: String, message: String },
+gondolin_wire::wire_struct! {
+    /// `policy_update` (c→d): replaces the declarative policy (secret rotation).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct PolicyUpdate {
+        pub policy: NetPolicy,
+    }
 }
 
-/// `body_pull` (either direction): read the next chunk of a body stream.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BodyPull {
-    pub stream: u64,
-    /// max chunk size in `bytes`
-    pub max: u64,
-    /// read position in `bytes` (daemon streams: lets several readers, e.g.
-    /// `clone()`d Requests, read the retained body independently); absent:
-    /// continue after the previous pull
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset: Option<u64>,
+gondolin_wire::wire_enum! {
+    /// Hook phase of a `hook_call`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum HookPhase {
+        IsRequestAllowed = "is_request_allowed",
+        IsIpAllowed = "is_ip_allowed",
+        OnRequest = "on_request",
+        OnResponse = "on_response",
+    }
 }
 
-/// `body_pull_result`: one chunk (empty `data` with `eof` ends the stream).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BodyChunk {
-    pub stream: u64,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
-    pub eof: bool,
+gondolin_wire::wire_struct! {
+    /// Request head as plain data.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct WireRequestHead {
+        pub method: String,
+        /// absolute URL
+        pub url: String,
+        /// `[name, value]` pairs, lowercase names
+        pub headers: Vec<(String, String)>,
+        /// daemon body stream id (pull with `body_pull`); absent: no body
+        pub body: Option<u64>,
+        /// first bytes of the body, sent inline (pull the rest from offset `len`)
+        pub body_prefix: Option<Vec<u8>>,
+        /// whether `body_prefix` is the whole body (no `body_pull` needed)
+        pub body_complete: bool = Default::default() => skip_if std::ops::Not::not,
+    }
 }
 
-/// `body_release` (either direction, no reply): the reader is done with a stream.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BodyRelease {
-    pub stream: u64,
+gondolin_wire::wire_struct! {
+    /// Response head as plain data.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct WireResponseHead {
+        pub status: u16,
+        pub status_text: String,
+        /// `[name, value]` pairs, lowercase names, repeated names allowed
+        pub headers: Vec<(String, String)>,
+        /// daemon body stream id; absent: no body
+        pub body: Option<u64>,
+        /// first bytes of the body, sent inline (pull the rest from offset `len`)
+        pub body_prefix: Option<Vec<u8>>,
+        /// whether `body_prefix` is the whole body (no `body_pull` needed)
+        pub body_complete: bool = Default::default() => skip_if std::ops::Not::not,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// Destination ip check info (`HttpIpAllowInfo`).
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct WireIpInfo {
+        pub hostname: String,
+        pub ip: String,
+        /// 4 or 6
+        pub family: u8,
+        pub port: u16,
+        /// "http" or "https"
+        pub protocol: String,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// `hook_call` (d→c request, answered by `hook_call_result`).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct HookCall {
+        pub phase: HookPhase,
+        /// request (all phases but `is_ip_allowed`; for `on_response` the final request, without body)
+        pub request: Option<WireRequestHead>,
+        /// upstream response (`on_response`)
+        pub response: Option<WireResponseHead>,
+        /// destination (`is_ip_allowed`)
+        pub ip: Option<WireIpInfo>,
+    }
+}
+
+gondolin_wire::wire_tagged! {
+    /// Body of a replaced request/response in a hook decision.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum WireBody : "kind" {
+        /// keep the original body (bytes already pulled are replayed by the daemon)
+        Original = "original",
+        /// no body
+        None = "none",
+        /// inline bytes
+        Bytes = "bytes" { data: Vec<u8> },
+        /// controller-held stream, pulled by the daemon with `body_pull`
+        Stream = "stream" { stream: u64 },
+    }
+}
+
+gondolin_wire::wire_tagged! {
+    /// `hook_call_result` payload (besides `ok`).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum HookDecision : "action" {
+        /// `is_request_allowed` / `is_ip_allowed` answer
+        Allowed = "allowed" { allowed: bool },
+        /// keep the request/response unchanged (incl. in-place header mutations
+        /// already reflected in `request`/`response` when present)
+        Continue = "continue",
+        /// continue with a replaced request (`on_request`)
+        Request = "request" { request: WireRequestHead, body: WireBody },
+        /// short-circuit (`on_request`) or replaced response (`on_response`)
+        Response = "response" { response: WireResponseHead, body: WireBody },
+        /// reject with an error response (`HttpRequestBlockedError`)
+        Block = "block" { status: u16, status_text: String, message: String },
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// `body_pull` (either direction): read the next chunk of a body stream.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct BodyPull {
+        pub stream: u64,
+        /// max chunk size in `bytes`
+        pub max: u64,
+        /// read position in `bytes` (daemon streams: lets several readers, e.g.
+        /// `clone()`d Requests, read the retained body independently); absent:
+        /// continue after the previous pull
+        pub offset: Option<u64>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// `body_pull_result`: one chunk (empty `data` with `eof` ends the stream).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct BodyChunk {
+        pub stream: u64,
+        pub data: Vec<u8>,
+        pub eof: bool,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// `body_release` (either direction, no reply): the reader is done with a stream.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct BodyRelease {
+        pub stream: u64,
+    }
 }
 
 /// Message type names.

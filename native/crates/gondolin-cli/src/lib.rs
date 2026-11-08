@@ -16,6 +16,7 @@ pub mod ingress;
 pub mod netcfg;
 pub mod registry;
 pub mod session;
+pub mod signals;
 pub mod ssh;
 pub mod util;
 pub mod vm;

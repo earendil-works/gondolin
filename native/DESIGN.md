@@ -192,17 +192,23 @@ or needs a decision before the flip:
 
 | crate | role | owns |
 |---|---|---|
-| `gondolin-wire` | `u32` BE length + CBOR framing, CBOR helpers (serde + ciborium), async frame reader/writer | shared by everything |
+| `gondolin-wire` | `u32` BE length + CBOR framing, own data model (`Value`), CBOR and JSON codecs, `ToValue`/`FromValue` with declarative macros, async frame reader/writer | shared by everything |
+| `gondolin-log` | logging facade (`error!`/`warn!`/`debug!`/`trace!`, one process sink) | shared by everything |
 | `gondolin-proto` | controller ⇄ daemon message types (`session`, `exec`, `vfs`, `net` modules) | protocol |
 | `gondolin-vfs` | host side of the sandboxfs RPC, mount table, native providers, object-tier cache | filesystem |
 | `gondolin-netstack` | Ethernet/ARP/DHCP/IPv4/ICMP/UDP-DNS/TCP; yields guest TCP flows as byte streams | packets |
+| `gondolin-http` | HTTP/1.1: sans-io heads/framing/chunked codec, tokio server and pooled client (100-continue, upgrades), rustls stream adapter; used by egress, assets and the CLI's ingress gateway | HTTP |
 | `gondolin-egress` | stream classification, HTTP/1.1 bridging, TLS MITM, WebSockets, policy, secrets, hook dispatch; later SSH egress and mapped TCP | upstream |
 | `gondolin-assets` | guest image resolution: refs/build ids/paths, builtin registry, shared image store, HTTPS downloads | images |
 | `gondolin-sshproxy` | exec-only SSH egress: guest-facing SSH server per flow, upstream SSH client (known_hosts, agent/key auth, caps, timeouts) | upstream SSH |
 | `gondolind` | binary: controller protocol, session, QEMU, guest control channel, wiring | glue |
 
 Runtime: tokio (multi-thread). TLS: rustls with the `ring` provider (simple
-static musl builds), certificates via rcgen. Upstream HTTP: hyper 1.x client.
+static musl builds); MITM leaves and the daemon's CA are written by a small DER
+encoder over ring (`gondolin_egress::x509`, mirrors `host/src/x509.ts`); URLs
+are parsed by `gondolin_http::url` (WHATWG, special schemes). HTTP/1.1 (guest-facing server,
+upstream client, asset downloads, ingress gateway): `gondolin-http`, our own
+sans-io codec with thin tokio adapters (replaced hyper/reqwest, M8).
 Static builds: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
 `aarch64-apple-darwin`, `x86_64-apple-darwin`, all from one machine with
 `make native-release` (`native/scripts/build-release.sh`). The Linux targets
@@ -213,6 +219,35 @@ host architecture's musl target and runs them inside a Gondolin VM (node
 engine, repository mounted read-only at its host path), so Linux-only code
 paths are tested on macOS; `native/scripts/test-linux.skip` lists tests that
 cannot run there.
+
+### Dependency diet conventions (PLAN.md M8)
+
+The `gondolin` binary's third-party runtime crates are counted per release
+target by `native/scripts/count-deps.sh` (`make -C native deps`, part of
+`make check` and CI) against the budget in `native/deps-budget`, which is
+lowered whenever the count drops. Conventions for new code:
+
+- **Data:** `gondolin_wire::Value` (CBOR/JSON data model) and the `cbor` /
+  `json` modules instead of serde/ciborium/serde_json. Typed messages use
+  `wire_struct!` (records; per field `as "name"`, `= default`,
+  `=> skip_if path`, `=> flatten`), `wire_enum!` (unit enums as strings),
+  `wire_tagged!` (internally tagged enums) and `wire_encode!` (encode-only,
+  borrowing); `value!({...})` builds values like `json!`. `Option` fields are
+  omitted when `None`, `Vec<u8>` is a byte string. Guest channels decode with
+  `decode_guest` (the §3.3 subset: `i64` integers, no floats/tags);
+  `json::to_string_pretty` is byte-identical to `JSON.stringify(v, null, 2)`
+  (tested against node). No serde, no proc-macro crates in the binary.
+- **Logging:** `gondolin_log::{error, warn, debug, trace}!` (format syntax,
+  optional `target:`); gondolind installs the sink with the `net` debug flag
+  and forwards `gondolin*` targets as `log` messages.
+- **Async traits:** object-safe traits return `BoxFuture<'a, T>`
+  (`gondolind::BoxFuture`) instead of `#[async_trait]`; errors implement
+  `Display`/`Error` by hand (no thiserror).
+- **Runtime:** tokio with `rt`, `rt-multi-thread`, `net`, `time`, `sync`,
+  `io-util` (workspace); `macros` only in dev-dependencies (use
+  `gondolind::util::{select2, join2}` or `poll_fn` instead of `select!`).
+  Child processes are watched by std threads (`vmm.rs`), CLI signals go
+  through a self-pipe (`gondolin-cli/src/signals.rs`).
 
 ### gondolind internals and subsystem seams
 
@@ -344,16 +379,30 @@ Changing them requires updating every implementor (coordinate through PLAN.md).
     `execPolicy` / `hostVerifier`, only for hooks the config declares
     (`exec_policy_hook`, `host_verifier_hook`); gondolind forwards them as
     `ssh_hook_call` → `ssh_hook_call_result`.
-  - Flow control: each exec bridges a guest-facing russh server channel to an
-    upstream russh client channel. Both sessions advertise SSH window only as
-    the bridge consumes data (`window_on_consume`, a patch in our vendored
-    russh, `vendor/russh/GONDOLIN-PATCHES.md`), so a direction blocked on its
-    far end stops its sender through the SSH window while both connections
-    keep being read; stock russh grants window on receipt and backpressures by
-    no longer reading the connection, which deadlocked a channel saturated in
-    both directions. Under each session a write pump (`pump.rs`) keeps the
-    session loop reading while its writes drain, since russh stops reading
-    while it writes and two russh peers otherwise block each other in `write`.
+  - SSH implementation: own, in `gondolin-sshproxy/src/ssh/` (replaced russh,
+    ~100 crates). Sans-io core: `transport` (version exchange, binary packet
+    protocol, `curve25519-sha256` and `ecdh-sha2-nistp256/384`, host keys
+    `ssh-ed25519`/`ecdsa-sha2-nistp256/384`/`rsa-sha2-256/512`, ciphers
+    `chacha20-poly1305@openssh.com` and `aes128/256-gcm@openssh.com` via ring,
+    strict kex (Terrapin), rekeying after 1 GiB, ext-info `server-sig-algs`,
+    no compression) and `connection` (userauth none/password/publickey/
+    keyboard-interactive, session channels, requests answered in order).
+    `session` is the tokio adapter (`Client`, `Server`, `Channel`), `agent`
+    the ssh-agent client, `keyfile` reads OpenSSH keys (bcrypt + AES-CTR/CBC/
+    GCM when passphrase protected), PEM PKCS#1/SEC1 (with OpenSSL's legacy
+    AES-CBC encryption) and PKCS#8 — the formats ssh2 reads, minus DSA/PuTTY.
+    Interop is tested against OpenSSH's `ssh` and `sshd` (`tests/openssh.rs`)
+    and node's ssh2 upstream (host `ssh-egress` test); `ssh_transport` and
+    `ssh_keys` fuzz the parsers.
+  - Flow control: each exec bridges a guest-facing server channel to an
+    upstream client channel. Both sessions advertise SSH window only as the
+    application consumes data (`Connection::consumed`), so a direction blocked
+    on its far end stops its sender through the SSH window while both
+    connections keep being read (granting window on receipt and backpressuring
+    by not reading the connection, as russh did, deadlocks a channel saturated
+    in both directions). Each connection has a reader and a writer task, so
+    reading never waits for writes to drain; unflushed output is bounded by
+    the peer's windows.
 
 ## Guest images (`gondolin-assets`)
 
@@ -374,7 +423,11 @@ engines share `~/.cache/gondolin/images`):
 - `ResolvedImage { source, selector, asset_dir, build_id, arch, kernel, initrd,
   rootfs, rootfs_format, krun_kernel, krun_initrd, rootfs_mode, manifest }`;
   `rootfs_mode` is `manifest.runtimeDefaults.rootfsMode`.
-- Downloads: rustls (ring, webpki + system roots), archive `sha256` from the
+- Downloads: rustls (ring) trusting what the node engine's `fetch` trusts:
+  the Mozilla CA list (`webpki-roots`, the list Node bundles) plus
+  `$NODE_EXTRA_CA_CERTS`; the OS trust store is not used (Node only does with
+  `--use-system-ca`), which also keeps `rustls-native-certs` out of assets.
+  Archive `sha256` from the
   registry, extraction into scratch space inside the store, every asset checked
   against the manifest checksums, import by rename into `objects/<build-id>`
   (temp dir + rename, as the node engine), ref symlinks replaced atomically.
@@ -677,7 +730,7 @@ providers with a cache) and the JS providers directly otherwise.
 served in the daemon by `gondolind/src/net.rs`: `gondolin-netstack` on the
 netdev socket, `gondolin-egress` for flows, `gondolin-sshproxy` for SSH egress.
 Open guest flows are reported as session activity (no idle pause while
-connected). With the `net` debug flag, `tracing` events of the network crates
+connected). With the `net` debug flag, `gondolin-log` records of the network crates
 are forwarded as `log { component: "net" }`. The controller side lives in
 `host/src/native/net.ts` (`NativeNetwork`: option compilation and the
 `hook_call`/`body_pull`/`body_release`/`ssh_hook_call` handlers,
@@ -725,7 +778,15 @@ omitted). `configure.net` (`NetConfig`) carries:
 - Upstream trust: the controller sends `tls.getCACertificates("default")` as
   `upstream_ca_pems` with the built-in root sets disabled, so the native engine
   trusts exactly what node's fetch would (incl. `NODE_EXTRA_CA_CERTS` and
-  `tls.setDefaultCACertificates`).
+  `tls.setDefaultCACertificates`). The static CLI has no Node.js CA store and
+  sets `use_webpki_roots` + `use_system_roots`: system roots are PEM files
+  (`gondolin_egress::system_roots`, no `rustls-native-certs`):
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` when set, else the first distribution bundle
+  (the `openssl-probe` list) or the certificate directories on Linux and
+  `/etc/ssl/cert.pem` on macOS, plus `NODE_EXTRA_CA_CERTS`. The macOS keychain
+  is not read (node's default store doesn't either, and `security
+  find-certificate` output lacks the trust settings); keychain-only roots must
+  be exported to `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE`.
 
 `policy_update { policy }` (c→d) replaces the whole `NetPolicy` (secret
 rotation/deletion, host changes); it applies to requests evaluated afterwards.
@@ -789,7 +850,7 @@ the same protocol as the TypeScript controller). Modules:
   (`checkpoint`, node's qcow2 + trailer format), registry entry and IPC
   socket (`registry`, the `SessionIpcServer` protocol with id remapping).
 - `ssh`, `ingress`, `fwd`: `--ssh` and `--listen` over the `ssh`/`ingress`
-  forwarder channels (hyper for the gateway, WebSocket upgrades tunneled).
+  forwarder channels (`gondolin-http` for the gateway, WebSocket upgrades tunneled).
 - `commands`: `bash`, `exec`, `list`, `attach`, `snapshot`, `image`.
 
 The binary is multi-call: as `gondolind*`, `gondolin daemon` or

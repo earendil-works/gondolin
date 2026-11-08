@@ -3,56 +3,113 @@
 //! `{ v, t, id, p }` message envelope (§3.4) used by the guest protocols and the
 //! controller protocol (`native/DESIGN.md`).
 //!
-//! CBOR is produced and consumed through serde (`ciborium`). Encoders must
-//! follow the guest's CBOR subset (§3.3) when talking to the guest: omit absent
-//! optional fields (`#[serde(skip_serializing_if = "Option::is_none")]`), use
-//! byte strings for raw data (`serde_bytes`), and never emit floats.
+//! The data model is our own [`Value`] with a CBOR codec ([`cbor`]) and a JSON
+//! codec ([`json`]); typed messages convert through [`ToValue`]/[`FromValue`],
+//! implemented with the declarative [`wire_struct!`], [`wire_enum!`] and
+//! [`wire_tagged!`] macros (no serde, no proc macros). Encoders follow the
+//! guest's CBOR subset (§3.3): optional fields are omitted when absent, raw
+//! data is a byte string (`Vec<u8>`), no floats are sent to the guest.
 
-use std::io;
+use std::{fmt, io};
 
 use bytes::{Buf, Bytes, BytesMut};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub use ciborium::Value;
+pub mod base64;
+pub mod cbor;
+pub mod convert;
+pub mod json;
+pub mod value;
+
+pub use convert::{DecodeError, FromValue, ToValue};
+pub use value::Value;
 
 /// Maximum frame payload in `bytes`, the same limit as the guest protocols.
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 
 /// Errors of encoding, decoding and frame I/O.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum WireError {
-    #[error("i/o error: {0}")]
-    Io(#[from] io::Error),
-    #[error("cbor encode error: {0}")]
+    Io(io::Error),
     Encode(String),
-    #[error("cbor decode error: {0}")]
     Decode(String),
-    #[error("frame of {0} bytes exceeds the {MAX_FRAME} byte limit")]
     FrameTooLarge(usize),
 }
 
-/// Encodes `value` as one CBOR item.
-pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
-    let mut out = Vec::new();
-    ciborium::into_writer(value, &mut out).map_err(|e| WireError::Encode(e.to_string()))?;
-    Ok(out)
+impl fmt::Display for WireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WireError::Io(e) => write!(f, "i/o error: {e}"),
+            WireError::Encode(e) => write!(f, "cbor encode error: {e}"),
+            WireError::Decode(e) => write!(f, "cbor decode error: {e}"),
+            WireError::FrameTooLarge(n) => {
+                write!(f, "frame of {n} bytes exceeds the {MAX_FRAME} byte limit")
+            }
+        }
+    }
 }
 
-/// Decodes one CBOR item from `bytes` (trailing bytes are ignored).
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WireError> {
-    ciborium::from_reader(bytes).map_err(|e| WireError::Decode(e.to_string()))
+impl std::error::Error for WireError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WireError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
-/// Converts a decoded CBOR value into a typed value.
-pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, WireError> {
-    value.deserialized().map_err(|e| WireError::Decode(e.to_string()))
+impl From<io::Error> for WireError {
+    fn from(e: io::Error) -> Self {
+        WireError::Io(e)
+    }
 }
 
-/// Converts a typed value into a CBOR value.
-pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<Value, WireError> {
-    Value::serialized(value).map_err(|e| WireError::Encode(e.to_string()))
+impl From<DecodeError> for WireError {
+    fn from(e: DecodeError) -> Self {
+        WireError::Decode(e.to_string())
+    }
+}
+
+impl From<cbor::CborError> for WireError {
+    fn from(e: cbor::CborError) -> Self {
+        WireError::Decode(e.to_string())
+    }
+}
+
+/// Encodes `value` as one CBOR item (never fails; `Result` for call sites
+/// that propagate errors).
+pub fn encode<T: ToValue + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
+    Ok(cbor::encode(&value.to_value()))
+}
+
+/// Decodes one CBOR item from `bytes` (controller profile; trailing bytes are
+/// ignored).
+pub fn decode<T: FromValue>(bytes: &[u8]) -> Result<T, WireError> {
+    let value = cbor::decode(bytes)?;
+    Ok(T::from_value(&value)?)
+}
+
+/// Decodes one CBOR item of a guest protocol (§3.3 subset: `i64` integers,
+/// no floats).
+pub fn decode_guest<T: FromValue>(bytes: &[u8]) -> Result<T, WireError> {
+    let value = cbor::decode_with(bytes, cbor::Profile::Guest)?;
+    Ok(T::from_value(&value)?)
+}
+
+/// Converts a decoded value into a typed value.
+pub fn from_value<T: FromValue>(value: impl AsRef<Value>) -> Result<T, WireError> {
+    Ok(T::from_value(value.as_ref())?)
+}
+
+/// Converts a typed value into a value (never fails).
+pub fn to_value<T: ToValue + ?Sized>(value: &T) -> Result<Value, WireError> {
+    Ok(value.to_value())
+}
+
+impl AsRef<Value> for Value {
+    fn as_ref(&self) -> &Value {
+        self
+    }
 }
 
 /// Prefixes `payload` with its `u32` big-endian length.
@@ -67,7 +124,7 @@ pub fn frame(payload: &[u8]) -> Result<Vec<u8>, WireError> {
 }
 
 /// The `{ v, t, id, p }` envelope with a typed payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Envelope<P> {
     /// protocol version (always 1 when sending)
     pub v: u32,
@@ -85,13 +142,36 @@ impl<P> Envelope<P> {
     }
 }
 
-/// An envelope whose payload is kept as a CBOR value, for dispatch on `t`.
+impl<P: ToValue> ToValue for Envelope<P> {
+    fn to_value(&self) -> Value {
+        Value::Map(vec![
+            (Value::Text("v".into()), self.v.to_value()),
+            (Value::Text("t".into()), Value::Text(self.t.clone())),
+            (Value::Text("id".into()), self.id.to_value()),
+            (Value::Text("p".into()), self.p.to_value()),
+        ])
+    }
+}
+
+impl<P: FromValue> FromValue for Envelope<P> {
+    fn from_value(value: &Value) -> Result<Self, DecodeError> {
+        let map = convert::expect_map(value, "a map (envelope)")?;
+        Ok(Envelope {
+            v: convert::field(map, "v")?,
+            t: convert::field(map, "t")?,
+            id: convert::field(map, "id")?,
+            p: convert::field(map, "p")?,
+        })
+    }
+}
+
+/// An envelope whose payload is kept as a value, for dispatch on `t`.
 pub type RawEnvelope = Envelope<Value>;
 
 impl RawEnvelope {
     /// Decodes the payload as `P`.
-    pub fn payload<P: DeserializeOwned>(&self) -> Result<P, WireError> {
-        from_value(self.p.clone())
+    pub fn payload<P: FromValue>(&self) -> Result<P, WireError> {
+        Ok(P::from_value(&self.p)?)
     }
 }
 
@@ -181,10 +261,7 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
     }
 
     /// Encodes and writes `value` as one frame.
-    pub async fn write_message<T: Serialize + ?Sized>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), WireError> {
+    pub async fn write_message<T: ToValue + ?Sized>(&mut self, value: &T) -> Result<(), WireError> {
         let payload = encode(value)?;
         self.write_frame(&payload).await
     }
@@ -203,13 +280,13 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct Payload {
-        name: String,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        cwd: Option<String>,
-        #[serde(with = "serde_bytes")]
-        data: Vec<u8>,
+    crate::wire_struct! {
+        #[derive(Debug, Clone, PartialEq)]
+        struct Payload {
+            name: String,
+            cwd: Option<String>,
+            data: Vec<u8>,
+        }
     }
 
     #[test]

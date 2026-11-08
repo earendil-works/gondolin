@@ -1,0 +1,18 @@
+# Lima VM for running gondolin's Linux/KVM tests on Apple silicon:
+# Virtualization.framework with nested virtualization (M3 or newer, macOS 15+),
+# so the guest kernel boots at EL2 and has /dev/kvm. Managed by
+# native/scripts/linux-kvm-vm.sh (`make native-test-kvm`), which mounts the
+# repository read-only and builds in a VM-local copy.
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-24.04
+vmType: vz
+nestedVirtualization: true
+cpus: 8
+memory: 16GiB
+disk: 100GiB
+# the repository mount is added by linux-kvm-vm.sh (read-only)
+mounts: []
+containerd:
+  system: false
+  user: false

@@ -8,6 +8,8 @@
 #   cargo       cargo test --workspace (linux/arm64, natively)
 #   vm          boots VMs (QEMU TCG) through the native engine: linux paths smoke
 #   host-tests  host tests with GONDOLIN_ENGINE=native (HOST_TESTS, or HOST_TESTS=all)
+#   vm-x64      (linux/amd64, GONDOLIN_NATIVE_BIN prebuilt) smoke with forced
+#               microvm + TCG, then the default machine (q35)
 # shellcheck disable=SC2016 # expanded by the inner shell
 set -euo pipefail
 
@@ -20,7 +22,10 @@ fi
 
 export CARGO_TARGET_DIR=/target
 export GONDOLIN_GUEST_DIR=/image
-export GONDOLIN_NATIVE_BIN=/target/release/gondolind
+export GONDOLIN_NATIVE_BIN=${GONDOLIN_NATIVE_BIN:-/target/release/gondolind}
+# the static CLI for host tests (else they find the checkout's host build in
+# /src/native/target, a macOS binary)
+export GONDOLIN_CLI_BIN=${GONDOLIN_CLI_BIN:-/target/release/gondolin}
 export GONDOLIN_FORCE_VM_TESTS=1
 export TMPDIR=/work/tmp
 mkdir -p "$TMPDIR"
@@ -47,7 +52,7 @@ node_setup() {
 }
 
 build_gondolind() {
-  (cd native && cargo build --locked --release -p gondolind)
+  (cd native && cargo build --locked --release -p gondolind -p gondolin-cli)
 }
 
 for phase in "$@"; do
@@ -60,6 +65,17 @@ for phase in "$@"; do
       run "node setup" node_setup
       run "build gondolind" build_gondolind
       run "native engine smoke (QEMU TCG)" node native/scripts/docker/linux-smoke.mts
+      ;;
+    vm-x64)
+      run "node setup" node_setup
+      echo "QEMU: $(qemu-system-x86_64 --version | head -1)"
+      # microvm is what x86_64 KVM hosts get. Under TCG the guest finds no
+      # clock to calibrate the TSC against (KVM has kvmclock) and stalls:
+      # tsc_early_khz supplies the frequency.
+      run "smoke: microvm + vhost-user-fs-device (TCG)" env SMOKE_MACHINE=microvm \
+        SMOKE_ACCEL=tcg,thread=multi SMOKE_APPEND=tsc_early_khz=2000000 \
+        node native/scripts/docker/linux-smoke.mts
+      run "smoke: default machine (q35, TCG)" node native/scripts/docker/linux-smoke.mts
       ;;
     host-tests)
       run "node setup" node_setup

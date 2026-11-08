@@ -171,10 +171,7 @@ impl EtcStore {
                     Some(l) => (start + l as usize).min(data.len()),
                     None => data.len(),
                 };
-                Ok(VfsCallResult {
-                    data: Some(serde_bytes::ByteBuf::from(data[start..end].to_vec())),
-                    ..ok()
-                })
+                Ok(VfsCallResult { data: Some(data[start..end].to_vec()), ..ok() })
             }
             VfsOp::WriteFile { path, data, offset, last, mode } => {
                 let p = norm(&path);

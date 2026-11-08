@@ -1,4 +1,4 @@
-.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner native native-check native-test native-release native-test-linux native-test-docker native-fuzz
+.PHONY: help lint typecheck build test check format fix clean hooks docs serve-docs fuzz fuzz-host fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean libkrun krun-runner native native-check native-test native-release native-test-linux native-test-docker native-test-kvm native-fuzz
 
 RUN_PARALLEL ?= ./scripts/run-parallel
 
@@ -66,6 +66,7 @@ help:
 	@echo "  make native-release - Static release binaries for linux-musl + darwin (native/target/dist)"
 	@echo "  make native-test-linux - Run native/ tests cross-compiled for Linux inside a VM"
 	@echo "  make native-test-docker - Linux tests in Docker (cargo arm64/amd64, native engine VMs under TCG, host tests)"
+	@echo "  make native-test-kvm - Linux tests with KVM in a Lima VM (nested virtualization; SUITES=...)"
 	@echo "  make native-fuzz - Run the native/ cargo-fuzz targets (nightly; FUZZ_TIME, FUZZ_TARGETS)"
 
 build:
@@ -255,6 +256,9 @@ native-test-linux:
 
 native-test-docker:
 	@$(MAKE) -C native test-docker
+
+native-test-kvm:
+	@native/scripts/linux-kvm-vm.sh test $(SUITES)
 
 native-fuzz:
 	@$(MAKE) -C native fuzz

@@ -5,16 +5,14 @@
 //! `ingress`), one upstream connection per request (`connection: close`);
 //! WebSocket upgrades are tunneled.
 
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
-use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderMap, HeaderName, HeaderValue};
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use gondolin_http::client::Connection;
+use gondolin_http::head::canonical_reason;
+use gondolin_http::server::{Request, Response, ServerConfig};
+use gondolin_http::{BoxBody, HeadLimits, Header, ParseError};
 use tokio::net::TcpListener;
 
 use crate::engine::Engine;
@@ -139,11 +137,24 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
+/// Server limits (hyper's defaults)
+const LIMITS: HeadLimits = HeadLimits { max_bytes: 8192 + 4096 * 100, max_headers: 100 };
+
+fn get<'a>(headers: &'a [Header], name: &str) -> Option<&'a str> {
+    gondolin_http::header(headers, name).and_then(|v| std::str::from_utf8(v).ok())
+}
+
+/// Replaces all `name` headers with one.
+fn set(headers: &mut Vec<Header>, name: &str, value: &str) {
+    headers.retain(|h| h.name != name);
+    headers.push(Header::new(name, value));
+}
+
+fn connection_tokens(headers: &[Header]) -> Vec<String> {
     headers
-        .get_all(hyper::header::CONNECTION)
         .iter()
-        .filter_map(|v| v.to_str().ok())
+        .filter(|h| h.name == "connection")
+        .filter_map(|h| std::str::from_utf8(&h.value).ok())
         .flat_map(|v| v.split(','))
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty())
@@ -151,11 +162,11 @@ fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
 }
 
 /// `stripHopByHopHeaders` / `stripHopByHopHeadersForWebSocket`
-fn filter_headers(headers: &HeaderMap, websocket: bool) -> HeaderMap {
+fn filter_headers(headers: &[Header], websocket: bool) -> Vec<Header> {
     let tokens = connection_tokens(headers);
-    let mut out = HeaderMap::new();
-    for (name, value) in headers {
-        let n = name.as_str();
+    let mut out = Vec::with_capacity(headers.len());
+    for h in headers {
+        let n = h.name.as_str();
         let drop = if websocket {
             matches!(
                 n,
@@ -173,25 +184,38 @@ fn filter_headers(headers: &HeaderMap, websocket: bool) -> HeaderMap {
             HOP_BY_HOP.contains(&n) || tokens.iter().any(|t| t == n)
         };
         if !drop {
-            out.append(name.clone(), value.clone());
+            out.push(h.clone());
         }
     }
     out
 }
 
-fn is_upgrade(headers: &HeaderMap) -> bool {
-    headers.contains_key(hyper::header::UPGRADE)
+fn is_upgrade(headers: &[Header]) -> bool {
+    headers.iter().any(|h| h.name == "upgrade")
         && connection_tokens(headers).iter().any(|t| t == "upgrade")
 }
 
-type Body = BoxBody<Bytes, hyper::Error>;
+fn text(status: u16, body: &str) -> Response {
+    Response::new(
+        status,
+        vec![Header::new("content-type", "text/plain")],
+        BoxBody::full(body.to_string()),
+    )
+}
 
-fn text(status: StatusCode, body: &str) -> Response<Body> {
-    let mut res =
-        Response::new(Full::new(Bytes::from(body.to_string())).map_err(|e| match e {}).boxed());
-    *res.status_mut() = status;
-    res.headers_mut().insert(hyper::header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-    res
+/// Path and `?query` of a request-target (origin or absolute form; no fragment).
+fn split_target(target: &str) -> (String, String) {
+    let target = target.split('#').next().unwrap_or_default();
+    let rest = match target.find("://") {
+        Some(i) => {
+            let after = &target[i + 3..];
+            after.find(['/', '?']).map_or("", |j| &after[j..])
+        }
+        None => target,
+    };
+    let (path, query) = rest.split_at(rest.find('?').unwrap_or(rest.len()));
+    let path = if path.is_empty() { "/" } else { path };
+    (path.to_string(), query.to_string())
 }
 
 /// A listening gateway.
@@ -261,16 +285,23 @@ pub async fn enable(
         while let Ok((socket, peer)) = listener.accept().await {
             let _ = socket.set_nodelay(true);
             let gw = gw.clone();
-            tokio::spawn(async move {
-                let service = hyper::service::service_fn(move |req| {
+            tokio::spawn(gondolin_http::server::serve(
+                socket,
+                ServerConfig { keep_alive: true, limits: LIMITS },
+                move |req| {
                     let gw = gw.clone();
-                    async move { Ok::<_, Infallible>(gw.handle(req, peer).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(socket), service)
-                    .with_upgrades()
-                    .await;
-            });
+                    async move { gw.handle(req, peer).await }
+                },
+                |err: &ParseError| {
+                    let status = if matches!(err, ParseError::TooLarge | ParseError::TooManyHeaders)
+                    {
+                        431
+                    } else {
+                        400
+                    };
+                    Response::new(status, vec![], BoxBody::empty())
+                },
+            ));
         }
     });
     let shown = if addr.is_ipv6() { format!("[{}]", addr.ip()) } else { addr.ip().to_string() };
@@ -278,51 +309,40 @@ pub async fn enable(
 }
 
 impl Gateway {
-    async fn handle(&self, req: Request<Incoming>, peer: SocketAddr) -> Response<Body> {
-        let upgrade = is_upgrade(req.headers());
+    async fn handle(&self, req: Request, peer: SocketAddr) -> Response {
+        let upgrade = is_upgrade(&req.head.headers);
         if upgrade && !self.allow_websockets {
-            return text(StatusCode::NOT_IMPLEMENTED, "websocket upgrades disabled\n");
+            return text(501, "websocket upgrades disabled\n");
         }
-        if !upgrade && req.headers().contains_key(hyper::header::UPGRADE) {
-            let mut res = text(StatusCode::UPGRADE_REQUIRED, "use websocket upgrade\n");
-            res.headers_mut().insert(hyper::header::UPGRADE, HeaderValue::from_static("websocket"));
+        if !upgrade && req.head.headers.iter().any(|h| h.name == "upgrade") {
+            let mut res = text(426, "use websocket upgrade\n");
+            res.headers.push(Header::new("upgrade", "websocket"));
             return res;
         }
-        let path = req.uri().path().to_string();
-        let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        let (path, query) = split_target(&req.head.target);
         let Some(route) = pick_route(&self.routes.read().unwrap(), &path) else {
-            return text(StatusCode::NOT_FOUND, "no route\n");
+            return text(404, "no route\n");
         };
         let backend_path =
             if route.strip_prefix { strip_prefix(&path, &route.prefix) } else { path.clone() };
-        let host_header = req
-            .headers()
-            .get(hyper::header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("localhost")
-            .to_string();
-        let mut headers = filter_headers(req.headers(), upgrade);
+        let host_header = get(&req.head.headers, "host").unwrap_or("localhost").to_string();
+        let mut headers = filter_headers(&req.head.headers, upgrade);
         if !upgrade {
-            for h in ["content-length", "expect"] {
-                headers.remove(h);
-            }
+            headers.retain(|h| h.name != "content-length" && h.name != "expect");
         }
-        headers.insert(
-            hyper::header::HOST,
-            HeaderValue::from_str(&host_header).unwrap_or(HeaderValue::from_static("localhost")),
-        );
+        let host_value = if gondolin_http::head::valid_value(host_header.as_bytes()) {
+            &host_header
+        } else {
+            "localhost"
+        };
+        set(&mut headers, "host", host_value);
         if !upgrade {
-            headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+            set(&mut headers, "connection", "close");
         }
         let client_ip = peer.ip().to_string();
-        let xff = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let xff = match get(&headers, "x-forwarded-for") {
             Some(prev) if !prev.is_empty() => format!("{prev}, {client_ip}"),
             _ => client_ip,
-        };
-        let set = |headers: &mut HeaderMap, name: &'static str, value: &str| {
-            if let Ok(v) = HeaderValue::from_str(value) {
-                headers.insert(HeaderName::from_static(name), v);
-            }
         };
         set(&mut headers, "x-forwarded-for", &xff);
         set(&mut headers, "x-forwarded-host", &host_header);
@@ -335,64 +355,59 @@ impl Gateway {
             .await
         {
             Ok(res) => res,
-            Err(_) => text(StatusCode::BAD_GATEWAY, "bad gateway\n"),
+            Err(_) => text(502, "bad gateway\n"),
         }
     }
 
     async fn forward(
         &self,
-        mut req: Request<Incoming>,
+        req: Request,
         port: u16,
         target: String,
-        headers: HeaderMap,
+        headers: Vec<Header>,
         upgrade: bool,
-    ) -> Result<Response<Body>, String> {
+    ) -> Result<Response, String> {
         let stream =
             crate::fwd::open(&self.engine, "ingress", "127.0.0.1", port, Duration::from_secs(10))
                 .await?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(stream))
-                .await
-                .map_err(|e| e.to_string())?;
-        tokio::spawn(async move {
-            let _ = conn.with_upgrades().await;
-        });
-        let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
-        let (parts, body) = req.into_parts();
-        let mut upstream = Request::builder().method(parts.method).uri(target);
-        if let Some(h) = upstream.headers_mut() {
-            *h = headers;
-        }
-        let body: Body = if upgrade {
-            Full::new(Bytes::new()).map_err(|e| match e {}).boxed()
-        } else {
-            body.boxed()
-        };
-        let upstream = upstream.body(body).map_err(|e| e.to_string())?;
-        let mut res = sender.send_request(upstream).await.map_err(|e| e.to_string())?;
-        if upgrade && res.status() == StatusCode::SWITCHING_PROTOCOLS {
-            let upstream_upgrade = hyper::upgrade::on(&mut res);
-            let (parts, _) = res.into_parts();
-            tokio::spawn(async move {
-                let (Ok(client), Ok(server)) =
-                    (client_upgrade.unwrap().await, upstream_upgrade.await)
-                else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(
-                    &mut TokioIo::new(client),
-                    &mut TokioIo::new(server),
-                )
-                .await;
+        let Request { head, body, upgrade: client_upgrade, .. } = req;
+        let body = if upgrade { BoxBody::empty() } else { body.boxed() };
+        let res = gondolin_http::client::send(
+            Connection::new(stream),
+            &head.method,
+            &target,
+            &headers,
+            body,
+            &LIMITS,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let reason = (canonical_reason(res.head.status).map(str::as_bytes)
+            != Some(res.head.reason.as_slice()))
+        .then(|| res.head.reason.clone());
+        if upgrade && res.head.status == 101 {
+            if let (Some(client), Some(mut server)) = (client_upgrade, res.upgraded) {
+                tokio::spawn(async move {
+                    let Ok(mut client) = client.await else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                });
+            }
+            return Ok(Response {
+                status: 101,
+                reason,
+                headers: res.head.headers,
+                body: BoxBody::empty(),
             });
-            return Ok(Response::from_parts(
-                parts,
-                Full::new(Bytes::new()).map_err(|e| match e {}).boxed(),
-            ));
         }
-        let (mut parts, body) = res.into_parts();
-        parts.headers = filter_headers(&parts.headers, false);
-        Ok(Response::from_parts(parts, body.boxed()))
+        Ok(Response {
+            status: res.head.status,
+            reason,
+            headers: filter_headers(&res.head.headers, false),
+            body: res.body.boxed(),
+        })
     }
 }
 
@@ -423,17 +438,28 @@ mod tests {
 
     #[test]
     fn hop_by_hop() {
-        let mut h = HeaderMap::new();
-        h.insert("connection", HeaderValue::from_static("upgrade, x-drop"));
-        h.insert("upgrade", HeaderValue::from_static("websocket"));
-        h.insert("x-drop", HeaderValue::from_static("1"));
-        h.insert("x-keep", HeaderValue::from_static("1"));
+        let h = vec![
+            Header::new("connection", "upgrade, x-drop"),
+            Header::new("upgrade", "websocket"),
+            Header::new("x-drop", "1"),
+            Header::new("x-keep", "1"),
+        ];
         assert!(is_upgrade(&h));
         let plain = filter_headers(&h, false);
-        assert!(plain.get("upgrade").is_none() && plain.get("x-drop").is_none());
+        assert!(get(&plain, "upgrade").is_none() && get(&plain, "x-drop").is_none());
         let ws = filter_headers(&h, true);
         assert!(
-            ws.get("upgrade").is_some() && ws.get("x-keep").is_some() && ws.get("x-drop").is_none()
+            get(&ws, "upgrade").is_some()
+                && get(&ws, "x-keep").is_some()
+                && get(&ws, "x-drop").is_none()
         );
+    }
+
+    #[test]
+    fn targets() {
+        assert_eq!(split_target("/a/b?x=1"), ("/a/b".into(), "?x=1".into()));
+        assert_eq!(split_target("http://h:1"), ("/".into(), "".into()));
+        assert_eq!(split_target("http://h/p?q#f"), ("/p".into(), "?q".into()));
+        assert_eq!(split_target("/p#f"), ("/p".into(), "".into()));
     }
 }

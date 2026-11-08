@@ -34,7 +34,7 @@ pub async fn open(
         }
         Ok(_) => return Err("tcp stream closed".into()),
         Err(_) => {
-            send(engine, "fwd_close", channel, id, serde_json::json!({})).await;
+            send(engine, "fwd_close", channel, id, gondolin_wire::value!({})).await;
             engine.fwd_forget(channel, id);
             return Err("tcp_open timeout".into());
         }
@@ -53,8 +53,14 @@ pub async fn open(
                         if pump_wr.write_all(&data).await.is_err() {
                             break;
                         }
-                        send(&engine, "fwd_window", channel, id, serde_json::json!({ "bytes": n }))
-                            .await;
+                        send(
+                            &engine,
+                            "fwd_window",
+                            channel,
+                            id,
+                            gondolin_wire::value!({ "bytes": n }),
+                        )
+                        .await;
                     }
                     FwdEvent::Closed(_) => {
                         closed_by_guest = true;
@@ -74,7 +80,7 @@ pub async fn open(
         loop {
             match pump_rd.read(&mut buf).await {
                 Ok(0) | Err(_) => {
-                    send(&engine2, "fwd_eof", channel, id, serde_json::json!({})).await;
+                    send(&engine2, "fwd_eof", channel, id, gondolin_wire::value!({})).await;
                     break;
                 }
                 Ok(n) => {
@@ -83,7 +89,7 @@ pub async fn open(
                         "fwd_data",
                         channel,
                         id,
-                        serde_json::json!({ "data": b64(&buf[..n]) }),
+                        gondolin_wire::value!({ "data": b64(&buf[..n]) }),
                     )
                     .await;
                 }
@@ -92,14 +98,14 @@ pub async fn open(
         // wait for the guest side, then make sure the stream is gone
         let closed_by_guest = down.await.unwrap_or(false);
         if !closed_by_guest {
-            send(&engine2, "fwd_close", channel, id, serde_json::json!({})).await;
+            send(&engine2, "fwd_close", channel, id, gondolin_wire::value!({})).await;
         }
         engine2.fwd_forget(channel, id);
     });
     Ok(user)
 }
 
-async fn send(engine: &Engine, t: &str, channel: &str, id: u32, mut p: serde_json::Value) {
+async fn send(engine: &Engine, t: &str, channel: &str, id: u32, mut p: gondolin_wire::Value) {
     p["channel"] = channel.into();
     p["stream"] = id.into();
     engine.send(t, &json_to_cbor(&p)).await;
