@@ -23,6 +23,7 @@ pub const COMMON: &str = "VFS Options:
 
 Network Options:
   --allow-host HOST               Allow HTTP requests to host (can repeat)
+  --hooks-script FILE             Tier-2 hook policy (.js script, .mjs module, .ts TypeScript)
   --host-secret NAME@HOST[,HOST...][=VALUE]
                                   Add secret for explicit hosts
                                   If =VALUE is omitted, reads from $NAME

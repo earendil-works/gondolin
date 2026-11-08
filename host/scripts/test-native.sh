@@ -40,6 +40,8 @@ default_tests=(
   test/ssh-egress.test.ts
   test/ssh-exec.test.ts
   test/native-net.test.ts
+  test/djs-hooks.test.ts
+  test/djs-hooks-vm.test.ts
   test/http-hooks.test.ts
   test/exec.test.ts
   test/backpressure.test.ts

@@ -36,6 +36,8 @@ pub struct CommonOptions {
     pub memory_mounts: Vec<String>,
     pub allowed_hosts: Vec<String>,
     pub secrets: Vec<SecretSpec>,
+    /// tier-2 hook policy file (`--hooks-script`)
+    pub hooks_script: Option<String>,
     /// image selector (asset dir, build id, or name:tag)
     pub image: Option<String>,
     /// `qemu` or `krun`
@@ -409,6 +411,9 @@ fn parse_common(
         }
         "--allow-host" => {
             c.allowed_hosts.push(value("--allow-host requires a host argument")?.clone())
+        }
+        "--hooks-script" => {
+            c.hooks_script = Some(value("--hooks-script requires a file argument")?.clone())
         }
         "--host-secret" => {
             let spec = value("--host-secret requires an argument")?;

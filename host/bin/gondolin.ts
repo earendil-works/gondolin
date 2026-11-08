@@ -22,6 +22,10 @@ import { RealFSProvider } from "../src/vfs/node/index.ts";
 import { nativeMounts } from "../src/native/vfs.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
 import { createHttpHooks } from "../src/http/hooks.ts";
+import {
+  createDjsHooks,
+  djsHooksOptionsFromFile,
+} from "../src/http/djs-hooks.ts";
 import type { HttpHooks } from "../src/qemu/contracts.ts";
 import { suggestHostsForSecret } from "../src/secret-host-suggestions.ts";
 import {
@@ -299,6 +303,9 @@ function bashUsage() {
   console.log(
     "  --allow-host HOST               Allow HTTP requests to host (can repeat)",
   );
+  console.log(
+    "  --hooks-script FILE             Tier-2 hook policy (.js script, .mjs module, .ts TypeScript)",
+  );
   console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
     "                                  Add secret with explicit hosts or discover suggestions",
@@ -452,6 +459,9 @@ function execUsage() {
   console.log();
   console.log("Network Options (VM mode only):");
   console.log("  --allow-host HOST               Allow HTTP requests to host");
+  console.log(
+    "  --hooks-script FILE             Tier-2 hook policy (.js script, .mjs module, .ts TypeScript)",
+  );
   console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
     "                                  Add secret with explicit hosts or discover suggestions",
@@ -519,6 +529,9 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+
+  /** tier-2 hook policy file (`createDjsHooks`) */
+  hooksScript?: string;
 
   /** image selector (asset dir, build id, or name:tag) */
   image?: string;
@@ -964,6 +977,11 @@ function parseListenSpec(spec: string): { host: string; port: number } {
   return { host, port };
 }
 
+/** `--hooks-script FILE`: a tier-2 policy (`.mjs` module, `.ts`/`.mts` TypeScript), with its relative imports */
+function loadHooksScript(file: string): HttpHooks {
+  return createDjsHooks(djsHooksOptionsFromFile(file));
+}
+
 function buildVmOptions(common: CommonOptions) {
   const mounts: Record<string, VirtualProvider> = {};
 
@@ -996,6 +1014,9 @@ function buildVmOptions(common: CommonOptions) {
   let httpHooks: HttpHooks | undefined;
   let env: Record<string, string> | undefined;
 
+  const djsHooks = common.hooksScript
+    ? loadHooksScript(common.hooksScript)
+    : undefined;
   if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
     const secrets: Record<string, { hosts: string[]; value: string }> = {};
     for (const secret of common.secrets) {
@@ -1006,9 +1027,12 @@ function buildVmOptions(common: CommonOptions) {
       allowedHosts:
         common.allowedHosts.length > 0 ? common.allowedHosts : undefined,
       secrets,
+      ...djsHooks,
     });
     httpHooks = result.httpHooks;
     env = result.env;
+  } else if (djsHooks) {
+    httpHooks = djsHooks;
   }
 
   if (common.dnsTrustedServers.length > 0) {
@@ -1233,6 +1257,12 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const host = optionArgs[++i];
         if (!host) fail("--allow-host requires a host argument");
         args.common.allowedHosts.push(host);
+        return i;
+      }
+      case "--hooks-script": {
+        const file = optionArgs[++i];
+        if (!file) fail("--hooks-script requires a file argument");
+        args.common.hooksScript = file;
         return i;
       }
       case "--host-secret": {
@@ -1800,6 +1830,15 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.allowedHosts.push(host);
+        break;
+      }
+      case "--hooks-script": {
+        const file = argv[++i];
+        if (!file) {
+          console.error("--hooks-script requires a file argument");
+          process.exit(1);
+        }
+        args.hooksScript = file;
         break;
       }
       case "--host-secret": {

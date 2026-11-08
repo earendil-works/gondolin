@@ -4,7 +4,12 @@ import https from "node:https";
 import type net from "node:net";
 import tls from "node:tls";
 
-import { type HttpHooks, type VM, createHttpHooks } from "../../src/index.ts";
+import {
+  type HttpHooks,
+  type VM,
+  createDjsHooks,
+  createHttpHooks,
+} from "../../src/index.ts";
 import {
   authorityKeyIdentifierExtension,
   basicConstraintsExtension,
@@ -172,6 +177,37 @@ function variants(): Variant[] {
         onResponse: async (response) => {
           await response.clone().arrayBuffer();
         },
+      }).httpHooks,
+    },
+    // tier 2: the same hooks as a createDjsHooks() policy (inside gondolind on
+    // the native engine, node:vm on the node engine)
+    {
+      name: "policy-noop-djs",
+      description:
+        "policy + no-op onRequest/onResponse as a tier-2 (djs) policy",
+      hooks: createHttpHooks({
+        ...policy,
+        ...createDjsHooks("function onRequest() {}\nfunction onResponse() {}"),
+      }).httpHooks,
+    },
+    {
+      name: "policy-body-djs",
+      description:
+        "policy + onRequest/onResponse reading cloned bodies as a tier-2 (djs) policy",
+      hooks: createHttpHooks({
+        ...policy,
+        ...createDjsHooks({
+          source: [
+            "async function onRequest(request) {",
+            "  if (request.body) await request.clone().arrayBuffer();",
+            "}",
+            "async function onResponse(response) {",
+            "  await response.clone().arrayBuffer();",
+            "}",
+          ].join("\n"),
+          // 32 MiB bodies are read whole into the policy's heap
+          limits: { memoryBytes: 256 * MiB },
+        }),
       }).httpHooks,
     },
   ];

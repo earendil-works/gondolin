@@ -280,6 +280,17 @@ impl Url {
         self.fragment_start.map(|i| &self.serialization[i + 1..])
     }
 
+    /// Percent-encoded username (empty without credentials).
+    pub fn username(&self) -> &str {
+        let info = self.userinfo();
+        info.split_once(':').map_or(info, |(user, _)| user)
+    }
+
+    /// Percent-encoded password, if any.
+    pub fn password(&self) -> Option<&str> {
+        self.userinfo().split_once(':').map(|(_, pass)| pass)
+    }
+
     /// Serialized `user:pass` (empty without credentials).
     fn userinfo(&self) -> &str {
         match self.host {

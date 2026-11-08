@@ -19,6 +19,8 @@ gondolin_wire::wire_struct! {
         pub policy: NetPolicy = NetConfig::default().policy,
         /// tier-3 hooks the controller implements
         pub hooks: HookRegistrations = NetConfig::default().hooks,
+        /// tier-2 hooks: a JavaScript policy run inside the daemon on djs
+        pub djs_hooks: Option<DjsHooksConfig>,
         /// size limits and timeouts
         pub limits: NetLimits = NetConfig::default().limits,
         /// CA used to sign MITM leaf certificates (absent: TLS flows are blocked)
@@ -41,6 +43,7 @@ impl Default for NetConfig {
         Self {
             policy: NetPolicy::default(),
             hooks: HookRegistrations::default(),
+            djs_hooks: None,
             limits: NetLimits::default(),
             mitm: None,
             tcp_hosts: Vec::new(),
@@ -146,6 +149,55 @@ gondolin_wire::wire_struct! {
         pub is_ip_allowed: bool = HookRegistrations::default().is_ip_allowed,
         pub on_request: Option<BodyHookRegistration>,
         pub on_response: Option<BodyHookRegistration>,
+    }
+}
+
+gondolin_wire::wire_enum! {
+    /// How a tier-2 policy source is evaluated.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum DjsSourceKind {
+        /// a classic script; the hooks are global functions
+        #[default]
+        Script = "script",
+        /// an ES module; the hooks are its exports
+        Module = "module",
+        /// an ES module in TypeScript (types are erased as it compiles)
+        TypeScript = "typescript",
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// Tier-2 hook policy (`createDjsHooks()`, `--hooks-script`): compiled once
+    /// at `configure.net`; the phases are the functions it defines among
+    /// `isRequestAllowed`, `isIpAllowed`, `onRequest` and `onResponse`.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct DjsHooksConfig {
+        /// policy source text
+        pub source: String = DjsHooksConfig::default().source,
+        /// name in stack traces and the module key of a module policy
+        pub filename: Option<String>,
+        /// script (global functions), module or typescript (exports)
+        pub kind: DjsSourceKind = DjsSourceKind::Script,
+        /// sources a module policy may import, by key (relative specifiers
+        /// resolve against the importer's key; in memory, no I/O); the key's
+        /// extension picks the language: `.ts`/`.mts`/`.cts` TypeScript,
+        /// `.json` a JSON module, else JavaScript
+        pub modules: std::collections::BTreeMap<String, String> = Default::default() => skip_if std::collections::BTreeMap::is_empty,
+        /// per-call budgets (absent fields: daemon defaults)
+        pub limits: DjsHookLimits = Default::default(),
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// Budgets of one tier-2 hook call; exceeding one fails the call closed.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DjsHookLimits {
+        /// fuel per call (interpreter cost units, about 4 ns each; default 50M)
+        pub fuel: Option<u64>,
+        /// heap cap per call in `bytes` (default 64 MiB)
+        pub memory_bytes: Option<u64>,
+        /// wall-clock time per call in `ms`, body reads included (default 30000)
+        pub timeout_ms: Option<u64>,
     }
 }
 

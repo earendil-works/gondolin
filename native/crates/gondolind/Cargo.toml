@@ -16,10 +16,16 @@ gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 gondolin-netstack.workspace = true
 gondolin-egress.workspace = true
 gondolin-sshproxy.workspace = true
+gondolin-hooks-djs = { workspace = true, optional = true }
 bytes.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 libc = "0.2"
 ring = "0.17"
+
+[features]
+default = ["djs-hooks"]
+# tier-2 hooks (`configure.net.djs_hooks`) on djs
+djs-hooks = ["dep:gondolin-hooks-djs"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }

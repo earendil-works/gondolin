@@ -198,7 +198,8 @@ or needs a decision before the flip:
 | `gondolin-vfs` | host side of the sandboxfs RPC, mount table, native providers, object-tier cache | filesystem |
 | `gondolin-netstack` | Ethernet/ARP/DHCP/IPv4/ICMP/UDP-DNS/TCP; yields guest TCP flows as byte streams | packets |
 | `gondolin-http` | HTTP/1.1: sans-io heads/framing/chunked codec, tokio server and pooled client (100-continue, upgrades), rustls stream adapter; used by egress, assets and the CLI's ingress gateway | HTTP |
-| `gondolin-egress` | stream classification, HTTP/1.1 bridging, TLS MITM, WebSockets, policy, secrets, hook dispatch; later SSH egress and mapped TCP | upstream |
+| `gondolin-egress` | stream classification, HTTP/1.1 bridging, TLS MITM, WebSockets, policy, secrets, hook dispatch (`ChainedHooks`: tier 2 before tier 3); later SSH egress and mapped TCP | upstream |
+| `gondolin-hooks-djs` | tier-2 hooks: a JavaScript policy (`configure.net.djs_hooks`) as a `HookBackend` on djs-embed (shim, adapter, decision validation) | hooks |
 | `gondolin-assets` | guest image resolution: refs/build ids/paths, builtin registry, shared image store, HTTPS downloads | images |
 | `gondolin-sshproxy` | exec-only SSH egress: guest-facing SSH server per flow, upstream SSH client (known_hosts, agent/key auth, caps, timeouts) | upstream SSH |
 | `gondolind` | binary: controller protocol, session, QEMU, guest control channel, wiring | glue |
@@ -243,6 +244,10 @@ lowered whenever the count drops. Conventions for new code:
 - **Async traits:** object-safe traits return `BoxFuture<'a, T>`
   (`gondolind::BoxFuture`) instead of `#[async_trait]`; errors implement
   `Display`/`Error` by hand (no thiserror).
+- **First-party engines:** djs (Earendil's JavaScript engine, git dependency
+  pinned by revision: djs-embed, djs-core, djs-prelude, djs-libm) is reported
+  separately by `count-deps.sh` (matched by its git source) and not counted
+  against the budget; it has no third-party dependencies of its own.
 - **Runtime:** tokio with `rt`, `rt-multi-thread`, `net`, `time`, `sync`,
   `io-util` (workspace); `macros` only in dev-dependencies (use
   `gondolind::util::{select2, join2}` or `poll_fn` instead of `select!`).
@@ -748,6 +753,15 @@ omitted). `configure.net` (`NetConfig`) carries:
   registered, which then fully replaces it, as in the node engine).
 - `hooks` (`HookRegistrations`): `is_request_allowed`, `is_ip_allowed`,
   `on_request?: { body }`, `on_response?: { body }`.
+- `djs_hooks?` (`DjsHooksConfig`, tier 2): `source`, `filename?`, `kind`
+  (`script` | `module` | `typescript`), `modules?: { key: source }` (language
+  by the key's extension: `.ts`/`.mts`/`.cts`, `.json`, else JS; the CLIs
+  fill it from the relative imports next to `--hooks-script`, so the daemon
+  does no I/O), `limits: { fuel?,
+  memory_bytes?, timeout_ms? }`. Compiled by `gondolin-hooks-djs` in
+  `build_native` (errors fail `configure`); gondolind advertises
+  `hello.features: ["djs_hooks"]` and the TS controller refuses to send a
+  policy to a daemon without it (an older daemon would ignore the field).
 - `limits`: body limits, max concurrent requests (128), WebSocket connect/header
   timeouts, MITM leaf cache size/ttl, `guest_keep_alive` (default false: one
   request per guest connection with `connection: close`, as the node engine).
@@ -860,12 +874,50 @@ The binary is multi-call: as `gondolind*`, `gondolin daemon` or
 
 1. **Declarative** (native): everything `createHttpHooks()` options express,
    DNS, limits. Zero round trips.
-2. **djs** (native, later): JS hooks running inside `gondolind` with a
-   restricted `Request`/`Response` shim and ES modules (`@sdk/...`). Needs djs
-   changes (ES modules, a stable embedding crate, byte input); research,
-   measurements and the djs requirements list in `docs/djs-hooks.md`.
+2. **djs** (native, `gondolin-hooks-djs`, cargo feature `djs-hooks` of
+   gondolind/gondolin-cli, on by default): a self-contained JavaScript policy
+   (`createDjsHooks()`, `--hooks-script`) run inside `gondolind` on djs-embed.
+   - Compile once at `configure.net`: the shim (`src/shim.js`: restricted
+     `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`,
+     `HttpRequestBlockedError`, `console`) plus the policy (a script, or an ES
+     module with in-memory imports bound by a generated module) into a
+     snapshot; the phases are the functions the policy defines, and only
+     those are registered (egress keeps its early-policy fast path).
+   - Per call: an instance from a pool, reset to the snapshot afterwards
+     (`Instance::reset`, same isolation as a fresh VM; measured equal for
+     header-only calls and 30% cheaper with bodies). At most 16 idle
+     instances; a reset keeps the heap allocation a call grew, so an idle
+     instance above 1 MiB is shrunk to that (`Instance::shrink_heap`;
+     header-only calls need ~320 KiB, a 256 KiB body ~640 KiB). Measured
+     (`examples/bench.rs ... caps`): shrinking, even to the snapshot's size,
+     costs nothing measurable on the next call at any body size (64 KiB: 20 µs
+     pooled with or without shrinking vs 34 µs fresh), so the cap only bounds
+     idle memory (≤ 16 MiB per policy). Heads go in as borrowed
+     djs values, the decision comes back as plain data and is validated on
+     the host (header names/values, method, http(s) URL, status). Bodies are
+     an async host function over egress's `BodyHandle` (read once per call,
+     clones share; gzip/deflate decoded for `onResponse`, bounded by the
+     response limit). URL parsing is a sync host function into
+     `gondolin_http::url`.
+   - Runs on the egress task, in fuel slices of 200k (~1 ms) with a
+     `yield_now` between slices; budgets per call: fuel (50M), heap (64 MiB,
+     uncatchable), wall clock (30 s, djs deadline between slices plus a tokio
+     timeout around body reads and the call).
+   - Fail closed: every engine error, panic (djs-embed `catch_unwind`, the
+     instance is dropped), budget, unsettled promise or invalid decision is
+     `HookError::Failed` (502); `HttpRequestBlockedError` is `Blocked`.
+   - djs API use is confined to `src/engine.rs` (the adapter).
+   - Research, the djs requirements and the prototype measurements:
+     `docs/djs-hooks.md`.
 3. **Controller callbacks**: arbitrary JS hooks in the Node SDK over the pipe.
    Full API, costs a round trip per registered phase.
+
+Order: `ChainedHooks` (egress) runs tier 2 before tier 3 in every phase:
+`is_request_allowed`/`is_ip_allowed` AND (first deny or error wins), each
+`on_request`/`on_response` sees the previous tier's replacement (a replaced
+body is offered to the next tier as a new `PullableBody`), `Respond`/errors
+end the phase. Declarative policy runs around both, as before (secrets after
+all `on_request` hooks, policy re-checked on the rewritten head).
 
 ## Filesystem tiers
 

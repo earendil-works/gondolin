@@ -5,9 +5,9 @@ progress, `[x]` done. Every milestone ends with tests passing on both engines
 for what it covers and a benchmark run recorded in `host/bench/results/`.
 
 Work happens in worktrees under `../gondolin-wt/<agent>` on branches
-`native/<agent>` and is merged into `main` by the coordinator. Owners: `core`
-(gondolind session/QEMU/exec, TS transport), `vfs`, `netstack`, `egress`,
-`bench`.
+`native/<agent>` and is merged into `main` by the coordinator. The first team
+(`core`, `vfs`, `netstack`, `egress`, `bench`) is archived; current: `hooks`
+(tier-2 djs hooks), `djs` (in ~/Development/djs).
 
 ## M0: foundations
 
@@ -130,8 +130,16 @@ Work happens in worktrees under `../gondolin-wt/<agent>` on branches
 - [x] Prototype (`native/experiments/djs-hooks/`, `native/docs/djs-hooks.md`):
       header-only hook 26–33 µs p50 vs 70 µs tier 3; 64 KiB body 20–35 µs vs
       157 µs; fails closed on fuel/memory/exceptions/panics
-- [ ] Production `gondolin-hooks-djs` crate — blocked on a stable `djs-embed`
-      crate (requirements E1–E7 in the doc)
+- [~] djs side (agent `djs` in ~/Development/djs, following djs's own process):
+      embedding crate (E1–E7), ES modules (M1–M8), TextEncoder/Decoder (B1),
+      byte passing, musl/darwin cross-builds, no third-party deps
+- [x] Production `gondolin-hooks-djs` on djs-embed (git rev 9cc1291, behind
+      `engine.rs`): `configure.net.djs_hooks`, `createDjsHooks()`, `--hooks-script`,
+      tier order declarative → djs → controller; 0.23 ms vs 0.29 ms (tier 3) vs
+      0.58 ms (node) per hooked request; +1.8 MB binary (feature `djs-hooks`);
+      third-party budget unchanged (djs counted as first-party)
+- [ ] Modules from disk for the CLIs; TypeScript policies; heap-size API in djs
+      for pool capping
 - [ ] djs: ES modules (requirements M1–M8; esbuild bundling as interim) and
       builtins B1–B3
 - [x] Profile byte passing and hook cost (ASCII/UTF-8 fast path found)

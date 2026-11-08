@@ -67,6 +67,37 @@ onRequest: async (request) => {
 }
 ```
 
+### Tier-2 Hooks (`createDjsHooks`)
+
+Hook policies written as self-contained JavaScript can run inside the native
+engine's daemon instead of your Node process: no round trip per request, and
+they work with remote daemons and the static CLI (`--hooks-script FILE`).
+Spread them into `createHttpHooks()` to combine them with allowlists and
+secrets:
+
+```ts
+import { createDjsHooks, createHttpHooks } from "@earendil-works/gondolin";
+
+const { httpHooks, env } = createHttpHooks({
+  allowedHosts: ["api.example.com"],
+  ...createDjsHooks(`
+    async function onRequest(request) {
+      if (new URL(request.url).pathname.startsWith("/admin")) {
+        throw new HttpRequestBlockedError("not allowed", 403);
+      }
+      request.headers.set("x-sandbox", "gondolin");
+    }
+  `),
+});
+```
+
+The policy uses the same hook names and return values as above, with a
+restricted environment (no `fetch`, timers, streams or Node APIs) and per-call
+budgets; any failure denies the request. See
+[Native Engine: Tier-2 Hooks](./native.md#tier-2-hooks) for the full contract,
+the order relative to declarative policy and Node hooks, and the
+restrictions.
+
 Notable consequences:
 
 - Secret placeholders are substituted in request headers by default (including Basic auth token decoding/re-encoding)

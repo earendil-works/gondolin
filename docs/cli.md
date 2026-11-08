@@ -178,6 +178,18 @@ without exposing them inside the VM (for HTTP/TLS-mediated flows).
     - The secret is only permitted for the listed host(s)
     - If `=VALUE` is omitted, the value is read from the host environment variable `$NAME`
 
+- `--hooks-script FILE`
+    - Run a tier-2 hook policy (JavaScript defining `onRequest`,
+      `onResponse`, `isRequestAllowed` and/or `isIpAllowed`) for every HTTP
+      request; a `.mjs` file is an ES module exporting them, a `.ts`/`.mts`
+      file a TypeScript module
+    - Files a module imports with relative specifiers (`./lib/x.ts`,
+      `./data.json`) are read from next to it and sent along
+    - On the native engine it runs inside the daemon (also in the static
+      CLI); see [Native Engine: Tier-2 Hooks](./native.md#tier-2-hooks)
+    - Combines with `--allow-host`/`--host-secret` (declarative policy runs
+      first, secrets are substituted after the hook)
+
 - `--disable-websockets`
     - Disable WebSocket upgrades through the bridge
     - Affects both:

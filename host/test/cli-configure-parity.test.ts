@@ -76,6 +76,28 @@ function normalize(text: string, args: string[]): unknown {
 const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-parity-"));
 const knownHosts = path.join(hostDir, "known_hosts");
 fs.writeFileSync(knownHosts, "");
+const hooksScript = path.join(hostDir, "policy.js");
+fs.writeFileSync(
+  hooksScript,
+  "function onRequest(req) { req.headers.set('x-policy', 'v1'); }\n",
+);
+fs.mkdirSync(path.join(hostDir, "lib"));
+const hooksTs = path.join(hostDir, "policy.ts");
+fs.writeFileSync(
+  hooksTs,
+  "import { ok } from './lib/hosts.ts';\nimport deny from './deny.json' with { type: 'json' };\nimport './missing.js';\nexport function onRequest(req: Request) {}\n",
+);
+fs.writeFileSync(
+  path.join(hostDir, "lib", "hosts.ts"),
+  "export { x } from './util.js';\nexport const ok = (h: string) => true;\n",
+);
+fs.writeFileSync(path.join(hostDir, "lib", "util.js"), "export const x = 1;\n");
+fs.writeFileSync(path.join(hostDir, "deny.json"), "[]");
+const hooksModule = path.join(hostDir, "policy.mjs");
+fs.writeFileSync(
+  hooksModule,
+  "export function isRequestAllowed(req) { return !req.url.includes('deny'); }\n",
+);
 test.after(() => fs.rmSync(hostDir, { recursive: true, force: true }));
 
 type Case = {
@@ -131,6 +153,25 @@ const cases: Case[] = [
       "OTHER@example.com,api.github.com",
     ],
     env: { OTHER: "from-env" },
+  },
+  {
+    name: "tier-2 hooks script",
+    args: ["exec", "--print-configure", "--hooks-script", hooksScript],
+  },
+  {
+    name: "tier-2 hooks module with an allowlist",
+    args: [
+      "bash",
+      "--print-configure",
+      "--allow-host",
+      "example.com",
+      "--hooks-script",
+      hooksModule,
+    ],
+  },
+  {
+    name: "tier-2 hooks in TypeScript with imports from disk",
+    args: ["exec", "--print-configure", "--hooks-script", hooksTs],
   },
   {
     name: "websockets off",
@@ -202,6 +243,11 @@ const cases: Case[] = [
     name: "trusted server without trusted dns",
     args: ["exec", "--print-configure", "--dns-trusted-server", "8.8.8.8"],
     error: "--dns-trusted-server requires --dns trusted",
+  },
+  {
+    name: "missing hooks script",
+    args: ["exec", "--print-configure", "--hooks-script", `${hostDir}/nope.js`],
+    error: `cannot read --hooks-script ${hostDir}/nope.js`,
   },
   {
     name: "duplicate mount paths",

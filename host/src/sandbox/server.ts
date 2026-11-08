@@ -52,6 +52,7 @@ import {
 import { errorMessage } from "../utils/error.ts";
 import type { TimeSync } from "./virtio-protocol.ts";
 import { buildTmpfsAppend } from "./tmpfs.ts";
+import { assertNodeEngineDjsHooks } from "../http/djs-hooks.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const TIME_SYNC_TIMEOUT_MS = 3000;
@@ -505,6 +506,9 @@ export class SandboxServer extends EventEmitter {
     const mac =
       parseMac(this.options.netMac) ??
       Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    if (this.options.netEnabled) {
+      assertNodeEngineDjsHooks(this.options.httpHooks);
+    }
     this.network = this.options.netEnabled
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,

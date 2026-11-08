@@ -10,6 +10,7 @@ members = [
     "crates/gondolin-vfs",
     "crates/gondolin-netstack",
     "crates/gondolin-egress",
+    "crates/gondolin-hooks-djs",
     "crates/gondolin-sshproxy",
     "crates/gondolin-assets",
     "crates/gondolin-virtiofs",
@@ -33,6 +34,7 @@ gondolin-netstack = { path = "crates/gondolin-netstack" }
 gondolin-egress = { path = "crates/gondolin-egress" }
 gondolin-sshproxy = { path = "crates/gondolin-sshproxy" }
 gondolin-assets = { path = "crates/gondolin-assets" }
+gondolin-hooks-djs = { path = "crates/gondolin-hooks-djs" }
 bytes = "1"
 # the minimal runtime (native/docs/runtime-without-tokio.md); crates add what
 # they still need (`macros` only in dev-dependencies once select!/join! are gone)
@@ -49,3 +51,11 @@ strip = "symbols"
 # the session task fails closed
 panic = "unwind"
 
+
+# djs (tier-2 hooks) at opt-level 1 in debug builds: at 0 its interpreter runs
+# several times slower (djs-embed's recommendation)
+[profile.dev.package.djs-core]
+opt-level = 1
+
+[profile.dev.package.djs-libm]
+opt-level = 1

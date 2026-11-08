@@ -49,8 +49,8 @@ pub use crate::error::{Blocked, BoxError};
 /// A boxed, sendable future (the async trait methods of egress).
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 pub use crate::hooks::{
-    BodyChoice, HookBackend, HookError, IpAllowInfo, NoHooks, RequestDecision, RequestHead,
-    ResponseDecision, ResponseHead,
+    BodyChoice, ChainedHooks, HookBackend, HookError, IpAllowInfo, NoHooks, RequestDecision,
+    RequestHead, ResponseDecision, ResponseHead,
 };
 pub use crate::http::MAX_HTTP_HEADER_BYTES;
 pub use crate::ip::{is_internal_ip, is_internal_ip_str};

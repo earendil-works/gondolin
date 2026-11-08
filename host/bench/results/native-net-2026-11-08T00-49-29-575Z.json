@@ -1,0 +1,1591 @@
+{
+  "version": 1,
+  "engine": "native",
+  "suite": "net",
+  "quick": false,
+  "complete": true,
+  "filter": "(noop|body)-(hooks|djs)$",
+  "interleaved": [
+    "node",
+    "native"
+  ],
+  "note": "tier-2 (djs) vs tier-3 hooks; machine shared with other agents",
+  "iterations": null,
+  "startedAt": "2026-11-08T00:49:29.575Z",
+  "finishedAt": "2026-11-08T00:49:57.850Z",
+  "machine": {
+    "hostname": "saratoga",
+    "platform": "darwin",
+    "osRelease": "25.6.0",
+    "osVersion": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050",
+    "productVersion": "26.6.2",
+    "arch": "arm64",
+    "cpuModel": "Apple M5 Max",
+    "cpuCount": 18,
+    "loadAvg": [
+      17.52,
+      31.61,
+      36.59
+    ],
+    "totalMemGB": 128,
+    "node": "v26.10.0",
+    "qemu": "QEMU emulator version 11.1.2",
+    "gitCommit": "703ddf2",
+    "gitDirty": true,
+    "image": "alpine-base:latest",
+    "nativeBin": "/Users/mitsuhiko/Development/gondolin-wt/hooks/host/../native/target/release/gondolind",
+    "qemuPath": "/opt/homebrew/bin/qemu-system-aarch64",
+    "virtiofsEnv": null,
+    "loadAvgEnd": [
+      19.75,
+      30.91,
+      36.17
+    ]
+  },
+  "workloads": [
+    {
+      "name": "net.http-seq.policy-noop-hooks",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "requestsPerIteration": 50,
+        "connection": "new per request",
+        "path": "/small"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 56.01237500000025,
+            "p95": 56.313949700000194,
+            "min": 55.01904100000047,
+            "max": 56.34745800000019,
+            "mean": 55.792958000000304
+          },
+          "samples": [
+            56.347,
+            56.012,
+            55.019
+          ]
+        },
+        "requestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 150,
+            "median": 0.292042,
+            "p95": 0.38741454999999997,
+            "min": 0.233666,
+            "max": 2.678667,
+            "mean": 0.3350477466666667
+          },
+          "samples": [
+            1.321,
+            0.384,
+            0.346,
+            0.415,
+            0.45,
+            0.35,
+            0.321,
+            0.31,
+            0.334,
+            0.352,
+            0.303,
+            0.31,
+            0.274,
+            0.287,
+            0.273,
+            0.337,
+            0.293,
+            0.248,
+            0.298,
+            0.303,
+            0.279,
+            0.271,
+            0.282,
+            0.26,
+            0.265,
+            0.346,
+            0.332,
+            0.341,
+            0.272,
+            0.287,
+            0.253,
+            0.285,
+            0.29,
+            0.251,
+            0.257,
+            0.25,
+            0.251,
+            0.284,
+            0.259,
+            0.248,
+            0.241,
+            0.299,
+            0.355,
+            0.266,
+            0.281,
+            0.263,
+            0.279,
+            0.294,
+            0.251,
+            0.254,
+            1.37,
+            0.428,
+            0.345,
+            0.373,
+            0.351,
+            0.319,
+            0.305,
+            0.314,
+            0.332,
+            0.335,
+            0.316,
+            0.312,
+            0.313,
+            0.328,
+            0.353,
+            0.328,
+            0.378,
+            0.326,
+            0.308,
+            0.298,
+            0.318,
+            0.306,
+            0.344,
+            0.307,
+            2.679,
+            0.315,
+            0.289,
+            0.306,
+            0.297,
+            0.256,
+            0.258,
+            0.275,
+            0.24,
+            0.284,
+            0.251,
+            0.259,
+            0.289,
+            0.339,
+            0.292,
+            0.298,
+            0.257,
+            0.282,
+            0.27,
+            0.258,
+            0.238,
+            0.268,
+            0.234,
+            0.236,
+            0.267,
+            0.246,
+            1.444,
+            0.388,
+            0.375,
+            0.355,
+            0.355,
+            0.386,
+            0.311,
+            0.319,
+            0.335,
+            0.293,
+            0.276,
+            0.314,
+            0.296,
+            0.268,
+            0.337,
+            0.27,
+            0.288,
+            0.267,
+            0.292,
+            0.256,
+            0.267,
+            0.244,
+            0.275,
+            0.311,
+            0.271,
+            0.259,
+            0.26,
+            0.257,
+            0.305,
+            0.347,
+            0.349,
+            0.302,
+            0.327,
+            0.285,
+            0.271,
+            0.266,
+            0.257,
+            0.25,
+            0.279,
+            0.255,
+            0.263,
+            0.269,
+            0.316,
+            0.278,
+            0.257,
+            0.248,
+            0.274,
+            0.288,
+            0.318,
+            0.341
+          ]
+        }
+      },
+      "totalMs": 394.1082919999999,
+      "loadAvg": 19.24
+    },
+    {
+      "name": "net.http-download.policy-noop-hooks",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 112.95675000000028,
+            "p95": 117.25192499999994,
+            "min": 110.56512500000008,
+            "max": 118.28762499999993,
+            "mean": 113.21538320000018
+          },
+          "samples": [
+            111.158,
+            113.109,
+            118.288,
+            112.957,
+            110.565
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 72.577042,
+            "p95": 78.0993252,
+            "min": 70.887125,
+            "max": 78.941042,
+            "mean": 73.7738418
+          },
+          "samples": [
+            70.887,
+            74.732,
+            78.941,
+            72.577,
+            71.732
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 440.91077726755515,
+            "p95": 450.3590715365157,
+            "min": 405.3658171879718,
+            "max": 451.42189078764306,
+            "mean": 434.4000823937428
+          },
+          "samples": [
+            451.422,
+            428.194,
+            405.366,
+            440.911,
+            446.108
+          ]
+        }
+      },
+      "totalMs": 722.4321250000003,
+      "loadAvg": 19.24,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 32.203,
+          "rssPeakMB": 197.9870147705078
+        },
+        {
+          "role": "gondolind",
+          "pid": 8047,
+          "cpuMs": 130,
+          "rssPeakMB": 11.9375
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 8117,
+          "cpuMs": 1390,
+          "rssPeakMB": 334.90625
+        },
+        {
+          "role": "gondolind",
+          "pid": 8118,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-upload.policy-noop-hooks",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 90.15287500000068,
+            "p95": 92.30250020000021,
+            "min": 88.43879100000049,
+            "max": 92.43154200000026,
+            "mean": 90.31114160000034
+          },
+          "samples": [
+            88.439,
+            92.432,
+            91.786,
+            90.153,
+            88.746
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 49.725875,
+            "p95": 52.9666078,
+            "min": 48.331209,
+            "max": 53.391791,
+            "mean": 50.26915
+          },
+          "samples": [
+            48.631,
+            53.392,
+            51.266,
+            49.726,
+            48.331
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 643.52814304424,
+            "p95": 661.2817510026916,
+            "min": 599.3430712972337,
+            "max": 662.0980658687847,
+            "mean": 637.4365333713356
+          },
+          "samples": [
+            658.016,
+            599.343,
+            624.197,
+            643.528,
+            662.098
+          ]
+        }
+      },
+      "totalMs": 581.6519999999991,
+      "loadAvg": 19.24,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 142.819,
+          "rssPeakMB": 198.56509399414062
+        },
+        {
+          "role": "gondolind",
+          "pid": 8047,
+          "cpuMs": 320,
+          "rssPeakMB": 12.203125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 8117,
+          "cpuMs": 1140,
+          "rssPeakMB": 363
+        },
+        {
+          "role": "gondolind",
+          "pid": 8118,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-seq.policy-body-hooks",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "requestsPerIteration": 50,
+        "connection": "new per request",
+        "path": "/small"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 57.43187500000022,
+            "p95": 58.24652530000094,
+            "min": 57.26312499999949,
+            "max": 58.33704200000102,
+            "mean": 57.67734733333358
+          },
+          "samples": [
+            58.337,
+            57.432,
+            57.263
+          ]
+        },
+        "requestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 150,
+            "median": 0.31066649999999996,
+            "p95": 0.4464065499999997,
+            "min": 0.245958,
+            "max": 2.652,
+            "mean": 0.3688666533333332
+          },
+          "samples": [
+            1.377,
+            2.327,
+            0.407,
+            0.381,
+            0.36,
+            0.328,
+            0.346,
+            0.342,
+            0.314,
+            0.304,
+            0.323,
+            0.316,
+            0.279,
+            0.266,
+            0.276,
+            0.341,
+            0.341,
+            0.288,
+            0.267,
+            0.285,
+            0.292,
+            0.272,
+            0.269,
+            0.257,
+            0.296,
+            0.271,
+            0.292,
+            0.455,
+            0.316,
+            0.318,
+            0.307,
+            0.297,
+            0.27,
+            0.258,
+            0.361,
+            0.288,
+            0.275,
+            0.29,
+            0.34,
+            0.27,
+            0.302,
+            0.361,
+            0.379,
+            0.281,
+            0.27,
+            0.261,
+            0.302,
+            0.302,
+            0.3,
+            0.388,
+            1.363,
+            1.522,
+            0.501,
+            0.427,
+            0.404,
+            0.436,
+            0.328,
+            0.357,
+            0.34,
+            0.331,
+            0.339,
+            0.307,
+            0.287,
+            0.273,
+            0.28,
+            0.303,
+            0.289,
+            0.366,
+            0.367,
+            0.298,
+            0.274,
+            0.311,
+            0.288,
+            0.291,
+            0.318,
+            0.307,
+            0.289,
+            0.271,
+            0.279,
+            0.311,
+            0.275,
+            0.256,
+            0.26,
+            0.268,
+            0.285,
+            0.272,
+            0.246,
+            0.286,
+            0.271,
+            0.292,
+            0.251,
+            0.267,
+            0.285,
+            0.279,
+            0.27,
+            0.248,
+            0.289,
+            0.272,
+            0.273,
+            0.349,
+            2.652,
+            0.456,
+            0.397,
+            0.319,
+            0.362,
+            0.4,
+            0.352,
+            0.376,
+            0.308,
+            0.367,
+            0.366,
+            0.318,
+            0.335,
+            0.372,
+            0.348,
+            0.279,
+            0.272,
+            0.279,
+            0.403,
+            0.322,
+            0.319,
+            0.328,
+            0.356,
+            0.369,
+            0.327,
+            0.325,
+            0.344,
+            0.314,
+            0.335,
+            0.326,
+            0.324,
+            0.328,
+            0.301,
+            0.272,
+            0.283,
+            0.34,
+            0.288,
+            0.326,
+            0.288,
+            0.434,
+            0.4,
+            0.384,
+            0.37,
+            0.314,
+            0.333,
+            0.355,
+            0.309,
+            0.311,
+            0.322,
+            0.268
+          ]
+        }
+      },
+      "totalMs": 392.43033300000025,
+      "loadAvg": 19.86
+    },
+    {
+      "name": "net.http-download.policy-body-hooks",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 138.20870900000045,
+            "p95": 143.7132421999995,
+            "min": 133.2425000000003,
+            "max": 144.6862089999995,
+            "mean": 138.8232086
+          },
+          "samples": [
+            144.686,
+            139.821,
+            133.243,
+            138.209,
+            138.157
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 99.124459,
+            "p95": 103.5419004,
+            "min": 94.151708,
+            "max": 104.104417,
+            "mean": 99.43708360000001
+          },
+          "samples": [
+            104.104,
+            101.292,
+            94.152,
+            99.124,
+            98.513
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 322.8264781752806,
+            "p95": 336.8676445813939,
+            "min": 307.3836915104188,
+            "max": 339.8769993636228,
+            "mean": 322.1672494696639
+          },
+          "samples": [
+            307.384,
+            315.919,
+            339.877,
+            322.826,
+            324.83
+          ]
+        }
+      },
+      "totalMs": 903.6647910000011,
+      "loadAvg": 19.86,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 426.011,
+          "rssPeakMB": 245.53585815429688
+        },
+        {
+          "role": "gondolind",
+          "pid": 9535,
+          "cpuMs": 200,
+          "rssPeakMB": 63.140625
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 9607,
+          "cpuMs": 1630,
+          "rssPeakMB": 319.46875
+        },
+        {
+          "role": "gondolind",
+          "pid": 9608,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-upload.policy-body-hooks",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 107.31820799999878,
+            "p95": 119.22621680000047,
+            "min": 106.43954099999974,
+            "max": 122.20000000000073,
+            "mean": 110.04839999999967
+          },
+          "samples": [
+            122.2,
+            106.953,
+            106.44,
+            107.318,
+            107.331
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 66.244791,
+            "p95": 77.80201679999999,
+            "min": 65.071125,
+            "max": 80.215375,
+            "mean": 69.15545
+          },
+          "samples": [
+            80.215,
+            66.097,
+            65.071,
+            66.245,
+            68.149
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 483.05684895284816,
+            "p95": 490.24250702179694,
+            "min": 398.9260163653165,
+            "max": 491.7695828987128,
+            "mean": 465.48977319314383
+          },
+          "samples": [
+            398.926,
+            484.134,
+            491.77,
+            483.057,
+            469.562
+          ]
+        }
+      },
+      "totalMs": 707.2867499999993,
+      "loadAvg": 20.92,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 684.102,
+          "rssPeakMB": 256.9577331542969
+        },
+        {
+          "role": "gondolind",
+          "pid": 9535,
+          "cpuMs": 410,
+          "rssPeakMB": 68.78125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 9607,
+          "cpuMs": 1370,
+          "rssPeakMB": 320.3125
+        },
+        {
+          "role": "gondolind",
+          "pid": 9608,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-seq.policy-noop-djs",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "requestsPerIteration": 50,
+        "connection": "new per request",
+        "path": "/small"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 54.88025000000198,
+            "p95": 55.69403719999864,
+            "min": 54.257541999999376,
+            "max": 55.78445799999827,
+            "mean": 54.974083333333205
+          },
+          "samples": [
+            55.784,
+            54.88,
+            54.258
+          ]
+        },
+        "requestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 150,
+            "median": 0.231021,
+            "p95": 0.3329164499999999,
+            "min": 0.182,
+            "max": 3.337792,
+            "mean": 0.2983858400000001
+          },
+          "samples": [
+            3.338,
+            0.312,
+            0.273,
+            0.252,
+            0.251,
+            0.248,
+            0.237,
+            0.239,
+            0.241,
+            0.285,
+            0.252,
+            0.277,
+            0.243,
+            0.228,
+            0.224,
+            0.214,
+            0.264,
+            0.218,
+            0.219,
+            0.215,
+            0.218,
+            0.215,
+            0.45,
+            0.23,
+            0.221,
+            0.228,
+            0.234,
+            0.227,
+            0.224,
+            0.219,
+            0.282,
+            0.352,
+            0.285,
+            0.269,
+            0.305,
+            0.265,
+            0.228,
+            0.229,
+            0.244,
+            0.23,
+            0.216,
+            0.218,
+            0.229,
+            0.223,
+            0.33,
+            0.264,
+            0.24,
+            0.234,
+            0.369,
+            0.231,
+            1.268,
+            0.335,
+            0.285,
+            0.33,
+            0.322,
+            0.275,
+            0.27,
+            0.257,
+            0.261,
+            0.27,
+            0.239,
+            1.599,
+            0.241,
+            0.22,
+            0.254,
+            0.217,
+            0.233,
+            0.226,
+            0.222,
+            0.215,
+            0.214,
+            0.238,
+            0.271,
+            0.258,
+            0.244,
+            0.258,
+            0.23,
+            0.237,
+            0.228,
+            0.227,
+            0.227,
+            0.253,
+            0.301,
+            0.283,
+            0.282,
+            0.285,
+            0.271,
+            0.27,
+            0.251,
+            0.259,
+            0.23,
+            0.218,
+            0.219,
+            0.227,
+            0.214,
+            0.212,
+            0.225,
+            0.218,
+            0.254,
+            0.206,
+            3.287,
+            0.307,
+            0.259,
+            0.279,
+            0.247,
+            0.293,
+            0.272,
+            0.252,
+            0.243,
+            0.239,
+            0.24,
+            0.234,
+            0.226,
+            0.208,
+            0.192,
+            0.192,
+            0.209,
+            0.248,
+            0.234,
+            0.219,
+            0.227,
+            0.224,
+            0.224,
+            0.215,
+            0.193,
+            0.196,
+            0.216,
+            0.23,
+            0.219,
+            0.221,
+            0.207,
+            0.229,
+            0.204,
+            0.219,
+            0.208,
+            0.207,
+            0.188,
+            0.186,
+            0.205,
+            0.206,
+            0.208,
+            0.191,
+            0.203,
+            0.182,
+            0.184,
+            0.243,
+            0.209,
+            0.188,
+            0.227,
+            0.231
+          ]
+        }
+      },
+      "totalMs": 387.27887499999997,
+      "loadAvg": 21.72
+    },
+    {
+      "name": "net.http-download.policy-noop-djs",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 106.51866599999994,
+            "p95": 108.58787500000035,
+            "min": 98.45658299999923,
+            "max": 108.95787500000006,
+            "mean": 104.57744979999988
+          },
+          "samples": [
+            107.108,
+            98.457,
+            106.519,
+            101.846,
+            108.958
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 67.259083,
+            "p95": 67.7573748,
+            "min": 59.119,
+            "max": 67.782333,
+            "mean": 64.30025
+          },
+          "samples": [
+            67.259,
+            59.119,
+            67.782,
+            59.683,
+            67.658
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 475.7721719161708,
+            "p95": 540.2576066985972,
+            "min": 472.09941859038696,
+            "max": 541.2811448096213,
+            "mean": 499.6572744518511
+          },
+          "samples": [
+            475.772,
+            541.281,
+            472.099,
+            536.163,
+            472.97
+          ]
+        }
+      },
+      "totalMs": 671.7560420000009,
+      "loadAvg": 21.72,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 26.495,
+          "rssPeakMB": 380.1313934326172
+        },
+        {
+          "role": "gondolind",
+          "pid": 11073,
+          "cpuMs": 120,
+          "rssPeakMB": 13.40625
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 11145,
+          "cpuMs": 1300,
+          "rssPeakMB": 328.890625
+        },
+        {
+          "role": "gondolind",
+          "pid": 11146,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-upload.policy-noop-djs",
+      "params": {
+        "hooks": "policy + no-op onRequest/onResponse as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 106.80983299999934,
+            "p95": 120.4274830000024,
+            "min": 93.15304200000173,
+            "max": 122.75995800000237,
+            "mean": 106.97773320000051
+          },
+          "samples": [
+            93.153,
+            111.098,
+            106.81,
+            101.068,
+            122.76
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 65.299167,
+            "p95": 76.7207746,
+            "min": 51.9315,
+            "max": 78.445583,
+            "mean": 64.2619082
+          },
+          "samples": [
+            51.932,
+            69.822,
+            65.299,
+            55.812,
+            78.446
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 490.0521931619741,
+            "p95": 607.6282622357718,
+            "min": 407.9260906251408,
+            "max": 616.196335557417,
+            "mean": 509.1683741534845
+          },
+          "samples": [
+            616.196,
+            458.311,
+            490.052,
+            573.356,
+            407.926
+          ]
+        }
+      },
+      "totalMs": 674.7893750000003,
+      "loadAvg": 21.72,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 147.944,
+          "rssPeakMB": 380.7406768798828
+        },
+        {
+          "role": "gondolind",
+          "pid": 11073,
+          "cpuMs": 390,
+          "rssPeakMB": 13.765625
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 11145,
+          "cpuMs": 1360,
+          "rssPeakMB": 335.625
+        },
+        {
+          "role": "gondolind",
+          "pid": 11146,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-seq.policy-body-djs",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "requestsPerIteration": 50,
+        "connection": "new per request",
+        "path": "/small"
+      },
+      "warmup": 1,
+      "iterations": 3,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 3,
+            "median": 53.632541999999376,
+            "p95": 54.483004199999414,
+            "min": 52.15679199999795,
+            "max": 54.57749999999942,
+            "mean": 53.45561133333225
+          },
+          "samples": [
+            54.577,
+            53.633,
+            52.157
+          ]
+        },
+        "requestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 150,
+            "median": 0.23293750000000002,
+            "p95": 0.32828284999999985,
+            "min": 0.20175,
+            "max": 1.469791,
+            "mean": 0.2712647533333334
+          },
+          "samples": [
+            1.271,
+            0.324,
+            0.303,
+            0.258,
+            0.263,
+            0.255,
+            0.256,
+            0.26,
+            0.245,
+            0.249,
+            0.259,
+            0.257,
+            0.249,
+            0.241,
+            0.26,
+            0.22,
+            0.24,
+            0.229,
+            0.234,
+            0.214,
+            0.21,
+            0.214,
+            0.225,
+            0.21,
+            0.21,
+            0.223,
+            0.23,
+            0.234,
+            0.243,
+            0.241,
+            0.221,
+            0.207,
+            0.215,
+            0.23,
+            0.272,
+            0.259,
+            0.212,
+            0.202,
+            0.208,
+            0.238,
+            0.258,
+            0.232,
+            0.234,
+            0.231,
+            0.215,
+            0.227,
+            0.223,
+            0.215,
+            0.211,
+            0.219,
+            1.183,
+            0.293,
+            0.301,
+            0.259,
+            0.274,
+            0.258,
+            0.254,
+            0.251,
+            0.246,
+            0.266,
+            0.248,
+            0.243,
+            0.259,
+            0.227,
+            0.225,
+            0.224,
+            0.303,
+            0.252,
+            0.22,
+            0.224,
+            0.214,
+            0.211,
+            0.23,
+            0.223,
+            0.656,
+            0.22,
+            0.214,
+            0.216,
+            0.208,
+            0.226,
+            0.213,
+            0.204,
+            0.213,
+            0.282,
+            0.31,
+            0.362,
+            0.388,
+            0.281,
+            0.305,
+            0.264,
+            0.235,
+            0.278,
+            0.332,
+            0.219,
+            0.256,
+            0.216,
+            0.204,
+            0.247,
+            0.305,
+            0.248,
+            1.193,
+            0.318,
+            0.289,
+            0.277,
+            0.273,
+            0.282,
+            0.253,
+            0.247,
+            0.26,
+            0.255,
+            0.308,
+            0.266,
+            0.24,
+            0.234,
+            0.231,
+            0.241,
+            0.234,
+            0.227,
+            0.218,
+            0.226,
+            0.227,
+            0.212,
+            0.228,
+            0.215,
+            0.216,
+            0.209,
+            0.212,
+            0.205,
+            0.256,
+            0.204,
+            0.253,
+            0.222,
+            0.214,
+            0.211,
+            0.21,
+            0.212,
+            0.204,
+            0.212,
+            0.204,
+            0.208,
+            1.47,
+            0.23,
+            0.222,
+            0.204,
+            0.209,
+            0.236,
+            0.212,
+            0.223,
+            0.224,
+            0.209
+          ]
+        }
+      },
+      "totalMs": 385.9275830000006,
+      "loadAvg": 20.94
+    },
+    {
+      "name": "net.http-download.policy-body-djs",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 115.94645800000217,
+            "p95": 118.18867500000196,
+            "min": 103.98783300000287,
+            "max": 118.63662500000282,
+            "mean": 113.26959160000115
+          },
+          "samples": [
+            118.637,
+            103.988,
+            115.946,
+            111.38,
+            116.397
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 77.09475,
+            "p95": 78.9837334,
+            "min": 65.96825,
+            "max": 79.18325,
+            "mean": 74.6623416
+          },
+          "samples": [
+            79.183,
+            65.968,
+            77.095,
+            72.88,
+            78.186
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 415.0736593607217,
+            "p95": 475.8813099880656,
+            "min": 404.1258725803753,
+            "max": 485.0818386117565,
+            "mean": 430.52854860934104
+          },
+          "samples": [
+            404.126,
+            485.082,
+            415.074,
+            439.079,
+            409.282
+          ]
+        }
+      },
+      "totalMs": 727.1919999999991,
+      "loadAvg": 20.94,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 33.363,
+          "rssPeakMB": 499.75943756103516
+        },
+        {
+          "role": "gondolind",
+          "pid": 12609,
+          "cpuMs": 150,
+          "rssPeakMB": 270.3125
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 12709,
+          "cpuMs": 1380,
+          "rssPeakMB": 337.125
+        },
+        {
+          "role": "gondolind",
+          "pid": 12710,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    },
+    {
+      "name": "net.http-upload.policy-body-djs",
+      "params": {
+        "hooks": "policy + onRequest/onResponse reading cloned bodies as a tier-2 (djs) policy",
+        "upstream": "localhost (host loopback, allowed via allowedInternalHosts)",
+        "timing": "python3 http.client in guest",
+        "bytes": 33554432
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "metrics": {
+        "wallMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 94.9249579999996,
+            "p95": 97.11562519999788,
+            "min": 91.57625000000189,
+            "max": 97.2699169999978,
+            "mean": 94.90630840000013
+          },
+          "samples": [
+            94.925,
+            96.498,
+            97.27,
+            94.262,
+            91.576
+          ]
+        },
+        "guestMs": {
+          "unit": "ms",
+          "stats": {
+            "n": 5,
+            "median": 55.500125,
+            "p95": 57.55345,
+            "min": 51.535083,
+            "max": 57.8405,
+            "mean": 55.270158200000004
+          },
+          "samples": [
+            55.5,
+            56.405,
+            57.841,
+            55.07,
+            51.535
+          ]
+        },
+        "MBps": {
+          "unit": "MB/s",
+          "stats": {
+            "n": 5,
+            "median": 576.5752779836082,
+            "p95": 612.9650595258162,
+            "min": 553.2455632299168,
+            "max": 620.9362270746707,
+            "mean": 579.8321069628844
+          },
+          "samples": [
+            576.575,
+            567.323,
+            553.246,
+            581.08,
+            620.936
+          ]
+        }
+      },
+      "totalMs": 612.2644579999978,
+      "loadAvg": 20.94,
+      "cost": [
+        {
+          "role": "host",
+          "pid": 7120,
+          "cpuMs": 109.928,
+          "rssPeakMB": 502.3843231201172
+        },
+        {
+          "role": "gondolind",
+          "pid": 12609,
+          "cpuMs": 310,
+          "rssPeakMB": 462.515625
+        },
+        {
+          "role": "qemu-system-aarch64",
+          "pid": 12709,
+          "cpuMs": 1160,
+          "rssPeakMB": 344.703125
+        },
+        {
+          "role": "gondolind",
+          "pid": 12710,
+          "cpuMs": 0,
+          "rssPeakMB": 1.71875
+        }
+      ]
+    }
+  ]
+}

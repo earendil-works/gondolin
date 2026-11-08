@@ -10,8 +10,13 @@ publish.workspace = true
 name = "gondolin"
 path = "src/main.rs"
 
+[features]
+default = ["djs-hooks"]
+# tier-2 hooks (`--hooks-script`, `configure.net.djs_hooks`) on djs
+djs-hooks = ["gondolind/djs-hooks"]
+
 [dependencies]
-gondolind = { path = "../gondolind" }
+gondolind = { path = "../gondolind", default-features = false }
 gondolin-wire.workspace = true
 gondolin-proto.workspace = true
 gondolin-assets.workspace = true

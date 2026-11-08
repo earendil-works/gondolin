@@ -60,6 +60,7 @@ import {
 } from "./config.ts";
 import { NativeNetwork } from "./net.ts";
 import { attachNetdevRelay } from "./netdev-relay.ts";
+import { assertNodeEngineDjsHooks } from "../http/djs-hooks.ts";
 import { NativeVfs, type NativeVfsSpec } from "./vfs.ts";
 import { NativeTcpChannelState } from "./tcp.ts";
 import {
@@ -184,6 +185,9 @@ export class NativeSandboxServer extends EventEmitter {
             daemonIsLocal: !internalOptions.remote,
           })
         : null;
+    if (options.netEnabled && externalNet) {
+      assertNodeEngineDjsHooks(options.httpHooks);
+    }
     this.network =
       options.netEnabled && externalNet
         ? new QemuNetworkBackend({
@@ -356,6 +360,15 @@ export class NativeSandboxServer extends EventEmitter {
         }
       }
       const configure = await this.buildConfigure();
+      if (
+        (configure as { net?: { djs_hooks?: unknown } }).net?.djs_hooks &&
+        !hello.features.includes("djs_hooks")
+      ) {
+        // an older daemon would ignore the policy (fail open)
+        throw new Error(
+          "createDjsHooks() needs a gondolind with tier-2 hooks (feature djs_hooks)",
+        );
+      }
       const configured = await transport.request("configure", configure);
       this.resolvedImage =
         configured && typeof configured.image === "object"

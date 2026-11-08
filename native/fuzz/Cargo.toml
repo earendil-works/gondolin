@@ -24,6 +24,7 @@ url = "2"
 gondolin-sshproxy = { path = "../crates/gondolin-sshproxy" }
 gondolind = { path = "../crates/gondolind" }
 gondolin-assets = { path = "../crates/gondolin-assets" }
+gondolin-hooks-djs = { path = "../crates/gondolin-hooks-djs" }
 miniz_oxide = "0.9"
 
 # standalone: not part of the native/ workspace (needs nightly + cargo-fuzz)
@@ -155,6 +156,13 @@ bench = false
 [[bin]]
 name = "ssh_keys"
 path = "fuzz_targets/ssh_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hooks_djs"
+path = "fuzz_targets/hooks_djs.rs"
 test = false
 doc = false
 bench = false

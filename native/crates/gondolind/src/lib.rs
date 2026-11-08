@@ -218,6 +218,8 @@ pub(crate) fn send_hello(ctl: &Controller) {
                 .iter()
                 .map(|f| f.to_string())
                 .chain(panics::test_panics_enabled().then(|| "test_panics".to_string()))
+                // tier-2 hooks (`configure.net.djs_hooks`)
+                .chain(cfg!(feature = "djs-hooks").then(|| "djs_hooks".to_string()))
                 .collect(),
             pid: std::process::id(),
         },

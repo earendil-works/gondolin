@@ -192,6 +192,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "djs-core"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=0e58f62c80252fc3f4156ab7a3744746434ed860#0e58f62c80252fc3f4156ab7a3744746434ed860"
+dependencies = [
+ "djs-libm",
+]
+
+[[package]]
+name = "djs-embed"
+version = "0.1.1"
+source = "git+https://github.com/earendil-works/djs.git?rev=0e58f62c80252fc3f4156ab7a3744746434ed860#0e58f62c80252fc3f4156ab7a3744746434ed860"
+dependencies = [
+ "djs-core",
+ "djs-prelude",
+]
+
+[[package]]
+name = "djs-libm"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=0e58f62c80252fc3f4156ab7a3744746434ed860#0e58f62c80252fc3f4156ab7a3744746434ed860"
+
+[[package]]
+name = "djs-lzrc"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=0e58f62c80252fc3f4156ab7a3744746434ed860#0e58f62c80252fc3f4156ab7a3744746434ed860"
+
+[[package]]
+name = "djs-prelude"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=0e58f62c80252fc3f4156ab7a3744746434ed860#0e58f62c80252fc3f4156ab7a3744746434ed860"
+dependencies = [
+ "djs-core",
+ "djs-lzrc",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -343,6 +379,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "gondolin-hooks-djs"
+version = "0.14.0"
+dependencies = [
+ "bytes",
+ "djs-embed",
+ "gondolin-egress",
+ "gondolin-http",
+ "gondolin-log",
+ "gondolin-netstack",
+ "gondolin-proto",
+ "gondolin-wire",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "miniz_oxide",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "gondolin-http"
 version = "0.14.0"
 dependencies = [
@@ -423,6 +482,7 @@ dependencies = [
  "bytes",
  "gondolin-assets",
  "gondolin-egress",
+ "gondolin-hooks-djs",
  "gondolin-log",
  "gondolin-netstack",
  "gondolin-proto",

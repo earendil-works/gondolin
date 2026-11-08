@@ -111,6 +111,14 @@ export {
   type UpdateSecretOptions,
 } from "./http/hooks.ts";
 
+// Tier-2 hooks (JavaScript policies run inside gondolind)
+export {
+  createDjsHooks,
+  djsHooksOptionsFromFile,
+  type DjsHookLimits,
+  type DjsHooksOptions,
+} from "./http/djs-hooks.ts";
+
 // Network types
 export type {
   DnsMode,

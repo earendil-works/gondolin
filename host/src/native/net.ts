@@ -15,6 +15,7 @@ import {
   type NativeHttpPolicyDescriptor,
   type NativeHttpRules,
 } from "../http/hooks.ts";
+import { djsHooksOf, type DjsHooksWire } from "../http/djs-hooks.ts";
 import { HttpRequestBlockedError } from "../http/utils.ts";
 import type {
   DnsOptions,
@@ -63,6 +64,8 @@ export type NetLimitsWire = {
 export type NetConfigWire = {
   policy: NetPolicyWire;
   hooks: HookRegistrationsWire;
+  /** tier-2 policy (`createDjsHooks()`), run in the daemon */
+  djs_hooks?: DjsHooksWire;
   limits: NetLimitsWire;
   mitm?: { cert_pem: string; key_pem: string };
   tcp_hosts?: Array<{
@@ -276,6 +279,28 @@ export function compileNetConfig(options: CompileNetOptions): CompiledNet {
     };
   }
 
+  // tier 2: functions from createDjsHooks() run in the daemon, not here
+  let djsHooks: DjsHooksWire | undefined;
+  for (const phase of [
+    "isRequestAllowed",
+    "isIpAllowed",
+    "onRequest",
+    "onResponse",
+  ] as const) {
+    const source =
+      descriptor?.user[phase] ??
+      (descriptor ? undefined : options.httpHooks?.[phase]);
+    const djs = djsHooksOf(source);
+    if (!djs) continue;
+    if (djsHooks && djsHooks !== djs.config) {
+      throw new Error(
+        "httpHooks: only one createDjsHooks() policy is supported",
+      );
+    }
+    djsHooks = djs.config;
+    delete tier3[phase];
+  }
+
   const registrations: HookRegistrationsWire = {
     is_request_allowed: Boolean(tier3.isRequestAllowed),
     is_ip_allowed: Boolean(tier3.isIpAllowed),
@@ -303,6 +328,7 @@ export function compileNetConfig(options: CompileNetOptions): CompiledNet {
       allow_websockets: allowWebSockets,
     },
     hooks: registrations,
+    ...(djsHooks ? { djs_hooks: djsHooks } : {}),
     limits,
     ...(options.mitm
       ? {

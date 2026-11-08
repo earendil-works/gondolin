@@ -230,3 +230,203 @@ impl HookBackend for NoHooks {
         HookRegistrations::default()
     }
 }
+
+/// Tiers in order (tier 2 before tier 3): each phase runs the backends that
+/// registered it, in order.
+///
+/// - `is_request_allowed` / `is_ip_allowed`: all must allow; the first deny
+///   (or error) ends the phase.
+/// - `on_request`: each backend sees the request as the previous one left it
+///   (a replaced head and body); a `Respond` or an error ends the phase.
+/// - `on_response`: likewise for the response.
+pub struct ChainedHooks {
+    tiers: Vec<std::sync::Arc<dyn HookBackend>>,
+    /// request body cap in `bytes` for bodies a tier replaced (later tiers pull them)
+    max_request_body_bytes: u64,
+    /// response body cap in `bytes`
+    max_response_body_bytes: u64,
+}
+
+impl ChainedHooks {
+    pub fn new(
+        tiers: Vec<std::sync::Arc<dyn HookBackend>>,
+        limits: &gondolin_proto::net::NetLimits,
+    ) -> Self {
+        Self {
+            tiers,
+            max_request_body_bytes: limits.max_request_body_bytes,
+            max_response_body_bytes: limits.max_response_body_bytes,
+        }
+    }
+}
+
+/// A body offered to the next tier and what the combined decision keeps.
+enum Carried {
+    /// the pipeline's own body (the handle egress passed in, if any)
+    Original,
+    /// no body
+    None,
+    /// a body an earlier tier produced, pullable by the next one
+    Replaced(crate::body::PullableBody),
+}
+
+impl Carried {
+    fn handle(&self, original: Option<&BodyHandle>) -> Option<BodyHandle> {
+        match self {
+            Carried::Original => original.cloned(),
+            Carried::None => None,
+            Carried::Replaced(p) => Some(p.handle()),
+        }
+    }
+
+    /// After a tier decided `choice`: what is carried on.
+    async fn then(self, choice: BodyChoice, limit: u64, error: &Blocked) -> Carried {
+        match choice {
+            BodyChoice::Original => self,
+            BodyChoice::None => {
+                self.discard().await;
+                Carried::None
+            }
+            BodyChoice::Body(b) => {
+                self.discard().await;
+                Carried::Replaced(crate::body::PullableBody::new(b, limit, error.clone()))
+            }
+        }
+    }
+
+    async fn discard(self) {
+        if let Carried::Replaced(p) = self {
+            p.discard().await;
+        }
+    }
+
+    async fn into_choice(self) -> BodyChoice {
+        match self {
+            Carried::Original => BodyChoice::Original,
+            Carried::None => BodyChoice::None,
+            Carried::Replaced(p) => BodyChoice::Body(p.into_body().await),
+        }
+    }
+}
+
+impl HookBackend for ChainedHooks {
+    fn registrations(&self) -> HookRegistrations {
+        let mut out = HookRegistrations::default();
+        for t in &self.tiers {
+            let r = t.registrations();
+            out.is_request_allowed |= r.is_request_allowed;
+            out.is_ip_allowed |= r.is_ip_allowed;
+            for (into, from) in
+                [(&mut out.on_request, r.on_request), (&mut out.on_response, r.on_response)]
+            {
+                if let Some(from) = from {
+                    let body = into.map(|i| i.body).unwrap_or(false) | from.body;
+                    *into = Some(gondolin_proto::net::BodyHookRegistration { body });
+                }
+            }
+        }
+        out
+    }
+
+    fn is_request_allowed<'a>(
+        &'a self,
+        request: &'a RequestHead,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            for t in &self.tiers {
+                if t.registrations().is_request_allowed && !t.is_request_allowed(request).await? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+    }
+
+    fn is_ip_allowed<'a>(
+        &'a self,
+        info: &'a IpAllowInfo,
+    ) -> crate::BoxFuture<'a, Result<bool, HookError>> {
+        Box::pin(async move {
+            for t in &self.tiers {
+                if t.registrations().is_ip_allowed && !t.is_ip_allowed(info).await? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+    }
+
+    fn on_request<'a>(
+        &'a self,
+        request: RequestHead,
+        body: Option<BodyHandle>,
+    ) -> crate::BoxFuture<'a, Result<RequestDecision, HookError>> {
+        Box::pin(async move {
+            let max = self.max_request_body_bytes;
+            let too_large =
+                Blocked::new(413, "Payload Too Large", format!("request body exceeds {max} bytes"));
+            let mut head = request.clone();
+            let mut carried = if body.is_some() { Carried::Original } else { Carried::None };
+            let mut changed = false;
+            for t in &self.tiers {
+                let Some(reg) = t.registrations().on_request else { continue };
+                let handle = if reg.body { carried.handle(body.as_ref()) } else { None };
+                match t.on_request(head.clone(), handle).await {
+                    Ok(RequestDecision::Continue) => {}
+                    Ok(RequestDecision::Request { head: h, body: choice }) => {
+                        head = h;
+                        changed = true;
+                        carried = carried.then(choice, max, &too_large).await;
+                    }
+                    Ok(RequestDecision::Respond { head, body }) => {
+                        carried.discard().await;
+                        return Ok(RequestDecision::Respond { head, body });
+                    }
+                    Err(e) => {
+                        carried.discard().await;
+                        return Err(e);
+                    }
+                }
+            }
+            if !changed {
+                return Ok(RequestDecision::Continue);
+            }
+            Ok(RequestDecision::Request { head, body: carried.into_choice().await })
+        })
+    }
+
+    fn on_response<'a>(
+        &'a self,
+        response: ResponseHead,
+        body: Option<BodyHandle>,
+        request: RequestHead,
+    ) -> crate::BoxFuture<'a, Result<ResponseDecision, HookError>> {
+        Box::pin(async move {
+            let max = self.max_response_body_bytes;
+            let too_large = Blocked::bad_gateway(format!("response body exceeds {max} bytes"));
+            let mut head = response;
+            let mut carried = if body.is_some() { Carried::Original } else { Carried::None };
+            let mut changed = false;
+            for t in &self.tiers {
+                let Some(reg) = t.registrations().on_response else { continue };
+                let handle = if reg.body { carried.handle(body.as_ref()) } else { None };
+                match t.on_response(head.clone(), handle, request.clone()).await {
+                    Ok(ResponseDecision::Continue) => {}
+                    Ok(ResponseDecision::Response { head: h, body: choice }) => {
+                        head = h;
+                        changed = true;
+                        carried = carried.then(choice, max, &too_large).await;
+                    }
+                    Err(e) => {
+                        carried.discard().await;
+                        return Err(e);
+                    }
+                }
+            }
+            if !changed {
+                return Ok(ResponseDecision::Continue);
+            }
+            Ok(ResponseDecision::Response { head, body: carried.into_choice().await })
+        })
+    }
+}

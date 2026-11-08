@@ -55,7 +55,14 @@ const SLICES: Record<string, string[]> = {
     "object-mount$",
   ],
   cli: ["^cli\\."],
-  net: ["\\.policy$", "ip-allow$", "noop-hooks$", "body-hooks$"],
+  net: [
+    "\\.policy$",
+    "ip-allow$",
+    "noop-hooks$",
+    "body-hooks$",
+    "noop-djs$",
+    "body-djs$",
+  ],
 };
 
 const SUITES: Record<string, (bench: Bench) => Promise<void>> = {

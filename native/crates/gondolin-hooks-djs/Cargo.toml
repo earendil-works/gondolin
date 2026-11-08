@@ -1,0 +1,32 @@
+[package]
+name = "gondolin-hooks-djs"
+description = "Tier-2 network hooks: JavaScript policies run in-process on djs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gondolin-egress.workspace = true
+gondolin-http.workspace = true
+gondolin-log.workspace = true
+gondolin-proto.workspace = true
+gondolin-wire.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+miniz_oxide = "0.9"
+# Earendil's JavaScript engine (first-party, not counted in native/deps-budget);
+# every use of its API is in src/engine.rs
+djs-embed = { git = "https://github.com/earendil-works/djs.git", rev = "0e58f62c80252fc3f4156ab7a3744746434ed860" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# egress's test harness (tests/pipeline.rs includes gondolin-egress/tests/common)
+gondolin-netstack.workspace = true
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

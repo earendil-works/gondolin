@@ -3,7 +3,9 @@
 # multi-call CLI + daemon): `cargo tree -e normal` of gondolin-cli, unique
 # name+version, without our workspace crates, for every release target.
 # Fails when a target exceeds the budget in native/deps-budget (lowered as the
-# dependency diet progresses, PLAN.md M8).
+# dependency diet progresses, PLAN.md M8). Earendil's own crates from the djs
+# repository (djs-embed, djs-core, djs-prelude, djs-libm; matched by their git
+# source) are first-party: reported separately, not counted against the budget.
 #
 # usage: native/scripts/count-deps.sh [--list] [--budget N]
 set -euo pipefail
@@ -22,17 +24,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# first-party crates outside the workspace: djs, by its git source
+FIRST_PARTY='^djs-[a-z0-9-]+ v[^ ]+ \(https://github\.com/earendil-works/djs(\.git)?[?#]'
+
+tree() { # target
+  (cd "$NATIVE" && cargo tree -q --locked -p gondolin-cli -e normal --prefix none --target "$1")
+}
+
 crates() { # target
-  (cd "$NATIVE" && cargo tree -q --locked -p gondolin-cli -e normal --prefix none --target "$1") |
-    sed 's/ (.*//' | sort -u | grep -v -E '^(gondolin-[a-z]+|gondolind) '
+  tree "$1" | grep -v -E "$FIRST_PARTY" |
+    sed 's/ (.*//' | sort -u | grep -v -E '^(gondolin(-[a-z]+)+|gondolind) '
+}
+
+first_party() { # target
+  tree "$1" | grep -E "$FIRST_PARTY" | sed 's/ (.*//' | sort -u
 }
 
 max=0
 for t in "${TARGETS[@]}"; do
   n=$(crates "$t" | wc -l | tr -d ' ')
-  printf '%-28s %4d\n' "$t" "$n"
+  f=$(first_party "$t" | wc -l | tr -d ' ')
+  printf '%-28s %4d  (+%d first-party: djs)\n' "$t" "$n" "$f"
   [ "$n" -gt "$max" ] && max=$n
-  if [ "$list" = 1 ]; then crates "$t" | sed 's/^/    /'; fi
+  if [ "$list" = 1 ]; then
+    crates "$t" | sed 's/^/    /'
+    first_party "$t" | sed 's/^/    first-party: /'
+  fi
 done
 if [ "$max" -gt "$budget" ]; then
   echo "error: $max runtime crates, budget is $budget (native/deps-budget)" >&2

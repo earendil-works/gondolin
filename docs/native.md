@@ -235,7 +235,9 @@ Behaviour visible to guests and SDK users is the same unless listed here.
   response bodies are transferred only when a hook reads them; `clone()` reads
   independently instead of buffering a second copy. Hooks that are not
   registered cost nothing; policy from `createHttpHooks()` options
-  (allowlists, internal ranges, secrets) is evaluated in the daemon.
+  (allowlists, internal ranges, secrets) is evaluated in the daemon, and
+  `createDjsHooks()` policies run in the daemon too (see
+  [Tier-2 Hooks](#tier-2-hooks)).
 - `VMOptions.fetch` is for asset downloads, as documented. The native engine
   never uses it for guest HTTP traffic (egress is always handled by the
   daemon); the node engine used it as its upstream client. Earlier versions
@@ -376,6 +378,140 @@ Differences from the node engine:
 - The VMM runs under the daemon (controller → `gondolind` → QEMU). Starting a
   VM costs one extra process spawn and handshake (a few milliseconds).
 - `SandboxServer`, if you construct it directly, is always the node engine.
+
+## Tier-2 Hooks
+
+Hooks normally run in your Node process: the daemon sends each registered
+phase to the controller and waits for the answer (tier 3). A **tier-2 policy**
+is self-contained JavaScript that the daemon runs itself, on djs (Earendil's
+embeddable JavaScript engine, compiled into `gondolind`). It needs no
+controller round trip, so it also works with the static `gondolin` CLI and
+with remote daemons, and costs far less per request. The declarative
+`createHttpHooks()` options (tier 1) remain the cheapest and should be
+preferred for anything they can express.
+
+```ts
+import { VM, createDjsHooks, createHttpHooks } from "@earendil-works/gondolin";
+
+const policy = `
+const DENY = ["/admin", "/internal"];
+
+async function onRequest(request) {
+  const url = new URL(request.url);
+  if (DENY.some((p) => url.pathname.startsWith(p))) {
+    throw new HttpRequestBlockedError("path not allowed", 403);
+  }
+  if (request.method === "POST") {
+    const body = await request.clone().text();
+    if (body.includes("DROP TABLE")) return new Response("no", { status: 400 });
+  }
+  request.headers.set("x-sandbox", "gondolin");
+}
+
+function onResponse(response) {
+  const r = new Response(response.body, response);
+  r.headers.delete("server");
+  return r;
+}
+`;
+
+const { httpHooks, env } = createHttpHooks({
+  allowedHosts: ["api.example.com"],
+  secrets: { API_KEY: { hosts: ["api.example.com"], value: process.env.API_KEY! } },
+  ...createDjsHooks(policy),
+});
+const vm = await VM.create({ httpHooks, env });
+```
+
+The static and Node CLIs take a policy file with `--hooks-script FILE`
+(`.js` a script, `.mjs` an ES module, `.ts`/`.mts` a TypeScript module). For
+modules, the CLI reads the files the policy imports with relative specifiers
+(`./lib/hosts.ts`, `./deny.json`), transitively from next to the script, and
+sends them along; the daemon itself never reads files. Bare specifiers and
+imports above the script's directory are not resolved
+(`djsHooksOptionsFromFile(file)` does the same for SDK users):
+
+```bash
+gondolin bash --allow-host api.example.com --hooks-script policy.js
+```
+
+**The contract.** A policy defines (script) or exports (module, `kind:
+"module"` or `"typescript"`) any of `isRequestAllowed(request)`, `isIpAllowed(info)`,
+`onRequest(request)` and `onResponse(response, request)`, with the same
+meaning and return values as `HttpHooks` (see
+[SDK: Network Access](./sdk-network.md)). Only the phases it defines are
+registered, so a policy with only `onResponse` keeps the request fast path.
+The environment offers `Request`, `Response`, `Headers`, `URL`,
+`URLSearchParams`, `HttpRequestBlockedError`, `TextEncoder`/`TextDecoder`,
+`atob`/`btoa`, `console` (written to the daemon log, visible with the `net`
+debug flag) and the standard JavaScript built-ins. Bodies stay in the daemon
+until the policy reads them (`text()`, `json()`, `bytes()`, `arrayBuffer()`);
+an unread body costs nothing and is streamed through. As on the node engine,
+forwarding a request whose body the hook consumed is refused (`400`): read
+from `request.clone()`. Compressed responses (`gzip`, `deflate`) are decoded
+for `onResponse`, as on tier 3.
+
+`createDjsHooks()` options:
+
+| option | meaning |
+|---|---|
+| `source` | the policy (or pass the source string directly) |
+| `kind` | `"script"` (default), `"module"` or `"typescript"` (an ES module whose types are erased, not checked); modules need the native engine |
+| `filename` | name in stack traces, the module's key (default `policy.js` / `policy.mjs` / `policy.ts`) |
+| `modules` | `{ key: source }` a module policy can import (`./lib.js` resolves against `filename`); the key's extension picks the language: `.ts`/`.mts`/`.cts` TypeScript, `.json` a JSON module (`import deny from "./deny.json" with { type: "json" }`), else JavaScript. There is no file or network access: anything else must be bundled into the policy |
+| `limits` | `{ fuel, memoryBytes, timeoutMs }` per call (defaults 50M fuel ≈ 0.2 s of interpretation, 64 MiB heap, 30 s wall clock including body reads) |
+
+**Evaluation.** The daemon compiles the policy once, when the VM is
+configured; a syntax error, a missing import or an exception at the top level
+fails `VM.create()`/the CLI before boot. Every call then starts from that
+compiled state: globals a call changes are gone in the next call, nothing is
+shared between requests or VMs. Builtins are frozen. `Date.now()` is the
+daemon's clock at the start of the call.
+
+**Fail closed.** An exception, a rejected or never-settling promise,
+exhausting fuel, memory or time, a malformed return value (an invalid header,
+a non-HTTP URL, a bad status) or an engine error deny the request with
+`502 Bad Gateway`, like a throwing tier-3 hook. `HttpRequestBlockedError`
+answers with its own status. The budgets cannot be caught by the policy.
+
+**Order of tiers.** Declarative policy first (head validation, and for
+policies without `onRequest` the early allowlist/internal-range check), then
+tier 2, then tier 3, in every phase: `isRequestAllowed`/`isIpAllowed` must
+allow in both (the first denial wins), `onRequest` of tier 3 sees the request
+as tier 2 left it (including a replaced body), and a tier-2 `Response` or
+block ends the phase. Secrets are substituted after all `onRequest` hooks, so
+hooks see placeholders, not secret values, and placeholders a hook adds are
+substituted too. The allowlist and internal-range checks run again on the
+rewritten request.
+
+**Restrictions** compared with Node hooks:
+
+- No closures over your program's state, no Node or npm APIs (`fs`,
+  `process`, `Buffer`, `require`): state comes from the source (generate it
+  with your configuration) or from `modules`.
+- No outbound I/O: no `fetch()`, timers (`setTimeout`), `AbortSignal`,
+  `crypto.subtle` or `crypto.randomUUID`.
+- No streams: bodies are whole values within the body limits and the policy's
+  heap; `request.body`/`response.body` is an opaque handle that can only be
+  passed on (`new Response(response.body, response)` keeps the original body),
+  and `formData()`, `blob()` and `ReadableStream` are missing. Fetch-only
+  `Request` fields (`signal`, `cache`, `mode`, `credentials`, ...) are absent.
+- `instanceof` checks against Node's own classes do not apply; `URL`,
+  `Headers` and friends are the daemon's implementations (URLs parse exactly
+  as egress parses them).
+- On the node engine a script policy runs in a `node:vm` context with Node's
+  own fetch classes (the same contract; globals persist between calls there);
+  module policies need the native engine. A daemon without tier-2 support
+  (older releases, or built without the `djs-hooks` feature) refuses such a
+  configuration instead of ignoring it.
+
+Typical cost on an Apple M5 Max (shared machine; `host/bench`, guest-measured
+per request): a no-op `onRequest`/`onResponse` pair adds about 0.23 ms per
+request as tier 2 against 0.29 ms as tier 3 (0.58 ms on the node engine), a
+policy reading 32 MiB bodies keeps ~415 MB/s downloads (tier 3: ~325 MB/s).
+In process, an empty call is ~8 µs and a header allowlist policy ~38 µs
+(`cargo run --release -p gondolin-hooks-djs --example bench`); research notes
+and engine details are in `native/docs/djs-hooks.md`.
 
 ## Troubleshooting
 

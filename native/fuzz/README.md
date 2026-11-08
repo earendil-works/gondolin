@@ -25,6 +25,7 @@ cd native/fuzz && cargo +nightly fuzz run netstack_stack
 | `sshproxy_flow` | arbitrary bytes after the `SSH-` banner into the guest-facing SSH server |
 | `assets_tar` | image archive tar reader and extraction into a temp dir (nothing outside the destination, no escaping symlinks); seeds in `seeds/assets_tar` |
 | `assets_gzip` | gzip framing/CRC-32 around miniz_oxide: arbitrary bytes, plus framed deflate round trips with one corrupted byte |
+| `hooks_djs` | tier-2 hooks (djs): guest heads/bodies into fixed policies that echo them into decisions (Request/Response/Headers/URL validation in the shim and the host), gzip response decoding; no panic, every call a decision or a `HookError` |
 | `ssh_transport` | the SSH core: raw bytes into a fresh client/server transport (ident, KEXINIT, ECDH), and encrypted payloads after a real handshake into the connection layer |
 | `ssh_keys` | private key files (OpenSSH/PEM/PKCS#8), public key blobs and lines, signatures, ssh-agent replies |
 | `sshproxy_parse` | git exec command parsing, known_hosts, allowlist patterns |

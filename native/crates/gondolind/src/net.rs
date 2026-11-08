@@ -48,6 +48,8 @@ pub enum NetError {
     Stack(gondolin_netstack::NetStackError),
     Egress(gondolin_egress::EgressError),
     Ssh(gondolin_sshproxy::SshConfigError),
+    /// the tier-2 policy did not compile (or this build has no tier-2 hooks)
+    Hooks(String),
 }
 
 impl std::fmt::Display for NetError {
@@ -56,6 +58,7 @@ impl std::fmt::Display for NetError {
             NetError::Stack(e) => e.fmt(f),
             NetError::Egress(e) => e.fmt(f),
             NetError::Ssh(e) => e.fmt(f),
+            NetError::Hooks(e) => f.write_str(e),
         }
     }
 }
@@ -178,6 +181,32 @@ impl FlowHandler for ActivityFlows {
     }
 }
 
+/// The programmable hook tiers in order: tier 2 (`djs_hooks`, run in the
+/// daemon) before tier 3 (controller callbacks) in every phase; declarative
+/// policy (tier 1) is egress itself and runs first.
+fn hook_tiers(
+    config: &proto::NetConfig,
+    remote: Arc<RemoteHooks>,
+) -> Result<Arc<dyn gondolin_egress::HookBackend>, NetError> {
+    let Some(djs) = &config.djs_hooks else {
+        return Ok(remote);
+    };
+    #[cfg(feature = "djs-hooks")]
+    {
+        let tier2 = gondolin_hooks_djs::DjsHooks::new(djs, &config.limits)
+            .map_err(|e| NetError::Hooks(e.to_string()))?;
+        Ok(Arc::new(gondolin_egress::ChainedHooks::new(
+            vec![Arc::new(tier2), remote],
+            &config.limits,
+        )))
+    }
+    #[cfg(not(feature = "djs-hooks"))]
+    {
+        let _ = (djs, remote);
+        Err(NetError::Hooks("djs_hooks: this gondolind was built without tier-2 hooks".into()))
+    }
+}
+
 /// Network side of a session.
 pub struct Net {
     stack: Arc<NetStack>,
@@ -214,7 +243,8 @@ impl Net {
         };
         let hooks =
             Arc::new(RemoteHooks::new(Arc::new(Link(controller)), config.egress.hooks.clone()));
-        let egress = Egress::new(config.egress, hooks.clone())?.with_ssh_proxy(ssh);
+        let backend = hook_tiers(&config.egress, hooks.clone())?;
+        let egress = Egress::new(config.egress, backend)?.with_ssh_proxy(ssh);
         let handler =
             Arc::new(ActivityFlows { inner: egress.clone(), open: AtomicUsize::new(0), activity });
         let stack = match config.system_resolvers {

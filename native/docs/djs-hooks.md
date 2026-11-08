@@ -1,6 +1,8 @@
 # djs as the tier-2 hook engine (M6 research)
 
-Status: research and prototype. The prototype is
+Status: research and prototype; the production implementation is
+`native/crates/gondolin-hooks-djs` on djs-embed (see `native/DESIGN.md`,
+"Hook tiers", and `docs/native.md`, "Tier-2 Hooks"). The prototype is
 [`native/experiments/djs-hooks/`](../experiments/djs-hooks/). It sits outside
 the workspace and path-depends on `~/Development/djs`; this doc used djs
 `88c5fd9b`.
