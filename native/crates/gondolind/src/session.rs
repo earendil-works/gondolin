@@ -184,20 +184,20 @@ pub(crate) struct VmState {
     restart_token: u64,
     restart_pending: bool,
     /// generations being stopped and what to do once they exited
-    stop_waiters: HashMap<u64, Vec<AfterStop>>,
+    pub(crate) stop_waiters: HashMap<u64, Vec<AfterStop>>,
     /// kernel command line of the next start
     append: String,
 }
 
 /// What to do once a stopped VMM exited.
 #[derive(Debug)]
-enum AfterStop {
+pub(crate) enum AfterStop {
     /// start again (restart / boot with a changed configuration)
     Start,
     /// answer `shutdown` and exit
     Shutdown { id: u64 },
-    /// export the root disk overlay (`checkpoint_export`)
-    Export { id: u64 },
+    /// export the root disk overlay (`checkpoint_export`; to `dest`, else streamed)
+    Export { id: u64, dest: Option<PathBuf> },
 }
 
 /// The session.
@@ -699,6 +699,7 @@ impl Session {
             let krun = qemu::is_krun(&cfg.vm);
             self.ckpt.overlay =
                 crate::rootdisk::prepare(&mut cfg.vm, &dir.0, krun, self.ckpt.imported.as_deref())?;
+            self.ckpt.export_blocker = crate::rootdisk::export_blocker(cfg.vm.root_disk.as_ref());
             check_vmm_binary(&cfg.vm)?;
         }
         let path = |name: &str| dir.0.join(name);
@@ -1031,6 +1032,9 @@ impl Session {
                     self.fail_inflight("server_shutdown", "server is shutting down");
                     return;
                 }
+                Err(StartError::Exported) => {
+                    self.client_error(client, None, "invalid_state", EXPORTED);
+                }
                 Err(StartError::Spawn(err)) => spawn_error = Some(err),
             }
         }
@@ -1217,6 +1221,9 @@ impl Session {
     pub(crate) fn start_vm(&mut self) {
         match self.start_vm_inner() {
             Ok(()) => {}
+            Err(StartError::Exported) => {
+                self.ctl.error_event("invalid_state", EXPORTED, None);
+            }
             Err(StartError::Spawn(err)) | Err(StartError::Fatal(err)) => self.vm_spawn_failed(err),
         }
     }
@@ -1224,6 +1231,9 @@ impl Session {
     fn start_vm_inner(&mut self) -> Result<(), StartError> {
         if self.vm.child.is_some() {
             return Ok(());
+        }
+        if self.ckpt.exported {
+            return Err(StartError::Exported);
         }
         if self.configured.is_none() {
             return Err(StartError::Fatal("session is not configured".into()));
@@ -1330,8 +1340,13 @@ impl Session {
         true
     }
 
-    pub(crate) fn add_export_waiter(&mut self, id: u64) {
-        self.add_stop_waiter(AfterStop::Export { id });
+    /// A VMM was told to stop and has not exited yet (`close_vm` took it).
+    pub(crate) fn vm_stopping(&self) -> bool {
+        self.vm.child.is_none() && self.vm.stop_waiters.contains_key(&self.vm.generation)
+    }
+
+    pub(crate) fn add_export_waiter(&mut self, id: u64, dest: Option<PathBuf>) {
+        self.add_stop_waiter(AfterStop::Export { id, dest });
     }
 
     fn add_stop_waiter(&mut self, after: AfterStop) {
@@ -1340,6 +1355,10 @@ impl Session {
 
     /// `SandboxController.restart`: close, then start once the VMM exited.
     pub(crate) fn restart_vm(&mut self) {
+        if self.ckpt.exported {
+            self.ctl.error_event("invalid_state", EXPORTED, None);
+            return;
+        }
         if self.close_vm() {
             self.add_stop_waiter(AfterStop::Start);
         } else {
@@ -1366,7 +1385,7 @@ impl Session {
         }
     }
 
-    fn vmm_exited(&mut self, generation: u64, code: Option<i32>, signal: Option<i32>) {
+    pub(crate) fn vmm_exited(&mut self, generation: u64, code: Option<i32>, signal: Option<i32>) {
         let waiters = self.vm.stop_waiters.remove(&generation).unwrap_or_default();
         if generation == self.vm.generation {
             // SandboxController's exit handler
@@ -1380,6 +1399,7 @@ impl Session {
                 self.vm.manual_stop = false;
             } else if self.configured.as_ref().is_some_and(|c| c.vm.auto_restart)
                 && !self.shutting_down
+                && !self.ckpt.exported
             {
                 self.vm.restart_token += 1;
                 self.vm.restart_pending = true;
@@ -1399,7 +1419,7 @@ impl Session {
                     }
                 }
                 AfterStop::Shutdown { id } => self.finish_shutdown(id),
-                AfterStop::Export { id } => self.export_overlay(id),
+                AfterStop::Export { id, dest } => self.export_overlay(id, dest),
             }
         }
     }
@@ -1480,9 +1500,15 @@ impl Session {
     }
 }
 
+/// Why a VM whose root disk went to a checkpoint does not start again
+const EXPORTED: &str =
+    "the vm was checkpointed (its root disk was exported) and cannot be started again";
+
 enum StartError {
     /// the VMM could not be spawned (reported like a VMM exit)
     Spawn(String),
+    /// the root disk was exported for a checkpoint (`invalid_state`)
+    Exported,
     /// the session cannot boot at all
     Fatal(String),
 }

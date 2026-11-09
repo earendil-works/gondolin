@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { ensureGuestAssets, loadAssetManifest } from "../src/assets.ts";
 import { VmCheckpoint } from "../src/checkpoint.ts";
-import { getQcow2BackingFilename } from "../src/qemu/img.ts";
+import { diskInfo } from "./helpers/disk-info.ts";
 import { VM } from "../src/vm/core.ts";
 import {
   shouldSkipVmTests,
@@ -228,12 +228,12 @@ test("checkpoint resume rebases qcow2 backing to resolved rootfs", {
     base = null;
 
     // Validate the checkpoint initially points at dirA.
-    const backing1 = getQcow2BackingFilename(checkpointPath);
+    const backing1 = diskInfo(checkpointPath).backing_file;
     assert.equal(backing1, expectedA);
 
-    // Resume while pointing to dirB and ensure resume updates the backing path.
+    // Resume while pointing to dirB and ensure resume updates the backing
+    // path (the daemon rebases the checkpoint when the VM starts).
     resumed = await checkpoint.resume<VM>({
-      autoStart: false,
       vfs: null,
       sandbox: {
         imagePath: dirB,
@@ -242,7 +242,8 @@ test("checkpoint resume rebases qcow2 backing to resolved rootfs", {
       },
     });
 
-    const backing2 = getQcow2BackingFilename(checkpointPath);
+    await resumed.start();
+    const backing2 = diskInfo(checkpointPath).backing_file;
     assert.equal(backing2, expectedB);
 
     await resumed.close();
@@ -298,7 +299,7 @@ test("checkpoint overwrite after resume preserves canonical backing and data", {
     checkpoint = await base.checkpoint(checkpointPath);
     base = null;
 
-    const initialBacking = getQcow2BackingFilename(checkpointPath);
+    const initialBacking = diskInfo(checkpointPath).backing_file;
     assert.ok(
       initialBacking,
       "expected first checkpoint to preserve a qcow2 backing file",
@@ -326,7 +327,7 @@ test("checkpoint overwrite after resume preserves canonical backing and data", {
     checkpoint = await resumed.checkpoint(checkpointPath);
     resumed = null;
 
-    const backing = getQcow2BackingFilename(checkpointPath);
+    const backing = diskInfo(checkpointPath).backing_file;
     assert.ok(
       backing,
       "expected overwritten checkpoint to preserve a qcow2 backing file",

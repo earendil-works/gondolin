@@ -33,7 +33,7 @@ tree() { # target
 
 crates() { # target
   tree "$1" | grep -v -E "$FIRST_PARTY" |
-    sed 's/ (.*//' | sort -u | grep -v -E '^(gondolin(-[a-z]+)+|gondolind) '
+    sed 's/ (.*//' | sort -u | grep -v -E '^(gondolin(-[a-z0-9]+)+|gondolind) '
 }
 
 first_party() { # target

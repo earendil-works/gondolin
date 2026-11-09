@@ -11,18 +11,19 @@ use.
 ## Requirements
 
 - Node.js >= 22.19.0
-- QEMU (`qemu-img` is used on both VM backends; QEMU runs the VM where libkrun
-  cannot):
+- QEMU only where libkrun cannot run the VM (Intel Macs, Linux arm64, Linux
+  without `/dev/kvm`) or when you select the `qemu` backend:
 
-| macOS               | Linux (Debian/Ubuntu)                                                              |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| `brew install qemu` | `sudo apt install qemu-system-arm qemu-utils` (arm64) or `qemu-system-x86 qemu-utils` (x64) |
+| macOS               | Linux (Debian/Ubuntu)                                                    |
+| ------------------- | ------------------------------------------------------------------------ |
+| `brew install qemu` | `sudo apt install qemu-system-arm` (arm64) or `qemu-system-x86` (x86_64) |
 
 Installing this package also installs, as optional platform packages, the
 Gondolin daemon (`gondolind`, `@earendil-works/gondolin-native-*` for macOS
 and Linux on arm64 and x64) and, on macOS arm64 and Linux x86_64, the krun
-runner. VMs use libkrun where it can run (Apple silicon, Linux with
-read/write `/dev/kvm`) and QEMU otherwise. See
+runner. VMs use libkrun where it can run (Apple silicon, Linux x86_64 with
+read/write `/dev/kvm`), which needs nothing else installed, and QEMU
+otherwise. See
 [Installation](https://earendil-works.github.io/gondolin/install/) for
 details, installs without optional dependencies (`GONDOLIN_NATIVE_BIN`), Linux
 arm64 krun, and building from a checkout.

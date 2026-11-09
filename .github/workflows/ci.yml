@@ -65,8 +65,17 @@ jobs:
       - name: Check (rustfmt + clippy -D warnings)
         run: make -C native check
 
+      # qemu-img/qemu-io for the gondolin-qcow2 interop tests (tests/qemu.rs)
+      - name: Install qemu-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils
+
       - name: Test workspace
         working-directory: native
+        env:
+          # fail instead of skipping the qemu-img interop tests
+          GONDOLIN_REQUIRE_QEMU_IMG: "1"
         run: cargo test --workspace --locked
 
       - name: Build release binaries (gondolind + static gondolin CLI)

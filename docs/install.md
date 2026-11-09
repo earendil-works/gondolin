@@ -7,8 +7,9 @@ three parts:
   needs Node.js
 - the Gondolin daemon (`gondolind`), a static binary that runs the VM; it is
   installed with the npm package as an optional platform package
-- a VM backend: QEMU, and optionally the krun runner (libkrun), which is the
-  default wherever it can run
+- a VM backend: the krun runner (libkrun), which is the default wherever it
+  can run and ships with the npm package on macOS arm64 and Linux x86_64, or
+  QEMU everywhere else
 
 Guest images are not part of the installation: the default image is
 downloaded and cached on first use (see [Images](./images.md)).
@@ -18,13 +19,27 @@ downloaded and cached on first use (see [Images](./images.md)).
 | | macOS | Linux |
 | --- | --- | --- |
 | Node.js | 22.19 or newer | 22.19 or newer |
-| QEMU (incl. `qemu-img`) | `brew install qemu` | `qemu-system-arm` (arm64) or `qemu-system-x86` (x86_64), plus `qemu-utils` |
-| krun (optional) | Apple silicon; runner ships with the npm package | read/write access to `/dev/kvm`; runner ships with the npm package on x86_64, build it on arm64 |
 | Gondolin daemon | npm platform package (arm64, x64) | npm platform package (arm64, x64; static binaries) |
+| krun | Apple silicon; runner ships with the npm package | read/write access to `/dev/kvm`; runner ships with the npm package on x86_64, build it on arm64 |
+| QEMU (only where krun is not used) | `brew install qemu` | `qemu-system-arm` (arm64) or `qemu-system-x86` (x86_64) |
 
-QEMU is needed on both backends: it is the VM backend wherever krun is not
-available, and its `qemu-img` creates the root disk overlays for krun VMs as
-well. Node.js is not needed for the [static CLI](#static-cli).
+What to install besides Node.js depends on the backend your machine ends up
+with:
+
+| Host | Default backend | Install |
+| --- | --- | --- |
+| macOS on Apple silicon | krun | nothing else |
+| Linux x86_64 with read/write `/dev/kvm` | krun | nothing else (see [krun on Linux](#krun-on-linux) for `/dev/kvm` access) |
+| macOS on Intel | QEMU (HVF) | [QEMU](#install-qemu) |
+| Linux arm64 | QEMU (KVM, or TCG without `/dev/kvm`) | [QEMU](#install-qemu), or [build the krun runner](#krun-on-linux) |
+| Linux x86_64 without `/dev/kvm` | QEMU (TCG, slow) | [QEMU](#install-qemu) |
+
+QEMU is needed only for VMs that run on the `qemu` backend: where krun cannot
+run, when you select `qemu` (`--vmm qemu`, `sandbox.vmm`, `GONDOLIN_VMM`) or
+set a QEMU-only option, and for the other cases listed in
+[VM Backends](./backends.md#default-backend-selection). The daemon prepares
+root disks, overlays and checkpoints itself, so `qemu-img` is not needed.
+Node.js is not needed for the [static CLI](#static-cli).
 
 ## Install the Package
 
@@ -60,6 +75,8 @@ at the same version as `@earendil-works/gondolin`.
 
 ## Install QEMU
 
+Skip this on hosts that use krun (see [Requirements](#requirements)).
+
 macOS (Homebrew):
 
 ```bash
@@ -69,20 +86,21 @@ brew install qemu node
 Debian/Ubuntu, arm64:
 
 ```bash
-sudo apt install qemu-system-arm qemu-utils nodejs npm
+sudo apt install qemu-system-arm nodejs npm
 ```
 
 Debian/Ubuntu, x86_64:
 
 ```bash
-sudo apt install qemu-system-x86 qemu-utils nodejs npm
+sudo apt install qemu-system-x86 nodejs npm
 ```
 
 Distribution Node.js packages are often older than 22.19; check
 `node --version` and install a newer Node.js if needed.
 
-`qemu-img` is looked up next to the QEMU binary, then on `PATH`. On Linux,
-QEMU uses KVM when `/dev/kvm` is accessible and falls back to software
+The QEMU binary (`qemu-system-aarch64` or `qemu-system-x86_64`, matching the
+guest image) is looked up on `PATH` unless `sandbox.qemuPath` names it. On
+Linux, QEMU uses KVM when `/dev/kvm` is accessible and falls back to software
 emulation (TCG, much slower) otherwise.
 
 How fast guest file access is depends on the QEMU build: with vhost-user
@@ -175,15 +193,15 @@ export GONDOLIN_NATIVE_BIN=/opt/gondolin/bin/gondolin
 ```
 
 The daemon can also run on another machine than your Node.js process; that
-machine needs only the binary and QEMU (or the krun runner). See
-[Remote Machines](./remote.md).
+machine needs only the binary and QEMU (the default backend there) or the
+krun runner. See [Remote Machines](./remote.md).
 
 ## Static CLI
 
 The `gondolin` binary of the platform package is also a self-contained CLI that
 needs no Node.js: `bash`, `exec`, `list`, `attach`, `snapshot` and `image`, with
-the same options as the Node CLI. It runs the VM in-process, so QEMU (or the
-krun runner) is its only runtime dependency. `build` and `tools` need the Node
+the same options as the Node CLI. It runs the VM in-process, so the krun
+runner or QEMU is its only runtime dependency. `build` and `tools` need the Node
 CLI. Usage and differences: [CLI Reference](./cli.md#static-cli-no-nodejs).
 
 To get the binary without installing the npm package, download the platform
@@ -279,11 +297,17 @@ arm64 and x64 are supported.
 
 ### QEMU Binary Not Found
 
-`Error: QEMU binary 'qemu-system-aarch64' not found.` QEMU is not installed or
-not on `PATH`. Install it (see [Install QEMU](#install-qemu)); the binary must
-match the guest architecture (`qemu-system-aarch64` or `qemu-system-x86_64`).
-Errors about `qemu-img` mean the QEMU utilities are missing
-(`qemu-utils` on Debian/Ubuntu).
+`Error: QEMU binary 'qemu-system-aarch64' not found.` (Node CLI, which also
+prints `brew install qemu` or the matching `sudo apt install qemu-system-arm` /
+`qemu-system-x86`), `QEMU binary '...' not found: install QEMU or use the
+krun backend` (SDK) or `qemu-system-aarch64 not found: install QEMU (...) or
+use --vmm krun` (static CLI): the VM uses the `qemu` backend and QEMU is not
+installed or not on `PATH`. Install it (see
+[Install QEMU](#install-qemu)); the binary must match the guest architecture
+(`qemu-system-aarch64` or `qemu-system-x86_64`). On a host that supports krun,
+check why krun was not selected (see
+[VM Backends](./backends.md#default-backend-selection)) or select it with
+`--vmm krun`.
 
 ### krun Runner Not Signed (macOS)
 

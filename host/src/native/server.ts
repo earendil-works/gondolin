@@ -16,6 +16,7 @@
 
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 import { type Duplex, PassThrough, type Readable } from "node:stream";
 
 import { stripTrailingNewline, type DebugComponent } from "../debug.ts";
@@ -44,6 +45,7 @@ import { SandboxVfsProvider } from "../vfs/provider.ts";
 import {
   type NativeEngineOptions,
   type NativeRemoteConfig,
+  type NativeRootDisk,
   assertNativeSupported,
   assertRemoteConfigure,
   buildNativeConfigure,
@@ -75,8 +77,10 @@ const WRITE_CHUNK = 64 * 1024;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
 type NativeSandboxServerInternalOptions = {
-  /** qemu root disk volatility mode */
-  qemuRootDiskVolatileMode?: "snapshot";
+  /** root disk for the daemon to prepare (`configure.vm.root_disk`) */
+  rootDisk?: NativeRootDisk;
+  /** checkpoint file to boot from (`root_disk.mode = "checkpoint"`): uploaded to a remote daemon, used in place by a local one */
+  checkpoint?: string;
   /** explicit daemon binary path */
   binaryPath?: string;
   /** how to reach the daemon */
@@ -173,16 +177,11 @@ export class NativeSandboxServer extends EventEmitter {
       : this.options.qemuPath;
   }
 
-  /** @internal resolved qemu binary path */
-  getQemuPath(): string {
-    return this.options.qemuPath;
-  }
-
   getState(): SandboxState {
     return this.status;
   }
 
-  /** Host pid of the QEMU process while one runs */
+  /** Host pid of the VMM process while one runs */
   getHostPid(): number | null {
     // a remote VMM's pid means nothing on this machine
     return this.internalOptions.remote ? null : this.vmmPid;
@@ -191,6 +190,11 @@ export class NativeSandboxServer extends EventEmitter {
   /** pid of the VMM on the daemon's machine */
   getVmmPid(): number | null {
     return this.vmmPid;
+  }
+
+  /** whether the daemon session was started (it owns the root disk then) */
+  isStarted(): boolean {
+    return this.started;
   }
 
   /** whether the daemon runs on another machine */
@@ -300,8 +304,15 @@ export class NativeSandboxServer extends EventEmitter {
         configured && typeof configured.image === "object"
           ? (configured.image as Record<string, unknown>)
           : null;
-      if (remote?.checkpointPath) {
-        await this.importCheckpoint(transport, remote.checkpointPath);
+      const checkpoint = this.internalOptions.checkpoint;
+      if (checkpoint) {
+        if (remote) {
+          await this.uploadCheckpoint(transport, checkpoint);
+        } else {
+          await transport.request("checkpoint_import", {
+            path: path.resolve(checkpoint),
+          });
+        }
       }
       await transport.request("start");
       this.started = true;
@@ -533,10 +544,10 @@ export class NativeSandboxServer extends EventEmitter {
     transport.send(type, payload);
   }
 
-  // ---- remote checkpoints ------------------------------------------------
+  // ---- checkpoints -------------------------------------------------------
 
-  /** Upload a local checkpoint file to the daemon (before `start`) */
-  private async importCheckpoint(transport: NativeTransport, file: string) {
+  /** Upload a local checkpoint file to a remote daemon (before `start`) */
+  private async uploadCheckpoint(transport: NativeTransport, file: string) {
     const id = transport.allocateId();
     const done = transport.request("checkpoint_import", {}, { id });
     const fd = fs.openSync(file, "r");
@@ -563,13 +574,25 @@ export class NativeSandboxServer extends EventEmitter {
   }
 
   /**
-   * Stop the VM and write its root disk overlay to `destination` (remote
-   * checkpoints); resolves with the image build id for the trailer.
+   * Stop the VM and write its root disk (its chain collapsed onto the
+   * image's rootfs) to `destination`: a local daemon moves the disk there, a
+   * remote one streams it. Resolves with the build id of the image the
+   * daemon resolved (remote sessions) for the trailer.
    */
   async exportCheckpoint(
     destination: string,
   ): Promise<{ buildId: string | null }> {
     const transport = this.requireTransport();
+    const buildIdOf = (result: Record<string, unknown> | undefined) => ({
+      buildId: typeof result?.build_id === "string" ? result.build_id : null,
+    });
+    if (!this.internalOptions.remote) {
+      return buildIdOf(
+        await transport.request("checkpoint_export", {
+          path: path.resolve(destination),
+        }),
+      );
+    }
     const fd = fs.openSync(destination, "w");
     try {
       const result = await transport.request(
@@ -584,9 +607,7 @@ export class NativeSandboxServer extends EventEmitter {
         },
       );
       fs.fsyncSync(fd);
-      return {
-        buildId: typeof result.build_id === "string" ? result.build_id : null,
-      };
+      return buildIdOf(result);
     } finally {
       fs.closeSync(fd);
     }

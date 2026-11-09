@@ -14,7 +14,6 @@
       "npm",
       "python3",
       "qemu-system-aarch64",
-      "qemu-img",
       "docker",
       "docker-cli",
       "containerd",

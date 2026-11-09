@@ -52,10 +52,10 @@ pub struct Prepared {
     pub rootfs_resize_pending: bool,
     /// the resolved image
     pub image: ResolvedImage,
-    /// root disk attached to the VM
+    /// root disk as configured (`mode`/`size` applied by the session)
     pub root_disk: Option<RootDisk>,
-    /// private directory (root disk overlay); removed on drop
-    pub work_dir: Option<WorkDir>,
+    /// checkpoint to boot from (`checkpoint_import` in place before `start`)
+    pub checkpoint: Option<PathBuf>,
 }
 
 /// A temporary directory removed on drop.
@@ -323,7 +323,7 @@ pub fn prepare_with_image(
         }
         .to_string()
     };
-    let mut vm = VmConfig {
+    let vm = VmConfig {
         vmm: Some(vmm.clone()),
         krun_runner_path: krun.then(|| detected_runner.unwrap_or_else(krun_runner_path)),
         qemu_path: if krun { String::new() } else { qemu_path },
@@ -351,16 +351,9 @@ pub fn prepare_with_image(
         auto_restart: false,
         idle_pause_ms: (!krun && cfg!(target_os = "macos")).then_some(DARWIN_IDLE_PAUSE_MS),
     };
-    let needs_dir = matches!(mode.as_str(), "cow" | "checkpoint")
-        || (mode == "memory" && (krun || rootfs_size.is_some()));
-    let work_dir = if needs_dir {
-        Some(WorkDir::create("gondolin-cli").map_err(|e| format!("cannot create work dir: {e}"))?)
-    } else {
-        None
-    };
     if let Some(r) = resume {
-        // `VmCheckpoint.resume`: rebase the checkpoint onto this machine's
-        // rootfs (in place, metadata only) and boot a fresh overlay on it
+        // `VmCheckpoint.resume`: the session rebases the checkpoint onto this
+        // machine's rootfs and boots a fresh overlay on it
         let compatible = r.data.compatible_vmm();
         if !compatible.contains(&vmm) {
             return Err(format!(
@@ -368,30 +361,6 @@ pub fn prepare_with_image(
                 compatible.join(", ")
             ));
         }
-        let qemu_img = gondolind::rootdisk::qemu_img_path(&vm.qemu_path);
-        let rootfs_path = std::path::absolute(&image.rootfs).map_err(|e| e.to_string())?;
-        match crate::checkpoint::backing_file(&qemu_img, &r.path)? {
-            Some(b) if b == r.path => {
-                return Err(format!(
-                    "checkpoint is corrupt: qcow2 backing file points to itself ({})",
-                    r.path.display()
-                ));
-            }
-            Some(b) if b != rootfs_path => {
-                crate::checkpoint::rebase(&qemu_img, &r.path, &rootfs_path, false)?;
-            }
-            _ => {}
-        }
-        if let Some(disk) = vm.root_disk.as_mut() {
-            disk.path = r.path.display().to_string();
-            disk.format = "qcow2".into();
-            disk.mode = Some("cow".into());
-        }
-        let dir = &work_dir.as_ref().unwrap().0;
-        gondolind::rootdisk::prepare(&mut vm, dir, krun, None)?;
-    } else {
-        let dir = work_dir.as_ref().map(|d| d.0.clone()).unwrap_or_else(std::env::temp_dir);
-        gondolind::rootdisk::prepare(&mut vm, &dir, krun, None)?;
     }
     let root_disk = vm.root_disk.clone();
 
@@ -508,10 +477,6 @@ pub fn prepare_with_image(
 
     // --- payload (buildNativeConfigure)
     let mut vm_json = gondolin_wire::ToValue::to_value(&vm);
-    if let Some(disk) = vm_json.get_mut("root_disk") {
-        disk.remove("mode");
-        disk.remove("size");
-    }
     vm_json.remove("image");
     vm_json.remove("arch");
     if krun {
@@ -538,7 +503,7 @@ pub fn prepare_with_image(
         rootfs_resize_pending: rootfs_size.is_some(),
         image,
         root_disk,
-        work_dir,
+        checkpoint: resume.map(|r| r.path.clone()),
     })
 }
 

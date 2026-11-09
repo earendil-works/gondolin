@@ -25,12 +25,9 @@ test("remote configure carries no controller-local paths", () => {
   );
   const payload = buildNativeConfigure(
     resolved,
+    { rootDisk: { path: "", format: "", mode: "auto" } },
     {},
-    {},
-    {
-      image,
-      rootfsMode: "auto",
-    },
+    { image },
   );
   assertRemoteConfigure(payload);
   assert.equal(payload.vm.image, "alpine-base:latest");
@@ -134,6 +131,37 @@ test("remote session: checkpoint to a local file and resume it remotely", {
     const read = await resumed.exec(["/bin/cat", "/opt/marker"]);
     assert.equal(read.exitCode, 0, read.stderr);
     assert.equal(read.stdout, "remote-checkpoint\n");
+
+    // checkpointing the resumed session collapses its chain onto the
+    // daemon's rootfs: the new checkpoint still has what only the first one
+    // held (a file the resumed session does not touch)
+    const big = await resumed.exec([
+      "/bin/sh",
+      "-c",
+      "dd if=/dev/urandom of=/srv/big bs=1M count=4 2>/dev/null && sync && md5sum /srv/big",
+    ]);
+    assert.equal(big.exitCode, 0, big.stderr);
+    const second = await resumed.checkpoint(path.join(dir, "second.qcow2"));
+    resumed = (await VmCheckpoint.load(second.path).resume({
+      sandbox: { console: "none" },
+    })) as VM;
+    const third = await resumed.exec([
+      "/bin/sh",
+      "-c",
+      "echo third > /opt/marker3 && sync",
+    ]);
+    assert.equal(third.exitCode, 0, third.stderr);
+    const last = await resumed.checkpoint(path.join(dir, "third.qcow2"));
+    resumed = (await VmCheckpoint.load(last.path).resume({
+      sandbox: { console: "none" },
+    })) as VM;
+    const all = await resumed.exec([
+      "/bin/sh",
+      "-c",
+      "cat /opt/marker /opt/marker3 && md5sum /srv/big",
+    ]);
+    assert.equal(all.exitCode, 0, all.stderr);
+    assert.equal(all.stdout, `remote-checkpoint\nthird\n${big.stdout}`);
   } finally {
     await resumed?.close();
     await vm.close().catch(() => {});

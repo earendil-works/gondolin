@@ -4,6 +4,7 @@ exclude = ["fuzz"]
 resolver = "3"
 members = [
     "crates/gondolin-log",
+    "crates/gondolin-qcow2",
     "crates/gondolin-wire",
     "crates/gondolin-http",
     "crates/gondolin-proto",
@@ -26,6 +27,7 @@ publish = false
 
 [workspace.dependencies]
 gondolin-log = { path = "crates/gondolin-log" }
+gondolin-qcow2 = { path = "crates/gondolin-qcow2" }
 gondolin-wire = { path = "crates/gondolin-wire" }
 gondolin-http = { path = "crates/gondolin-http" }
 gondolin-proto = { path = "crates/gondolin-proto" }

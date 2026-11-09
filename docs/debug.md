@@ -160,6 +160,10 @@ gondolind --version
 echo '{"vm": {"qemu_path": "qemu-system-aarch64", "kernel_path": "/k", "initrd_path": "/i", "memory": "1G", "cpus": 2}}' \
   | gondolind --qemu-args
 
+# format, virtual size and backing file of a disk image or checkpoint (JSON),
+# what `qemu-img info` would report
+gondolind --disk-info ~/.cache/gondolin/checkpoints/dev-base.qcow2
+
 # load or create the MITM CA in a directory and print its certificate
 # (default directory: ~/.cache/gondolin/ssl)
 gondolind --mitm-ca ~/.cache/gondolin/ssl
@@ -191,10 +195,18 @@ built.
 **`the node engine has been removed; ...`**: drop `engine: "node"`,
 `GONDOLIN_ENGINE=node` or `--engine node`. See [Upgrading](./upgrading.md).
 
-**`Error: QEMU binary 'qemu-system-aarch64' not found.`** (CLI) or a
-`spawnSync qemu-system-... ENOENT` error (SDK): install QEMU on the machine
-the daemon runs on (`brew install qemu`, `sudo apt install qemu-system`), or
-point `sandbox.qemuPath` at it.
+**`Error: QEMU binary 'qemu-system-aarch64' not found.`** (Node CLI, followed
+by the install command for your platform),
+**`QEMU binary '...' not found: install QEMU or use the krun backend (sandbox.vmm: "krun")`**
+(SDK) or **`qemu-system-aarch64 not found: install QEMU (macOS: brew install
+qemu; Debian/Ubuntu: apt install qemu-system-arm) or use --vmm krun`** (static
+CLI): the VM uses the `qemu` backend and QEMU is missing. Install it on the
+machine the daemon runs on (`brew install qemu`; on Debian/Ubuntu
+`qemu-system-arm` for `qemu-system-aarch64`, `qemu-system-x86` for
+`qemu-system-x86_64`), point `sandbox.qemuPath` at it, or use krun where the
+host supports it (see [VM Backends](./backends.md#default-backend-selection)).
+A remote daemon reports `cannot run qemu-system-...` when the VM starts.
+`qemu-img` is not needed.
 
 **`vm startup timed out after 120000ms while waiting for guest readiness`**:
 the guest did not boot, connect, or mount its filesystems in time. Check the
@@ -255,6 +267,34 @@ Homebrew's QEMU does not), krun needs a runner with the `virtiofs-socket`
 capability, and images whose `sandboxfs` predates virtio-fs always use
 sandboxfs. `GONDOLIN_VIRTIOFS=1` turns the message into a warning;
 `GONDOLIN_VIRTIOFS=0` forces sandboxfs. See [Files and Mounts](./vfs.md).
+
+### Root Disks and Checkpoints
+
+**`cannot resume checkpoint ...`**: the daemon refused the checkpoint's qcow2
+header (external data file, encryption, extended L2 entries, corrupt flag,
+unknown features or `repeated header extension ...`) or its backing chain does not end in the image's rootfs
+after the rebase. Checkpoints written by Gondolin pass; see
+[Persistence and Snapshots](./snapshots.md#validation-on-resume).
+
+**`backing file without a backing format (set it with qemu-img rebase -u -F raw|qcow2)`**:
+a qcow2 `sandbox.rootDiskPath` (or a file in its chain) names its backing
+file without recording its format. Run
+`qemu-img rebase -u -F raw -b BACKING DISK` (or `-F qcow2`). Related
+refusals: `backing file name "..." is not a file path` (a protocol or JSON
+name such as `json:` or `nbd:`), `unsupported backing format "..."`,
+`repeated header extension ...`, `not a regular file`, `backing chain loop
+at ...` and `backing chain too long`. A block device as `rootDiskPath` must
+be attached raw (`a block device can only be attached as a raw disk
+(sandbox.rootDiskFormat "raw"), not qcow2`), and `rootfs.size` on it fails
+with `block device ... has N bytes, less than M (block devices are not
+resized)` when it is too small. See
+[Security Design](./security.md#root-disks-and-checkpoints).
+
+**`cannot checkpoint: ...`**: the root disk cannot be exported: `root disk
+is running in ephemeral snapshot mode` (`rootfs.mode: "memory"` on QEMU),
+`root disk must be qcow2 (got ...)` (`readonly` mode or a raw own disk),
+`root disk is read-only` (`sandbox.rootDiskReadOnly`), or the image has no
+`buildId`. See [Persistence and Snapshots](./snapshots.md#creating-a-checkpoint).
 
 ### Network
 

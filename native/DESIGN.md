@@ -115,9 +115,9 @@ controller's temp, cache, home and working directories):
 
 - the image is a selector (`native.image`, else a string `sandbox.imagePath`,
   else the daemon's default image) resolved by the daemon (`vm.image`);
-- the root disk is prepared by the daemon (`root_disk.mode` cow/memory/
-  readonly/auto and `size`, qcow2 overlay in the session directory via
-  `qemu-img`); `rootfs.size` still grows the filesystem in the guest;
+- the root disk is prepared by the daemon as for every session (see "Root
+  disks and checkpoints"), with `root_disk.path` empty (the rootfs of
+  `vm.image`) and `mode` possibly `auto` (the image manifest's default);
 - the VMM binary is checked by the daemon at `start`; `getHostPid()` is `null`
   (`getVmmPid()` has the daemon-side pid);
 - the network is served by the daemon (`net: { mode: "native" }`) and MITM
@@ -130,16 +130,60 @@ controller's temp, cache, home and working directories):
 - SSH and ingress keys and listeners stay in the controller (they serve the
   controller's user), streams use `fwd_*`;
 - checkpoints stay controller-side files in the SDK's format (qcow2 + JSON
-  trailer): `vm.checkpoint()` asks the daemon to stop the VM and stream its
-  overlay (`checkpoint_export`) and appends the trailer locally (build id from
-  `configure_result.image`); `VmCheckpoint.resume()` on a remote daemon uploads
-  the file before boot (`checkpoint_import`, `root_disk.mode = "checkpoint"`),
-  the daemon rebases it onto its copy of the image (resolved by build id; the
-  daemon's local default image counts when its build id matches) and boots it
-  below a fresh overlay. The CLI's `snapshot`/`bash --resume` work the same
-  way;
+  trailer): `checkpoint_export` streams the disk instead of moving it (build
+  id for the trailer from `configure_result.image`) and
+  `VmCheckpoint.resume()` uploads the file before boot (`checkpoint_import`
+  without `path`); the daemon resolves the image by build id (its local
+  default image counts when its build id matches). The CLI's
+  `snapshot`/`bash --resume` work the same way;
 - not supported remotely (clear errors): `sandbox.rootDisk*`, socket path
   overrides, `imagePath` with explicit asset paths.
+
+### Root disks and checkpoints
+
+The daemon prepares every root disk (`rootdisk.rs` on `gondolin-qcow2`; no
+controller runs `qemu-img`). The controller sends `root_disk { path, format,
+mode?, size? }`: the image's rootfs with a `mode` (`cow`: qcow2 overlay in the
+session's socket directory, `memory`: QEMU `snapshot=on` or an overlay on krun
+and with `size`, `readonly`, `auto`, `checkpoint`), or without a mode its own
+disk (`sandbox.rootDisk*`, attached as is; `size` grows it in place). `size`
+grows the overlay before boot; the controller runs `resize2fs` in the guest.
+
+Checkpoints are the SDK's single-file format (qcow2 + JSON trailer
+`[json][GONDCPT1][u64be length]`, appended by the controller):
+
+- `checkpoint_export { path? }` stops the VM, collapses the disk's backing
+  chain onto the rootfs (a resumed session's disk is an overlay on the
+  checkpoint it was resumed from; safe rebase), then moves the disk to `path`
+  (local daemons: same filesystem; an atomic rename, across filesystems a
+  synced copy next to `path` renamed over it, so `path` may be the
+  checkpoint the session was resumed from) or streams it (remote daemons, no
+  `path`). The exportable disk is the overlay the daemon created or the
+  controller's own writable qcow2 disk; a chain that does not contain the
+  rootfs (the controller's disk, an overlay on a standalone checkpoint) is
+  collapsed onto its bottom raw file or flattened into a standalone image.
+  Other disks are refused with the SDK's messages (snapshot mode, not qcow2,
+  read-only). After an export the session refuses to start the VM again
+  (`start`/restart/boot/auto-restart: `invalid_state`) and a second export.
+- `checkpoint_import { path? }` before `start` with `root_disk.mode =
+  "checkpoint"`: a local daemon uses the checkpoint file in place, a remote
+  one receives it as `checkpoint_data`. At `start` its backing file is
+  pointed at this session's rootfs (metadata only, in place; a checkpoint
+  naming itself is refused as corrupt) and the VM boots on a fresh overlay
+  on it. Checkpoints written by `qemu-img` (earlier releases) work the same.
+- Untrusted disks: every qcow2 the VMM is handed that the daemon did not
+  just create (an imported checkpoint, local or uploaded; the controller's
+  own disk; a qcow2 rootfs below an overlay) is validated with its whole
+  backing chain (`gondolin_qcow2::validate_chain`): regular files only, no
+  external data file (QEMU and libkrun's imago open the file the header
+  names, imago writable), no encryption, extended L2, corrupt flag or
+  unknown incompatible features, and every backing reference a plain path
+  (no `json:`/protocol names) with an explicit `raw`/`qcow2` format. An
+  imported checkpoint's header is checked before its backing file is
+  rewritten (name and format), and afterwards its chain must be exactly the
+  session's rootfs and the rootfs's own chain.
+- `gondolind --disk-info PATH` prints what `qemu-img info` would (format,
+  virtual size, backing file), for tests and debugging.
 
 `host/scripts/test-native-remote.sh` proves this on one machine: the daemon
 runs through `host/scripts/gondolind-remote-sim.sh` (empty environment, its own
@@ -168,8 +212,9 @@ What changed for SDK users when the native engine replaced the node engine:
 - Diagnostics: debug output was ported but is not byte-identical (daemon
   stderr lines arrive as `error` debug events; `log` events of QEMU and the
   protocol are ported); error messages surfaced to callers kept their text.
-- The krun Hypervisor entitlement check and `qemu-img` overlays run in the
-  controller for local sessions (remote sessions do both daemon-side).
+- The krun Hypervisor entitlement check runs in the controller for local
+  sessions (remote sessions: daemon-side). Root disks and checkpoints are the
+  daemon's for both (no `qemu-img`); QEMU is needed only for `vmm=qemu`.
 
 ## Rust workspace (`native/`)
 
@@ -186,6 +231,7 @@ What changed for SDK users when the native engine replaced the node engine:
 | `gondolin-hooks-djs` | tier-2 hooks: a JavaScript policy (`configure.net.djs_hooks`) as a `HookBackend` on djs-embed (shim, adapter, decision validation) | hooks |
 | `gondolin-assets` | guest image resolution: refs/build ids/paths, builtin registry, shared image store, HTTPS downloads | images |
 | `gondolin-sshproxy` | exec-only SSH egress: guest-facing SSH server per flow, upstream SSH client (known_hosts, agent/key auth, caps, timeouts) | upstream SSH |
+| `gondolin-qcow2` | qcow2 without `qemu-img` (std only): header/extension parsing, overlay creation, in-place backing file rewrite (`rebase -u`), grow (L1 relocation), safe rebase that collapses a backing chain (resumed checkpoints); used by `gondolind::rootdisk` for every session | disk images |
 | `gondolind` | library + binary: controller protocol, session, QEMU/krun, guest control channel, wiring, in-process embedding (`embed`) | glue |
 | `gondolin-cli` | the multi-call `gondolin` binary: static CLI on an in-process controller, and the daemon (`gondolin daemon`) | CLI |
 
@@ -564,8 +610,8 @@ EOF on a pipe from the daemon). `configure` carries:
 
 - `vm`: `vmm?: qemu|krun`, `qemu_path`, `krun_runner_path?`, `image?`,
   `arch?`, `kernel_path`, `initrd_path`, `root_disk?: { path, format:
-  raw|qcow2, read_only, snapshot, mode?: cow|memory|readonly|auto, size? }`
-  (`mode`: the daemon prepares the disk, see "Remote sessions"), `memory`,
+  raw|qcow2, read_only, snapshot, mode?: cow|memory|readonly|auto|checkpoint,
+  size? }` (the daemon prepares the disk, see "Root disks and checkpoints"), `memory`,
   `cpus`, `machine_type?`, `accel?`, `cpu?`, `console?: stdio|none`, `append?` (replaces the default cmdline),
   `append_extra: [..]` (e.g. `gondolin.tmpfs=`), `mac?`, `auto_restart`,
   `idle_pause_ms?` (qemu only). QEMU arguments, accelerator/machine/cpu
@@ -853,7 +899,7 @@ the same protocol as the TypeScript controller). Modules:
 - `args`: the flag parsers of `host/bin/gondolin.ts` (same errors).
 - `configure`: the `configure` payload for the CLI options, the counterpart
   of `VM.create()` + `NativeSandboxServer.buildConfigure()` (image resolution
-  with `gondolin-assets`, root disk via `rootdisk::prepare`, mount table
+  with `gondolin-assets`, root disk mode and size for the session, mount table
   incl. the MITM CA `static` mount and the `/etc/gondolin` object mount,
   network via `gondolin_egress::cli_policy`). Both CLIs print it with
   `--print-configure`; `host/test/cli-configure-parity.test.ts` compares them.
@@ -862,7 +908,8 @@ the same protocol as the TypeScript controller). Modules:
   `etc_mount` from memory).
 - `vm`, `session`: boot and readiness (`ensureRunning`, rootfs resize, mount
   checks), clients and execs with output windows and stdin acks, checkpoints
-  (`checkpoint`, the SDK's qcow2 + trailer format), registry entry and IPC
+  (`checkpoint_export`/`checkpoint_import` with local paths, the SDK's qcow2 +
+  trailer format), registry entry and IPC
   socket (`registry`, the `SessionIpcServer` protocol with id remapping).
 - `ssh`, `ingress`, `fwd`: `--ssh` and `--listen` over the `ssh`/`ingress`
   forwarder channels (`gondolin-http` for the gateway, WebSocket upgrades tunneled).

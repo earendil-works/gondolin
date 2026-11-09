@@ -1,0 +1,13 @@
+[package]
+name = "gondolin-qcow2"
+description = "Dependency-free qcow2 overlay handling (create, backing file, grow, safe rebase) replacing qemu-img"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
+gondolin-wire.workspace = true

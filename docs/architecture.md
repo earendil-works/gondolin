@@ -38,8 +38,8 @@ Responsibilities:
   VFS providers, VFS hooks (see
   [What Calls Back Into Your Process](#what-calls-back-into-your-process))
 - The SSH and ingress listeners (`vm.enableSsh()`, `vm.enableIngress()`)
-- For a daemon on the same machine: resolving and downloading guest images,
-  preparing the copy-on-write root disk and creating the TLS interception CA
+- For a daemon on the same machine: resolving and downloading guest images
+  and creating the TLS interception CA
 
 Key concepts you interact with:
 
@@ -65,6 +65,10 @@ binary is found.
 What it does itself, without calling back into your process:
 
 - Starts and supervises the VMM (QEMU or the krun runner)
+- Prepares the root disk with its own qcow2 implementation (copy-on-write
+  overlays, `rootfs.size`, checkpoint export and resume; no `qemu-img`) and
+  validates every disk it did not create before the VMM opens it (see
+  [Security Design](./security.md#root-disks-and-checkpoints))
 - Speaks the guest control protocol (exec, file transfer, clock sync)
 - Runs the network stack (Ethernet, ARP, DHCP, IPv4, ICMP, DNS, TCP), the
   HTTP/1.1 bridge, TLS interception, WebSockets, mapped TCP and the SSH

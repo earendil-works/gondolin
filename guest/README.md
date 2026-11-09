@@ -81,4 +81,5 @@ them):
 npx @earendil-works/gondolin bash
 ```
 
-The host manages the full QEMU lifecycle automatically.
+The Gondolin daemon manages the VM lifecycle (krun or QEMU, see
+[VM Backends](../docs/backends.md)) automatically.

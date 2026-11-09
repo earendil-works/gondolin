@@ -313,6 +313,14 @@ impl Vm {
                 .request_value("configure", json_to_cbor(&prepared.configure))
                 .await
                 .map_err(|e| e.message)?;
+            if let Some(path) = &prepared.checkpoint {
+                // the session uses the checkpoint file in place
+                let path = path.display().to_string();
+                engine
+                    .request_value("checkpoint_import", gondolin_wire::value!({ "path": path }))
+                    .await
+                    .map_err(|e| e.message)?;
+            }
             engine.request("start", &gondolin_wire::Value::map()).await.map_err(|e| e.message)?;
             let client = Client::open(engine.clone(), 1).await;
             client
@@ -463,10 +471,12 @@ impl Vm {
             return Err(format!("checkpointPath must be an absolute path (got: {path})"));
         }
         let disk = self.prepared.root_disk.clone().ok_or("vm has no root disk")?;
-        if disk.snapshot {
+        let krun = self.prepared.configure["vm"]["vmm"].as_str() == Some("krun");
+        let mode = disk.mode.as_deref().unwrap_or("");
+        if mode == "memory" && !krun && disk.size.is_none() {
             return Err("cannot checkpoint: root disk is running in ephemeral snapshot mode".into());
         }
-        if disk.format != "qcow2" {
+        if mode == "readonly" {
             return Err(format!(
                 "cannot checkpoint: root disk must be qcow2 (got {})",
                 disk.format
@@ -475,39 +485,31 @@ impl Vm {
         let build_id = self.prepared.image.build_id.clone().ok_or(
             "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)",
         )?;
-        // best-effort flush of guest buffers (QEMU is stopped abruptly)
+        // best-effort flush of guest buffers (the VMM is stopped abruptly)
         let _ = tokio::time::timeout(
             Duration::from_secs(10),
             self.run(&["/bin/sh", "-c", "sync; sync"]),
         )
         .await;
+        // the session stops the VM, collapses a resumed checkpoint's chain
+        // onto the rootfs and moves the disk next to the target; the target
+        // is replaced only once the trailer is written (it may be the
+        // checkpoint this session was resumed from)
+        let file_name =
+            target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let partial = target.with_file_name(format!(".{file_name}.partial-{}", std::process::id()));
+        let exported = self
+            .engine
+            .request_value(
+                "checkpoint_export",
+                gondolin_wire::value!({ "path": partial.display().to_string() }),
+            )
+            .await
+            .map_err(|e| e.message);
         self.engine.shutdown().await;
-
-        let overlay = std::path::PathBuf::from(&disk.path);
-        let qemu_img = gondolind::rootdisk::qemu_img_path(
-            self.prepared.configure["vm"]["qemu_path"].as_str().unwrap_or(""),
-        );
-        let rootfs = std::path::absolute(&self.prepared.image.rootfs).map_err(|e| e.to_string())?;
-        if let Some(backing) = crate::checkpoint::backing_file(&qemu_img, &overlay)?
-            && backing != rootfs
-        {
-            // collapse resume ancestry onto the rootfs
-            crate::checkpoint::rebase(&qemu_img, &overlay, &rootfs, true)?;
-            if crate::checkpoint::backing_file(&qemu_img, &overlay)?.as_deref() == Some(&target) {
-                return Err(format!(
-                    "cannot checkpoint: rebased overlay still points to destination checkpoint path ({})",
-                    target.display()
-                ));
-            }
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let _ = std::fs::remove_file(&target);
-        if std::fs::rename(&overlay, &target).is_err() {
-            std::fs::copy(&overlay, &target)
-                .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-            let _ = std::fs::remove_file(&overlay);
+        if let Err(err) = exported {
+            let _ = std::fs::remove_file(&partial);
+            return Err(err);
         }
         let name = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let vmm = self.prepared.configure["vm"]["vmm"].as_str().unwrap_or("qemu").to_string();
@@ -529,7 +531,19 @@ impl Vm {
             created_with_vmm: Some(vmm),
             compatible_vmm: Some(compatible),
         };
-        crate::checkpoint::write_trailer(&target, &data)?;
+        let finish = || -> Result<(), String> {
+            crate::checkpoint::write_trailer(&partial, &data)?;
+            std::fs::rename(&partial, &target)
+                .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+            if let Some(dir) = target.parent() {
+                crate::checkpoint::sync_dir(dir);
+            }
+            Ok(())
+        };
+        if let Err(err) = finish() {
+            let _ = std::fs::remove_file(&partial);
+            return Err(err);
+        }
         Ok((target.display().to_string(), name))
     }
 }
@@ -580,9 +594,12 @@ fn check_vmm(prepared: &Prepared) -> Result<(), String> {
     {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("{path} --version failed ({s})")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "{path} not found: install QEMU (brew install qemu / apt install qemu-system)"
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let apt = if path.contains("x86_64") { "qemu-system-x86" } else { "qemu-system-arm" };
+            Err(format!(
+                "{path} not found: install QEMU (macOS: brew install qemu; Debian/Ubuntu: apt install {apt}) or use --vmm krun"
+            ))
+        }
         Err(e) => Err(format!("cannot run {path}: {e}")),
     }
 }

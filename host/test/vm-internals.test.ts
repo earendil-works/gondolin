@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +9,6 @@ import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
 import { createExecSession } from "../src/exec.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
-import { getImageVirtualSizeBytes } from "../src/qemu/img.ts";
 import type { RootfsMode } from "../src/build/config.ts";
 
 function makeTempResolvedServerOptions() {
@@ -89,13 +87,10 @@ function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
   );
 }
 
-function hasQemuImg(): boolean {
-  try {
-    execFileSync("qemu-img", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+/** The root disk the VM would send to the daemon (`configure.vm.root_disk`) */
+async function rootDiskOf(vm: VM): Promise<Record<string, unknown>> {
+  const { configure } = await vm.describeNativeConfigure();
+  return (configure.vm as Record<string, any>).root_disk;
 }
 
 function makeVm(options: VMOptions = {}) {
@@ -148,12 +143,11 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
 
   try {
     const resolved = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskReadOnly, true);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, true);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.path, resolved.rootfsPath);
+    assert.equal(rootDisk.format, "raw");
+    assert.equal(rootDisk.mode, "readonly");
+    assert.equal(rootDisk.size, undefined);
   } finally {
     await vm.close();
     cleanup();
@@ -216,12 +210,7 @@ test("vm internals: manifest runtimeDefaults.rootfsMode is used by default", asy
   const vm = new VM({ autoStart: false, vfs: null }, resolved as any);
 
   try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskReadOnly, true);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, true);
+    assert.equal((await rootDiskOf(vm)).mode, "readonly");
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -242,24 +231,16 @@ test("vm internals: rootfs option overrides manifest default", async () => {
   );
 
   try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskReadOnly, false);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, true);
-    assert.equal(rootDisk.readOnly, false);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.mode, "memory");
+    assert.equal(rootDisk.read_only, false);
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
-
+test("vm internals: rootfs cow mode asks the daemon for an overlay", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
     vfs: null,
@@ -268,71 +249,75 @@ test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => 
 
   try {
     const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskFormat, "qcow2");
-    assert.equal(resolved.rootDiskReadOnly, false);
+    const rootDisk = await rootDiskOf(vm);
+    // the daemon creates the overlay on the rootfs when the VM starts
+    assert.equal(rootDisk.path, resolved.rootfsPath);
+    assert.equal(rootDisk.mode, "cow");
+    assert.equal(rootDisk.read_only, false);
     assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-    assert.equal(fs.existsSync(rootDisk.path), true);
   } finally {
     await vm.close();
     cleanup();
   }
 });
 
-test("vm internals: rootfs size grows cow overlay before boot", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
+for (const mode of ["cow", "memory"] as const) {
+  test(`vm internals: rootfs size is applied by the daemon (${mode} mode)`, async () => {
+    const { vm, cleanup } = makeVm({
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode, size: "64M" },
+    });
 
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "cow", size: "64M" },
+    try {
+      const rootDisk = await rootDiskOf(vm);
+      assert.equal(rootDisk.mode, mode);
+      assert.equal(rootDisk.size, 64 * 1024 * 1024);
+      assert.equal((vm as any).rootfsGuestResizePending, true);
+    } finally {
+      await vm.close();
+      cleanup();
+    }
   });
+}
 
+test("vm internals: own root disks are sent as is, rootfs size grows them", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const rootDiskPath = path.join(dir, "mine.qcow2");
+  fs.writeFileSync(rootDiskPath, "");
+  const vm = new VM(
+    {
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode: "readonly", size: "64M" },
+      sandbox: { rootDiskPath, rootDiskFormat: "qcow2" },
+    },
+    resolved as any,
+  );
   try {
-    const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal((vm as any).rootfsGuestResizePending, true);
-    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.path, rootDiskPath);
+    assert.equal(rootDisk.format, "qcow2");
+    assert.equal(rootDisk.mode, undefined);
+    assert.equal(rootDisk.size, 64 * 1024 * 1024);
   } finally {
     await vm.close();
-    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("vm internals: rootfs size uses resized overlay for qemu memory mode", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
-
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "memory", size: "64M" },
-  });
-
-  try {
-    const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskFormat, "qcow2");
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-    assert.equal((vm as any).rootfsGuestResizePending, true);
-    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
-  } finally {
-    await vm.close();
-    cleanup();
+test("vm internals: checkpoints of disks that are not qcow2 overlays fail early", async () => {
+  for (const [rootfs, message] of [
+    [{ mode: "readonly" }, /root disk must be qcow2 \(got raw\)/],
+    [{ mode: "memory" }, /ephemeral snapshot mode/],
+  ] as const) {
+    const { vm, cleanup } = makeVm({ autoStart: false, vfs: null, rootfs });
+    try {
+      await assert.rejects(() => vm.checkpoint("/tmp/never.qcow2"), message);
+    } finally {
+      await vm.close();
+      cleanup();
+    }
   }
 });
 

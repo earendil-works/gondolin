@@ -31,7 +31,9 @@ The backend is chosen in this order:
       `cpu`, `qemuIdlePauseMs`); setting one selects `qemu`
 
 So macOS arm64 and Linux x86_64 installs from npm boot with `krun` out of the
-box, and every other setup keeps working with `qemu`.  Pin a backend with
+box, and every other setup keeps working with `qemu`.  QEMU only has to be
+installed when a VM ends up on the `qemu` backend: root disks and checkpoints
+are prepared by the daemon on both backends.  Pin a backend with
 `GONDOLIN_VMM=qemu` (or `sandbox.vmm`, `--vmm`) when you rely on QEMU-only
 behavior such as the faster vhost-user virtio-fs on Linux.
 
@@ -58,7 +60,7 @@ Two cases keep `qemu` as the default:
 | `sandbox.cpus`                                                 | ✓      | ✓      | Shared high-level CPU count option                                                                                           |
 | `sandbox.memory`                                               | ✓      | ✓      | `krun` parses memory and passes MiB to `libkrun`                                                                             |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓      | ✓      | Supported on both backends; not with a [remote daemon](./remote.md)                                                          |
-| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay via `qemu-img` (ephemeral writes, not RAM-backed) |
+| `rootfs.mode = "memory"`                                       | ✓      | ✓      | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay the daemon creates (ephemeral writes, not RAM-backed) |
 | `rootfs.mode = "cow"`                                          | ✓      | ✓      | Writable qcow2 copy-on-write overlay on both backends; the overlay does not modify the original rootfs image                |
 | `rootfs.size`                                                   | ✓      | ✓      | Ensures the effective writable root disk is at least the requested size before boot and runs `resize2fs` in the guest; requires `resize2fs` in the image |
 | `vm.checkpoint()` / checkpoint resume                          | ✓      | ✓      | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build         |

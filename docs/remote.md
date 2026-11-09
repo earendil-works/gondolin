@@ -24,7 +24,9 @@ const vm = await VM.create({
 
 The remote machine needs the `gondolin` binary (see
 [Getting the Binary onto Another Machine](#getting-the-binary-onto-another-machine))
-and QEMU or the krun runner. Node.js is only needed where the controller runs.
+and QEMU (the default backend for remote daemons, see [Backend](#configuration)
+below) or the krun runner; no `qemu-img`. Node.js is only needed where the
+controller runs.
 
 ## How It Works
 
@@ -114,7 +116,7 @@ files):
 - **Root disks** are prepared by the daemon: the `rootfs.mode` (`cow`,
   `memory`, `readonly`, or the image manifest's default) and `rootfs.size`
   work as usual, and the copy-on-write overlay lives in the daemon's session
-  directory.
+  directory, as it does locally.
 - **Checkpoints** (`vm.checkpoint()`, `gondolin snapshot`) are written on the
   controller in the usual single-file format: the daemon stops the VM and
   streams its disk overlay. Resuming (`VmCheckpoint.resume()`,

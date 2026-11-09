@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
-import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
+import { parseDiskSizeToBytes } from "../src/vm/disk.ts";
 import { VM } from "../src/vm/core.ts";
 import {
   nativeDaemonCommand,
@@ -203,8 +203,12 @@ function renderCliError(err: unknown) {
       if (process.platform === "darwin") {
         console.error("  brew install qemu");
       } else {
+        // Debian/Ubuntu package the aarch64 and x86_64 emulators separately
+        const pkg = binary.includes("x86_64")
+          ? "qemu-system-x86"
+          : "qemu-system-arm";
         console.error(
-          "  sudo apt install qemu-system (or equivalent for your distro)",
+          `  sudo apt install ${pkg} (Debian/Ubuntu, or equivalent for your distro)`,
         );
       }
       return;

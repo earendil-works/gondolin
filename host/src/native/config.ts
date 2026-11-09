@@ -33,7 +33,7 @@ export type NativeEngineOptions = {
   remote?: boolean;
   /** image selector for remote daemons (`name:tag`, build id or daemon-side directory; default image when absent) */
   image?: string;
-  /** local checkpoint file to boot from (remote resume; uploaded to the daemon) */
+  /** local checkpoint file to boot from (`VmCheckpoint.resume`; a remote daemon gets an upload, a local one uses the file in place) */
   checkpoint?: string;
 };
 
@@ -144,24 +144,44 @@ export type NativeSubsystems = {
 export type NativeRemoteConfig = {
   /** image selector ("" = the daemon's default image) */
   image: string;
-  /** rootfs mode (`auto` = the image manifest's default, `checkpoint` = boot `checkpointPath`) */
-  rootfsMode: "auto" | "cow" | "memory" | "readonly" | "checkpoint";
-  /** local checkpoint file uploaded before boot (controller-side, never sent as a path) */
-  checkpointPath?: string;
-  /** minimum rootfs size in `bytes` */
-  rootfsSizeBytes?: number;
   /** daemon-side qemu binary given explicitly by the user */
   qemuPath?: string;
   /** daemon-side krun runner given explicitly by the user */
   krunRunnerPath?: string;
 };
 
+/** Root disk mode applied by the daemon (`configure.vm.root_disk.mode`) */
+export type NativeRootDiskMode =
+  | "auto"
+  | "cow"
+  | "memory"
+  | "readonly"
+  | "checkpoint";
+
+/**
+ * The root disk as sent to the daemon (`configure.vm.root_disk`), which
+ * prepares it: overlays, `memory`/`readonly`, resizing and checkpoint
+ * rebasing all happen in `gondolind`.
+ */
+export type NativeRootDisk = {
+  /** disk image ("" = the rootfs of the daemon-resolved image) */
+  path: string;
+  /** `raw` or `qcow2` ("" = the format of the image's rootfs) */
+  format: string;
+  /** attach read-only (the controller's own disk) */
+  readOnly?: boolean;
+  /** how the daemon prepares the disk (`auto` = the image manifest's default, `checkpoint` = boot the imported checkpoint); absent: use `path` as is */
+  mode?: NativeRootDiskMode;
+  /** minimum virtual size in `bytes` */
+  size?: number;
+};
+
 /** Build the `configure` payload */
 export function buildNativeConfigure(
   options: ResolvedSandboxServerOptions,
   internal: {
-    /** qemu root disk volatility mode */
-    qemuRootDiskVolatileMode?: "snapshot";
+    /** root disk for the daemon */
+    rootDisk?: NativeRootDisk;
   },
   subsystems: NativeSubsystems,
   remote?: NativeRemoteConfig,
@@ -171,6 +191,17 @@ export function buildNativeConfigure(
     appendExtra.push(buildTmpfsAppend(options.tmpfs));
   }
   const krun = options.vmm === "krun";
+  const disk = internal.rootDisk;
+  const rootDisk = disk
+    ? {
+        path: disk.path,
+        format: disk.format,
+        read_only: disk.readOnly ?? false,
+        snapshot: false,
+        mode: disk.mode,
+        size: disk.size,
+      }
+    : undefined;
   const vm = remote
     ? {
         vmm: options.vmm,
@@ -179,12 +210,7 @@ export function buildNativeConfigure(
         image: remote.image,
         kernel_path: "",
         initrd_path: "",
-        root_disk: {
-          path: "",
-          format: "",
-          mode: remote.rootfsMode,
-          size: remote.rootfsSizeBytes,
-        },
+        root_disk: rootDisk,
       }
     : {
         vmm: options.vmm,
@@ -192,14 +218,7 @@ export function buildNativeConfigure(
         qemu_path: krun ? "" : options.qemuPath,
         kernel_path: options.kernelPath,
         initrd_path: options.initrdPath,
-        root_disk: options.rootDiskPath
-          ? {
-              path: options.rootDiskPath,
-              format: options.rootDiskFormat ?? "raw",
-              read_only: options.rootDiskReadOnly ?? false,
-              snapshot: internal.qemuRootDiskVolatileMode === "snapshot",
-            }
-          : undefined,
+        root_disk: rootDisk,
       };
   return {
     vm: {

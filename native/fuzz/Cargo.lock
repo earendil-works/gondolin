@@ -247,6 +247,7 @@ dependencies = [
  "gondolin-http",
  "gondolin-netstack",
  "gondolin-proto",
+ "gondolin-qcow2",
  "gondolin-sshproxy",
  "gondolin-wire",
  "gondolind",
@@ -304,6 +305,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gondolin-qcow2"
+version = "0.14.0"
+
+[[package]]
 name = "gondolin-sshproxy"
 version = "0.14.0"
 dependencies = [
@@ -353,6 +358,7 @@ dependencies = [
  "gondolin-log",
  "gondolin-netstack",
  "gondolin-proto",
+ "gondolin-qcow2",
  "gondolin-sshproxy",
  "gondolin-vfs",
  "gondolin-virtiofs",

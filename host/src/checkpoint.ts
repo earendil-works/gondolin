@@ -7,14 +7,6 @@ import {
 import path from "node:path";
 
 import {
-  createTempQcow2Overlay,
-  ensureQemuImgAvailable,
-  inferDiskFormatFromPath,
-  rebaseQcow2InPlace,
-  resolveQcow2BackingPath,
-} from "./qemu/img.ts";
-
-import {
   findCommonAssetDir,
   loadAssetManifest,
   loadGuestAssets,
@@ -33,8 +25,9 @@ const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 // Trailer format (appended to the end of the qcow2 file):
 //   [utf8 json bytes][8-byte magic][u64be json length]
 //
-// QEMU/qemu-img tolerate trailing bytes after the qcow2 image. We use that to
-// store the checkpoint metadata in the same file.
+// qcow2 readers (QEMU, libkrun, gondolind) ignore bytes after the image
+// data. We use that to store the checkpoint metadata in the same file;
+// gondolind never allocates into a file that ends in this trailer.
 //
 // Note: The magic is a file-format marker for "qcow2 + JSON trailer".
 // It is intentionally *not* tied to the JSON schema version.
@@ -262,31 +255,6 @@ function resolveAssetDirByBuildId(buildId: string): {
   throw new Error(msg);
 }
 
-function ensureCheckpointBackedByRootfs(
-  checkpointDiskPath: string,
-  rootfsPath: string,
-): void {
-  const checkpointAbs = path.resolve(checkpointDiskPath);
-  const backingAbs = resolveQcow2BackingPath(checkpointDiskPath);
-  if (!backingAbs) return;
-
-  if (backingAbs === checkpointAbs) {
-    throw new Error(
-      `checkpoint is corrupt: qcow2 backing file points to itself (${checkpointAbs})`,
-    );
-  }
-
-  const desired = path.resolve(rootfsPath);
-
-  if (backingAbs === desired) return;
-
-  rebaseQcow2InPlace(
-    checkpointDiskPath,
-    desired,
-    inferDiskFormatFromPath(desired),
-  );
-}
-
 async function resolveGuestAssetsForResume(
   requiredBuildId: string,
   options: VMOptions,
@@ -451,14 +419,16 @@ export class VmCheckpoint {
       );
     }
 
-    // A remote daemon boots the checkpoint itself: upload it and let
-    // the daemon resolve the image by build id.
+    if (!fs.existsSync(this.diskPath)) {
+      throw new Error(`checkpoint disk not found: ${this.diskPath}`);
+    }
+    // The daemon boots the checkpoint below a fresh overlay after pointing
+    // its backing file at the image's rootfs (`root_disk.mode =
+    // "checkpoint"`): a remote daemon gets an upload and resolves the image
+    // by build id, a local one uses the file in place.
     const native = resolveNativeEngineOptions(mergedForResume.native);
     resolveVmEngine(mergedForResume.engine, native);
     if (native.remote) {
-      if (!fs.existsSync(this.diskPath)) {
-        throw new Error(`checkpoint disk not found: ${this.diskPath}`);
-      }
       const imagePath = mergedForResume.sandbox?.imagePath;
       return (await createVm({
         ...mergedForResume,
@@ -474,36 +444,21 @@ export class VmCheckpoint {
       })) as TVm;
     }
 
-    ensureQemuImgAvailable();
-
-    const checkpointDisk = this.diskPath;
-    if (!fs.existsSync(checkpointDisk)) {
-      throw new Error(`checkpoint disk not found: ${checkpointDisk}`);
-    }
-
     const resolved = await resolveGuestAssetsForResume(
       this.data.guestAssetBuildId,
       mergedForResume,
     );
-
-    // Fix qcow2 backing filename portability by rebasing in-place on resume.
-    ensureCheckpointBackedByRootfs(checkpointDisk, resolved.assets.rootfsPath);
-
-    const overlayPath = createTempQcow2Overlay(checkpointDisk, "qcow2");
-
-    const merged: VMOptions = {
+    // the checkpoint replaces any root disk of the resume options
+    const sandbox = { ...mergedForResume.sandbox };
+    delete sandbox.rootDiskPath;
+    delete sandbox.rootDiskFormat;
+    delete sandbox.rootDiskReadOnly;
+    delete sandbox.rootDiskDeleteOnClose;
+    return (await createVm({
       ...mergedForResume,
-      sandbox: {
-        ...(mergedForResume.sandbox ?? {}),
-        imagePath: resolved.imagePath,
-        rootDiskPath: overlayPath,
-        rootDiskFormat: "qcow2",
-        rootDiskReadOnly: false,
-        rootDiskDeleteOnClose: true,
-      },
-    };
-
-    return (await createVm(merged)) as TVm;
+      sandbox: { ...sandbox, imagePath: resolved.imagePath },
+      native: { ...native, checkpoint: this.diskPath },
+    })) as TVm;
   }
 
   /** @deprecated Use {@link resume} */

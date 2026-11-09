@@ -72,17 +72,23 @@ and cached locally (default: `alpine-base:latest`).
 
 ## Requirements
 
-| macOS                         | Linux (Debian/Ubuntu)                                                                 |
-| ----------------------------- | ------------------------------------------------------------------------------------- |
-| `brew install qemu node`      | `sudo apt install qemu-system-arm qemu-utils nodejs npm` (x86_64: `qemu-system-x86`) |
+| Host                                 | VM backend | Install                                                    |
+| ------------------------------------ | ---------- | ---------------------------------------------------------- |
+| macOS, Apple silicon                 | krun       | Node.js only (`brew install node`)                         |
+| Linux x86_64 with `/dev/kvm`         | krun       | Node.js only                                               |
+| macOS, Intel                         | QEMU       | `brew install qemu node`                                   |
+| Linux arm64 (Debian/Ubuntu)          | QEMU       | `sudo apt install qemu-system-arm nodejs npm`              |
+| Linux x86_64 without `/dev/kvm`      | QEMU (TCG) | `sudo apt install qemu-system-x86 nodejs npm`              |
 
 Node.js 22.19 or newer. `npm install @earendil-works/gondolin` also installs
 the platform packages with the Gondolin daemon (`gondolind`, macOS and Linux on
 arm64 and x64) and, on macOS arm64 and Linux x86_64, the krun runner. VMs run
-on libkrun where it can (Apple silicon, Linux with `/dev/kvm`) and on QEMU
-otherwise; QEMU's `qemu-img` is needed either way. See
+on libkrun where it can (Apple silicon, Linux x86_64 with read/write
+`/dev/kvm`) and on QEMU otherwise, so QEMU is only needed on the other hosts
+or when you select the `qemu` backend. See
 [Installation](https://earendil-works.github.io/gondolin/install/) for the
-details, the static CLI without Node.js, and building from a checkout.
+details, krun on Linux arm64, the static CLI without Node.js, and building
+from a checkout.
 
 ## Feature Highlights
 

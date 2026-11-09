@@ -71,9 +71,12 @@ When `rootfs.mode` is not set, the image's `manifest.json` default
 (`runtimeDefaults.rootfsMode`, set at [build time](./custom-images.md#runtime-defaults))
 applies, else `cow`. The CLI always uses this default.
 
-Overlays are created in the system temporary directory (`/tmp` on macOS) and
-need `qemu-img` on the host. With a [remote daemon](./remote.md) the daemon
-creates them on its machine and applies the mode itself.
+The Gondolin daemon prepares the root disk when the VM starts, with its own
+qcow2 implementation (no `qemu-img` needed): it creates overlays in its
+private session directory in the system temporary directory (`TMPDIR`, `/tmp`
+on macOS) and deletes them when the VM closes. Make sure that directory has
+room for what the guest writes. With a [remote daemon](./remote.md) the same
+happens on the daemon's machine.
 
 ## Root Disk Size
 
@@ -91,8 +94,8 @@ const vm = await VM.create({
 gondolin bash --rootfs-size 8G
 ```
 
-Gondolin grows the writable disk on the host with `qemu-img resize` (it never
-shrinks) and runs `resize2fs /dev/vda` in the guest before `VM.start()`
+The daemon grows the writable disk before boot (it never shrinks it) and
+Gondolin runs `resize2fs /dev/vda` in the guest before `VM.start()`
 completes. The image itself is not modified. Combined with
 `rootfs.mode: "memory"`, Gondolin uses a temporary qcow2 overlay instead of
 QEMU's snapshot mode so the resize lasts for the VM's lifetime;
@@ -131,16 +134,30 @@ const checkpoint = await vm.checkpoint(path.resolve("./my-snapshot.qcow2"));
 // `vm` is closed now and must not be used again
 ```
 
-Before stopping the VM, Gondolin runs a best-effort `sync` in the guest. A
-checkpoint needs a qcow2 root disk, so it fails for `rootfs.mode: "readonly"`
-and for `rootfs.mode: "memory"` on `qemu` (unless combined with
-`rootfs.size`); use `cow` (the default). It also needs an image whose
-`manifest.json` has a `buildId` (see [Images](./images.md#what-an-image-is)).
+A VM that never started (for example with `autoStart: false`) is booted
+first, since the daemon creates the root disk when the VM starts. A VM whose
+guest has already stopped is not booted again: its disk is exported as it
+is. Before stopping a running VM, Gondolin runs a best-effort `sync` in the
+guest. A checkpoint needs a writable qcow2 root disk, so it fails for
+`rootfs.mode: "readonly"`, for `rootfs.mode: "memory"` on `qemu` (unless
+combined with `rootfs.size`) and for a raw or read-only
+[own root disk](#using-your-own-root-disk); use `cow` (the default). It also
+needs an image whose `manifest.json` has a `buildId` (see
+[Images](./images.md#what-an-image-is)).
 
 Checkpointing a VM that was itself resumed from a checkpoint writes a
 standalone checkpoint backed directly by the image (the chain is collapsed),
 so you can layer environments without accumulating dependencies between
-checkpoint files.
+checkpoint files. A VM resumed from a checkpoint without a backing file (a
+standalone image) can be checkpointed again too; its disk is flattened into
+a new standalone checkpoint.
+
+The checkpoint file is replaced atomically: the disk is renamed into place,
+or, across filesystems, copied to a temporary file next to the destination,
+synced and then renamed. Writing a checkpoint onto the file the VM was
+resumed from is therefore safe (for example `gondolin bash --resume X`
+followed by `gondolin snapshot ... --output X`): the old checkpoint stays
+intact until the new one is complete.
 
 ### Resuming a Checkpoint
 
@@ -190,8 +207,8 @@ enough) or a path to any checkpoint file, plus the usual `bash` options
 ### Checkpoint Format
 
 The checkpoint is a qcow2 image with the metadata appended as a JSON trailer
-(`[json][8-byte magic "GONDCPT1"][u64be json length]`; QEMU and `qemu-img`
-ignore trailing bytes). The metadata records:
+(`[json][8-byte magic "GONDCPT1"][u64be json length]`; QEMU, `qemu-img` and
+Gondolin's own qcow2 code ignore trailing bytes). The metadata records:
 
 - `guestAssetBuildId`: the build id of the image the disk belongs to
 - `createdWithVmm` and `compatibleVmm`: the backend that created it and the
@@ -239,11 +256,35 @@ the required one.
 ### qcow2 Backing File Rebasing
 
 qcow2 overlays embed the path of their backing file. When a checkpoint moves
-to another machine (or the image moves), that path can become invalid. On
-resume, Gondolin compares the checkpoint's backing path (`qemu-img info`)
-with the resolved image's `rootfs.ext4` and, if they differ, rebases the
-checkpoint in place (`qemu-img rebase -u`). Moved checkpoints repair
-themselves the first time you resume them.
+to another machine (or the image moves), that path can become invalid. When a
+resumed VM starts, the daemon compares the checkpoint's backing file name
+and format with the resolved image's `rootfs.ext4` and, if either differs,
+rewrites them in the checkpoint file (metadata only, like
+`qemu-img rebase -u`). Moved checkpoints repair themselves the first time a
+VM resumed from them starts; the VM then boots on a fresh overlay on top of
+the checkpoint, so the checkpoint's contents are not modified.
+
+Checkpoints created by earlier releases (with `qemu-img`) resume the same
+way.
+
+### Validation on Resume
+
+A checkpoint's qcow2 header can name other files (a backing file, an
+external data file) that the VM would open, so the daemon checks every
+checkpoint before it boots from it and refuses it with
+`cannot resume checkpoint ...` when:
+
+- it uses an external data file, encryption, extended L2 entries, the
+  corrupt flag, unknown qcow2 features or a repeated header extension
+  (checked before anything is written, so a refused file is left unchanged)
+- after the backing file is pointed at the image's rootfs, its backing chain
+  is anything other than that rootfs (or nothing, for a standalone
+  checkpoint)
+- its backing file is itself (`checkpoint is corrupt`)
+
+Checkpoints written by Gondolin always pass. See
+[Security Design](./security.md#root-disks-and-checkpoints) for the full list
+of checks, which also apply to your own root disks.
 
 ### Remote Daemons
 
@@ -251,7 +292,8 @@ With a [remote daemon](./remote.md), `vm.checkpoint(path)` still writes the
 checkpoint on your machine, in the same format: the daemon stops the VM and
 streams the disk overlay. `resume()` uploads the checkpoint to the daemon,
 which resolves the image by build id on its own machine (or by
-`native.image` / a string `sandbox.imagePath`).
+`native.image` / a string `sandbox.imagePath`). The backing path is rewritten
+and validated in the uploaded copy, never in your file.
 
 ## Using Your Own Root Disk
 
@@ -271,6 +313,25 @@ typically a qcow2 overlay backed by the image's `rootfs.ext4`. Gondolin does
 not delete it unless asked, so writes persist across runs. These options are
 not supported with remote daemons.
 
+The disk and every file in its backing chain must exist and be regular
+files when the VM starts. The exception is a block device attached raw
+(`rootDiskFormat: "raw"`): Gondolin never resizes it (`rootfs.size` fails
+unless the device is already large enough) and it cannot be checkpointed. A
+qcow2 disk is validated like a checkpoint (see
+[Security Design](./security.md#root-disks-and-checkpoints)): no external
+data files, encryption, extended L2 entries, corrupt flag, unknown features
+or repeated header extensions, and every backing file must be named by a
+plain path with a recorded `raw` or `qcow2` format. A disk whose backing file has no recorded
+format is refused; set it with
+`qemu-img rebase -u -F raw -b BACKING DISK` (or `-F qcow2`).
+
+With `rootfs.size` the daemon grows this disk in place; it refuses to modify
+images that are dirty, marked corrupt or contain internal snapshots.
+Checkpointing a VM on its own qcow2 disk moves that disk into the checkpoint
+file, collapsed onto the raw file at the bottom of its chain or flattened
+into a standalone image; collapsing fails on compressed clusters. Disks
+created with `qemu-img create` (qcow2 versions 2 and 3) are fine.
+
 ## Gotchas
 
 - **Disk only.** No RAM or process state is captured; resuming boots fresh
@@ -283,8 +344,9 @@ not supported with remote daemons.
 - **The trailer is fragile.** Tools that rewrite the image (`qemu-img
   convert`, ...) drop the trailing metadata, after which
   `VmCheckpoint.load()` fails. Copy checkpoint files as plain files.
-- **Resume can modify the file.** Rebasing updates the checkpoint in place;
-  copy a checkpoint yourself first if you need it immutable.
+- **Resume can modify the file.** Rewriting the backing file name updates
+  the checkpoint file's header in place when a resumed VM starts (a local
+  daemon only); copy a checkpoint yourself first if you need it immutable.
 - **Checkpoints go stale.** Updating your images does not update old
   checkpoints, and a checkpoint is useless once its image is gone (for
   example after `gondolin image rm`). Prefer rebuilding environments from

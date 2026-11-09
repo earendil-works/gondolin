@@ -7,10 +7,11 @@ list of changes is in the
 ## Upgrading from 0.14
 
 This release replaces the in-process TypeScript engine with the Gondolin
-daemon (`gondolind`, a static Rust binary) and makes `krun` the default VM
-backend where it can run. Most programs keep working unchanged; check the
-sections below if you select an engine, pass `fetch`, rely on QEMU-specific
-behaviour, ship your own images or runner, or use the removed exports.
+daemon (`gondolind`, a static Rust binary), makes `krun` the default VM
+backend where it can run and no longer needs `qemu-img`. Most programs keep
+working unchanged; check the sections below if you select an engine, pass
+`fetch`, rely on QEMU-specific behaviour, work with root disks or
+checkpoints, ship your own images or runner, or use the removed exports.
 
 ### The Daemon Is Required
 
@@ -92,7 +93,60 @@ The daemon serves the guest filesystem itself (see
 Some configuration errors are now reported when the VM starts (its first
 `exec()` or `vm.start()`) rather than when `VM.create()` returns, because the
 daemon validates them: for example unreadable SSH credential files, a missing
-QEMU binary or an unknown image.
+QEMU binary, an unknown image, or a root disk that cannot be prepared or
+grown (`rootfs.size`).
+
+### Root Disks and Checkpoints
+
+The daemon now prepares every root disk itself, with a built-in qcow2
+implementation, for local and remote VMs alike:
+
+- `qemu-img` is no longer needed. QEMU is only needed for VMs on the `qemu`
+  backend; hosts that run krun (Apple silicon, Linux x86_64 with `/dev/kvm`)
+  need neither (see [Installation](./install.md#requirements)). A missing
+  QEMU binary fails with `QEMU binary '...' not found: install QEMU or use
+  the krun backend`.
+- Overlays are created when the VM starts, in the daemon's private session
+  directory under the system temporary directory, instead of by
+  `VM.create()`. Root disk errors, including `rootfs.size` on your own
+  `sandbox.rootDiskPath` disk, surface from `vm.start()` (or the first call
+  that boots the VM).
+- A resumed checkpoint's backing file name and format are rewritten when the
+  resumed VM starts rather than in `resume()`.
+- `vm.checkpoint()` on a VM that never started boots it first (also with
+  `autoStart: false`); a VM whose guest already stopped is exported as it is.
+  A VM resumed from a standalone checkpoint (no backing file) can now be
+  checkpointed again.
+- Checkpoints written to an existing file replace it atomically, so writing
+  a checkpoint onto the one the VM was resumed from (`gondolin bash --resume
+  X`, then `gondolin snapshot ... --output X`) keeps the old file until the
+  new one is complete.
+- Checkpoints keep their format: files created by earlier releases resume as
+  before.
+
+Security fix: resuming a crafted checkpoint could expose host files to the
+guest, because its qcow2 header was handed to the VMM with only the backing
+file name rewritten. The daemon now validates every qcow2 disk it attaches
+and did not create (checkpoints, `sandbox.rootDiskPath`, qcow2 image rootfs)
+together with its backing chain (see
+[Security Design](./security.md#root-disks-and-checkpoints)). This can refuse
+disks that worked before:
+
+- A qcow2 `sandbox.rootDiskPath` whose backing file has no recorded format
+  fails with `backing file without a backing format`. Record the format with
+  `qemu-img rebase -u -F raw -b BACKING DISK` (or `-F qcow2`); the backing
+  path stays the same.
+- Backing files must be named by plain paths in `raw` or `qcow2` format; a
+  name like `json:{...}` or `nbd:...` is refused.
+- qcow2 disks with external data files, encryption, extended L2 entries or
+  repeated header extensions (`repeated header extension ...`) are refused.
+- `sandbox.rootDiskPath` (and every file in its backing chain) must exist and
+  be a regular file when the VM starts. A block device still works as
+  `sandbox.rootDiskPath` when attached raw (`rootDiskFormat: "raw"`), as
+  before, but never as qcow2 (`a block device can only be attached as a raw
+  disk`), in a backing chain or as a checkpoint; `rootfs.size` on it fails
+  unless the device is already large enough (devices are not resized). Other
+  special files (character devices, FIFOs, directories) are refused.
 
 ### krun Is the Default Backend
 

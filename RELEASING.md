@@ -22,8 +22,9 @@ release needs for virtio-fs.
    - runs `gondolin --version`, `gondolind --version` (the npm bin alias of
      the multi-call binary), the static CLI's `--version` and
      `gondolin-krun-runner --version`
-   - boots VMs with the node and native engines and with the static CLI
-     (qemu, plus krun on a krun host) from the installed packages
+   - boots a VM with the Node CLI (`gondolin exec`, which runs the native
+     engine through the installed platform package) and with the static CLI,
+     on qemu, plus krun on a krun host, from the installed packages
 
    It needs no credentials and touches nothing remote; packages come from
    the npm registry. `--keep --out DIR` keeps the tarballs.

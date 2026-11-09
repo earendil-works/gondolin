@@ -78,6 +78,7 @@ const USAGE: &str = "usage: gondolind                     speak the controller p
        gondolind assets ...          manage guest images (assets --help)
        gondolind --mitm-ca [DIR]     load or create the MITM CA, print its certificate
        gondolind --qemu-args         print the QEMU argv for a configure payload (JSON on stdin)
+       gondolind --disk-info PATH    print a disk image's format, virtual size and backing file (JSON)
        gondolind --vmm-watchdog PID  (macOS, internal) kill the VMM PID when the daemon exits";
 
 /// Process entry point (argument handling, runtime setup).
@@ -127,6 +128,16 @@ pub fn main_with_args(args: Vec<String>) {
         Some("--qemu-args") => {
             // debugging/parity helper: print the QEMU argv for a configure payload (JSON on stdin)
             std::process::exit(print_qemu_args());
+        }
+        Some("--disk-info") => {
+            // debugging/test helper: what `qemu-img info` reports, without qemu-img
+            std::process::exit(match args.get(1) {
+                Some(path) => print_disk_info(std::path::Path::new(path)),
+                None => {
+                    eprintln!("{USAGE}");
+                    2
+                }
+            });
         }
         Some(other) => {
             eprintln!("gondolind: unknown argument {other}");
@@ -239,6 +250,32 @@ async fn flush_controller(ctl: &Controller) {
         }
     };
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), flush).await;
+}
+
+/// `--disk-info`: `{ format, virtual_size, backing_file?, backing_format?,
+/// full_backing_file? }` (the format is probed by magic).
+fn print_disk_info(path: &std::path::Path) -> i32 {
+    let info = match gondolin_qcow2::info(path) {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("gondolind: {err}");
+            return 1;
+        }
+    };
+    let mut out = gondolin_wire::value!({
+        "format": info.format.name(),
+        "virtual_size": info.virtual_size,
+    });
+    if let Some(b) = &info.backing_file {
+        out["backing_file"] = gondolin_wire::Value::Text(b.clone());
+        let full = gondolin_qcow2::resolve_backing(path, b);
+        out["full_backing_file"] = gondolin_wire::Value::Text(full.display().to_string());
+    }
+    if let Some(f) = info.backing_format {
+        out["backing_format"] = gondolin_wire::Value::Text(f);
+    }
+    println!("{}", gondolin_wire::json::to_string(&out));
+    0
 }
 
 fn print_qemu_args() -> i32 {

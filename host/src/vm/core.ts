@@ -9,16 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { AsyncSingleflight } from "../utils/async.ts";
 
-import {
-  createTempQcow2Overlay,
-  ensureDiskImageMinimumSize,
-  ensureQemuImgAvailable,
-  inferDiskFormatFromPath,
-  moveFile,
-  parseDiskSizeToBytes,
-  rebaseQcow2InPlace,
-  resolveQcow2BackingPath,
-} from "../qemu/img.ts";
+import { inferDiskFormatFromPath, parseDiskSizeToBytes } from "./disk.ts";
 import {
   VmCheckpoint,
   registerVmCreate,
@@ -38,6 +29,7 @@ import {
 import { NativeSandboxServer } from "../native/server.ts";
 import { NativeFsClient, type NativeVfsSpec } from "../native/vfs.ts";
 import {
+  type NativeRootDisk,
   type SandboxEngine,
   resolveNativeEngineOptions,
   resolveVmEngine,
@@ -224,19 +216,6 @@ export type SshAccess = {
 
 export type VMState = SandboxState | "unknown";
 
-type RootDiskState = {
-  /** root disk image path */
-  path: string;
-  /** root disk image format */
-  format: "raw" | "qcow2";
-  /** backend-native ephemeral snapshot mode */
-  snapshot: boolean;
-  /** readonly mode for the root disk */
-  readOnly: boolean;
-  /** delete the disk file on vm.close() */
-  deleteOnClose: boolean;
-};
-
 export class VM {
   /**
    * Replace the debug log callback.
@@ -261,8 +240,13 @@ export class VM {
   /** gondolind runs on another machine (no shared filesystem) */
   readonly remote: boolean;
   private readonly resolvedSandboxOptions: ResolvedSandboxServerOptions;
-  private rootDisk: RootDiskState | null = null;
+  /** root disk the daemon prepares (`configure.vm.root_disk`) */
+  private readonly rootDisk: NativeRootDisk;
+  /** the controller's own disk to delete on close (`sandbox.rootDiskDeleteOnClose`) */
+  private deleteOnClosePath: string | null = null;
   private checkpointed = false;
+  /** the checkpoint being written (`close()` waits for it) */
+  private checkpointInFlight: Promise<unknown> | null = null;
   /** whether `close()` was called; a closed vm must not be restarted */
   private closed = false;
   private readonly baseOptionsForClone: VMOptions;
@@ -557,58 +541,63 @@ export class VM {
       sandboxOptions.rootDiskReadOnly !== undefined ||
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
-    const manifestRootfsMode = this.remote
-      ? undefined
-      : resolveManifestRootfsMode(resolved);
-    const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
-    const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
-
-    try {
-      // Prepare root disk:
-      // - Explicit sandbox.rootDisk* options win.
-      // - Otherwise, use rootfs mode from VM options/manifest/default.
-      if (this.remote) {
-        // the daemon creates the overlay / applies the mode and size
-        if (rootfsSizeBytes !== null) this.rootfsGuestResizePending = true;
+    // The root disk is prepared by the daemon (overlay, memory/readonly
+    // modes, size, checkpoint rebasing); local and remote sessions differ
+    // only in who names the image's rootfs.
+    const size = rootfsSizeBytes ?? undefined;
+    if (this.remote) {
+      this.rootDisk = {
+        path: "",
+        format: "",
+        mode: native.checkpoint
+          ? "checkpoint"
+          : (options.rootfs?.mode ?? "auto"),
+        size,
+      };
+    } else {
+      const rootfsDisk = {
+        path: resolved.rootfsPath,
+        format: inferDiskFormatFromPath(resolved.rootfsPath),
+      };
+      const rootfsMode =
+        options.rootfs?.mode ?? resolveManifestRootfsMode(resolved) ?? "cow";
+      if (native.checkpoint) {
+        this.rootDisk = { ...rootfsDisk, mode: "checkpoint", size };
       } else if (hasUserRootDiskConfig) {
-        this.rootDisk = prepareConfiguredRootDisk(resolved, sandboxOptions);
-      } else if (rootfsMode === "readonly") {
-        this.rootDisk = prepareBaseRootDisk(resolved, {
-          readOnly: true,
-          snapshot: false,
-        });
-      } else if (rootfsMode === "memory") {
-        this.rootDisk =
-          supportsSnapshotRootDisk && rootfsSizeBytes === null
-            ? prepareBaseRootDisk(resolved, {
-                readOnly: false,
-                snapshot: true,
-              })
-            : prepareOverlayRootDisk(resolved);
-      } else if (rootfsMode === "cow") {
-        this.rootDisk = prepareOverlayRootDisk(resolved);
+        // (without rootDiskPath configuredRootDisk refuses deleting the rootfs)
+        if (
+          sandboxOptions.rootDiskDeleteOnClose &&
+          sandboxOptions.rootDiskPath !== undefined
+        ) {
+          this.deleteOnClosePath = sandboxOptions.rootDiskPath;
+        }
+        try {
+          this.rootDisk = configuredRootDisk(resolved, sandboxOptions, size);
+        } catch (err) {
+          this.cleanupRootDiskSync();
+          throw err;
+        }
+      } else if (
+        rootfsMode === "readonly" ||
+        rootfsMode === "memory" ||
+        rootfsMode === "cow"
+      ) {
+        if (rootfsMode === "readonly" && size !== undefined) {
+          throw new Error(
+            "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)",
+          );
+        }
+        this.rootDisk = { ...rootfsDisk, mode: rootfsMode, size };
       } else {
         throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
-
-      if (rootfsSizeBytes !== null && !this.remote) {
-        prepareRootDiskResize(
-          this.rootDisk,
-          resolved.rootfsPath,
-          rootfsSizeBytes,
-        );
-        this.rootfsGuestResizePending = true;
-      }
-    } catch (err) {
-      this.cleanupRootDiskSync();
-      throw err;
     }
+    if (size !== undefined) this.rootfsGuestResizePending = true;
 
     this.resolvedSandboxOptions = resolved;
     const serverInternalOptions = {
-      qemuRootDiskVolatileMode: this.rootDisk?.snapshot
-        ? ("snapshot" as const)
-        : undefined,
+      rootDisk: this.rootDisk,
+      checkpoint: native.checkpoint,
       native,
       nativeVfs,
       setMitmCaCert: (certPem: string) => {
@@ -617,11 +606,6 @@ export class VM {
       remote: remoteResolution
         ? {
             image: remoteResolution.image,
-            checkpointPath: native.checkpoint,
-            rootfsMode: native.checkpoint
-              ? ("checkpoint" as const)
-              : (options.rootfs?.mode ?? ("auto" as const)),
-            rootfsSizeBytes: rootfsSizeBytes ?? undefined,
             qemuPath: sandboxOptions.qemuPath,
             krunRunnerPath: sandboxOptions.krunRunnerPath,
           }
@@ -713,6 +697,10 @@ export class VM {
    * Close the VM and release associated resources.
    */
   async close() {
+    // a checkpoint in progress owns the shutdown (its export stops the VM
+    // and its caller, e.g. the CLI on `sandbox_stopped`, may close meanwhile)
+    const inFlight = this.checkpointInFlight;
+    if (inFlight) await inFlight.catch(() => undefined);
     this.closed = true;
     return this.closeSingleflight.run(() => this.closeInternal());
   }
@@ -1310,8 +1298,23 @@ fi
       return;
     }
 
+    // only the selected backend's binary is needed (QEMU only for vmm=qemu)
     const vmmPath = server.getVmmPath();
-    execFileSync(vmmPath, ["--version"], { stdio: "ignore" });
+    try {
+      execFileSync(vmmPath, ["--version"], { stdio: "ignore" });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" && server.getVmmBackend() === "qemu") {
+        const error: NodeJS.ErrnoException = new Error(
+          `QEMU binary '${vmmPath}' not found: install QEMU or use the krun backend (sandbox.vmm: "krun")`,
+        );
+        // keeps what callers (the CLI) render a friendly message from
+        error.code = code;
+        error.path = vmmPath;
+        throw error;
+      }
+      throw err;
+    }
     if (server.getVmmBackend() === "krun") {
       assertMacHypervisorEntitlement(vmmPath);
     }
@@ -1514,9 +1517,9 @@ fi
   }
 
   private cleanupRootDiskSync() {
-    if (!this.rootDisk?.deleteOnClose) return;
+    if (!this.deleteOnClosePath) return;
     try {
-      fs.rmSync(this.rootDisk.path, { force: true });
+      fs.rmSync(this.deleteOnClosePath, { force: true });
     } catch {
       // ignore
     }
@@ -2138,84 +2141,48 @@ fi
   }
 
   /**
-   * Remote checkpoint: the daemon stops the VM and streams its root disk
-   * overlay; the checkpoint file (qcow2 + trailer) is written here.
+   * Why the root disk cannot be checkpointed, if the controller can tell
+   * (the daemon refuses everything else, e.g. remote `auto` modes)
    */
-  private async checkpointRemote(
+  private checkpointBlocker(): string | null {
+    const disk = this.rootDisk;
+    if (
+      disk.mode === "memory" &&
+      this.resolvedSandboxOptions.vmm === "qemu" &&
+      disk.size === undefined
+    ) {
+      return "cannot checkpoint: root disk is running in ephemeral snapshot mode";
+    }
+    const format =
+      disk.mode === "readonly" || disk.mode === undefined
+        ? disk.format
+        : "qcow2";
+    if (format && format !== "qcow2") {
+      return `cannot checkpoint: root disk must be qcow2 (got ${format})`;
+    }
+    return null;
+  }
+
+  private async checkpointInternal(
     checkpointPath: string,
     options: {
       /** keep session attach IPC open until caller performs post-checkpoint cleanup */
       keepSessionIpc: boolean;
     },
   ): Promise<VmCheckpoint> {
-    const server = this.server;
-    if (!(server instanceof NativeSandboxServer)) {
-      throw new Error("sandbox server is not available");
+    if (this.checkpointInFlight) {
+      throw new Error("a checkpoint of this vm is already in progress");
     }
-    if (server.getState() === "running") {
-      try {
-        await this.exec(["/bin/sh", "-c", "sync; sync"]);
-      } catch {
-        // ignore
-      }
-    }
-    const resolvedCheckpointPath = path.resolve(checkpointPath);
-    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
-    const partial = `${resolvedCheckpointPath}.partial-${process.pid}`;
-    let exported: { buildId: string | null };
+    const run = this.writeCheckpoint(checkpointPath, options);
+    this.checkpointInFlight = run;
     try {
-      exported = await server.exportCheckpoint(partial);
-    } catch (err) {
-      fs.rmSync(partial, { force: true });
-      throw err;
+      return await run;
+    } finally {
+      this.checkpointInFlight = null;
     }
-    if (options.keepSessionIpc) {
-      await this.closeSingleflight.run(() =>
-        this.closeInternal({
-          keepSessionIpc: true,
-          keepSessionRegistration: true,
-        }),
-      );
-    } else {
-      await this.close();
-    }
-    if (!exported.buildId) {
-      fs.rmSync(partial, { force: true });
-      throw new Error(
-        "cannot checkpoint: the daemon's guest image has no manifest buildId",
-      );
-    }
-    fs.rmSync(resolvedCheckpointPath, { force: true });
-    fs.renameSync(partial, resolvedCheckpointPath);
-
-    const image = server.getResolvedImage();
-    const createdWithVmm = this.resolvedSandboxOptions.vmm;
-    const data: VmCheckpointData = {
-      version: 1,
-      name: path.basename(
-        resolvedCheckpointPath,
-        path.extname(resolvedCheckpointPath),
-      ),
-      createdAt: new Date().toISOString(),
-      diskFile: path.basename(resolvedCheckpointPath),
-      guestAssetBuildId: exported.buildId,
-      snapshotKind: "disk",
-      createdWithVmm,
-      compatibleVmm:
-        image?.krun_kernel || createdWithVmm === "krun"
-          ? ["qemu", "krun"]
-          : ["qemu"],
-    };
-    VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
-    this.checkpointed = true;
-    return new VmCheckpoint(
-      resolvedCheckpointPath,
-      data,
-      this.baseOptionsForClone,
-    );
   }
 
-  private async checkpointInternal(
+  private async writeCheckpoint(
     checkpointPath: string,
     options: {
       /** keep session attach IPC open until caller performs post-checkpoint cleanup */
@@ -2230,38 +2197,60 @@ fi
         `checkpointPath must be an absolute path (got: ${checkpointPath})`,
       );
     }
+    const blocker = this.checkpointBlocker();
+    if (blocker) throw new Error(blocker);
 
-    if (this.remote) {
-      return await this.checkpointRemote(checkpointPath, options);
-    }
-    const rootDisk = this.rootDisk;
-    if (!rootDisk) {
-      throw new Error("vm has no root disk");
-    }
-    if (rootDisk.snapshot) {
-      throw new Error(
-        "cannot checkpoint: root disk is running in ephemeral snapshot mode",
-      );
-    }
-    if (rootDisk.format !== "qcow2") {
-      throw new Error(
-        `cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`,
-      );
+    // local sessions: the build id of the image's manifest
+    let localManifest: ReturnType<typeof loadAssetManifest> = null;
+    if (!this.remote) {
+      const { kernelPath, initrdPath, rootfsPath } =
+        this.resolvedSandboxOptions;
+      const commonDir =
+        path.dirname(kernelPath) === path.dirname(initrdPath) &&
+        path.dirname(kernelPath) === path.dirname(rootfsPath)
+          ? path.dirname(kernelPath)
+          : null;
+      localManifest = commonDir ? loadAssetManifest(commonDir) : null;
+      if (!localManifest?.buildId) {
+        throw new Error(
+          "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)",
+        );
+      }
     }
 
-    // Ensure the disk isn't deleted by close().
-    rootDisk.deleteOnClose = false;
+    const server = this.server;
+    if (!(server instanceof NativeSandboxServer)) {
+      throw new Error("sandbox server is not available");
+    }
+    // the daemon prepares the disk when its session starts: a VM that never
+    // booted boots now; one whose guest stopped is exported as it is
+    if (!server.isStarted()) {
+      await this.startSingleflight.run(() => this.startInternal());
+    }
 
     // Best-effort flush of guest filesystem buffers so the checkpoint captures
-    // recent writes even though we currently stop QEMU abruptly.
-    if (this.server && this.server.getState() === "running") {
+    // recent writes even though the VMM is stopped abruptly.
+    if (server.getState() === "running") {
       try {
         await this.exec(["/bin/sh", "-c", "sync; sync"]);
       } catch {
         // ignore
       }
     }
-
+    const resolvedCheckpointPath = path.resolve(checkpointPath);
+    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
+    // the daemon stops the VM, collapses a resumed checkpoint's chain onto
+    // the rootfs and moves (local) or streams (remote) the disk here
+    const partial = `${resolvedCheckpointPath}.partial-${process.pid}`;
+    let exported: { buildId: string | null };
+    try {
+      exported = await server.exportCheckpoint(partial);
+    } catch (err) {
+      fs.rmSync(partial, { force: true });
+      throw err;
+    }
+    // the disk is gone: never delete the checkpoint on close
+    this.deleteOnClosePath = null;
     if (options.keepSessionIpc) {
       await this.closeSingleflight.run(() =>
         this.closeInternal({
@@ -2270,74 +2259,32 @@ fi
         }),
       );
     } else {
-      await this.close();
+      // not close(): it waits for this checkpoint
+      this.closed = true;
+      await this.closeSingleflight.run(() => this.closeInternal());
     }
-
-    const resolvedCheckpointPath = path.resolve(checkpointPath);
-
-    const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
-    const backingPath = resolveQcow2BackingPath(rootDisk.path);
-    if (backingPath && backingPath !== rootfsPath) {
-      // Collapse resume-generated checkpoint ancestry before we publish this
-      // overlay as the new checkpoint file.
-      ensureQemuImgAvailable();
-      rebaseQcow2InPlace(
-        rootDisk.path,
-        rootfsPath,
-        inferDiskFormatFromPath(rootfsPath),
-        "safe",
-      );
-
-      const rebasedBackingPath = resolveQcow2BackingPath(rootDisk.path);
-      if (rebasedBackingPath === resolvedCheckpointPath) {
-        throw new Error(
-          `cannot checkpoint: rebased overlay still points to destination checkpoint path (${resolvedCheckpointPath})`,
-        );
-      }
-    }
-
-    fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
-    fs.rmSync(resolvedCheckpointPath, { force: true });
-
-    moveFile(rootDisk.path, resolvedCheckpointPath);
-
-    const checkpointName = path.basename(
-      resolvedCheckpointPath,
-      path.extname(resolvedCheckpointPath),
-    );
-
-    const guestAssets = {
-      kernelPath: this.resolvedSandboxOptions.kernelPath,
-      initrdPath: this.resolvedSandboxOptions.initrdPath,
-      rootfsPath: this.resolvedSandboxOptions.rootfsPath,
-    };
-
-    const commonDir =
-      path.dirname(guestAssets.kernelPath) ===
-        path.dirname(guestAssets.initrdPath) &&
-      path.dirname(guestAssets.kernelPath) ===
-        path.dirname(guestAssets.rootfsPath)
-        ? path.dirname(guestAssets.kernelPath)
-        : null;
-
-    const manifest = commonDir ? loadAssetManifest(commonDir) : null;
-    const guestAssetBuildId = manifest?.buildId;
-
+    const guestAssetBuildId = localManifest?.buildId ?? exported.buildId;
     if (!guestAssetBuildId) {
+      fs.rmSync(partial, { force: true });
       throw new Error(
-        "cannot checkpoint: guest assets are missing manifest buildId (rebuild guest assets with a newer gondolin build)",
+        "cannot checkpoint: the daemon's guest image has no manifest buildId",
       );
     }
+    fs.rmSync(resolvedCheckpointPath, { force: true });
+    fs.renameSync(partial, resolvedCheckpointPath);
 
     const createdWithVmm = this.resolvedSandboxOptions.vmm;
+    const hasKrunKernel = this.remote
+      ? Boolean(server.getResolvedImage()?.krun_kernel)
+      : Boolean(localManifest?.assets?.krunKernel);
     const compatibleVmm: SandboxVmm[] =
-      manifest?.assets?.krunKernel || createdWithVmm === "krun"
-        ? ["qemu", "krun"]
-        : ["qemu"];
-
+      hasKrunKernel || createdWithVmm === "krun" ? ["qemu", "krun"] : ["qemu"];
     const data: VmCheckpointData = {
       version: 1,
-      name: checkpointName,
+      name: path.basename(
+        resolvedCheckpointPath,
+        path.extname(resolvedCheckpointPath),
+      ),
       createdAt: new Date().toISOString(),
       // Kept for schema compatibility (ignored for single-file checkpoints)
       diskFile: path.basename(resolvedCheckpointPath),
@@ -2346,13 +2293,10 @@ fi
       createdWithVmm,
       compatibleVmm,
     };
-
     VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
 
     // Mark this VM as consumed.
-    this.rootDisk = null;
     this.checkpointed = true;
-
     return new VmCheckpoint(
       resolvedCheckpointPath,
       data,
@@ -2370,20 +2314,15 @@ fi
 
 registerVmCreate((options) => VM.create(options));
 
-function installRootDisk(
-  resolved: ResolvedSandboxServerOptions,
-  rootDisk: RootDiskState,
-): RootDiskState {
-  resolved.rootDiskPath = rootDisk.path;
-  resolved.rootDiskFormat = rootDisk.format;
-  resolved.rootDiskReadOnly = rootDisk.readOnly;
-  return rootDisk;
-}
-
-function prepareConfiguredRootDisk(
+/**
+ * The controller's own root disk (`sandbox.rootDisk*`): attached as is, the
+ * daemon only grows it for `rootfs.size`.
+ */
+function configuredRootDisk(
   resolved: ResolvedSandboxServerOptions,
   options: SandboxServerOptions,
-): RootDiskState {
+  size: number | undefined,
+): NativeRootDisk {
   const rootDiskPath = options.rootDiskPath ?? resolved.rootDiskPath;
   const deleteOnClose = options.rootDiskDeleteOnClose ?? false;
 
@@ -2396,46 +2335,29 @@ function prepareConfiguredRootDisk(
       "sandbox.rootDiskDeleteOnClose requires sandbox.rootDiskPath (refusing to delete base rootfs)",
     );
   }
-
-  return installRootDisk(resolved, {
+  const readOnly =
+    options.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false;
+  if (size !== undefined) {
+    if (readOnly) {
+      throw new Error(
+        "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)",
+      );
+    }
+    if (isSameExistingFile(rootDiskPath, resolved.rootfsPath)) {
+      throw new Error(
+        "rootfs.size refuses to resize the base rootfs image; use rootfs.mode='cow' or provide a separate sandbox.rootDiskPath",
+      );
+    }
+  }
+  return {
     path: rootDiskPath,
     format:
       options.rootDiskFormat ??
       resolved.rootDiskFormat ??
       inferDiskFormatFromPath(rootDiskPath),
-    snapshot: false,
-    readOnly: options.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false,
-    deleteOnClose,
-  });
-}
-
-function prepareBaseRootDisk(
-  resolved: ResolvedSandboxServerOptions,
-  opts: Pick<RootDiskState, "readOnly" | "snapshot">,
-): RootDiskState {
-  return installRootDisk(resolved, {
-    path: resolved.rootfsPath,
-    format: inferDiskFormatFromPath(resolved.rootfsPath),
-    snapshot: opts.snapshot,
-    readOnly: opts.readOnly,
-    deleteOnClose: false,
-  });
-}
-
-function prepareOverlayRootDisk(
-  resolved: ResolvedSandboxServerOptions,
-): RootDiskState {
-  ensureQemuImgAvailable();
-  return installRootDisk(resolved, {
-    path: createTempQcow2Overlay(
-      resolved.rootfsPath,
-      inferDiskFormatFromPath(resolved.rootfsPath),
-    ),
-    format: "qcow2",
-    snapshot: false,
-    readOnly: false,
-    deleteOnClose: true,
-  });
+    readOnly,
+    size,
+  };
 }
 
 function isSameExistingFile(a: string, b: string): boolean {
@@ -2450,29 +2372,6 @@ function isSameExistingFile(a: string, b: string): boolean {
   } catch {
     return false;
   }
-}
-
-function prepareRootDiskResize(
-  rootDisk: RootDiskState | null,
-  rootfsPath: string,
-  sizeBytes: number,
-): void {
-  if (!rootDisk) {
-    throw new Error("rootfs.size requires a root disk");
-  }
-  if (rootDisk.readOnly) {
-    throw new Error(
-      "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)",
-    );
-  }
-  if (isSameExistingFile(rootDisk.path, rootfsPath)) {
-    throw new Error(
-      "rootfs.size refuses to resize the base rootfs image; use rootfs.mode='cow' or provide a separate sandbox.rootDiskPath",
-    );
-  }
-
-  ensureQemuImgAvailable();
-  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes);
 }
 
 function resolveManifestRootfsMode(

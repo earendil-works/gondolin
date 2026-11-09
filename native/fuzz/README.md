@@ -29,6 +29,7 @@ cd native/fuzz && cargo +nightly fuzz run netstack_stack
 | `ssh_transport` | the SSH core: raw bytes into a fresh client/server transport (ident, KEXINIT, ECDH), and encrypted payloads after a real handshake into the connection layer |
 | `ssh_keys` | private key files (OpenSSH/PEM/PKCS#8), public key blobs and lines, signatures, ssh-agent replies |
 | `sshproxy_parse` | git exec command parsing, known_hosts, allowlist patterns |
+| `qcow2_parse` | `gondolin-qcow2` on arbitrary images: header re-encoding, L1/L2 mapping, safe rebase of an empty overlay over the image (guest view unchanged), allocating writes, grow and backing rewrite; seeds in `seeds/qcow2_parse` (small QEMU images) |
 
 Crashes land in `artifacts/<target>/`; reproduce with
 `cargo +nightly fuzz run <target> artifacts/<target>/<file>` and add a unit test

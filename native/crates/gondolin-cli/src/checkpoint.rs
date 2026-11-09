@@ -4,7 +4,6 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use gondolin_wire::{FromValue, ToValue};
 
@@ -124,7 +123,15 @@ pub fn write_trailer(path: &Path, data: &CheckpointData) -> Result<(), String> {
     let len = buf.len() as u64;
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&len.to_be_bytes());
-    f.write_all(&buf).map_err(|e| e.to_string())
+    f.write_all(&buf).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| format!("cannot sync checkpoint {}: {e}", path.display()))
+}
+
+/// Best-effort fsync of a directory (a rename in it is durable then).
+pub fn sync_dir(dir: &Path) {
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
 }
 
 /// Reads the trailer (`readCheckpointTrailer`).
@@ -228,53 +235,6 @@ pub fn resolve_resume(resume: &str) -> Result<PathBuf, String> {
                 .join("\n")
         )),
     }
-}
-
-/// `qemu-img info` backing file of a qcow2 (absolute), if any.
-pub fn backing_file(qemu_img: &Path, disk: &Path) -> Result<Option<PathBuf>, String> {
-    let out = Command::new(qemu_img)
-        .args(["info", "--output=json", "-U"])
-        .arg(disk)
-        .output()
-        .map_err(|e| format!("cannot run {}: {e}", qemu_img.display()))?;
-    if !out.status.success() {
-        return Err(format!(
-            "qemu-img info {} failed: {}",
-            disk.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let json = gondolin_wire::json::parse(&String::from_utf8_lossy(&out.stdout))
-        .map_err(|e| e.to_string())?;
-    let backing = json["full-backing-filename"].as_str().or(json["backing-filename"].as_str());
-    Ok(backing.map(|b| {
-        let p = PathBuf::from(b);
-        if p.is_absolute() { p } else { disk.parent().unwrap_or(Path::new("/")).join(p) }
-    }))
-}
-
-/// `qemu-img rebase` in place (`unsafe`: metadata only).
-pub fn rebase(qemu_img: &Path, disk: &Path, backing: &Path, safe: bool) -> Result<(), String> {
-    let format = gondolind::rootdisk::infer_format(&backing.display().to_string());
-    let mut cmd = Command::new(qemu_img);
-    cmd.arg("rebase");
-    if !safe {
-        cmd.arg("-u");
-    }
-    let out = cmd
-        .args(["-F", format, "-b"])
-        .arg(backing)
-        .arg(disk)
-        .output()
-        .map_err(|e| format!("cannot run {}: {e}", qemu_img.display()))?;
-    if !out.status.success() {
-        return Err(format!(
-            "qemu-img rebase {} failed: {}",
-            disk.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

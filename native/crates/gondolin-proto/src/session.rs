@@ -120,10 +120,11 @@ gondolin_wire::wire_struct! {
         /// qemu `snapshot=on` (writes are discarded)
         pub snapshot: bool = Default::default(),
         /// prepare the disk in the daemon: `cow` (qcow2 overlay in the session
-        /// directory), `memory` (writes discarded), `readonly`, or `auto` (the
-        /// image manifest's `rootfsMode`, else `cow`); absent: use `path` as is
+        /// directory), `memory` (writes discarded), `readonly`, `auto` (the
+        /// image manifest's `rootfsMode`, else `cow`) or `checkpoint` (an overlay
+        /// on the `checkpoint_import`ed file); absent: use `path` as is
         pub mode: Option<String>,
-        /// minimum virtual size in `bytes` (grows the overlay; needs a writable mode)
+        /// minimum virtual size in `bytes` (grows the overlay, or `path` in place without a mode; needs a writable disk)
         pub size: Option<u64>,
     }
 }

@@ -124,7 +124,10 @@ Gondolin tries to keep the QEMU device model minimal and predictable:
 - Only necessary devices are exposed.
 - Console is non-graphical and intended for programmatic control.
 - The root disk is typically treated as ephemeral for a run (writes do not
-  persist to the base image).
+  persist to the base image): a qcow2 overlay the daemon creates, or QEMU's
+  `snapshot=on` for `rootfs.mode: "memory"` without `rootfs.size` (see
+  [Persistence and Snapshots](./snapshots.md#root-disk-modes)). Only the
+  `qemu-system-*` binary is needed; Gondolin does not run `qemu-img`.
 
 The exact QEMU flags may evolve over time, but the stability goals are:
 

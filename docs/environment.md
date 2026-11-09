@@ -50,7 +50,7 @@ These affect `gondolin build` and the SDK's image build API (Node only; see
 | `GONDOLIN_KRUN_RUNNER` | SDK, static CLI | Path of the krun runner binary; checked before the other runner locations and counts as an installed runner for the default backend selection |
 | `GONDOLIN_CPU` | SDK, static CLI | QEMU CPU model when `sandbox.cpu` is not set, for example `cortex-a72`. Applies only when QEMU is the backend; it does not select QEMU |
 | `GONDOLIN_VIRTIOFS` | SDK, static CLI | Guest filesystem transport: `1` (`true`, `on`) asks for virtio-fs and warns when it is unavailable, `0` (`false`, `off`) forces sandboxfs. Default: virtio-fs when the backend and image support it, else sandboxfs (see [Files and Mounts](./vfs.md)) |
-| `PATH` | SDK, static CLI, daemon | Where `qemu-system-*`, `qemu-img` (also looked up next to the QEMU binary) and `gondolin-krun-runner` are found when no explicit path is set |
+| `PATH` | SDK, static CLI, daemon | Where `qemu-system-*` and `gondolin-krun-runner` are found when no explicit path is set |
 
 ## Daemon and Remote Machines
 
@@ -103,4 +103,4 @@ software emulation).
 | `GONDOLIN_SESSIONS_DIR` | SDK, static CLI | Session registry (`<uuid>.json` and `<uuid>.sock` per running VM) used by `gondolin list`, `attach`, `exec --sock` and `snapshot`; VMs created with the SDK register here too. Default: `~/.cache/gondolin/sessions` |
 | `GONDOLIN_CHECKPOINT_DIR` | Node CLI, static CLI | Where `gondolin snapshot` writes checkpoints and `gondolin bash --resume ID` looks them up. Default: `~/.cache/gondolin/checkpoints` |
 | `TERM` | SDK, static CLI | Passed to interactive shells (`vm.shell()`, `gondolin bash`) unless their environment sets it; `xterm-ghostty` and an unset value become `xterm-256color` |
-| `TMPDIR` | Node CLI | Scratch directory for the `trufflehog` host suggestions of `--host-secret NAME` |
+| `TMPDIR` | daemon, static CLI, Node CLI | Where the daemon creates each VM's private session directory (VMM sockets and the root disk overlay; on macOS, or when `TMPDIR` is longer than 60 bytes, `/tmp` is used instead), and the Node CLI's scratch directory for the `trufflehog` host suggestions of `--host-secret NAME` |

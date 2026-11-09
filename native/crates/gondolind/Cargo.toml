@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 gondolin-wire.workspace = true
 gondolin-log.workspace = true
+gondolin-qcow2.workspace = true
 gondolin-proto.workspace = true
 gondolin-assets.workspace = true
 gondolin-vfs.workspace = true

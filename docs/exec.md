@@ -49,7 +49,9 @@ await vm.close();
 
 - `VM.create()` never boots the VM. It boots lazily on first use: `vm.exec()`
   / `vm.shell()`, `vm.fs` operations on guest paths, `vm.enableSsh()`,
-  `vm.enableIngress()`, or an explicit `vm.start()`. Calling `start()`
+  `vm.enableIngress()`, `vm.checkpoint()` (which boots the VM even with
+  `autoStart: false`, since the root disk is created at start), or an
+  explicit `vm.start()`. Calling `start()`
   yourself moves the boot cost (well under a second on a warm machine) and
   any boot error to a point you control. `start()` is idempotent.
 - With `autoStart: false` (default `true`) nothing boots implicitly: those

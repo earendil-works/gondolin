@@ -739,3 +739,145 @@ fn back_to_back_output_is_coalesced_in_order() {
         .collect();
     assert_eq!(sizes, vec![big.len(), 2]);
 }
+
+/// A crafted checkpoint (an external data file naming a host file) imported
+/// in place is refused at `start`, before anything is attached or rewritten.
+#[test]
+fn crafted_checkpoint_is_refused_at_start() {
+    use gondolin_proto::session::RootDisk;
+    use gondolin_qcow2::header::{EXT_DATA_FILE, Extension, INCOMPAT_DATA_FILE};
+
+    let dir = std::env::temp_dir().join(format!("gondolind-crafted-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rootfs = dir.join("rootfs.ext4");
+    std::fs::write(&rootfs, vec![0u8; 1 << 20]).unwrap();
+    let ckpt = dir.join("ckpt.qcow2");
+    crate::rootdisk::craft_qcow2(&ckpt, 1 << 20, Some(("/elsewhere/rootfs.ext4", "raw")), |h| {
+        h.incompatible_features |= INCOMPAT_DATA_FILE;
+        h.extensions.push(Extension { kind: EXT_DATA_FILE, data: b"/etc/passwd".to_vec() });
+    });
+    let before = std::fs::read(&ckpt).unwrap();
+
+    let ctl = Controller::new();
+    let host = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
+    let (mut s, _channels) = Session::new(ctl.clone(), Dispatcher::default(), host);
+    let mut vm = test_vm();
+    vm.root_disk = Some(RootDisk {
+        path: rootfs.display().to_string(),
+        format: "raw".into(),
+        read_only: false,
+        snapshot: false,
+        mode: Some("checkpoint".into()),
+        size: None,
+    });
+    s.apply_configure(Configure {
+        vm,
+        limits: Limits::default(),
+        debug: vec![],
+        vfs: None,
+        net: None,
+    })
+    .unwrap();
+    let mut h = Harness { s, ctl };
+    h.msg("checkpoint_import", 7, map(vec![("path", text(&ckpt.display().to_string()))]));
+    let frames = h.controller_frames();
+    let import = frames.iter().find(|f| f.t == "checkpoint_import_result").unwrap();
+    assert_eq!(Fields::of(&import.p).bool("ok"), Some(true));
+
+    h.msg("start", 8, map(vec![]));
+    let frames = h.controller_frames();
+    let start = frames.iter().find(|f| f.t == "start_result").unwrap();
+    let f = Fields::of(&start.p);
+    assert_eq!(f.bool("ok"), Some(false));
+    let message = f.text("message").unwrap_or("");
+    assert!(message.contains("external data file"), "{message}");
+    assert!(std::fs::read(&ckpt).unwrap() == before);
+    drop(h);
+    // imported in place: the controller's file stays
+    assert!(ckpt.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// After `checkpoint_export` the VM stays stopped: restarts (lifecycle,
+/// boot, auto-restart) and a second export fail with `invalid_state`.
+#[test]
+fn no_restart_after_checkpoint_export() {
+    let mut h = Harness::new(Limits::default());
+    h.s.ckpt.overlay =
+        Some(crate::rootdisk::Overlay { path: "/nonexistent.qcow2".into(), base: None });
+    h.s.ckpt.exported = true;
+    h.msg("checkpoint_export", 3, map(vec![("path", text("/tmp/never.qcow2"))]));
+    let frames = h.controller_frames();
+    let res = frames.iter().find(|f| f.t == "checkpoint_export_result").unwrap();
+    assert_eq!(Fields::of(&res.p).text("code"), Some("invalid_state"));
+
+    h.s.restart_vm();
+    h.s.start_vm();
+    let frames = h.controller_frames();
+    let errors: Vec<_> = frames
+        .iter()
+        .filter(|f| f.t == "error")
+        .map(|f| Fields::of(&f.p).text("code").unwrap_or("").to_string())
+        .collect();
+    assert_eq!(errors, vec!["invalid_state", "invalid_state"]);
+    assert!(h.s.vm.child.is_none());
+}
+
+/// An export while the VMM is still stopping (e.g. a restart in flight)
+/// waits for it to exit before touching the disk.
+#[tokio::test]
+async fn checkpoint_export_waits_for_a_stopping_vmm() {
+    let mut h = Harness::new(Limits::default());
+    let dir = std::env::temp_dir().join(format!("gondolind-export-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let disk = dir.join("rootfs.qcow2");
+    std::fs::write(&disk, gondolin_qcow2::new_image(1 << 20, None).unwrap()).unwrap();
+    h.s.ckpt.overlay = Some(crate::rootdisk::Overlay { path: disk.clone(), base: None });
+    // a stop is pending: the child was taken, its exit not seen yet
+    let generation = h.s.vm.generation;
+    h.s.vm.stop_waiters.insert(generation, Vec::new());
+    let dest = dir.join("ckpt.qcow2");
+    h.msg("checkpoint_export", 4, map(vec![("path", text(&dest.display().to_string()))]));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(h.controller_frames().iter().all(|f| f.t != "checkpoint_export_result"));
+    assert!(disk.exists() && !dest.exists(), "nothing moved while the VMM runs");
+
+    h.s.vmm_exited(generation, Some(0), None);
+    let mut result = None;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Some(f) =
+            h.controller_frames().into_iter().find(|f| f.t == "checkpoint_export_result")
+        {
+            result = Some(f);
+            break;
+        }
+    }
+    let result = result.expect("export answered after the exit");
+    assert_eq!(Fields::of(&result.p).bool("ok"), Some(true), "{:?}", result.p);
+    assert!(dest.exists() && !disk.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Uploaded checkpoints are private files (mode 0600, not 0666 & umask).
+#[test]
+fn uploaded_checkpoints_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(Limits::default());
+    h.msg("checkpoint_import", 9, map(vec![]));
+    h.msg(
+        "checkpoint_data",
+        9,
+        map(vec![("data", Value::Bytes(b"QFI\xfb".to_vec())), ("eof", Value::Bool(true))]),
+    );
+    let frames = h.controller_frames();
+    let res = frames.iter().find(|f| f.t == "checkpoint_import_result").unwrap();
+    assert_eq!(Fields::of(&res.p).bool("ok"), Some(true));
+    let path = h.s.ckpt.imported.clone().unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    drop(h);
+    assert!(!path.exists(), "an upload is removed with the session");
+}

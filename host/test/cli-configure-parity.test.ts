@@ -71,9 +71,6 @@ function normalize(text: string, args: string[]): unknown {
       delete net.stack?.dns?.trusted_servers;
     }
   }
-  // the root disk overlay is a fresh temp file
-  const disk = out.configure?.vm?.root_disk;
-  if (disk && disk.format === "qcow2") disk.path = "<overlay>";
   let json = JSON.stringify(out);
   // random secret marker
   json = json.replace(/[0-9a-f]{48}/g, "<MARKER>");

@@ -24,7 +24,8 @@
 #
 # Nothing is published, tagged or pushed. Needs the release toolchain (Rust
 # with the four targets, Zig 0.17, pnpm, npm) and network access for npm
-# dependencies; the VM smoke test needs QEMU and a cached or downloadable image.
+# dependencies; the VM smoke test needs QEMU (krun is tried in addition on a
+# krun host) and a cached or downloadable image.
 # shellcheck disable=SC2015,SC2016,SC2086,SC2012,SC2001 # ok/fail never fail; JS in single quotes; intended word splitting
 set -euo pipefail
 

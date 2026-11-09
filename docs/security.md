@@ -453,6 +453,58 @@ Guidance:
 - Keep the VMM up to date (QEMU, and the krun runner, which bundles libkrun and
   is updated with Gondolin); the VM boundary is fundamental.
 
+### Root Disks and Checkpoints
+
+The daemon creates, grows and collapses qcow2 disks itself
+(`native/crates/gondolin-qcow2`, fuzzed); it does not run `qemu-img`. A qcow2
+header can name other host files (a backing file, an external data file) that
+the VMM opens with the disk: QEMU reads them, and libkrun's qcow2 driver even
+opens an external data file writable. A crafted checkpoint could therefore
+give the guest a host file of your choosing. Before a VM starts, the daemon
+validates every qcow2 the VMM will open that it did not just create itself:
+
+- imported checkpoints: the file itself for a local daemon, the uploaded copy
+  for a remote one
+- `sandbox.rootDiskPath` when it is a qcow2 image
+- an image rootfs in qcow2 format, attached directly or below an overlay
+
+Raw disks carry no metadata and are only checked to be regular files. The
+one exception is a block device as `sandbox.rootDiskPath`: it is accepted
+only attached raw (`rootDiskFormat: "raw"`) with no rootfs mode, never as
+qcow2, in a backing chain or as a checkpoint, and it is never resized or
+exported. Other special files (character devices, FIFOs, directories) are
+refused. Overlays the daemon creates for the session are trusted.
+
+For a validated disk, its whole backing chain is checked:
+
+- every file in the chain must be a regular file, without loops, and the
+  chain can have at most 64 layers
+- each qcow2 header is refused when it uses an external data file (the
+  incompatible feature bit or a data file name extension), encryption,
+  extended L2 entries, the corrupt flag or unknown incompatible features,
+  or when it repeats a known header extension (backing format, data file,
+  feature name table, bitmaps, crypto), which QEMU and libkrun would
+  interpret differently. Dirty images and zstd compression are allowed
+- each backing reference is refused when its name would be parsed by QEMU as
+  a protocol or JSON (a `:` before any `/`, as in `json:` or `nbd:`), when it
+  records no backing format (which would make the VMM probe it), or when that
+  format is anything other than `raw` or `qcow2`
+
+Imported checkpoints get stricter treatment:
+
+- their header is checked before anything is written, so a refused
+  checkpoint is left unchanged
+- their backing file name and format are then rewritten to the session's
+  rootfs whenever either differs (a checkpoint whose backing file is itself
+  is refused as corrupt)
+- afterwards the checkpoint's chain must be exactly the rootfs and the
+  rootfs's own chain; a standalone checkpoint (no backing file) must have no
+  chain at all
+
+What these checks do not cover: a checkpoint's contents become the guest's
+root disk, and the VMM still parses its qcow2 metadata. Only resume
+checkpoints you created or trust.
+
 ## Known Limitations and Sharp Edges
 
 ### "Mediated Networking" Is Not the Same as "Safe Networking"
