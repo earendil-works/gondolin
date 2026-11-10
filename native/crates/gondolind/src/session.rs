@@ -610,10 +610,8 @@ impl Session {
                 }
             }
             Some("krun") => crate::krun::validate(&cfg.vm)?,
-            Some("firecracker") => {
-                crate::firecracker::check_host()?;
-                crate::firecracker::validate(&cfg.vm)?;
-            }
+            // checked by `firecracker::prepare` below
+            Some("firecracker") => {}
             Some(other) => return Err(format!("unsupported vmm: {other}")),
         }
         if cfg.vm.root_disk.as_ref().is_some_and(|d| d.path.is_empty()) {
@@ -623,6 +621,9 @@ impl Session {
             || (cfg.vm.initrd_path.is_empty() && !qemu::is_krun(&cfg.vm))
         {
             return Err("vm.kernel_path and vm.initrd_path are required".into());
+        }
+        if crate::firecracker::is_firecracker(&cfg.vm) {
+            crate::firecracker::prepare(&mut cfg.vm)?;
         }
         if qemu::uses_qemu(&cfg.vm)
             && let Some(machine) = qemu::machine_fallback(&cfg.vm, &self.host)
@@ -864,7 +865,7 @@ impl Session {
         };
         let Some(cfg) = self.configured.as_ref() else { return Ok(None) };
         if crate::firecracker::is_firecracker(&cfg.vm) {
-            // Nitro Sandboxes have no virtio-fs device: sandboxfs over vsock
+            // Firecracker has no virtio-fs device: sandboxfs over vsock
             let message = "virtio-fs unavailable with vmm=firecracker; using sandboxfs";
             if service.required() {
                 gondolin_log::warn!("{message}");

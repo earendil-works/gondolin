@@ -103,9 +103,11 @@ export type SandboxServerOptions = {
    */
   firecrackerPath?: string;
   /**
-   * AWS Nitro Sandbox settings (`vmm: "firecracker"`, which currently always
-   * runs a Nitro Sandbox; defaults: `GONDOLIN_NITRO_MODE`,
-   * `GONDOLIN_NITRO_CPU_OVERCOMMIT`)
+   * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
+   * settings (defaults: `GONDOLIN_NITRO_MODE`, `GONDOLIN_NITRO_CPU_OVERCOMMIT`;
+   * setting either variable also selects a Nitro Sandbox). Unset: a KVM
+   * microVM when the daemon's host has a usable `/dev/kvm`, else a Nitro
+   * Sandbox when it has `/dev/nitro_enclaves`.
    */
   nitro?: NitroOptions;
   /** guest asset directory or explicit asset paths */
@@ -219,7 +221,10 @@ export type ResolvedSandboxServerOptions = {
   krunRunnerPath: string;
   /** firecracker binary path */
   firecrackerPath: string;
-  /** Nitro Sandbox settings (set exactly when `vmm` is `firecracker`) */
+  /**
+   * Nitro Sandbox settings (`vmm: "firecracker"`; unset: the daemon picks
+   * KVM or a Nitro Sandbox)
+   */
   nitro?: ResolvedNitroOptions;
   /** kernel image path */
   kernelPath: string;
@@ -377,18 +382,23 @@ function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
   return null;
 }
 
-/** {@link NitroOptions} with the `GONDOLIN_NITRO_*` defaults applied */
+/**
+ * {@link NitroOptions} with the `GONDOLIN_NITRO_*` defaults applied, or
+ * `undefined` when neither the options nor the variables ask for a Nitro
+ * Sandbox
+ */
 function resolveNitroOptions(
   options: NitroOptions | undefined,
-): ResolvedNitroOptions {
+): ResolvedNitroOptions | undefined {
   const envMode = process.env.GONDOLIN_NITRO_MODE?.trim().toLowerCase();
+  const envOvercommit = process.env.GONDOLIN_NITRO_CPU_OVERCOMMIT?.trim();
+  if (options === undefined && !envMode && !envOvercommit) return undefined;
   const mode = options?.mode ?? (envMode || "direct");
   if (mode !== "direct" && mode !== "confidential") {
     throw new Error(
       `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct" or "confidential")`,
     );
   }
-  const envOvercommit = process.env.GONDOLIN_NITRO_CPU_OVERCOMMIT?.trim();
   const cpuOvercommit =
     options?.cpuOvercommit ?? (envOvercommit ? envOvercommit !== "0" : true);
   return { mode, cpuOvercommit };
