@@ -77,8 +77,8 @@ See [Files and Mounts](./vfs.md).
     - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 - `--vmm BACKEND` (also `--vmm=BACKEND`)
-    - Select the backend: `qemu`, `krun` or `firecracker` (AWS Nitro
-      Sandboxes, see [AWS Nitro Sandboxes](./nitro.md))
+    - Select the backend: `qemu`, `krun` or `firecracker` (KVM microVMs or
+      AWS Nitro Sandboxes, see [VM Backends](./backends.md#firecracker))
     - Default: `GONDOLIN_VMM`, else `krun` where it can run (supported host,
       installed runner, image with krun boot assets), else `qemu`; see
       [VM Backends](./backends.md#default-backend-selection)

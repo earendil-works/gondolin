@@ -64,14 +64,31 @@ const CLEAN_ENV = {
   GONDOLIN_NITRO_CPU_OVERCOMMIT: undefined,
 };
 
-test("firecracker runs a direct-mode Nitro Sandbox by default", (t) => {
+test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) => {
   const dir = makeAssetsDir(t);
   const resolved = withEnv(CLEAN_ENV, () =>
     resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
   );
   assert.equal(resolved.vmm, "firecracker");
   assert.equal(resolved.firecrackerPath, "firecracker");
-  assert.deepEqual(resolved.nitro, { mode: "direct", cpuOvercommit: true });
+  assert.equal(resolved.nitro, undefined);
+  const payload = buildNativeConfigure(resolved, {}, {});
+  assert.equal((payload.vm as Record<string, unknown>).nitro, undefined);
+
+  // any Nitro setting selects a Nitro Sandbox, with defaults for the rest
+  const nitro = withEnv(CLEAN_ENV, () =>
+    resolveSandboxServerOptions({
+      imagePath: dir,
+      vmm: "firecracker",
+      nitro: {},
+    }),
+  );
+  assert.deepEqual(nitro.nitro, { mode: "direct", cpuOvercommit: true });
+  const fromEnv = withEnv(
+    { ...CLEAN_ENV, GONDOLIN_NITRO_CPU_OVERCOMMIT: "1" },
+    () => resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
+  );
+  assert.deepEqual(fromEnv.nitro, { mode: "direct", cpuOvercommit: true });
   // the regular image assets, not krun's
   assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
   assert.equal(path.basename(resolved.initrdPath), "initramfs.cpio.lz4");
@@ -224,7 +241,7 @@ test("remote sessions send only an explicit firecracker path", () => {
       const vm = payload.vm as Record<string, unknown>;
       assert.equal(vm.vmm, "firecracker");
       assert.equal(vm.firecracker_path, undefined);
-      assert.deepEqual(vm.nitro, { mode: "direct", cpu_overcommit: true });
+      assert.equal(vm.nitro, undefined);
 
       const explicit = resolveRemoteSandboxOptions(
         { vmm: "firecracker", firecrackerPath: "/daemon/firecracker" },

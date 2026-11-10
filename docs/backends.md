@@ -4,8 +4,9 @@ Gondolin supports three VM backends:
 
 - `krun` (default where it can run; uses `libkrun` via the `gondolin-krun-runner` helper)
 - `qemu` (the fallback everywhere else, broader feature support and tuning knobs)
-- `firecracker` (AWS Nitro Sandboxes on EC2 through Firecracker; Linux only,
-  never selected automatically, see [AWS Nitro Sandboxes](./nitro.md))
+- `firecracker` (Firecracker microVMs on Linux KVM, or AWS Nitro Sandboxes on
+  EC2; never selected automatically, see [firecracker](#firecracker) and
+  [AWS Nitro Sandboxes](./nitro.md))
 
 All backends are started and driven by the Gondolin daemon (`gondolind`; see
 [Architecture](./architecture.md)): the VMM process is a child of the daemon,
@@ -57,14 +58,14 @@ Two cases keep `qemu` as the default:
 | `sandbox.vmm` | ✓ | ✓ | ✓ | Select backend (`"qemu"`, `"krun"` or `"firecracker"`); default: see [above](#default-backend-selection) (never `firecracker`) |
 | `sandbox.qemuPath` | ✓ |  |  | Rejected unless `vmm=qemu` |
 | `sandbox.krunRunnerPath` |  | ✓ |  | Used only with `vmm=krun` |
-| `sandbox.firecrackerPath` / `sandbox.nitro` |  |  | ✓ | Rejected unless `vmm=firecracker`; see [AWS Nitro Sandboxes](./nitro.md) |
+| `sandbox.firecrackerPath` / `sandbox.nitro` |  |  | ✓ | Rejected unless `vmm=firecracker`; `sandbox.nitro` selects a Nitro Sandbox, see [AWS Nitro Sandboxes](./nitro.md) |
 | `sandbox.machineType` | ✓ |  |  | Rejected unless `vmm=qemu` |
 | `sandbox.accel` | ✓ |  |  | Rejected unless `vmm=qemu`; the other backends' accelerator is implicit |
 | `sandbox.cpu` | ✓ |  |  | Rejected unless `vmm=qemu`; `GONDOLIN_CPU` only applies to `qemu` |
 | `sandbox.qemuIdlePauseMs` | ✓ |  |  | Rejected unless `vmm=qemu`; see [QEMU: Idle Pause](./qemu.md#idle-pause) |
 | `sandbox.cpus` | ✓ | ✓ | ✓ | Shared high-level CPU count option; Firecracker with dedicated cores (`nitro.cpuOvercommit: false`) needs an even count |
-| `sandbox.memory` | ✓ | ✓ | ✓ | `krun` and `firecracker` parse memory and pass MiB (Firecracker: rounded up to 2 MiB, at least 64 MiB on Nitro) |
-| `sandbox.console` | ✓ | ✓ | ✓ | Firecracker turns the Nitro debug console on only for `"stdio"` or `protocol` debugging, and otherwise boots the kernel with `quiet` (the boot log costs ~0.45 s) |
+| `sandbox.memory` | ✓ | ✓ | ✓ | `krun` and `firecracker` parse memory and pass MiB (Firecracker: rounded up to 2 MiB, at least 64 MiB) |
+| `sandbox.console` | ✓ | ✓ | ✓ | Firecracker boots the kernel with `quiet` (the boot log to the emulated UART costs ~0.45 s) and on Nitro turns the debug console off, unless `"stdio"` or `protocol` debugging |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | ✓ | Supported on all backends; Firecracker needs a raw disk; not with a [remote daemon](./remote.md) |
 | `rootfs.mode = "memory"` | ✓ | ✓ | ✓ | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay the daemon creates; Firecracker a raw copy in the session directory (reflinked on XFS/btrfs); writes are discarded on all |
 | `rootfs.mode = "cow"` | ✓ | ✓ | ✓ | QEMU and krun: a writable qcow2 copy-on-write overlay; Firecracker (raw disks only): a raw copy per session, like `memory`. The original rootfs image is never modified |
@@ -115,21 +116,32 @@ from its `PATH`.
 
 ### firecracker
 
-- Linux daemon host only: an x86_64 or Graviton EC2 instance with Nitro
-  Enclaves enabled, and Firecracker 1.18 or newer; setup in
-  [AWS Nitro Sandboxes](./nitro.md)
-- Currently always an AWS Nitro Sandbox (`sandbox.nitro`, direct mode by
-  default); plain KVM microVMs are not supported yet
-- Boots the image's regular kernel and initramfs: the kernel must be
-  EFI-bootable (x86_64: an EFI-stub `bzImage`) with ACPI, virtio-pci and the
-  vsock transport; Alpine's `linux-virt` qualifies. Confidential mode also
-  needs the DMB virtio patches
+- Linux daemon host only, with Firecracker 1.18 or newer and one of:
+    - KVM: read-write access to `/dev/kvm` (bare metal, or a VM with nested
+      virtualization such as EC2 `m8i`/`c8i`/`r8i` instances)
+    - AWS Nitro Sandboxes: an x86_64 or Graviton EC2 instance with Nitro
+      Enclaves enabled; setup in [AWS Nitro Sandboxes](./nitro.md)
+- Where the VM runs: a Nitro Sandbox when `sandbox.nitro` (or
+  `GONDOLIN_NITRO_MODE` / `GONDOLIN_NITRO_CPU_OVERCOMMIT`) is set; otherwise
+  the daemon picks KVM when `/dev/kvm` is usable, else a Nitro Sandbox (direct
+  mode) when the host has `/dev/nitro_enclaves`
+- Boots the image's regular kernel and initramfs; the kernel needs
+  virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
+  `linux-virt` qualifies). On KVM Firecracker only boots an uncompressed kernel,
+  so the daemon decompresses the image's `vmlinuz` (a gzip-compressed bzImage
+  on x86_64 or EFI zboot image on aarch64) once into
+  `~/.cache/gondolin/firecracker-kernels/`. Nitro Sandboxes boot the
+  compressed kernel through UEFI firmware (x86_64: an EFI-stub `bzImage`);
+  confidential mode also needs the DMB virtio patches
+- The default kernel command line is Firecracker's own (`console=ttyS0`,
+  `panic=1`, and on x86_64 `reboot=k` and the i8042 flags), so a guest panic
+  ends the VM instead of hanging it
 - Requires a guest image built with vsock support (this release or newer):
   the guest helpers connect over vsock when the kernel command line has
   `gondolin.vsock`
 - The daemon needs root (more precisely `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
-  `CAP_NET_RAW` and access to `/dev/nitro_enclaves`): it creates a network
-  namespace and a tap device per VM
+  `CAP_NET_RAW` and access to `/dev/kvm` or `/dev/nitro_enclaves`): it
+  creates a network namespace and a tap device per VM
 - Binary resolution: `sandbox.firecrackerPath`, else `GONDOLIN_FIRECRACKER`,
   else `firecracker` on the daemon's `PATH` (a remote daemon only receives an
   explicit `sandbox.firecrackerPath`)
@@ -140,15 +152,16 @@ from its `PATH`.
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
 - Some krun networking edge cases are still under investigation
 - krun's virtio-fs forwards every request through the runner to the daemon over a socket, one at a time: faster than sandboxfs, but slower than QEMU's vhost-user (shared guest memory, several queues) for large I/O; older runners (no `virtiofs-socket` capability) fall back to sandboxfs
-- Firecracker on Nitro boots through UEFI firmware (~0.4 s) and has no snapshots or pause; mounts use sandboxfs over vsock
+- Firecracker has no snapshots or pause in Gondolin, and no virtio-fs: mounts use sandboxfs over vsock. On Nitro it boots through UEFI firmware (~0.4 s)
 - Host CA trust configuration can cause guest-visible HTTP `502` errors on all backends when upstream TLS validation fails
 
 ## Recommendation
 
 Use the default unless you need something only one backend offers: `qemu` for
 the fastest guest mounts (vhost-user virtio-fs with a Linux distribution QEMU),
-QEMU tuning knobs, or guests for another architecture; `firecracker` to run
-VMs as AWS Nitro Sandboxes on EC2 instances without nested virtualization. When the backend
+QEMU tuning knobs, or guests for another architecture; `firecracker` for
+Firecracker's minimal device model on Linux KVM, or to run VMs as AWS Nitro
+Sandboxes on EC2 instances without nested virtualization. When the backend
 matters, pin it explicitly (`sandbox.vmm`, `--vmm`, `GONDOLIN_VMM`) rather than
 relying on detection. If you expose backend knobs in higher-level tooling, gate
 them by backend and fail fast on unsupported combinations.

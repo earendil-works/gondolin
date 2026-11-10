@@ -500,7 +500,13 @@ pub fn uses_qemu(vm: &VmConfig) -> bool {
 /// Base kernel command line: `append` (or the default) plus extra pieces.
 pub fn base_append(vm: &VmConfig, host: &HostInfo) -> String {
     let first = vm.append.clone().unwrap_or_else(|| {
-        if is_krun(vm) { crate::krun::DEFAULT_APPEND.to_string() } else { default_append(host) }
+        if is_krun(vm) {
+            crate::krun::DEFAULT_APPEND.to_string()
+        } else if crate::firecracker::is_firecracker(vm) {
+            crate::firecracker::DEFAULT_APPEND.to_string()
+        } else {
+            default_append(host)
+        }
     });
     std::iter::once(first.trim().to_string())
         .chain(vm.append_extra.iter().map(|s| s.to_string()))

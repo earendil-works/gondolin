@@ -5,7 +5,11 @@ On an EC2 instance, Gondolin can run each VM as an
 a lightweight VM that the Nitro System runs next to the instance and isolates
 from it, launched through [Firecracker](https://github.com/firecracker-microvm/firecracker/tree/main/docs/nitro-sandboxes).
 This works on ordinary (non-metal) x86_64 and Graviton instance types that
-support Nitro Enclaves, with no nested virtualization. Select it with the `firecracker` backend:
+support Nitro Enclaves, with no nested virtualization. Select it with the
+`firecracker` backend; on a host without a usable `/dev/kvm` it runs Nitro
+Sandboxes by default, and `sandbox.nitro` (or `GONDOLIN_NITRO_MODE`) asks for
+one explicitly (on hosts that also have KVM, it otherwise runs a KVM microVM,
+see [VM Backends](./backends.md#firecracker)):
 
 ```bash
 sudo gondolin exec --vmm firecracker -- uname -a
@@ -135,5 +139,3 @@ namespace and the tap disappear with the VM.
   protocol debugging is on (in confidential mode it disables attestation).
   Without it the kernel command line also gets `quiet` (unless it already sets
   a log level): the boot log to the emulated UART costs about 0.45 s per boot.
-- Only Nitro Sandboxes for now; plain KVM microVMs through Firecracker are not
-  supported yet.

@@ -488,6 +488,7 @@ name = "gondolind"
 version = "0.14.0"
 dependencies = [
  "bytes",
+ "flate2",
  "gondolin-assets",
  "gondolin-egress",
  "gondolin-hooks-djs",

@@ -1,4 +1,4 @@
-//! Firecracker backend (AWS Nitro Sandboxes).
+//! Firecracker backend: KVM microVMs, or AWS Nitro Sandboxes.
 //!
 //! The VM is described by one JSON file (`firecracker --no-api --config-file`):
 //! kernel + initrd + command line, vCPUs and memory, the raw root disk, a
@@ -7,11 +7,17 @@
 //! the daemon's guest channels listen (the guest helpers connect there when
 //! the command line has `gondolin.vsock`, see `guest/ARCHITECTURE.md` §3.1).
 //!
-//! The `enclave` block makes Firecracker launch the VM through
+//! With `vm.nitro` the `enclave` block makes Firecracker launch the VM through
 //! `/dev/nitro_enclaves` instead of KVM.  Direct mode (the default) runs an
 //! unpatched guest kernel; confidential mode needs the DMB virtio patches and
-//! rejects the entropy device.
+//! rejects the entropy device.  Without `vm.nitro` the daemon picks KVM when
+//! `/dev/kvm` is usable, else a Nitro Sandbox ([`prepare`]).
+//!
+//! On KVM Firecracker boots only an uncompressed kernel (an ELF `vmlinux` on
+//! x86_64, an arm64 `Image` on aarch64); [`prepare`] decompresses the image's
+//! `vmlinuz` once into the cache ([`uncompressed_kernel`]).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use gondolin_proto::session::VmConfig;
@@ -21,6 +27,16 @@ use crate::qemu::ChardevPaths;
 
 /// Kernel command line flag that selects the guest's vsock transport.
 pub const VSOCK_APPEND: &str = "gondolin.vsock";
+
+/// Default kernel command line. The serial port is `ttyS0` on both
+/// architectures; `panic=1` (and `reboot=k` on x86_64, which resets through the
+/// i8042) turn a guest panic into a VMM exit, and the i8042 flags skip probing
+/// for devices Firecracker doesn't have.
+#[cfg(target_arch = "x86_64")]
+pub const DEFAULT_APPEND: &str =
+    "console=ttyS0 initramfs_async=1 reboot=k panic=1 i8042.noaux i8042.nomux i8042.dumbkbd";
+#[cfg(not(target_arch = "x86_64"))]
+pub const DEFAULT_APPEND: &str = "console=ttyS0 initramfs_async=1 panic=1";
 
 /// Guest CID of the VM's vsock device (any value above 2 works: each VM has
 /// its own device).
@@ -76,29 +92,130 @@ pub fn check_host() -> Result<(), String> {
     Ok(())
 }
 
+/// The KVM device; usable when this process can open it read-write.
+const KVM_DEVICE: &str = "/dev/kvm";
+/// The Nitro Enclaves device of an AWS Nitro Sandboxes parent instance.
+const NITRO_DEVICE: &str = "/dev/nitro_enclaves";
+
+fn kvm_usable() -> bool {
+    std::fs::OpenOptions::new().read(true).write(true).open(KVM_DEVICE).is_ok()
+}
+
+/// Fills in where the VM runs when `vm.nitro` is unset: KVM when usable, else
+/// a Nitro Sandbox with the default settings when the host has the device.
+fn select_target(vm: &mut VmConfig, kvm: bool, nitro_device: bool) -> Result<(), String> {
+    if vm.nitro.is_some() || kvm {
+        return Ok(());
+    }
+    if nitro_device {
+        vm.nitro = Some(gondolin_proto::session::NitroConfig {
+            mode: "direct".into(),
+            cpu_overcommit: true,
+        });
+        return Ok(());
+    }
+    Err(format!(
+        "vmm=firecracker needs {KVM_DEVICE} (read-write access for KVM microVMs) or \
+         {NITRO_DEVICE} (AWS Nitro Sandboxes)"
+    ))
+}
+
+/// Validates `vm` and settles the parts this host decides: KVM or Nitro
+/// ([`select_target`]) and, on KVM, the uncompressed kernel that replaces
+/// `vm.kernel_path`.
+pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
+    check_host()?;
+    select_target(vm, kvm_usable(), Path::new(NITRO_DEVICE).exists())?;
+    validate(vm)?;
+    if vm.nitro.is_none() {
+        let cache = gondolin_assets::store::gondolin_cache_dir().join("firecracker-kernels");
+        vm.kernel_path =
+            uncompressed_kernel(Path::new(&vm.kernel_path), &cache)?.display().to_string();
+    }
+    Ok(())
+}
+
+/// Whether `data` is a kernel Firecracker boots on KVM on this architecture.
+fn bootable_on_kvm(data: &[u8]) -> bool {
+    if cfg!(target_arch = "x86_64") {
+        data.starts_with(b"\x7fELF")
+    } else {
+        // arm64 `Image` header magic
+        data.get(0x38..0x3c) == Some(b"ARM\x64".as_slice())
+    }
+}
+
+/// Largest kernel [`uncompressed_kernel`] decompresses.
+const MAX_KERNEL_BYTES: u64 = 512 << 20;
+
+/// The kernel at `path` in a form Firecracker boots on KVM: itself when it
+/// already is one, else the gzip payload of a bzImage (x86_64) or EFI zboot
+/// image (aarch64), decompressed once to `cache/<sha256 of path's contents>`.
+pub fn uncompressed_kernel(path: &Path, cache: &Path) -> Result<PathBuf, String> {
+    let data =
+        std::fs::read(path).map_err(|e| format!("cannot read kernel {}: {e}", path.display()))?;
+    if bootable_on_kvm(&data) {
+        return Ok(path.to_path_buf());
+    }
+    let digest = ring::digest::digest(&ring::digest::SHA256, &data);
+    let name: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let out = cache.join(&name);
+    if out.exists() {
+        return Ok(out);
+    }
+    // like the kernel's scripts/extract-vmlinux: try each gzip header
+    let kernel = data
+        .windows(3)
+        .enumerate()
+        .filter(|(_, w)| *w == [0x1f, 0x8b, 0x08])
+        .find_map(|(at, _)| {
+            let mut out = Vec::new();
+            gondolin_assets::archive::gzip::GzipReader::first_member(&data[at..])
+                .take(MAX_KERNEL_BYTES + 1)
+                .read_to_end(&mut out)
+                .ok()?;
+            (out.len() as u64 <= MAX_KERNEL_BYTES && bootable_on_kvm(&out)).then_some(out)
+        })
+        .ok_or_else(|| {
+            format!(
+                "{} is not a kernel Firecracker can boot on KVM (expected an uncompressed \
+                 kernel or a gzip-compressed bzImage/zboot image)",
+                path.display()
+            )
+        })?;
+    std::fs::create_dir_all(cache)
+        .map_err(|e| format!("cannot create {}: {e}", cache.display()))?;
+    // concurrent sessions may race: each writes its own file, the rename is atomic
+    let tmp = cache.join(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &kernel).and_then(|()| std::fs::rename(&tmp, &out)).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write {}: {e}", out.display())
+    })?;
+    Ok(out)
+}
+
 /// Checks the parts of the configuration this backend supports.
 pub fn validate(vm: &VmConfig) -> Result<(), String> {
-    let Some(nitro) = &vm.nitro else {
-        return Err(
-            "vmm=firecracker currently requires vm.nitro (AWS Nitro Sandboxes); KVM microVMs are not supported yet"
-                .into(),
-        );
-    };
-    if nitro.mode != "direct" && nitro.mode != "confidential" {
-        return Err(format!("vm.nitro.mode must be direct or confidential (got {:?})", nitro.mode));
+    if let Some(nitro) = &vm.nitro {
+        if nitro.mode != "direct" && nitro.mode != "confidential" {
+            return Err(format!(
+                "vm.nitro.mode must be direct or confidential (got {:?})",
+                nitro.mode
+            ));
+        }
+        if !nitro.cpu_overcommit && !vm.cpus.is_multiple_of(2) {
+            return Err(format!(
+                "vm.cpus must be even with dedicated cores (vm.nitro.cpu_overcommit false): {}",
+                vm.cpus
+            ));
+        }
     }
     if vm.cpus < 1 || vm.cpus > 1024 {
         return Err(format!("invalid vm cpu count for the firecracker backend: {}", vm.cpus));
     }
-    if !nitro.cpu_overcommit && !vm.cpus.is_multiple_of(2) {
-        return Err(format!(
-            "vm.cpus must be even with dedicated cores (vm.nitro.cpu_overcommit false): {}",
-            vm.cpus
-        ));
-    }
     let mib = memory_mib(vm)?;
     if mib < 64 {
-        return Err(format!("a Nitro Sandbox needs at least 64 MiB of memory (got {mib} MiB)"));
+        return Err(format!("a Firecracker VM needs at least 64 MiB of memory (got {mib} MiB)"));
     }
     if vm.idle_pause_ms.is_some_and(|ms| ms > 0) {
         return Err("vm.idle_pause_ms is only supported with vmm=qemu".into());
@@ -142,8 +259,6 @@ pub fn wants_console(vm: &VmConfig, protocol_debug: bool) -> bool {
 /// The Firecracker configuration file for `vm` (after `rootdisk::prepare_raw`).
 pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     validate(vm)?;
-    let nitro = vm.nitro.as_ref().expect("validated");
-    let direct = nitro.mode == "direct";
     let debug = args.console;
 
     let mut boot_args = format!("{} {VSOCK_APPEND}", args.append.trim());
@@ -201,14 +316,22 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
             "guest_cid": u64::from(GUEST_CID),
             "uds_path": args.vsock_uds.display().to_string(),
         },
-        "enclave": {
-            "debug_mode": debug,
-            "direct_mode": direct,
-            "cpu_overcommit": nitro.cpu_overcommit,
-        },
     });
-    if direct {
+    let mut entropy = true;
+    if let Some(nitro) = &vm.nitro {
+        let direct = nitro.mode == "direct";
+        config.insert(
+            "enclave",
+            gondolin_wire::value!({
+                "debug_mode": debug,
+                "direct_mode": direct,
+                "cpu_overcommit": nitro.cpu_overcommit,
+            }),
+        );
         // the Nitro System rejects virtio-rng in confidential mode
+        entropy = direct;
+    }
+    if entropy {
         config.insert("entropy", gondolin_wire::value!({}));
     }
     Ok(config)
@@ -366,7 +489,7 @@ mod tests {
         assert!(validate(&vm()).is_ok());
         let mut v = vm();
         v.nitro = None;
-        assert!(validate(&v).unwrap_err().contains("vm.nitro"));
+        assert!(validate(&v).is_ok(), "KVM");
         let mut v = vm();
         v.nitro = Some(NitroConfig { mode: "fast".into(), cpu_overcommit: true });
         assert!(validate(&v).unwrap_err().contains("direct or confidential"));
@@ -378,10 +501,92 @@ mod tests {
         v.memory = "32M".into();
         assert!(validate(&v).unwrap_err().contains("64 MiB"));
         let mut v = vm();
+        v.nitro = None;
+        v.cpus = 3;
+        assert!(validate(&v).is_ok(), "odd vCPU counts are fine on KVM");
+        let mut v = vm();
         v.accel = Some("kvm".into());
         assert!(validate(&v).unwrap_err().contains("vm.accel"));
         let mut v = vm();
         v.idle_pause_ms = Some(1000);
         assert!(validate(&v).unwrap_err().contains("idle_pause_ms"));
+    }
+
+    #[test]
+    fn kvm_config_has_no_enclave_block() {
+        let mut vm = vm();
+        vm.nitro = None;
+        let uds = PathBuf::from("/s/v.sock");
+        let config = config(&vm, &args(&uds)).unwrap();
+        assert!(config.get("enclave").is_none());
+        assert!(config.get("entropy").is_some());
+        assert_eq!(config["boot-source"]["kernel_image_path"].as_str(), Some("/img/vmlinuz-virt"));
+    }
+
+    #[test]
+    fn target_selection() {
+        let direct = Some(NitroConfig { mode: "direct".into(), cpu_overcommit: true });
+        let pick = |nitro: Option<NitroConfig>, kvm, dev| {
+            let mut v = vm();
+            v.nitro = nitro;
+            select_target(&mut v, kvm, dev).map(|()| v.nitro)
+        };
+        assert_eq!(pick(None, true, true).unwrap(), None, "KVM wins when usable");
+        assert_eq!(pick(None, false, true).unwrap(), direct, "else a Nitro Sandbox");
+        let chosen = Some(NitroConfig { mode: "confidential".into(), cpu_overcommit: false });
+        assert_eq!(pick(chosen.clone(), true, false).unwrap(), chosen, "explicit Nitro stays");
+        assert!(pick(None, false, false).unwrap_err().contains("/dev/kvm"));
+    }
+
+    /// The start of a kernel [`bootable_on_kvm`] accepts.
+    fn fake_kernel() -> Vec<u8> {
+        let mut k = vec![0u8; 4096];
+        if cfg!(target_arch = "x86_64") {
+            k[..4].copy_from_slice(b"\x7fELF");
+        } else {
+            k[0x38..0x3c].copy_from_slice(b"ARM\x64");
+        }
+        k
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn kernels_are_decompressed_once_into_the_cache() {
+        let dir = std::env::temp_dir().join(format!("gondolin-fc-kernel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("cache");
+
+        // a boot stub, a gzip stream that isn't the kernel, then the kernel
+        let mut image = b"MZ boot stub".to_vec();
+        image.extend(gzip(b"not a kernel"));
+        image.extend([0x1f, 0x8b, 0x08, 0, 0]);
+        image.extend(gzip(&fake_kernel()));
+        image.extend(b"trailer");
+        let vmlinuz = dir.join("vmlinuz");
+        std::fs::write(&vmlinuz, &image).unwrap();
+
+        let out = uncompressed_kernel(&vmlinuz, &cache).unwrap();
+        assert!(out.starts_with(&cache));
+        assert_eq!(std::fs::read(&out).unwrap(), fake_kernel());
+        assert_eq!(uncompressed_kernel(&vmlinuz, &cache).unwrap(), out, "cached");
+        let leftovers = std::fs::read_dir(&cache).unwrap().count();
+        assert_eq!(leftovers, 1, "no temp files left behind");
+
+        let raw = dir.join("vmlinux");
+        std::fs::write(&raw, fake_kernel()).unwrap();
+        assert_eq!(uncompressed_kernel(&raw, &cache).unwrap(), raw, "already uncompressed");
+
+        let junk = dir.join("junk");
+        std::fs::write(&junk, gzip(b"nope")).unwrap();
+        assert!(uncompressed_kernel(&junk, &cache).unwrap_err().contains("not a kernel"));
+        assert!(uncompressed_kernel(&dir.join("missing"), &cache).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
