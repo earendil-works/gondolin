@@ -116,7 +116,11 @@ export function assertNativeSupported(
   resolved: ResolvedSandboxServerOptions,
   raw: SandboxServerOptions | undefined,
 ): void {
-  if (resolved.vmm !== "qemu" && resolved.vmm !== "krun") {
+  if (
+    resolved.vmm !== "qemu" &&
+    resolved.vmm !== "krun" &&
+    resolved.vmm !== "firecracker"
+  ) {
     throw nativeUnsupported(`sandbox.vmm=${resolved.vmm}`);
   }
   const socketOptions = [
@@ -148,6 +152,8 @@ export type NativeRemoteConfig = {
   qemuPath?: string;
   /** daemon-side krun runner given explicitly by the user */
   krunRunnerPath?: string;
+  /** daemon-side firecracker binary given explicitly by the user */
+  firecrackerPath?: string;
 };
 
 /** Root disk mode applied by the daemon (`configure.vm.root_disk.mode`) */
@@ -191,6 +197,12 @@ export function buildNativeConfigure(
     appendExtra.push(buildTmpfsAppend(options.tmpfs));
   }
   const krun = options.vmm === "krun";
+  const firecracker = options.vmm === "firecracker";
+  // the daemon's VMM binary, besides QEMU
+  const noQemu = krun || firecracker;
+  const nitro = options.nitro
+    ? { mode: options.nitro.mode, cpu_overcommit: options.nitro.cpuOvercommit }
+    : undefined;
   const disk = internal.rootDisk;
   const rootDisk = disk
     ? {
@@ -206,7 +218,9 @@ export function buildNativeConfigure(
     ? {
         vmm: options.vmm,
         krun_runner_path: krun ? remote.krunRunnerPath : undefined,
-        qemu_path: krun ? "" : (remote.qemuPath ?? ""),
+        firecracker_path: firecracker ? remote.firecrackerPath : undefined,
+        nitro,
+        qemu_path: noQemu ? "" : (remote.qemuPath ?? ""),
         image: remote.image,
         kernel_path: "",
         initrd_path: "",
@@ -215,7 +229,9 @@ export function buildNativeConfigure(
     : {
         vmm: options.vmm,
         krun_runner_path: krun ? options.krunRunnerPath : undefined,
-        qemu_path: krun ? "" : options.qemuPath,
+        firecracker_path: firecracker ? options.firecrackerPath : undefined,
+        nitro,
+        qemu_path: noQemu ? "" : options.qemuPath,
         kernel_path: options.kernelPath,
         initrd_path: options.initrdPath,
         root_disk: rootDisk,
@@ -233,7 +249,7 @@ export function buildNativeConfigure(
       append_extra: appendExtra,
       mac: options.netMac,
       auto_restart: options.autoRestart,
-      idle_pause_ms: krun ? undefined : options.qemuIdlePauseMs,
+      idle_pause_ms: noQemu ? undefined : options.qemuIdlePauseMs,
     },
     limits: {
       max_stdin_bytes: options.maxStdinBytes,

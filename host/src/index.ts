@@ -29,6 +29,7 @@ export {
   type VmFsDeleteOptions,
 } from "./vm/core.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
+export type { NitroOptions, SandboxVmm } from "./sandbox/server-options.ts";
 export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
 export type { ExecSignalName } from "./utils/signals.ts";
 
