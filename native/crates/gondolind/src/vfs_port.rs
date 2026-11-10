@@ -41,6 +41,11 @@ impl FsPortHandler {
         match self.boot.lock().unwrap().as_ref() {
             Some(config) => FsReply::ok(Value::Map(vec![
                 (Value::Text("mount".into()), Value::Text(config.fuse_mount.clone())),
+                // largest read/write the backend takes (sandboxfs: 60 KiB without it)
+                (
+                    Value::Text("max_data".into()),
+                    Value::Integer((gondolin_vfs::rpc::MAX_RPC_DATA as u64).into()),
+                ),
                 (
                     Value::Text("binds".into()),
                     Value::Array(

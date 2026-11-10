@@ -21,8 +21,9 @@ use crate::types::{Attr, StatFs};
 pub const DEFAULT_ENTRY_TTL_MS: u64 = 1000;
 pub const DEFAULT_ATTR_TTL_MS: u64 = 1000;
 pub const DEFAULT_NEGATIVE_TTL_MS: u64 = 250;
-/// Largest `read`/`write` payload in `bytes`.
-pub const MAX_RPC_DATA: usize = 60 * 1024;
+/// Largest `read`/`write` payload in `bytes`; advertised to sandboxfs as
+/// `max_data` in the `mounts` reply (guests that don't read it stay at 60 KiB).
+pub const MAX_RPC_DATA: usize = 1024 * 1024;
 
 /// Fields of an `fs_response` payload.
 #[derive(Debug, Clone, PartialEq)]

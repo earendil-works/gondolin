@@ -51,6 +51,8 @@ pub const Opcode = enum(u32) {
 pub const init_flags = struct {
     pub const atomic_o_trunc: u32 = 1 << 3;
     pub const big_writes: u32 = 1 << 5;
+    /// `InitOut.max_pages` is valid (protocol 7.28)
+    pub const max_pages: u32 = 1 << 22;
 };
 
 /// `FATTR_*` bits in `SetattrIn.valid`
