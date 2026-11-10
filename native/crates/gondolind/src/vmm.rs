@@ -74,18 +74,43 @@ impl VmmProcess {
         generation: u64,
         events: mpsc::Sender<(u64, VmmEvent)>,
     ) -> std::io::Result<Self> {
+        Self::spawn_in(program, args, generation, events, None)
+    }
+
+    /// [`VmmProcess::spawn`] inside the network namespace `netns` (an open
+    /// `/proc/.../ns/net` descriptor; Linux only).
+    pub fn spawn_in(
+        program: &str,
+        args: &[String],
+        generation: u64,
+        events: mpsc::Sender<(u64, VmmEvent)>,
+        netns: Option<std::os::fd::RawFd>,
+    ) -> std::io::Result<Self> {
         let mut cmd = Command::new(program);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: prctl is async-signal-safe; kill QEMU if the daemon dies.
+            // SAFETY: prctl and setns are async-signal-safe; kill the VMM if
+            // the daemon dies. `netns` is still open in the child before exec.
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    if let Some(fd) = netns
+                        && libc::setns(fd, libc::CLONE_NEWNET) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }
+        }
+        #[cfg(not(target_os = "linux"))]
+        if netns.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "network namespaces are Linux-only",
+            ));
         }
         let mut child = cmd.spawn()?;
         let pid = child.id();

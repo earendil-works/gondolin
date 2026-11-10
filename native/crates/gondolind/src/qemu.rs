@@ -492,6 +492,11 @@ pub fn is_krun(vm: &VmConfig) -> bool {
     vm.vmm.as_deref() == Some("krun")
 }
 
+/// Whether the configuration selects the QEMU backend (the default).
+pub fn uses_qemu(vm: &VmConfig) -> bool {
+    matches!(vm.vmm.as_deref(), None | Some("qemu"))
+}
+
 /// Base kernel command line: `append` (or the default) plus extra pieces.
 pub fn base_append(vm: &VmConfig, host: &HostInfo) -> String {
     let first = vm.append.clone().unwrap_or_else(|| {
@@ -799,6 +804,8 @@ mod tests {
             image: None,
             vmm: None,
             krun_runner_path: None,
+            firecracker_path: None,
+            nitro: None,
             arch: None,
             kernel_path: "/img/vmlinuz".into(),
             initrd_path: "/img/initrd".into(),

@@ -367,6 +367,85 @@ pub fn prepare(
     Ok(created)
 }
 
+/// [`prepare`] for VMMs that only attach raw disks (Firecracker): every
+/// writable mode (`auto`, `cow`, `memory`) gets a raw copy of the base in
+/// `dir` (a reflink on XFS/btrfs, so it costs nothing there) whose writes are
+/// discarded with the session; `readonly` attaches the base itself.
+/// Checkpoints need a qcow2 overlay, so `checkpoint` is refused and a prepared
+/// disk is never exportable.
+pub fn prepare_raw(vm: &mut VmConfig, dir: &Path) -> Result<(), String> {
+    let Some(disk) = vm.root_disk.as_mut() else { return Ok(()) };
+    if !disk.path.is_empty() {
+        disk.path = std::path::absolute(&disk.path)
+            .map_err(|e| format!("invalid root_disk.path {}: {e}", disk.path))?
+            .display()
+            .to_string();
+    }
+    if disk.path.is_empty() {
+        return Err("root_disk.path is required (or vm.image)".into());
+    }
+    if disk.format.is_empty() {
+        disk.format = infer_format(&disk.path).into();
+    }
+    let path = PathBuf::from(&disk.path);
+    let format = Format::parse(&disk.format)?;
+    if format != Format::Raw {
+        return Err(format!(
+            "the firecracker backend needs a raw root disk ({} is {})",
+            path.display(),
+            format.name()
+        ));
+    }
+    if !is_block_device(&path) {
+        qcow2::validate_chain(&path, format)?;
+    }
+    let size = disk.size.take();
+    if size == Some(0) {
+        return Err("invalid disk resize target: 0".into());
+    }
+    let copy = |disk: &mut RootDisk| -> Result<(), String> {
+        let dest = dir.join("rootfs.raw");
+        // std::fs::copy uses copy_file_range on Linux: a reflink where the
+        // filesystem supports it
+        std::fs::copy(&path, &dest).map_err(|e| {
+            format!("cannot copy root disk {} to {}: {e}", path.display(), dest.display())
+        })?;
+        disk.path = dest.display().to_string();
+        disk.read_only = false;
+        disk.snapshot = false;
+        Ok(())
+    };
+    match disk.mode.take().as_deref() {
+        // the controller's own disk: as is, unless its writes are to be discarded
+        None if disk.snapshot => copy(disk)?,
+        None => {}
+        Some("readonly") => {
+            if size.is_some() {
+                return Err(
+                    "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)"
+                        .into(),
+                );
+            }
+            disk.read_only = true;
+            disk.snapshot = false;
+        }
+        Some("auto" | "cow" | "memory") => copy(disk)?,
+        Some("checkpoint") => {
+            return Err("checkpoints are not supported with vmm=firecracker".into());
+        }
+        Some(other) => return Err(format!("unsupported rootfs mode: {other}")),
+    }
+    if let Some(bytes) = size {
+        if disk.read_only || disk.snapshot {
+            return Err(
+                "rootfs.size requires a writable root disk (rootfs.mode cannot be readonly)".into(),
+            );
+        }
+        qcow2::ensure_min_size(Path::new(&disk.path), Format::Raw, bytes)?;
+    }
+    Ok(())
+}
+
 /// Writes a qcow2 (empty, `size` bytes) whose header `edit` may tamper with.
 #[cfg(test)]
 pub(crate) fn craft_qcow2(
@@ -406,6 +485,56 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn raw_vm(mode: Option<&str>, path: &Path) -> VmConfig {
+        VmConfig { root_disk: Some(disk(mode, path, "raw")), ..crate::tests::test_vm() }
+    }
+
+    #[test]
+    fn raw_disks_for_firecracker() {
+        let t = TempDir::new("raw");
+        let base = t.0.join("rootfs.ext4");
+        std::fs::write(&base, vec![7u8; 4096]).unwrap();
+        let session = t.0.join("session");
+        std::fs::create_dir_all(&session).unwrap();
+
+        // writable modes: a private copy, the base untouched
+        for mode in ["auto", "cow", "memory"] {
+            let mut vm = raw_vm(Some(mode), &base);
+            prepare_raw(&mut vm, &session).unwrap();
+            let d = vm.root_disk.unwrap();
+            assert_eq!(PathBuf::from(&d.path), session.join("rootfs.raw"), "{mode}");
+            assert_eq!(d.format, "raw");
+            assert!(!d.read_only && !d.snapshot);
+            assert_eq!(std::fs::read(&d.path).unwrap(), vec![7u8; 4096]);
+        }
+
+        // readonly: the base itself
+        let mut vm = raw_vm(Some("readonly"), &base);
+        prepare_raw(&mut vm, &session).unwrap();
+        let d = vm.root_disk.unwrap();
+        assert_eq!(PathBuf::from(&d.path), base);
+        assert!(d.read_only);
+
+        // rootfs.size grows the copy, not the base
+        let mut vm = raw_vm(Some("cow"), &base);
+        vm.root_disk.as_mut().unwrap().size = Some(1 << 20);
+        prepare_raw(&mut vm, &session).unwrap();
+        assert_eq!(std::fs::metadata(session.join("rootfs.raw")).unwrap().len(), 1 << 20);
+        assert_eq!(std::fs::metadata(&base).unwrap().len(), 4096);
+
+        // no checkpoints, no qcow2
+        let mut vm = raw_vm(Some("checkpoint"), &base);
+        assert!(prepare_raw(&mut vm, &session).unwrap_err().contains("checkpoints"));
+        let q = t.0.join("disk.qcow2");
+        craft_qcow2(&q, 1 << 20, None, |_| {});
+        let mut vm =
+            VmConfig { root_disk: Some(disk(Some("cow"), &q, "qcow2")), ..crate::tests::test_vm() };
+        assert!(prepare_raw(&mut vm, &session).unwrap_err().contains("raw root disk"));
+        let mut vm = raw_vm(Some("readonly"), &base);
+        vm.root_disk.as_mut().unwrap().size = Some(1 << 20);
+        assert!(prepare_raw(&mut vm, &session).unwrap_err().contains("writable"));
     }
 
     fn disk(mode: Option<&str>, path: &Path, format: &str) -> RootDisk {
