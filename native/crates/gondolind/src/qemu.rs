@@ -105,9 +105,13 @@ pub struct VirtioFsArgs<'a> {
 /// virtio-fs mount tag the guest uses (`mount -t virtiofs gondolin ...`).
 pub const VIRTIOFS_TAG: &str = "gondolin";
 
-/// What a QEMU binary offers for virtio-fs (`-device help`, `-object help`).
+/// What a QEMU binary offers for virtio-fs (`-device help`, `-object help`)
+/// and whether it lacks the microvm machine (`-machine help`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VirtioFsSupport {
+    /// the binary was probed and has no `microvm` machine (distribution
+    /// builds such as Amazon Linux 2023's leave it out)
+    pub microvm_missing: bool,
     /// `vhost-user-fs-pci` (PCI machines) is available
     pub pci: bool,
     /// `vhost-user-fs-device` (MMIO, microvm) is available
@@ -155,8 +159,13 @@ fn run_help(qemu: &str, args: &[&str]) -> String {
     out.unwrap_or_default()
 }
 
-/// Parses `-device help` / `-object help` output.
-pub fn parse_virtiofs_support(devices: &str, objects: &str, host: &HostInfo) -> VirtioFsSupport {
+/// Parses `-device help` / `-object help` / `-machine help` output.
+pub fn parse_virtiofs_support(
+    devices: &str,
+    objects: &str,
+    machines: &str,
+    host: &HostInfo,
+) -> VirtioFsSupport {
     let has = |text: &str, name: &str| text.contains(&format!("\"{name}\""));
     let object = |name: &str| objects.lines().any(|l| l.trim() == name);
     let memory_backend = if host.is_linux() && object("memory-backend-memfd") {
@@ -166,15 +175,37 @@ pub fn parse_virtiofs_support(devices: &str, objects: &str, host: &HostInfo) -> 
     } else {
         None
     };
+    // `microvm              microvm (i386)`; no output: not probed
+    let microvm_missing = !machines.trim().is_empty()
+        && !machines.lines().any(|l| l.split_whitespace().next() == Some("microvm"));
     VirtioFsSupport {
+        microvm_missing,
         pci: has(devices, "vhost-user-fs-pci"),
         mmio: has(devices, "vhost-user-fs-device"),
         memory_backend,
     }
 }
 
+/// One binary's probe on disk: `((pci, mmio, memory backend), microvm missing)`.
+type ProbeRecord = ((bool, bool, Option<String>), bool);
+
+/// `q35` when the default machine for `vm` would be `microvm` but its QEMU
+/// binary has none (probed once per binary, see [`probe_virtiofs`]);
+/// `None` keeps the default. Blocking.
+pub fn machine_fallback(vm: &VmConfig, host: &HostInfo) -> Option<&'static str> {
+    if vm.machine_type.is_some() {
+        return None;
+    }
+    let target_arch = detect_target_arch(&vm.qemu_path, host);
+    let accel = vm.accel.clone().unwrap_or_else(|| select_accel(&target_arch, host).to_string());
+    if select_machine_type(&target_arch, Some(&accel), host) != "microvm" {
+        return None;
+    }
+    probe_virtiofs(&vm.qemu_path, host).microvm_missing.then_some("q35")
+}
+
 /// Probes (once per binary, keyed by path, size and mtime, cached in memory
-/// and in `<cache>/gondolin/qemu-virtiofs.json`) what `qemu` offers for
+/// and in `<cache>/gondolin/qemu-probe.json`) what `qemu` offers for
 /// virtio-fs. Blocking.
 pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
     use std::collections::HashMap;
@@ -197,14 +228,15 @@ pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
     if let Some(s) = cache.lock().unwrap().get(&key) {
         return *s;
     }
-    let disk = gondolin_assets::store::gondolin_cache_dir().join("qemu-virtiofs.json");
-    let mut on_disk: HashMap<String, (bool, bool, Option<String>)> = std::fs::read_to_string(&disk)
+    let disk = gondolin_assets::store::gondolin_cache_dir().join("qemu-probe.json");
+    let mut on_disk: HashMap<String, ProbeRecord> = std::fs::read_to_string(&disk)
         .ok()
         .and_then(|t| gondolin_wire::json::parse(&t).ok())
         .and_then(|v| gondolin_wire::FromValue::from_value(&v).ok())
         .unwrap_or_default();
-    let support = if let Some((pci, mmio, backend)) = on_disk.get(&key) {
+    let support = if let Some(((pci, mmio, backend), microvm_missing)) = on_disk.get(&key) {
         VirtioFsSupport {
+            microvm_missing: *microvm_missing,
             pci: *pci,
             mmio: *mmio,
             memory_backend: match backend.as_deref() {
@@ -217,10 +249,14 @@ pub fn probe_virtiofs(qemu: &str, host: &HostInfo) -> VirtioFsSupport {
         let qemu_path = resolved.display().to_string();
         let devices = run_help(&qemu_path, &["-machine", "none", "-device", "help"]);
         let objects = run_help(&qemu_path, &["-machine", "none", "-object", "help"]);
-        let support = parse_virtiofs_support(&devices, &objects, host);
+        let machines = run_help(&qemu_path, &["-machine", "help"]);
+        let support = parse_virtiofs_support(&devices, &objects, &machines, host);
         on_disk.insert(
             key.clone(),
-            (support.pci, support.mmio, support.memory_backend.map(str::to_string)),
+            (
+                (support.pci, support.mmio, support.memory_backend.map(str::to_string)),
+                support.microvm_missing,
+            ),
         );
         if let Some(parent) = disk.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -848,16 +884,24 @@ mod tests {
         let devices = "name \"virtio-blk-pci\", bus PCI\nname \"vhost-user-fs-device\", bus virtio-bus\nname \"vhost-user-fs-pci\", bus PCI\n";
         let objects = "List of user creatable objects:\n  memory-backend-file\n  memory-backend-memfd\n  memory-backend-shm\n";
         let linux = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
-        let s = parse_virtiofs_support(devices, objects, &linux);
+        let s = parse_virtiofs_support(devices, objects, "", &linux);
         assert_eq!(s.memory_backend, Some("memory-backend-memfd"));
         assert!(s.usable("q35") && s.usable("microvm"));
-        let s = parse_virtiofs_support(devices, objects, &mac_arm());
+        let s = parse_virtiofs_support(devices, objects, "", &mac_arm());
         assert_eq!(s.memory_backend, Some("memory-backend-shm"));
         // Homebrew QEMU: no vhost-user devices
-        let s = parse_virtiofs_support("name \"virtio-blk-pci\", bus PCI\n", objects, &mac_arm());
+        let s =
+            parse_virtiofs_support("name \"virtio-blk-pci\", bus PCI\n", objects, "", &mac_arm());
         assert!(!s.usable("virt"));
-        let s = parse_virtiofs_support(devices, "  memory-backend-file\n", &mac_arm());
+        let s = parse_virtiofs_support(devices, "  memory-backend-file\n", "", &mac_arm());
         assert!(!s.usable("virt"));
+        assert!(!s.microvm_missing, "not probed: assume the default works");
+
+        // `-machine help` of a build with and without microvm
+        let with = "Supported machines are:\nmicrovm              microvm (i386)\nq35                  Standard PC (Q35 + ICH9, 2009)\n";
+        let without = "Supported machines are:\npc                   Standard PC\nq35                  Standard PC (Q35 + ICH9, 2009)\n";
+        assert!(!parse_virtiofs_support(devices, objects, with, &linux).microvm_missing);
+        assert!(parse_virtiofs_support(devices, objects, without, &linux).microvm_missing);
     }
 
     #[test]

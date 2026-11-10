@@ -596,7 +596,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn apply_configure(&mut self, cfg: Configure) -> Result<(), String> {
+    pub(crate) fn apply_configure(&mut self, mut cfg: Configure) -> Result<(), String> {
         match cfg.vm.vmm.as_deref() {
             None | Some("qemu") => {
                 if cfg.vm.qemu_path.is_empty() {
@@ -613,6 +613,12 @@ impl Session {
             || (cfg.vm.initrd_path.is_empty() && !qemu::is_krun(&cfg.vm))
         {
             return Err("vm.kernel_path and vm.initrd_path are required".into());
+        }
+        if !qemu::is_krun(&cfg.vm)
+            && let Some(machine) = qemu::machine_fallback(&cfg.vm, &self.host)
+        {
+            gondolin_log::debug!("{} has no microvm machine; using {machine}", cfg.vm.qemu_path);
+            cfg.vm.machine_type = Some(machine.to_string());
         }
         if cfg.vm.cpus == 0 {
             return Err("vm.cpus must be at least 1".into());
