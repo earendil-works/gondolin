@@ -47,6 +47,10 @@ const CONTROL_BATCH: usize = 256;
 
 /// Delay before an automatic restart after an unexpected VM exit.
 const AUTO_RESTART_DELAY: Duration = Duration::from_millis(1000);
+/// How long a Firecracker guest may take to send its first control message
+/// (healthy ones take ~1 s): an image without the vsock transport never does,
+/// and would otherwise only hit the caller's much longer start timeout.
+const FIRECRACKER_GUEST_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Events posted to the session task.
 #[derive(Debug)]
@@ -82,6 +86,8 @@ pub enum Timer {
     Restart(u64),
     /// time sync timeout for the request id
     TimeSync(u32),
+    /// the guest of this VMM generation must have spoken by now
+    GuestDeadline(u64),
 }
 
 /// Events of the control channel (sandboxd).
@@ -193,6 +199,10 @@ pub(crate) struct VmState {
     pub(crate) stop_waiters: HashMap<u64, Vec<AfterStop>>,
     /// kernel command line of the next start
     append: String,
+    /// the current generation's guest sent a control message
+    guest_seen: bool,
+    /// why the daemon stopped the current generation (reported with its exit)
+    exit_reason: Option<String>,
 }
 
 /// What to do once a stopped VMM exited.
@@ -454,6 +464,7 @@ impl Session {
                     }
                 }
                 Timer::TimeSync(id) => self.time_sync_timeout(id),
+                Timer::GuestDeadline(generation) => self.guest_deadline(generation),
             },
             Event::Qmp(done) => self.qmp_done(done),
             Event::Activity { source, active } => self.external_activity(source, active),
@@ -1186,6 +1197,7 @@ impl Session {
     }
 
     fn handle_guest_message(&mut self, v: Value) {
+        self.vm.guest_seen = true;
         let f = Fields::of(&v);
         let t = f.text("t").unwrap_or("");
         if t != "exec_output" {
@@ -1429,12 +1441,22 @@ impl Session {
         let netns = rt.tap.as_ref().map(|t| t.netns());
         #[cfg(not(target_os = "linux"))]
         let netns = None;
+        let guest_deadline = crate::firecracker::is_firecracker(&cfg.vm);
         self.set_vm_state(State::Starting);
         match VmmProcess::spawn_in(&qemu_path, &args, generation, self.vmm_tx.clone(), netns) {
             Ok(child) => {
                 crate::timing::mark("vmm spawned");
                 self.vm.child = Some(child);
+                self.vm.guest_seen = false;
+                self.vm.exit_reason = None;
                 let _ = self.events.send(Event::VmmSpawned(generation));
+                if guest_deadline {
+                    let events = self.events.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(FIRECRACKER_GUEST_DEADLINE).await;
+                        let _ = events.send(Event::Timer(Timer::GuestDeadline(generation)));
+                    });
+                }
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1468,6 +1490,24 @@ impl Session {
         child.stop(false);
         self.vm.stop_waiters.entry(self.vm.generation).or_default();
         true
+    }
+
+    /// The guest of `generation` never sent a control message: stop the VM
+    /// and say why (no automatic restart, it would not get further).
+    fn guest_deadline(&mut self, generation: u64) {
+        if generation != self.vm.generation || self.vm.guest_seen {
+            return;
+        }
+        let Some(child) = self.vm.child.as_mut() else { return };
+        let message = format!(
+            "the guest did not connect within {} s; images for vmm=firecracker need the guest \
+             helpers' vsock transport (built with this version of Gondolin)",
+            FIRECRACKER_GUEST_DEADLINE.as_secs()
+        );
+        gondolin_log::warn!("{message}");
+        self.vm.exit_reason = Some(message);
+        self.vm.manual_stop = true;
+        child.stop(true);
     }
 
     /// A VMM was told to stop and has not exited yet (`close_vm` took it).
@@ -1525,7 +1565,8 @@ impl Session {
             self.cleanup_qmp_socket();
             self.vm.child = None;
             self.set_vm_state(State::Stopped);
-            self.vm_exited_server(code, signal.map(vmm::signal_name), None);
+            let reason = self.vm.exit_reason.take();
+            self.vm_exited_server(code, signal.map(vmm::signal_name), reason);
             if self.vm.manual_stop {
                 self.vm.manual_stop = false;
             } else if self.configured.as_ref().is_some_and(|c| c.vm.auto_restart)
@@ -1578,6 +1619,10 @@ impl Session {
             "sandbox exited".to_string()
         } else {
             format!("sandbox exited ({detail})")
+        };
+        let base = match &error {
+            Some(error) => format!("{base}: {error}"),
+            None => base,
         };
         let message = format!("{base}{}", self.log_tail.format_hint_for(self.vmm_label()));
         self.fail_inflight("sandbox_stopped", &message);
