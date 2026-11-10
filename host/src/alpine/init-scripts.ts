@@ -179,6 +179,9 @@ sandboxfs_binds=""
 sandboxfs_virtiofs=""
 # scratch tmpfs mounts: "/path[:opt=value...][,/path...]" or "none"
 gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
+# static network configuration from the host, instead of DHCP:
+# "ADDRESS/PREFIX,GATEWAY,DNS[+DNS...]" (gondolin.net)
+gondolin_net=""
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -194,6 +197,9 @@ if [ -r /proc/cmdline ]; then
         ;;
       gondolin.tmpfs=*)
         gondolin_tmpfs="\${arg#gondolin.tmpfs=}"
+        ;;
+      gondolin.net=*)
+        gondolin_net="\${arg#gondolin.net=}"
         ;;
     esac
   done
@@ -301,7 +307,31 @@ else
   log "[init] no network link tool (ip/ifconfig)"
 fi
 
-if command -v udhcpc > /dev/null 2>&1; then
+# The host's settings when it sends them (what its DHCP server would hand
+# out; DHCP costs ~40 ms of udhcpc per boot), else DHCP.
+net_configured=0
+case "\${gondolin_net}" in
+  */*,*,*)
+    if command -v ip > /dev/null 2>&1; then
+      net_address="\${gondolin_net%%,*}"
+      net_rest="\${gondolin_net#*,}"
+      net_gateway="\${net_rest%%,*}"
+      net_dns="\${net_rest#*,}"
+      if ip addr add "\${net_address}" brd + dev eth0 \
+        && ip route add default via "\${net_gateway}" dev eth0; then
+        for net_server in $(printf "%s" "\${net_dns}" | tr '+' ' '); do
+          printf "nameserver %s\\n" "\${net_server}"
+        done > /etc/resolv.conf
+        net_configured=1
+      else
+        log "[init] static network configuration failed, trying DHCP"
+        ip addr flush dev eth0 > /dev/null 2>&1 || true
+      fi
+    fi
+    ;;
+esac
+
+if [ "\${net_configured}" != 1 ] && command -v udhcpc > /dev/null 2>&1; then
   UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
   if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
     UDHCPC_SCRIPT="/sbin/udhcpc.script"

@@ -333,7 +333,38 @@ impl ControllerRequests for Controller {
     }
 }
 
+/// `gondolin.net=ADDRESS/PREFIX,GATEWAY,DNS[+DNS...]`: the static network
+/// configuration the guest's init applies instead of running DHCP (images
+/// without support ignore it and use DHCP, which hands out the same values).
+pub fn guest_net_arg(stack: &NetStack) -> String {
+    let config = stack.config();
+    let dns: Vec<String> = stack.guest_dns_servers().iter().map(ToString::to_string).collect();
+    format!(
+        "gondolin.net={}/{},{},{}",
+        config.guest_ip,
+        config.prefix_len,
+        config.gateway_ip,
+        dns.join("+")
+    )
+}
+
+/// `GONDOLIN_GUEST_DHCP=1` (or `true`/`yes`/`on`): leave `gondolin.net` out so
+/// the guest configures its network with DHCP (images whose init cannot
+/// apply it, and the test that keeps the DHCP path working).
+pub fn guest_dhcp_forced(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    })
+}
+
 impl NetBackend for Net {
+    fn guest_net_arg(&self) -> Option<String> {
+        if guest_dhcp_forced(std::env::var("GONDOLIN_GUEST_DHCP").ok().as_deref()) {
+            return None;
+        }
+        Some(guest_net_arg(&self.stack))
+    }
+
     fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()> {
         Box::pin(async move {
             match crate::panics::CatchUnwind::new(self.stack.serve(stream)).await {
@@ -448,6 +479,13 @@ pub fn build_native(config: &Value, ctx: &SubsystemContext) -> Result<NetSetup, 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn guest_dhcp_switch() {
+        assert!(guest_dhcp_forced(Some("1")) && guest_dhcp_forced(Some(" TRUE ")));
+        assert!(!guest_dhcp_forced(Some("0")) && !guest_dhcp_forced(Some("")));
+        assert!(!guest_dhcp_forced(None));
+    }
     use std::sync::Mutex;
 
     use super::*;

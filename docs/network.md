@@ -67,6 +67,13 @@ The host implements enough LAN behavior for a typical Linux userspace to work:
 - ARP resolution for the gateway
 - DHCP (so the guest can use standard `udhcpc`/dhclient flows)
 
+The daemon also passes the same settings on the kernel command line
+(`gondolin.net=192.168.127.3/24,192.168.127.1,DNS[+DNS...]`), and the guest's
+init applies them with `ip` instead of running DHCP, which saves ~40 ms per
+boot. Images without that support ignore the argument and use DHCP, and
+`GONDOLIN_GUEST_DHCP=1` in the daemon's environment leaves it out (CI keeps
+the DHCP path working that way).
+
 This is a **virtual** LAN: it is not bridged to the real host network!
 
 ## Protocol Layers Implemented by the Host
@@ -93,7 +100,8 @@ constrained. The modes and their options are described in
 [Network Access](./network-access.md#dns); this section covers how they work.
 
 - Only UDP destination port **53** is handled; all other UDP is dropped.
-- The guest learns a DNS server via DHCP:
+- The guest learns a DNS server via DHCP (or the same list in
+  `gondolin.net`):
     - In `synthetic` / `trusted` mode, the DHCP server advertises the
       **gateway** (`192.168.127.1`) as the resolver (so the host can intercept
       DNS)

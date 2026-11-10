@@ -21,6 +21,7 @@ Paths under `~/.cache/gondolin` move to `$XDG_CACHE_HOME/gondolin` when
 | --- | --- | --- |
 | `GONDOLIN_DEFAULT_IMAGE` | SDK, static CLI, daemon | Image selector used when none is given (`name:tag`, build id or directory). Default: `alpine-base:latest` |
 | `GONDOLIN_GUEST_DIR` | SDK, static CLI, daemon | Asset directory (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets) used instead of the default image; also searched for the assets of a checkpoint on resume |
+| `GONDOLIN_GUEST_DHCP` | daemon | `1`: configure the guest network with DHCP instead of passing `gondolin.net=` on the kernel command line (for images whose init cannot apply it). Default: off |
 | `GONDOLIN_IMAGE_STORE` | SDK, static CLI, daemon | Local image store (refs and objects). Default: `~/.cache/gondolin/images` |
 | `GONDOLIN_IMAGE_REGISTRY_URL` | SDK, static CLI, daemon | URL of the builtin image registry JSON. Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json` |
 | `XDG_CACHE_HOME` | SDK, static CLI, daemon | Base of the Gondolin cache (`$XDG_CACHE_HOME/gondolin`). Default: `~/.cache` |

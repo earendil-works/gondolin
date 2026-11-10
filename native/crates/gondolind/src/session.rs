@@ -669,6 +669,12 @@ impl Session {
         crate::timing::enable(self.debug_enabled("timing").then(|| self.ctl.clone()));
         crate::timing::mark("configured");
         self.base_append = qemu::base_append(&cfg.vm, &self.host);
+        if let Some(arg) = match &net {
+            NetSetup::Native(backend) => backend.guest_net_arg(),
+            NetSetup::None => None,
+        } {
+            self.base_append = format!("{} {arg}", self.base_append);
+        }
         self.vm.append = self.base_append.clone();
         self.idle.configure(if qemu::is_krun(&cfg.vm) { None } else { cfg.vm.idle_pause_ms });
         self.vfs = vfs;
