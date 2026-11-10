@@ -363,8 +363,13 @@ const Fs = struct {
             .write => self.write(payload),
             .create => self.create(h, payload),
             .release => blk: {
+                // the kernel ignores RELEASE errors: reply now instead of
+                // after a round trip (one of open/read/release per small
+                // file). The host handles requests in order, so later ones
+                // on this handle's file still come after it.
                 const release, _ = try fuse.parse(fuse.ReleaseIn, payload);
-                _ = try self.call("release", .{ .fh = release.fh });
+                const rpc = if (self.rpc) |*rpc| rpc else break :blk empty;
+                try rpc.sendUnanswered("release", .{ .fh = release.fh });
                 break :blk empty;
             },
             .releasedir, .fsync, .fsyncdir, .flush, .destroy => empty,
