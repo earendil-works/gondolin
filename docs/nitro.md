@@ -128,6 +128,23 @@ only leave through the stack and its policy, as on the other backends: the
 host kernel has nothing to deliver it to and nowhere to route it. The
 namespace and the tap disappear with the VM.
 
+## Boot Time
+
+`exec -- true` takes about 1.05 s on an `m7i.xlarge` with a 1 GiB sandbox.
+Most of it is the Nitro System launching the enclave before the guest kernel
+starts (~0.6 s plus ~0.14 s per GiB of sandbox memory, which it populates and
+zeroes); the guest then reaches its first command in ~0.27 s. Stopping a
+sandbox takes ~0.15 s (+~0.07 s per GiB) in the kernel, whichever signal ends
+Firecracker. Smaller sandboxes (`sandbox.memory`) start and stop faster:
+
+| `sandbox.memory` | Firecracker start to first guest connection | stop |
+| --- | --- | --- |
+| 256 MiB | ~0.74 s | ~0.15 s |
+| 1 GiB | ~0.89 s | ~0.20 s |
+| 4 GiB | ~1.28 s | ~0.41 s |
+
+`GONDOLIN_DEBUG=timing` shows where a boot spends its time.
+
 ## Limitations
 
 - No checkpoints (`vm.checkpoint()`), no idle pause.
