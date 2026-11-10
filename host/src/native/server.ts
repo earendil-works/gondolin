@@ -37,6 +37,7 @@ import type {
   GuestFileWriteOptions,
   ResolvedSandboxServerOptions,
   SandboxServerOptions,
+  SandboxVmm,
 } from "../sandbox/server-options.ts";
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import { AsyncSingleflight } from "../utils/async.ts";
@@ -166,15 +167,20 @@ export class NativeSandboxServer extends EventEmitter {
   }
 
   /** @internal resolved VM backend name */
-  getVmmBackend(): "qemu" | "krun" {
+  getVmmBackend(): SandboxVmm {
     return this.options.vmm;
   }
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    return this.options.vmm === "krun"
-      ? this.options.krunRunnerPath
-      : this.options.qemuPath;
+    switch (this.options.vmm) {
+      case "krun":
+        return this.options.krunRunnerPath;
+      case "firecracker":
+        return this.options.firecrackerPath;
+      default:
+        return this.options.qemuPath;
+    }
   }
 
   getState(): SandboxState {
@@ -262,6 +268,7 @@ export class NativeSandboxServer extends EventEmitter {
         [
           remote.qemuPath,
           remote.krunRunnerPath,
+          remote.firecrackerPath,
           ...(this.nativeVfs?.daemonPaths ?? []),
         ].filter((p): p is string => typeof p === "string"),
       );
