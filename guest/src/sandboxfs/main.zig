@@ -204,6 +204,8 @@ const Fs = struct {
     unsupported_logged: std.StaticBitSet(64) = .empty,
     /// largest read/write RPC payload the host takes, in `bytes`
     rpc_data: u32 = legacy_rpc_data,
+    /// the host serves `readdirplus` (READDIRPLUS is negotiated at INIT)
+    host_readdirplus: bool = false,
     /// `/sys/class/bdi/<dev>/read_ahead_kb` of the mount, tuned once the
     /// kernel has processed INIT (which resets it)
     readahead_path: ?[:0]const u8 = null,
@@ -356,6 +358,7 @@ const Fs = struct {
             },
             .opendir => self.ok(fuse.OpenOut{ .fh = h.nodeid, .open_flags = 0 }),
             .readdir => self.readdir(h, payload),
+            .readdirplus => self.readdirplus(h, payload),
             .read => self.read(payload),
             .write => self.write(payload),
             .create => self.create(h, payload),
@@ -410,7 +413,10 @@ const Fs = struct {
         // FUSE_ATOMIC_O_TRUNC: the kernel forwards O_TRUNC in OPEN and the host
         // truncates through the opened handle instead of a separate SETATTR.
         // FUSE_MAX_PAGES: requests as large as one RPC (the default is 128 KiB)
-        const flags = in.flags & (fuse.init_flags.big_writes | fuse.init_flags.atomic_o_trunc | fuse.init_flags.max_pages);
+        // READDIRPLUS: listings carry each entry's attributes, so `find`,
+        // `ls -l` and friends need no LOOKUP round trip per entry
+        const plus: u32 = if (self.host_readdirplus) fuse.init_flags.do_readdirplus else 0;
+        const flags = in.flags & (fuse.init_flags.big_writes | fuse.init_flags.atomic_o_trunc | fuse.init_flags.max_pages | plus);
         return self.ok(fuse.InitOut{
             .major = in.major,
             .minor = in.minor,
@@ -532,6 +538,40 @@ const Fs = struct {
         return .{ .data = out.items };
     }
 
+    fn readdirplus(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, _ = try fuse.parse(fuse.ReadIn, payload);
+        // the host returns only what fits `max_bytes`: each entry with an
+        // `entry` is a lookup the kernel will FORGET
+        const res = try self.call("readdirplus", .{ .ino = h.nodeid, .offset = req.offset, .max_bytes = req.size });
+        const entries = switch (res.get("entries") orelse return error.InvalidResponse) {
+            .array => |a| a,
+            else => return error.InvalidResponse,
+        };
+
+        var out: std.ArrayList(u8) = try .initCapacity(self.arena.allocator(), req.size);
+        for (entries) |entry| {
+            const name = try expectText(entry.get("name"));
+            const record = fuse.direntplusSize(name.len);
+            if (out.items.len + record > req.size) {
+                log.warn("readdirplus reply exceeds {d} bytes", .{req.size});
+                break;
+            }
+            // without one (removed meanwhile) the kernel only lists the name
+            const entry_out: fuse.EntryOut = if (entry.get("entry")) |e| try entryOut(e) else std.mem.zeroes(fuse.EntryOut);
+            const dirent: fuse.Dirent = .{
+                .ino = getU64(entry, "ino") orelse return error.InvalidResponse,
+                .off = getU64(entry, "offset") orelse 0,
+                .namelen = @intCast(name.len),
+                .type = getU32(entry, "type") orelse 0,
+            };
+            out.appendSliceAssumeCapacity(std.mem.asBytes(&entry_out));
+            out.appendSliceAssumeCapacity(std.mem.asBytes(&dirent));
+            out.appendSliceAssumeCapacity(name);
+            out.appendNTimesAssumeCapacity(0, record - @sizeOf(fuse.EntryOut) - @sizeOf(fuse.Dirent) - name.len);
+        }
+        return .{ .data = out.items };
+    }
+
     fn read(self: *Fs, payload: []const u8) HandlerError!Reply {
         const req, _ = try fuse.parse(fuse.ReadIn, payload);
         // Fill the whole request: a short reply for a non-EOF region makes the
@@ -589,6 +629,7 @@ const Fs = struct {
         if (getU32(res.res, "max_data")) |host_max| {
             self.rpc_data = std.math.clamp(host_max, legacy_rpc_data, max_rpc_data);
         }
+        if (res.get("readdirplus")) |v| self.host_readdirplus = v == .bool and v.bool;
         const path = binds_path orelse return;
         const binds = switch (res.get("binds") orelse return error.InvalidResponse) {
             .array => |a| a,

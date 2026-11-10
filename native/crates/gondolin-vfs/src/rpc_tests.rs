@@ -364,6 +364,59 @@ async fn readdir_offsets_types_and_cache_body() {
 }
 
 #[tokio::test]
+async fn readdirplus_looks_up_what_fits() {
+    timed(readdirplus_looks_up_what_fits_body()).await
+}
+
+async fn readdirplus_looks_up_what_fits_body() {
+    let (service, _) = memory_service();
+    let mut g = Guest::new(service);
+    let mut inos = Vec::new();
+    for name in ["a", "bb", "ccc"] {
+        inos.push(g.create(1, name).await.0);
+    }
+    let plus = |r: Value| -> Vec<(String, u64, Option<u64>)> {
+        get(&r, "entries")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    get(e, "name").unwrap().as_text().unwrap().to_string(),
+                    uint(e, "offset"),
+                    get(e, "entry").map(|entry| {
+                        assert!(get(entry, "attr").is_some());
+                        uint(entry, "ino")
+                    }),
+                )
+            })
+            .collect()
+    };
+    let call = |offset: u64, max_bytes: u64| {
+        vec![("ino", int(1)), ("offset", int(offset)), ("max_bytes", int(max_bytes))]
+    };
+
+    // every entry with its lookup, the same inodes as readdir/create
+    let all = plus(g.call("readdirplus", call(0, 65536)).await.ok());
+    let names: Vec<_> = all.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert_eq!(names, ["a", "bb", "ccc"]);
+    for ((_, _, ino), created) in all.iter().zip(&inos) {
+        assert_eq!(*ino, Some(*created));
+    }
+
+    // only what fits the reply: the rest comes with the next call
+    let budget = crate::rpc::direntplus_size(1) + crate::rpc::direntplus_size(2);
+    let first = plus(g.call("readdirplus", call(0, budget as u64)).await.ok());
+    assert_eq!(first.len(), 2);
+    let rest = plus(g.call("readdirplus", call(first[1].1, 65536)).await.ok());
+    assert_eq!(rest.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(), ["ccc"]);
+    assert_eq!(crate::rpc::direntplus_size(1), 160);
+    assert_eq!(crate::rpc::direntplus_size(8), 160);
+    assert_eq!(crate::rpc::direntplus_size(9), 168);
+}
+
+#[tokio::test]
 async fn validates_names_and_sizes() {
     timed(validates_names_and_sizes_body()).await
 }

@@ -123,6 +123,43 @@ fn entry_value(ino: u64, a: &Attr) -> Value {
     ])
 }
 
+/// `readdirplus`: readdir with each entry's lookup (sandboxfs READDIRPLUS).
+/// Every entry with an `entry` is a lookup reference the kernel returns with
+/// FORGET, so only entries that fit the guest's reply (`max_bytes`) are
+/// returned at all.
+async fn readdirplus(core: &FsCore, ino: u64, offset: u64, max_bytes: usize) -> VfsResult<Value> {
+    let max = (max_bytes / direntplus_size(0)).clamp(1, 4096);
+    let page = core.readdir(ino, offset, max).await?;
+    let mut used = 0;
+    let mut entries = Vec::new();
+    for e in page.entries.iter() {
+        let size = direntplus_size(e.name.len());
+        if used + size > max_bytes {
+            break;
+        }
+        used += size;
+        let mut fields = vec![
+            ("ino", int(e.ino)),
+            ("name", text(&e.name)),
+            ("type", int(e.kind as u64)),
+            ("offset", int(e.offset)),
+        ];
+        // gone since the listing: a plain entry (the kernel skips it)
+        if let Ok(entry) = core.lookup(ino, &e.name).await {
+            fields.push(("entry", entry_value(entry.ino, &entry.attr)));
+        }
+        entries.push(map(fields));
+    }
+    Ok(map(vec![("entries", Value::Array(entries)), ("entry_ttl_ms", int(DEFAULT_ENTRY_TTL_MS))]))
+}
+
+/// Size of a FUSE `fuse_direntplus` record for a `name_len`-byte name in
+/// `bytes`: `fuse_entry_out` (128) and `fuse_dirent` (24) plus the name,
+/// padded to 8.
+pub fn direntplus_size(name_len: usize) -> usize {
+    (128 + 24 + name_len).next_multiple_of(8)
+}
+
 fn statfs_value(s: StatFs) -> Value {
     map(vec![
         ("blocks", int(s.blocks)),
@@ -271,6 +308,22 @@ impl RpcSession {
                     ("next_offset", int(page.next_offset)),
                     ("entry_ttl_ms", int(DEFAULT_ENTRY_TTL_MS)),
                 ])
+            }
+            "readdirplus" => {
+                let ino = u("ino")?;
+                let offset = ud("offset", 0)?;
+                let max_bytes = ud("max_bytes", 4096)?.clamp(256, 1 << 20) as usize;
+                // one blocking task for the listing and every entry's lstat,
+                // made inline, instead of a blocking-pool hop per entry
+                let core = core.clone();
+                let rt = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    crate::host::with_inline_blocking(|| {
+                        rt.block_on(readdirplus(&core, ino, offset, max_bytes))
+                    })
+                })
+                .await
+                .map_err(|e| VfsError::new(errno::EIO, format!("readdirplus task failed: {e}")))??
             }
             "open" => {
                 let fh = core.open(u("ino")?, u("flags")?).await?;

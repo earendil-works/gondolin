@@ -41,6 +41,8 @@ impl FsPortHandler {
         match self.boot.lock().unwrap().as_ref() {
             Some(config) => FsReply::ok(Value::Map(vec![
                 (Value::Text("mount".into()), Value::Text(config.fuse_mount.clone())),
+                // the backend serves `readdirplus` (sandboxfs READDIRPLUS)
+                (Value::Text("readdirplus".into()), Value::Bool(true)),
                 // largest read/write the backend takes (sandboxfs: 60 KiB without it)
                 (
                     Value::Text("max_data".into()),
