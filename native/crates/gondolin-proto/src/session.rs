@@ -96,7 +96,8 @@ gondolin_wire::wire_struct! {
         pub accel: Option<String>,
         /// qemu cpu model override
         pub cpu: Option<String>,
-        /// guest console: `stdio` (default) or `none`
+        /// guest console: `stdio` (default) or `none` (vmm `firecracker`: off
+        /// unless `stdio` or protocol debugging, see `firecracker::wants_console`)
         pub console: Option<String>,
         /// kernel cmdline replacing the default (`console=... initramfs_async=1`)
         pub append: Option<String>,
