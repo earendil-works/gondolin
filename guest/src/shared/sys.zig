@@ -662,6 +662,12 @@ pub const vsock_host_cid: u32 = 2;
 /// `SO_VM_SOCKETS_CONNECT_TIMEOUT` (the `struct timeval` variant, level
 /// `AF_VSOCK`).
 const so_vm_sockets_connect_timeout: u32 = 6;
+/// `SO_VM_SOCKETS_BUFFER_SIZE` / `_MAX_SIZE` (`u64`, level `AF_VSOCK`)
+const so_vm_sockets_buffer_size: u32 = 0;
+const so_vm_sockets_buffer_max_size: u32 = 2;
+/// Receive window of the host channels' vsock sockets, in `bytes`: more than
+/// one sandboxfs response (1 MiB of data plus framing)
+const vsock_buffer_size: u64 = 2 * 1024 * 1024;
 
 /// Connect a blocking `AF_VSOCK` stream socket to `port` on the host (CID 2).
 /// `timeout_ms` bounds how long `connect` waits for the host to answer (the
@@ -687,6 +693,13 @@ pub fn vsockConnectHost(port: u32, timeout_ms: u32) ConnectError!fd_t {
     };
     // Best effort: an older kernel keeps the default timeout.
     _ = linux.setsockopt(fd, linux.AF.VSOCK, so_vm_sockets_connect_timeout, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
+    // A receive window that fits a whole large message: the host may only
+    // send as much as the window before the guest returns credit, and every
+    // credit update is a round trip to the VMM (the default 256 KiB cut
+    // 1 MiB sandboxfs responses into four). Best effort; the maximum first.
+    const buffer_size: u64 = vsock_buffer_size;
+    _ = linux.setsockopt(fd, linux.AF.VSOCK, so_vm_sockets_buffer_max_size, std.mem.asBytes(&buffer_size), @sizeOf(u64));
+    _ = linux.setsockopt(fd, linux.AF.VSOCK, so_vm_sockets_buffer_size, std.mem.asBytes(&buffer_size), @sizeOf(u64));
 
     const addr: linux.sockaddr.vm = .{ .port = port, .cid = vsock_host_cid, .flags = 0 };
     while (true) {
