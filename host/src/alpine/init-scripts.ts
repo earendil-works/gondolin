@@ -14,7 +14,15 @@ if [ ! -c "\${CONSOLE}" ]; then
   fi
 fi
 
+# set from /proc/cmdline: \`quiet\` drops the log, which otherwise goes to the
+# serial console (each byte traps to the VMM; the device listings alone cost
+# ~50 ms per boot on a slow emulated serial console)
+gondolin_quiet=0
+
 log() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     printf "%s\\n" "$*" > "\${CONSOLE}" 2>/dev/null || printf "%s\\n" "$*"
   else
@@ -22,7 +30,12 @@ log() {
   fi
 }
 
+# runs a command, its output going where log() writes
 log_cmd() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    "$@" > /dev/null 2>&1 || true
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     "$@" > "\${CONSOLE}" 2>&1 || "$@" || true
   else
@@ -140,6 +153,9 @@ setup_mitm_ca() {
 }
 
 mount -t proc proc /proc || log "[init] mount proc failed"
+case " $(cat /proc/cmdline 2>/dev/null || true) " in
+  *" quiet "*) gondolin_quiet=1 ;;
+esac
 mount -t sysfs sysfs /sys || log "[init] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[init] mount devtmpfs failed"
 
@@ -239,19 +255,22 @@ mount_point_error() {
   fi
 }
 
-log "[init] /dev entries:"
-log_cmd ls -l /dev
-if [ -d /dev/virtio-ports ]; then
-  log "[init] /dev/virtio-ports:"
-  log_cmd ls -l /dev/virtio-ports
-else
-  log "[init] /dev/virtio-ports missing"
-fi
-if [ -d /sys/class/virtio-ports ]; then
-  log "[init] /sys/class/virtio-ports:"
-  log_cmd ls -l /sys/class/virtio-ports
-else
-  log "[init] /sys/class/virtio-ports missing"
+# device listings for debugging boot problems (nobody reads them when quiet)
+if [ "\${gondolin_quiet}" != 1 ]; then
+  log "[init] /dev entries:"
+  log_cmd ls -l /dev
+  if [ -d /dev/virtio-ports ]; then
+    log "[init] /dev/virtio-ports:"
+    log_cmd ls -l /dev/virtio-ports
+  else
+    log "[init] /dev/virtio-ports missing"
+  fi
+  if [ -d /sys/class/virtio-ports ]; then
+    log "[init] /sys/class/virtio-ports:"
+    log_cmd ls -l /sys/class/virtio-ports
+  else
+    log "[init] /sys/class/virtio-ports missing"
+  fi
 fi
 
 if modprobe virtio_console > /dev/null 2>&1; then
@@ -299,14 +318,16 @@ if modprobe fuse > /dev/null 2>&1; then
 fi
 
 wait_for_sandboxfs() {
-  for i in $(seq 1 300); do
+  # every 10 ms (30 s in total): the mount lands a few ms after sandboxfs
+  # connects, and every boot waits for it
+  for i in $(seq 1 3000); do
     if grep -q " \${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
       return 0
     fi
     if grep -q " \${sandboxfs_mount} virtiofs " /proc/mounts; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.01
   done
   return 1
 }
@@ -370,6 +391,10 @@ elif [ -x /usr/bin/sandboxfs ]; then
         else
           bind_source="\${sandboxfs_mount}\${bind}"
         fi
+        # the host binds it itself when it gets there first
+        if awk -v p="\${bind}" '$2 == p { found = 1 } END { exit !found }' /proc/mounts; then
+          continue
+        fi
         log "[init] binding sandboxfs \${bind_source} -> \${bind}"
         log_cmd mount --bind "\${bind_source}" "\${bind}"
       done < "\${sandboxfs_binds_file}"
@@ -423,7 +448,15 @@ if [ ! -c "\${CONSOLE}" ]; then
   fi
 fi
 
+# set from /proc/cmdline: \`quiet\` drops the log, which otherwise goes to the
+# serial console (each byte traps to the VMM; the device listings alone cost
+# ~50 ms per boot on a slow emulated serial console)
+gondolin_quiet=0
+
 log() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     printf "%s\\n" "$*" > "\${CONSOLE}" 2>/dev/null || printf "%s\\n" "$*"
   else
@@ -463,17 +496,21 @@ setup_virtio_ports() {
 }
 
 wait_for_virtio_ports() {
-  for i in $(seq 1 300); do
+  # every 10 ms, 30 s in total
+  for i in $(seq 1 3000); do
     setup_virtio_ports
     if [ -c /dev/virtio-ports/virtio-port ] && [ -c /dev/virtio-ports/virtio-fs ]; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.01
   done
   return 1
 }
 
 mount -t proc proc /proc || log "[initramfs] mount proc failed"
+case " $(cat /proc/cmdline 2>/dev/null || true) " in
+  *" quiet "*) gondolin_quiet=1 ;;
+esac
 mount -t sysfs sysfs /sys || log "[initramfs] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[initramfs] mount devtmpfs failed"
 
@@ -510,33 +547,17 @@ if ! wait_for_virtio_ports; then
   log "[initramfs] virtio ports not ready"
 fi
 
-if command -v ip > /dev/null 2>&1; then
-  ip link set lo up || true
-  ip link set eth0 up || true
-elif command -v ifconfig > /dev/null 2>&1; then
-  ifconfig lo up || true
-  ifconfig eth0 up || true
-fi
-
-if command -v udhcpc > /dev/null 2>&1; then
-  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
-  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
-    UDHCPC_SCRIPT="/sbin/udhcpc.script"
-  fi
-  if [ -x "\${UDHCPC_SCRIPT}" ]; then
-    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
-  else
-    udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
-  fi
-fi
+# no network here: the root filesystem's init brings it up (DHCP twice cost
+# ~30 ms per boot)
 
 wait_for_block() {
   dev="$1"
-  for i in $(seq 1 50); do
+  # every 10 ms, 5 s in total
+  for i in $(seq 1 500); do
     if [ -b "\${dev}" ]; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.01
   done
   return 1
 }
@@ -553,11 +574,6 @@ if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
-
-if [ -s /etc/resolv.conf ]; then
-  mkdir -p /newroot/etc
-  cp /etc/resolv.conf /newroot/etc/resolv.conf 2>/dev/null || true
-fi
 
 exec switch_root /newroot /init
 `;

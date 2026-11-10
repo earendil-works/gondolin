@@ -90,7 +90,7 @@ secret's value from `$NAME` when no `=VALUE` is given, and `--ssh-credential
 | `GONDOLIN_DEBUG` | SDK, static CLI | Comma-separated debug flags: `net`, `exec`, `vfs` (alias `fs`), `protocol`, or `all` (also `*`, `1`, `true`); `sandbox.debug` wins (see [Debugging and Troubleshooting](./debug.md)) |
 | `GONDOLIN_START_TIMEOUT_MS` | SDK, static CLI | How long to wait for the VM to boot, in `ms`, when `startTimeoutMs` is not set. Default: `120000` (SDK), `60000` (static CLI) |
 | `GONDOLIN_VFS_READY_TIMEOUT_MS` | SDK | How long to wait for the guest filesystem mounts after boot, in `ms`. Default: `30000` |
-| `GONDOLIN_VFS_READY_SLEEP_SECONDS` | SDK | Polling interval of that wait, in seconds. Default: `0.1` |
+| `GONDOLIN_VFS_READY_SLEEP_SECONDS` | SDK | Polling interval of that wait, in seconds. Default: `0.01` |
 | `CI` | SDK | `true` turns off the image download progress display |
 
 Raise the timeouts on slow hosts (for example nested virtualization or
