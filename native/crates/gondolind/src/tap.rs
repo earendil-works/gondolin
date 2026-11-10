@@ -240,12 +240,16 @@ mod linux {
     /// thread's namespace), non-blocking.
     fn packet_socket(index: u32) -> io::Result<OwnedFd> {
         let protocol = ETH_P_ALL.to_be();
+        // Protocol 0: the socket receives nothing until `bind` sets the
+        // protocol and the interface. Opened with ETH_P_ALL it would see
+        // every interface's frames until then, and the bind would have to
+        // unhook it first, which waits for an RCU grace period (~65 ms).
         // SAFETY: socket(2).
         let raw = cvt(unsafe {
             libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_RAW | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                libc::c_int::from(protocol),
+                0,
             )
         })
         .map_err(|e| {
