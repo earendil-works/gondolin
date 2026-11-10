@@ -1371,6 +1371,10 @@ impl Session {
                     vsock_uds: &uds,
                     tap: tap.as_deref(),
                     mac: &mac,
+                    console: crate::firecracker::wants_console(
+                        &cfg.vm,
+                        self.debug_enabled("protocol"),
+                    ),
                 },
             )
             .map_err(StartError::Fatal)?;

@@ -125,6 +125,18 @@ pub struct ConfigArgs<'a> {
     pub tap: Option<&'a str>,
     /// guest MAC address
     pub mac: &'a str,
+    /// turn on the sandbox's debug console (the guest's serial output on
+    /// Firecracker's stdout): see [`wants_console`]
+    pub console: bool,
+}
+
+/// Whether the debug console is worth its cost: in confidential mode it zeroes
+/// the attestation PCRs. On only when `vm.console` is explicitly `stdio` or
+/// the protocol debug output (which shows it) is on. Without it the kernel
+/// also gets `quiet`: it writes its boot log to the emulated UART inline
+/// whether or not anyone reads it (~0.45 s per boot).
+pub fn wants_console(vm: &VmConfig, protocol_debug: bool) -> bool {
+    vm.console.as_deref() == Some("stdio") || protocol_debug
 }
 
 /// The Firecracker configuration file for `vm` (after `rootdisk::prepare_raw`).
@@ -132,13 +144,19 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     validate(vm)?;
     let nitro = vm.nitro.as_ref().expect("validated");
     let direct = nitro.mode == "direct";
-    // the debug console is the guest's serial output; without it boot is
-    // faster (no inline printk to an emulated UART)
-    let debug = vm.console.as_deref() != Some("none");
+    let debug = args.console;
 
+    let mut boot_args = format!("{} {VSOCK_APPEND}", args.append.trim());
+    let sets_loglevel = args
+        .append
+        .split_whitespace()
+        .any(|a| a == "quiet" || a == "debug" || a.starts_with("loglevel="));
+    if !debug && !sets_loglevel {
+        boot_args.push_str(" quiet");
+    }
     let mut boot = gondolin_wire::value!({
         "kernel_image_path": vm.kernel_path.clone(),
-        "boot_args": format!("{} {VSOCK_APPEND}", args.append.trim()),
+        "boot_args": boot_args,
     });
     if !vm.initrd_path.is_empty() {
         boot.insert("initrd_path", Value::from(vm.initrd_path.clone()));
@@ -242,6 +260,7 @@ mod tests {
             vsock_uds: uds,
             tap: Some("gfc1"),
             mac: "02:00:00:00:00:01",
+            console: true,
         }
     }
 
@@ -278,12 +297,31 @@ mod tests {
     }
 
     #[test]
-    fn console_none_disables_the_debug_console() {
+    fn debug_console_only_when_someone_reads_it() {
         let mut vm = vm();
+        assert!(!wants_console(&vm, false), "off by default");
+        assert!(wants_console(&vm, true), "protocol debug shows it");
+        vm.console = Some("stdio".into());
+        assert!(wants_console(&vm, false));
         vm.console = Some("none".into());
+        assert!(!wants_console(&vm, false));
         let uds = PathBuf::from("/s/v.sock");
-        let config = config(&vm, &args(&uds)).unwrap();
+        let config = config(&vm, &ConfigArgs { console: false, ..args(&uds) }).unwrap();
         assert_eq!(config["enclave"]["debug_mode"].as_bool(), Some(false));
+        assert_eq!(
+            config["boot-source"]["boot_args"].as_str(),
+            Some("console=ttyS0 initramfs_async=1 gondolin.vsock quiet")
+        );
+        // a log level chosen by the caller wins
+        let chosen = super::config(
+            &vm,
+            &ConfigArgs { console: false, append: "console=ttyS0 loglevel=7", ..args(&uds) },
+        )
+        .unwrap();
+        assert_eq!(
+            chosen["boot-source"]["boot_args"].as_str(),
+            Some("console=ttyS0 loglevel=7 gondolin.vsock")
+        );
     }
 
     #[test]
