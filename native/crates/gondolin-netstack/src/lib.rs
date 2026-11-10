@@ -1,5 +1,7 @@
 //! Userspace network stack for gondolind: speaks QEMU's stream netdev
-//! (`u32` big-endian length-prefixed Ethernet frames over a unix stream) and
+//! (`u32` big-endian length-prefixed Ethernet frames over a unix stream) or
+//! raw frames from a datagram socket ([`FrameSocket`], e.g. a packet socket on
+//! a Firecracker tap, with Linux offload headers handled by [`offload`]) and
 //! terminates guest traffic on the host.
 //!
 //! - Ethernet, ARP for the gateway, IPv4 (checksums verified, fragments
@@ -25,11 +27,14 @@ pub mod config;
 pub mod dhcp;
 pub mod dns;
 mod flow;
+pub mod frames;
+pub mod offload;
 mod stack;
 pub mod wire;
 
 pub use config::{DnsConfig, DnsMode, MacAddr, NetConfig, NetLimits, SyntheticHostMapping};
 pub use dns::SyntheticHostMap;
+pub use frames::FrameSocket;
 pub use stack::{NetStack, NetStackError, NetStats, READ_HOLD};
 
 /// Addressing of one guest TCP connection.

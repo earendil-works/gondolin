@@ -42,6 +42,8 @@ use tokio::task::JoinHandle;
 use crate::config::{DnsMode, MacAddr, NetConfig, SyntheticHostMapping};
 use crate::dns::{self, SyntheticAnswer, SyntheticHostMap};
 use crate::flow;
+use crate::frames::FrameSocket;
+use crate::offload::{self, VNET_HDR_LEN, VnetHdr};
 use crate::wire::{self, Ipv4};
 use crate::{FlowHandler, FlowMeta, SyntheticHostLookup, TcpFlow};
 
@@ -213,6 +215,38 @@ impl NetStack {
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
         let shared = &self.shared;
+        let _guard = self.begin_session()?;
+        let (rd, wr) = tokio::io::split(stream);
+        crate::race(
+            reader(shared, rd),
+            crate::race(writer(shared, wr), async {
+                ticker(shared).await;
+                Ok(())
+            }),
+        )
+        .await
+    }
+
+    /// Serves raw Ethernet frames on `socket` (one frame per datagram, see
+    /// [`FrameSocket`]) until the socket fails or the future is dropped. Like
+    /// [`NetStack::serve`], all flows of the session are aborted when it
+    /// returns and a later call starts a fresh session.
+    pub async fn serve_frames<F: FrameSocket + ?Sized>(&self, socket: Arc<F>) -> io::Result<()> {
+        let shared = &self.shared;
+        let _guard = self.begin_session()?;
+        crate::race(
+            frame_reader(shared, &*socket),
+            crate::race(frame_writer(shared, &*socket), async {
+                ticker(shared).await;
+                Ok(())
+            }),
+        )
+        .await
+    }
+
+    /// Starts a netdev session; the guard shuts it down when dropped.
+    fn begin_session(&self) -> io::Result<SessionGuard<'_>> {
+        let shared = &self.shared;
         {
             let mut st = shared.lock();
             if st.running {
@@ -227,25 +261,16 @@ impl NetStack {
             st.next_flow_id = next_flow_id;
             st.running = true;
         }
+        Ok(SessionGuard(shared))
+    }
+}
 
-        // Shuts the session down even if this future is dropped.
-        struct Guard<'a>(&'a Shared);
-        impl Drop for Guard<'_> {
-            fn drop(&mut self) {
-                self.0.lock().shutdown();
-            }
-        }
-        let _guard = Guard(shared);
+/// Shuts the netdev session down even if the serving future is dropped.
+struct SessionGuard<'a>(&'a Shared);
 
-        let (rd, wr) = tokio::io::split(stream);
-        crate::race(
-            reader(shared, rd),
-            crate::race(writer(shared, wr), async {
-                ticker(shared).await;
-                Ok(())
-            }),
-        )
-        .await
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.lock().shutdown();
     }
 }
 
@@ -1270,20 +1295,8 @@ impl<F: Future> Future for CatchUnwind<F> {
 async fn reader<R: AsyncRead>(shared: &Arc<Shared>, rd: R) -> io::Result<()> {
     let mut rd = std::pin::pin!(rd);
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
-    let max_queued = shared.config.limits.tx_queue_max_bytes;
     loop {
-        // Stop reading from QEMU while our queue towards it is over the hard cap:
-        // replies to guest packets (ACK/RST) are queued unconditionally, so a guest
-        // that sends without receiving must be throttled here.
-        loop {
-            let drained = shared.tx_drained.notified();
-            let mut drained = std::pin::pin!(drained);
-            drained.as_mut().enable();
-            if shared.lock().device.queued() <= max_queued {
-                break;
-            }
-            drained.await;
-        }
+        wait_tx_room(shared).await;
         if buf.capacity() - buf.len() < READ_CHUNK / 4 {
             buf.reserve(READ_CHUNK);
         }
@@ -1307,19 +1320,7 @@ async fn reader<R: AsyncRead>(shared: &Arc<Shared>, rd: R) -> io::Result<()> {
             let _ = frame.split_to(wire::QEMU_FRAME_PREFIX);
             frames.push(frame.freeze());
         }
-        if frames.is_empty() {
-            continue;
-        }
-        let spawn = {
-            let mut st = shared.lock();
-            for frame in frames {
-                st.handle_frame(shared, frame);
-            }
-            let spawn = st.poll(shared);
-            st.after_change(shared);
-            spawn
-        };
-        spawn_flows(shared, spawn);
+        handle_frames(shared, frames);
     }
 }
 
@@ -1342,6 +1343,124 @@ async fn writer<W: AsyncWrite>(shared: &Arc<Shared>, wr: W) -> io::Result<()> {
         };
         wr.write_all(&chunk).await?;
         wr.flush().await?;
+        let mut st = shared.lock();
+        st.device.tx_inflight = 0;
+        if st.unblock() {
+            shared.poll_notify.notify_one();
+        }
+        drop(st);
+        shared.tx_drained.notify_waiters();
+    }
+}
+
+/// Waits until the queue towards the guest is back under its hard cap
+/// (replies to guest packets are queued unconditionally, so a guest that sends
+/// without receiving must be throttled at the source).
+async fn wait_tx_room(shared: &Arc<Shared>) {
+    let max_queued = shared.config.limits.tx_queue_max_bytes;
+    loop {
+        let drained = shared.tx_drained.notified();
+        let mut drained = std::pin::pin!(drained);
+        drained.as_mut().enable();
+        if shared.lock().device.queued() <= max_queued {
+            break;
+        }
+        drained.await;
+    }
+}
+
+/// Feeds guest frames to the stack and polls it once.
+fn handle_frames(shared: &Arc<Shared>, frames: Vec<Bytes>) {
+    if frames.is_empty() {
+        return;
+    }
+    let spawn = {
+        let mut st = shared.lock();
+        for frame in frames {
+            st.handle_frame(shared, frame);
+        }
+        let spawn = st.poll(shared);
+        st.after_change(shared);
+        spawn
+    };
+    spawn_flows(shared, spawn);
+}
+
+/// Most frames taken from a [`FrameSocket`] per stack poll.
+const FRAME_BATCH: usize = 64;
+
+/// Turns one received datagram into guest frames (expanding offloads).
+fn push_datagram(vnet: bool, datagram: &[u8], frames: &mut Vec<Bytes>) {
+    if !vnet {
+        if datagram.len() <= MAX_FRAME_LEN {
+            frames.push(Bytes::copy_from_slice(datagram));
+        }
+        return;
+    }
+    let Some((hdr, frame)) = VnetHdr::parse(datagram) else {
+        gondolin_log::trace!("dropping datagram without virtio_net_hdr ({} bytes)", datagram.len());
+        return;
+    };
+    if let Err(err) = offload::expand(&hdr, frame, frames) {
+        gondolin_log::debug!("dropping offloaded frame: {err:?} ({hdr:?})");
+    }
+}
+
+async fn frame_reader<F: FrameSocket + ?Sized>(shared: &Arc<Shared>, socket: &F) -> io::Result<()> {
+    let vnet = socket.vnet_hdr();
+    let mut buf = vec![0u8; MAX_FRAME_LEN + VNET_HDR_LEN];
+    loop {
+        wait_tx_room(shared).await;
+        let n = std::future::poll_fn(|cx| socket.poll_recv_frame(cx, &mut buf)).await?;
+        let mut frames = Vec::new();
+        push_datagram(vnet, &buf[..n], &mut frames);
+        // drain what is already queued, one stack poll for the batch
+        for _ in 1..FRAME_BATCH {
+            match socket.try_recv_frame(&mut buf) {
+                Ok(n) => push_datagram(vnet, &buf[..n], &mut frames),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        handle_frames(shared, frames);
+    }
+}
+
+async fn frame_writer<F: FrameSocket + ?Sized>(shared: &Arc<Shared>, socket: &F) -> io::Result<()> {
+    let vnet = socket.vnet_hdr();
+    let mut datagram = Vec::with_capacity(MAX_FRAME_LEN + VNET_HDR_LEN);
+    loop {
+        let chunk = {
+            let mut st = shared.lock();
+            if st.device.tx.is_empty() {
+                None
+            } else {
+                let chunk = st.device.tx.split().freeze();
+                st.device.tx_inflight = chunk.len();
+                Some(chunk)
+            }
+        };
+        let Some(chunk) = chunk else {
+            shared.tx_notify.notified().await;
+            continue;
+        };
+        // the queue holds QEMU-framed frames: send each without its prefix
+        let mut rest = &chunk[..];
+        while rest.len() >= wire::QEMU_FRAME_PREFIX {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            let frame = &rest[wire::QEMU_FRAME_PREFIX..wire::QEMU_FRAME_PREFIX + len];
+            rest = &rest[wire::QEMU_FRAME_PREFIX + len..];
+            let out: &[u8] = if vnet {
+                datagram.clear();
+                datagram.extend_from_slice(&VnetHdr::default().encode());
+                datagram.extend_from_slice(frame);
+                &datagram
+            } else {
+                frame
+            };
+            std::future::poll_fn(|cx| socket.poll_send_frame(cx, out)).await?;
+        }
         let mut st = shared.lock();
         st.device.tx_inflight = 0;
         if st.unblock() {
