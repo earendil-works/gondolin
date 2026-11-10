@@ -17,6 +17,10 @@ const ALL_DEBUG_FLAGS: ReadonlyArray<DebugFlag> = [
   "timing",
 ];
 
+function isDebugFlag(value: string): value is DebugFlag {
+  return (ALL_DEBUG_FLAGS as ReadonlyArray<string>).includes(value);
+}
+
 /**
  * Component identifier passed to debug log callbacks
  */
@@ -60,15 +64,7 @@ export function parseDebugEnv(
     }
 
     const flag = raw === "fs" ? "vfs" : raw;
-    if (
-      flag === "net" ||
-      flag === "exec" ||
-      flag === "vfs" ||
-      flag === "protocol" ||
-      flag === "timing"
-    ) {
-      flags.add(flag);
-    }
+    if (isDebugFlag(flag)) flags.add(flag);
   }
 
   return flags;
@@ -90,14 +86,7 @@ export function resolveDebugFlags(
 
   const out = new Set<DebugFlag>();
   for (const flag of config) {
-    if (
-      flag === "net" ||
-      flag === "exec" ||
-      flag === "vfs" ||
-      flag === "protocol"
-    ) {
-      out.add(flag);
-    }
+    if (isDebugFlag(flag)) out.add(flag);
   }
   return out;
 }
