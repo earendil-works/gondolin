@@ -35,6 +35,9 @@ Set `GONDOLIN_DEBUG` to a comma-separated list of flags:
 - `vfs`: VFS operations and the guest filesystem transport (`fs` is accepted
   as an alias)
 - `protocol`: virtio/control-protocol traffic and QEMU log forwarding
+- `timing`: when each step of starting and stopping the VM finished (root
+  disk, network, VMM spawn, guest channels, first guest messages, shutdown),
+  in milliseconds since the session was created and since the previous step
 - `all` (or `*`, `1`, `true`): turns on everything
 
 Unknown flags are ignored. The [static CLI](./cli.md#static-cli-no-nodejs)

@@ -91,7 +91,7 @@ impl WorkDir {
 
 /// `parseDebugEnv`: `GONDOLIN_DEBUG` as a sorted flag list.
 pub fn debug_flags(value: Option<&str>) -> Vec<String> {
-    const ALL: [&str; 4] = ["net", "exec", "vfs", "protocol"];
+    const ALL: [&str; 5] = ["net", "exec", "vfs", "protocol", "timing"];
     let mut flags = std::collections::BTreeSet::new();
     for raw in value.unwrap_or("").split(',') {
         let raw = raw.trim();
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn debug_env() {
         assert_eq!(debug_flags(Some("exec, fs")), vec!["exec", "vfs"]);
-        assert_eq!(debug_flags(Some("all")).len(), 4);
+        assert_eq!(debug_flags(Some("all")).len(), 5);
         assert!(debug_flags(Some("bogus")).is_empty());
     }
 

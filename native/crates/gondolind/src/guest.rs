@@ -174,6 +174,7 @@ impl GuestPort {
                     }
                 };
                 drop(current.take());
+                crate::timing::mark(format!("guest connected: {name}"));
                 handler.connected();
                 current = Some(AbortOnDrop(tokio::spawn(serve_connection(
                     stream,

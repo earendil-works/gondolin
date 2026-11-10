@@ -34,6 +34,7 @@ pub mod session;
 mod stdio;
 pub mod subsystem;
 pub mod tcpfwd;
+pub mod timing;
 pub mod util;
 pub mod vfs;
 pub mod vfs_port;

@@ -257,6 +257,7 @@ impl Session {
         dispatcher: Dispatcher,
         host: HostInfo,
     ) -> (Self, SessionChannels) {
+        crate::timing::start();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::channel(64);
         let (vmm_tx, vmm_rx) = mpsc::channel(256);
@@ -657,6 +658,8 @@ impl Session {
             })
         };
         self.debug = cfg.debug.iter().cloned().collect();
+        crate::timing::enable(self.debug_enabled("timing").then(|| self.ctl.clone()));
+        crate::timing::mark("configured");
         self.base_append = qemu::base_append(&cfg.vm, &self.host);
         self.vm.append = self.base_append.clone();
         self.idle.configure(if qemu::is_krun(&cfg.vm) { None } else { cfg.vm.idle_pause_ms });
@@ -702,6 +705,7 @@ impl Session {
             self.ckpt.export_blocker = crate::rootdisk::export_blocker(cfg.vm.root_disk.as_ref());
             check_vmm_binary(&cfg.vm)?;
         }
+        crate::timing::mark("root disk ready");
         let path = |name: &str| dir.0.join(name);
         let chardevs = ChardevPaths {
             control: path("control.sock"),
@@ -862,6 +866,7 @@ impl Session {
             }
             return;
         }
+        crate::timing::mark("shutdown requested");
         self.shutting_down = true;
         self.close_server();
         if self.close_vm() {
@@ -1103,6 +1108,9 @@ impl Session {
         }
         let id = fields::request_id(f.get("id"));
         let p = f.get("p").map(Fields::of).unwrap_or_else(|| Fields::of(&Value::Null));
+        if t != "exec_output" && crate::timing::enabled() {
+            crate::timing::mark(format!("guest message: {t}"));
+        }
         if self.debug_enabled("protocol") {
             let id_text = id.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
             let extra = match t {
@@ -1303,6 +1311,7 @@ impl Session {
         self.set_vm_state(State::Starting);
         match VmmProcess::spawn(&qemu_path, &args, generation, self.vmm_tx.clone()) {
             Ok(child) => {
+                crate::timing::mark("vmm spawned");
                 self.vm.child = Some(child);
                 let _ = self.events.send(Event::VmmSpawned(generation));
                 Ok(())
@@ -1386,6 +1395,7 @@ impl Session {
     }
 
     pub(crate) fn vmm_exited(&mut self, generation: u64, code: Option<i32>, signal: Option<i32>) {
+        crate::timing::mark("vmm exited");
         let waiters = self.vm.stop_waiters.remove(&generation).unwrap_or_default();
         if generation == self.vm.generation {
             // SandboxController's exit handler

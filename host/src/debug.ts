@@ -1,4 +1,4 @@
-export type DebugFlag = "net" | "exec" | "vfs" | "protocol";
+export type DebugFlag = "net" | "exec" | "vfs" | "protocol" | "timing";
 
 /**
  * Debug configuration value
@@ -14,6 +14,7 @@ const ALL_DEBUG_FLAGS: ReadonlyArray<DebugFlag> = [
   "exec",
   "vfs",
   "protocol",
+  "timing",
 ];
 
 /**
@@ -63,7 +64,8 @@ export function parseDebugEnv(
       flag === "net" ||
       flag === "exec" ||
       flag === "vfs" ||
-      flag === "protocol"
+      flag === "protocol" ||
+      flag === "timing"
     ) {
       flags.add(flag);
     }
