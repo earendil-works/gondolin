@@ -117,8 +117,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 fn openRpcPort(path: []const u8) ?sys.fd_t {
     const name = std.fs.path.basename(path);
     for (0..50) |_| {
-        if (shared.virtio_port.tryOpenPath(path, .blocking) catch null) |fd| return fd;
-        if (shared.virtio_port.scan(name, .blocking) catch null) |fd| return fd;
+        if (shared.virtio_port.transport() == .vsock) {
+            // the path only names the channel; there is no device node
+            if (shared.virtio_port.tryConnectVsock(name, .blocking) catch null) |fd| return fd;
+        } else {
+            if (shared.virtio_port.tryOpenPath(path, .blocking) catch null) |fd| return fd;
+            if (shared.virtio_port.scan(name, .blocking) catch null) |fd| return fd;
+        }
         sys.sleepMs(100);
     }
     return null;
@@ -314,9 +319,43 @@ const Fs = struct {
     /// RPC port every call fails with `ENOSYS`.
     fn call(self: *Fs, op: []const u8, req: anytype) HandlerError!fs_rpc.Response {
         const rpc = if (self.rpc) |*rpc| rpc else return self.hostErrno(.NOSYS);
-        const response = try rpc.call(self.arena.allocator(), op, req);
+        const response = rpc.call(self.arena.allocator(), op, req) catch |err| {
+            if (isConnectionLost(err)) reconnectRpc(rpc);
+            return err;
+        };
         if (response.err != .SUCCESS) return self.hostErrno(response.err);
         return response;
+    }
+
+    /// Whether `err` means the host closed the RPC connection.
+    fn isConnectionLost(err: fs_rpc.CallError) bool {
+        return switch (err) {
+            error.EndOfStream,
+            error.BrokenPipe,
+            error.ConnectionResetByPeer,
+            error.SocketUnconnected,
+            error.ConnectionTimedOut,
+            => true,
+            else => false,
+        };
+    }
+
+    /// A vsock connection does not recover once the host closes it (a
+    /// virtio-serial port does): connect a new one for later requests.  The
+    /// failed request is not retried, since it may not be idempotent.
+    fn reconnectRpc(rpc: *fs_rpc.Client) void {
+        if (shared.virtio_port.transport() != .vsock) return;
+        const fd = shared.virtio_port.tryConnectVsock("virtio-fs", .blocking) catch |err| {
+            log.warn("rpc reconnect failed: {t}", .{err});
+            return;
+        } orelse {
+            log.warn("rpc reconnect failed: host not listening", .{});
+            return;
+        };
+        sys.close(rpc.fd);
+        rpc.fd = fd;
+        rpc.reset();
+        log.info("rpc reconnected over vsock", .{});
     }
 
     fn hostErrno(self: *Fs, err: E) error{HostErrno} {
@@ -373,7 +412,10 @@ const Fs = struct {
                 // on this handle's file still come after it.
                 const release, _ = try fuse.parse(fuse.ReleaseIn, payload);
                 const rpc = if (self.rpc) |*rpc| rpc else break :blk empty;
-                try rpc.sendUnanswered("release", .{ .fh = release.fh });
+                rpc.sendUnanswered("release", .{ .fh = release.fh }) catch |err| {
+                    if (isConnectionLost(err)) reconnectRpc(rpc);
+                    return err;
+                };
                 break :blk empty;
             },
             .flush => blk: {

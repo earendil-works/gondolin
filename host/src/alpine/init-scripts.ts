@@ -182,6 +182,8 @@ gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
 # static network configuration from the host, instead of DHCP:
 # "ADDRESS/PREFIX,GATEWAY,DNS[+DNS...]" (gondolin.net)
 gondolin_net=""
+# host channels over vsock instead of virtio-serial (gondolin.vsock)
+gondolin_vsock=0
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -200,6 +202,15 @@ if [ -r /proc/cmdline ]; then
         ;;
       gondolin.net=*)
         gondolin_net="\${arg#gondolin.net=}"
+        ;;
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
         ;;
     esac
   done
@@ -283,6 +294,12 @@ if modprobe virtio_console > /dev/null 2>&1; then
   log "[init] loaded virtio_console"
 fi
 setup_virtio_ports
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # the helpers connect to the host over vsock (see guest/ARCHITECTURE.md)
+  if modprobe vmw_vsock_virtio_transport > /dev/null 2>&1; then
+    log "[init] loaded vmw_vsock_virtio_transport"
+  fi
+fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
@@ -552,6 +569,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 root_device="/dev/vda"
 root_fstype="ext4"
+gondolin_vsock=0
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -561,6 +579,15 @@ if [ -r /proc/cmdline ]; then
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
+        ;;
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
         ;;
     esac
   done
@@ -573,7 +600,10 @@ modprobe virtio_rng > /dev/null 2>&1 || true
 modprobe virtio_net > /dev/null 2>&1 || true
 modprobe fuse > /dev/null 2>&1 || true
 
-if ! wait_for_virtio_ports; then
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # host channels use vsock; there are no virtio-serial ports to wait for
+  :
+elif ! wait_for_virtio_ports; then
   log "[initramfs] virtio ports not ready"
 fi
 

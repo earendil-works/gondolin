@@ -656,6 +656,55 @@ pub fn tcpConnectLoopback(port: u16) ConnectError!fd_t {
     }
 }
 
+/// vsock CID of the host.
+pub const vsock_host_cid: u32 = 2;
+
+/// `SO_VM_SOCKETS_CONNECT_TIMEOUT` (the `struct timeval` variant, level
+/// `AF_VSOCK`).
+const so_vm_sockets_connect_timeout: u32 = 6;
+
+/// Connect a blocking `AF_VSOCK` stream socket to `port` on the host (CID 2).
+/// `timeout_ms` bounds how long `connect` waits for the host to answer (the
+/// kernel default is 2 s); a host with no listener on `port` usually answers
+/// at once with a reset, reported as `ConnectionRefused`.
+pub fn vsockConnectHost(port: u32, timeout_ms: u32) ConnectError!fd_t {
+    const sock_rc = linux.socket(linux.AF.VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    const fd: fd_t = switch (linux.errno(sock_rc)) {
+        .SUCCESS => @intCast(sock_rc),
+        .ACCES, .PERM => return error.AccessDenied,
+        // no vsock transport loaded / no device
+        .AFNOSUPPORT, .INVAL, .NODEV => return error.NetworkUnreachable,
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOMEM, .NOBUFS => return error.SystemResources,
+        else => |err| return unexpected(err),
+    };
+    errdefer close(fd);
+
+    const timeout: linux.timeval = .{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    // Best effort: an older kernel keeps the default timeout.
+    _ = linux.setsockopt(fd, linux.AF.VSOCK, so_vm_sockets_connect_timeout, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
+
+    const addr: linux.sockaddr.vm = .{ .port = port, .cid = vsock_host_cid, .flags = 0 };
+    while (true) {
+        const rc = linux.connect(fd, &addr, @sizeOf(@TypeOf(addr)));
+        switch (linux.errno(rc)) {
+            .SUCCESS => return fd,
+            .INTR => continue,
+            .ACCES, .PERM => return error.AccessDenied,
+            .CONNREFUSED, .CONNRESET => return error.ConnectionRefused,
+            .HOSTUNREACH, .NETUNREACH, .NODEV => return error.NetworkUnreachable,
+            .TIMEDOUT => return error.ConnectionTimedOut,
+            .ADDRINUSE, .ADDRNOTAVAIL => return error.AddressInUse,
+            .AGAIN, .INPROGRESS => return error.WouldBlock,
+            else => |err| return unexpected(err),
+        }
+    }
+}
+
 /// Half-close the write side of a socket, ignoring errors.
 pub fn shutdownWrite(fd: fd_t) void {
     _ = linux.shutdown(fd, linux.SHUT.WR);

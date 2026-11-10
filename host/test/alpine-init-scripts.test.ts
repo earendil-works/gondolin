@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ROOTFS_INIT_SCRIPT } from "../src/alpine/init-scripts.ts";
+import {
+  INITRAMFS_INIT_SCRIPT,
+  ROOTFS_INIT_SCRIPT,
+} from "../src/alpine/init-scripts.ts";
 import { DEFAULT_GUEST_TMPFS, buildTmpfsAppend } from "../src/sandbox/tmpfs.ts";
 
 test("rootfs init uses current uv system certificates environment variable", () => {
@@ -166,4 +169,102 @@ test("rootfs init mounts tmpfs entries from the cmdline", () => {
 test("rootfs init does not hardcode application env vars", () => {
   assert.doesNotMatch(ROOTFS_INIT_SCRIPT, /XDG_(CACHE|CONFIG|DATA)_HOME/);
   assert.doesNotMatch(ROOTFS_INIT_SCRIPT, /UV_CACHE_DIR/);
+});
+
+/** Run a script's kernel cmdline loop against `cmdline` and print `gondolin_vsock`. */
+function parseVsockFlag(
+  t: test.TestContext,
+  script: string,
+  cmdline: string,
+): string {
+  const start = script.indexOf("  for arg in $(cat /proc/cmdline); do");
+  const endMarker = "\n  done\n";
+  const end = script.indexOf(endMarker, start) + endMarker.length;
+  assert.ok(start >= 0 && end > start);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-cmdline-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cmdlineFile = path.join(dir, "cmdline");
+  fs.writeFileSync(cmdlineFile, `${cmdline}\n`);
+
+  return execFileSync(
+    "sh",
+    [
+      "-euc",
+      [
+        "gondolin_vsock=0",
+        script.slice(start, end).replace("/proc/cmdline", cmdlineFile),
+        'printf "%s" "${gondolin_vsock}"',
+      ].join("\n"),
+    ],
+    { encoding: "utf8" },
+  );
+}
+
+for (const [name, script] of [
+  ["rootfs", ROOTFS_INIT_SCRIPT],
+  ["initramfs", INITRAMFS_INIT_SCRIPT],
+] as const) {
+  test(`${name} init parses gondolin.vsock like the guest helpers`, (t) => {
+    const cases: [string, string][] = [
+      ["console=ttyS0 initramfs_async=1", "0"],
+      ["console=ttyS0 gondolin.vsock", "1"],
+      ["gondolin.vsock=1 root=/dev/vda", "1"],
+      ["gondolin.vsock=on", "1"],
+      ["gondolin.vsock=0", "0"],
+      ["gondolin.vsock=OFF", "0"],
+      ["gondolin.vsock gondolin.vsock=no", "0"],
+      ["gondolin.vsock=false gondolin.vsock", "1"],
+      ["gondolin.vsockport=5", "0"],
+    ];
+    for (const [cmdline, expected] of cases) {
+      assert.equal(parseVsockFlag(t, script, cmdline), expected, cmdline);
+    }
+  });
+}
+
+test("initramfs waits for virtio-serial ports only without gondolin.vsock", () => {
+  const start = INITRAMFS_INIT_SCRIPT.indexOf(
+    'if [ "${gondolin_vsock}" = 1 ]; then',
+  );
+  const endMarker = '  log "[initramfs] virtio ports not ready"\nfi\n';
+  const end =
+    INITRAMFS_INIT_SCRIPT.indexOf(endMarker, start) + endMarker.length;
+  assert.ok(start >= 0 && end > start);
+
+  const run = (vsock: string) =>
+    execFileSync(
+      "sh",
+      [
+        "-euc",
+        [
+          "log() { :; }",
+          "wait_for_virtio_ports() { echo waited; }",
+          `gondolin_vsock=${vsock}`,
+          INITRAMFS_INIT_SCRIPT.slice(start, end),
+        ].join("\n"),
+      ],
+      { encoding: "utf8" },
+    ).trim();
+  assert.equal(run("0"), "waited");
+  assert.equal(run("1"), "");
+});
+
+test("rootfs init loads the vsock transport only with gondolin.vsock", () => {
+  assert.match(
+    ROOTFS_INIT_SCRIPT,
+    /if \[ "\$\{gondolin_vsock\}" = 1 \]; then\n(?: {2}#.*\n)? {2}if modprobe vmw_vsock_virtio_transport /,
+  );
+  // before the helpers that open the host channels start
+  const modprobe = ROOTFS_INIT_SCRIPT.indexOf(
+    "modprobe vmw_vsock_virtio_transport",
+  );
+  for (const helper of [
+    "/usr/bin/sandboxfs --mount",
+    "/usr/bin/sandboxssh",
+    "exec /usr/bin/sandboxd",
+  ]) {
+    const at = ROOTFS_INIT_SCRIPT.indexOf(helper);
+    assert.ok(at > modprobe, helper);
+  }
 });

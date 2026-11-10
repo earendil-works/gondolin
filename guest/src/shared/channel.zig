@@ -1,14 +1,20 @@
-//! Non-blocking virtio-serial endpoint for poll-driven event loops.
+//! Non-blocking host channel endpoint for poll-driven event loops.
 //!
 //! Combines the port fd with a `FrameReader` and an `Outbox` and tracks
 //! whether the host end is connected.  virtio-serial reports a missing host
 //! connection as EOF on `read(2)` and as a permanent `POLLHUP`, so while
 //! disconnected the fd must be left out of the poll set (otherwise poll spins)
 //! and is re-probed periodically instead.
+//!
+//! A vsock channel does not recover after the host closes it: once
+//! disconnected, the probe connects a new socket (rate-limited to
+//! `reconnect_poll_ms`) and replaces `fd`, so callers must read `fd` from the
+//! channel rather than keep their own copy.
 
 const std = @import("std");
 const sys = @import("sys.zig");
 const framing = @import("framing.zig");
+const virtio_port = @import("virtio_port.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -21,6 +27,10 @@ pub const Channel = struct {
     outbox: framing.Outbox,
     /// host end connected (cleared on EOF/POLLHUP, set again once HUP clears)
     connected: bool = true,
+    /// channel name; enables reconnecting with a new socket over vsock
+    name: ?[]const u8 = null,
+    /// last vsock reconnect attempt in `ms` (monotonic)
+    last_reconnect_ms: u64 = 0,
 
     pub const Readiness = enum {
         /// keep going (new frames may be available in `reader`)
@@ -31,6 +41,11 @@ pub const Channel = struct {
 
     pub fn init(gpa: Allocator, fd: sys.fd_t) Channel {
         return .{ .fd = fd, .outbox = .init(gpa) };
+    }
+
+    /// Channel for the host port `name` (opened with `virtio_port.open`).
+    pub fn initPort(gpa: Allocator, fd: sys.fd_t, name: []const u8) Channel {
+        return .{ .fd = fd, .outbox = .init(gpa), .name = name };
     }
 
     pub fn deinit(self: *Channel, gpa: Allocator) void {
@@ -80,15 +95,37 @@ pub const Channel = struct {
         return .ok;
     }
 
-    /// While disconnected: check (without blocking) whether the host is back.
+    /// While disconnected: check whether the host is back (virtio-serial: a
+    /// zero-timeout poll; vsock: a new connect, waiting at most
+    /// `virtio_port.vsock_connect_timeout_ms`).
     pub fn probeReconnect(self: *Channel) bool {
         if (self.connected) return true;
+        if (self.name) |name| {
+            if (virtio_port.transport() == .vsock) return self.reconnectVsock(name);
+        }
         const revents = sys.pollOne(self.fd, sys.POLL.IN | sys.POLL.OUT, 0) catch return false;
         if (revents != 0 and revents & sys.POLL.HUP == 0) {
             self.connected = true;
             std.log.scoped(.channel).info("virtio port reconnected", .{});
         }
         return self.connected;
+    }
+
+    /// Replace the dead vsock connection with a new one, at most once per
+    /// `reconnect_poll_ms`.
+    fn reconnectVsock(self: *Channel, name: []const u8) bool {
+        const now = sys.monotonicMs();
+        if (now -% self.last_reconnect_ms < @as(u64, @intCast(reconnect_poll_ms))) return false;
+        self.last_reconnect_ms = now;
+        const fd = virtio_port.tryConnectVsock(name, .nonblocking) catch |err| {
+            std.log.scoped(.channel).warn("vsock reconnect of {s} failed: {t}", .{ name, err });
+            return false;
+        } orelse return false;
+        sys.close(self.fd);
+        self.fd = fd;
+        self.connected = true;
+        std.log.scoped(.channel).info("vsock channel {s} reconnected", .{name});
+        return true;
     }
 
     fn markDisconnected(self: *Channel) Readiness {
