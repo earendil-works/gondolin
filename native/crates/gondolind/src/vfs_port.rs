@@ -24,6 +24,20 @@ pub struct FsPortHandler {
     events: mpsc::UnboundedSender<Event>,
     /// set when `protocol` debugging is enabled
     debug: Option<Arc<Controller>>,
+    /// per-op host time while `timing` debugging is on, reported when the
+    /// guest disconnects ([`OpStats`])
+    stats: Mutex<std::collections::BTreeMap<String, OpStats>>,
+}
+
+/// Host time of one fs op: from receiving the request to queueing the
+/// response, and the part spent waiting for the session to admit it
+/// (`VfsBegin`, the idle-pause gate).
+#[derive(Default)]
+struct OpStats {
+    count: u64,
+    total: std::time::Duration,
+    gate: std::time::Duration,
+    max: std::time::Duration,
 }
 
 impl FsPortHandler {
@@ -34,7 +48,7 @@ impl FsPortHandler {
         events: mpsc::UnboundedSender<Event>,
         debug: Option<Arc<Controller>>,
     ) -> Self {
-        FsPortHandler { outbox, backend, boot, events, debug }
+        FsPortHandler { outbox, backend, boot, events, debug, stats: Default::default() }
     }
 
     fn mounts_reply(&self) -> FsReply {
@@ -134,9 +148,12 @@ impl PortHandler for FsPortHandler {
                 req => req,
             };
 
+            let started = crate::timing::enabled().then(std::time::Instant::now);
             let (tx, rx) = oneshot::channel();
             let _ = self.events.send(Event::VfsBegin(tx));
-            let reply = match rx.await {
+            let admitted = rx.await;
+            let gate = started.map(|s| s.elapsed());
+            let reply = match admitted {
                 // a panicking request fails with EIO; sandboxfs keeps serving
                 Ok(Ok(())) => match crate::panics::CatchUnwind::new(self.serve(&op, req)).await {
                     Ok(reply) => reply,
@@ -147,6 +164,7 @@ impl PortHandler for FsPortHandler {
             };
             let _ = self.events.send(Event::VfsEnd);
 
+            let timed_op = started.map(|_| op.clone());
             let sent = match gondolin_wire::frame_value(&fs_response(id, op, reply)) {
                 Ok(frame) => self.outbox.send_frame(frame),
                 Err(err) => {
@@ -160,11 +178,42 @@ impl PortHandler for FsPortHandler {
                     message: "virtio bridge queue exceeded".into(),
                 });
             }
+            if let (Some(started), Some(op)) = (started, timed_op) {
+                let total = started.elapsed();
+                let mut stats = self.stats.lock().unwrap();
+                let s = stats.entry(op).or_default();
+                s.count += 1;
+                s.total += total;
+                s.gate += gate.unwrap_or_default();
+                s.max = s.max.max(total);
+            }
             Ok(())
         })
     }
 
     fn error(&self, message: String) {
         let _ = self.events.send(Event::PortError { port: "fs", message });
+    }
+
+    fn disconnected(&self) {
+        self.report_timing();
+    }
+}
+
+impl FsPortHandler {
+    /// Reports (once) the per-op host times collected while `timing`
+    /// debugging is on.
+    pub(crate) fn report_timing(&self) {
+        let stats = std::mem::take(&mut *self.stats.lock().unwrap());
+        for (op, s) in stats {
+            let us = |d: std::time::Duration| d.as_micros() / u128::from(s.count.max(1));
+            crate::timing::mark(format!(
+                "fs {op}: {} requests, host {} µs each (session gate {} µs), max {} µs",
+                s.count,
+                us(s.total),
+                us(s.gate),
+                s.max.as_micros()
+            ));
+        }
     }
 }
