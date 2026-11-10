@@ -124,6 +124,10 @@ struct Runtime {
     virtiofs: Option<VirtioFsRuntime>,
     /// the fs channel's handler (its `timing` statistics)
     fs_handler: Arc<crate::vfs_port::FsPortHandler>,
+    /// Firecracker: the network namespace holding the guest NIC's tap (gone,
+    /// with the tap, once dropped and the VMM has exited)
+    #[cfg(target_os = "linux")]
+    tap: Option<crate::tap::TapNet>,
     dir: SocketDir,
 }
 
@@ -606,6 +610,10 @@ impl Session {
                 }
             }
             Some("krun") => crate::krun::validate(&cfg.vm)?,
+            Some("firecracker") => {
+                crate::firecracker::check_host()?;
+                crate::firecracker::validate(&cfg.vm)?;
+            }
             Some(other) => return Err(format!("unsupported vmm: {other}")),
         }
         if cfg.vm.root_disk.as_ref().is_some_and(|d| d.path.is_empty()) {
@@ -616,7 +624,7 @@ impl Session {
         {
             return Err("vm.kernel_path and vm.initrd_path are required".into());
         }
-        if !qemu::is_krun(&cfg.vm)
+        if qemu::uses_qemu(&cfg.vm)
             && let Some(machine) = qemu::machine_fallback(&cfg.vm, &self.host)
         {
             gondolin_log::debug!("{} has no microvm machine; using {machine}", cfg.vm.qemu_path);
@@ -680,7 +688,7 @@ impl Session {
             self.base_append = format!("{} {arg}", self.base_append);
         }
         self.vm.append = self.base_append.clone();
-        self.idle.configure(if qemu::is_krun(&cfg.vm) { None } else { cfg.vm.idle_pause_ms });
+        self.idle.configure(if qemu::uses_qemu(&cfg.vm) { cfg.vm.idle_pause_ms } else { None });
         self.vfs = vfs;
         self.net = net;
         self.configured = Some(cfg);
@@ -716,20 +724,40 @@ impl Session {
 
     fn start_runtime(&mut self) -> Result<(), String> {
         let dir = make_socket_dir().map_err(|e| format!("cannot create socket directory: {e}"))?;
+        let mut firecracker = false;
         if let Some(cfg) = self.configured.as_mut() {
-            let krun = qemu::is_krun(&cfg.vm);
-            self.ckpt.overlay =
-                crate::rootdisk::prepare(&mut cfg.vm, &dir.0, krun, self.ckpt.imported.as_deref())?;
-            self.ckpt.export_blocker = crate::rootdisk::export_blocker(cfg.vm.root_disk.as_ref());
+            firecracker = crate::firecracker::is_firecracker(&cfg.vm);
+            if firecracker {
+                crate::rootdisk::prepare_raw(&mut cfg.vm, &dir.0)?;
+                self.ckpt.overlay = None;
+                self.ckpt.export_blocker = Some(
+                    "cannot checkpoint: checkpoints are not supported with vmm=firecracker".into(),
+                );
+            } else {
+                let krun = qemu::is_krun(&cfg.vm);
+                self.ckpt.overlay = crate::rootdisk::prepare(
+                    &mut cfg.vm,
+                    &dir.0,
+                    krun,
+                    self.ckpt.imported.as_deref(),
+                )?;
+                self.ckpt.export_blocker =
+                    crate::rootdisk::export_blocker(cfg.vm.root_disk.as_ref());
+            }
             check_vmm_binary(&cfg.vm)?;
         }
         crate::timing::mark("root disk ready");
         let path = |name: &str| dir.0.join(name);
-        let chardevs = ChardevPaths {
-            control: path("control.sock"),
-            fs: path("fs.sock"),
-            ssh: path("ssh.sock"),
-            ingress: path("ingress.sock"),
+        let chardevs = if firecracker {
+            // where Firecracker forwards the guest's vsock connections
+            crate::firecracker::chardev_paths(&dir.0)
+        } else {
+            ChardevPaths {
+                control: path("control.sock"),
+                fs: path("fs.sock"),
+                ssh: path("ssh.sock"),
+                ingress: path("ingress.sock"),
+            }
         };
         let mut ports = Vec::new();
         let control_handler =
@@ -773,7 +801,23 @@ impl Session {
         ] {
             self.dispatcher.register(t, dispatch.clone());
         }
+        #[cfg(target_os = "linux")]
+        let mut tap = None;
         let (netdev_path, netdev_task) = match &self.net {
+            #[cfg(target_os = "linux")]
+            NetSetup::Native(backend) if firecracker => {
+                // Firecracker attaches the guest NIC to a tap; the stack
+                // reads the guest's frames with a packet socket on it
+                let name = crate::tap::tap_name(std::process::id(), next_tap_id());
+                let mut created = crate::tap::TapNet::create(&name).map_err(|e| e.to_string())?;
+                let socket = created.take_socket().map_err(|e| format!("tap {name}: {e}"))?;
+                let backend = backend.clone();
+                let task =
+                    tokio::spawn(async move { backend.serve_frames(Arc::new(socket)).await });
+                tap = Some(created);
+                crate::timing::mark("tap ready");
+                (None, Some(task))
+            }
             NetSetup::Native(backend) => {
                 let p = path("net.sock");
                 let listener = tokio::net::UnixListener::bind(&p)
@@ -804,6 +848,8 @@ impl Session {
             qmp_path,
             virtiofs,
             fs_handler,
+            #[cfg(target_os = "linux")]
+            tap,
             dir,
         });
         Ok(())
@@ -817,6 +863,16 @@ impl Session {
             return Ok(None);
         };
         let Some(cfg) = self.configured.as_ref() else { return Ok(None) };
+        if crate::firecracker::is_firecracker(&cfg.vm) {
+            // Nitro Sandboxes have no virtio-fs device: sandboxfs over vsock
+            let message = "virtio-fs unavailable with vmm=firecracker; using sandboxfs";
+            if service.required() {
+                gondolin_log::warn!("{message}");
+            } else {
+                gondolin_log::debug!("{message}");
+            }
+            return Ok(None);
+        }
         if qemu::is_krun(&cfg.vm) {
             let runner = crate::krun::runner_path(&cfg.vm);
             if !crate::krun::runner_capabilities(&runner)
@@ -1299,7 +1355,33 @@ impl Session {
             Some(_) => format!("{append} sandboxfs.virtiofs={}", qemu::VIRTIOFS_TAG),
             None => append.to_string(),
         };
-        let (qemu_path, args) = if qemu::is_krun(&cfg.vm) {
+        let (qemu_path, args) = if crate::firecracker::is_firecracker(&cfg.vm) {
+            let uds = crate::firecracker::vsock_uds(&rt.dir.0);
+            // Firecracker binds the vsock socket itself (a previous run's is stale)
+            let _ = std::fs::remove_file(&uds);
+            #[cfg(target_os = "linux")]
+            let tap = rt.tap.as_ref().map(|t| t.name().to_string());
+            #[cfg(not(target_os = "linux"))]
+            let tap: Option<String> = None;
+            let mac = cfg.vm.mac.clone().unwrap_or_else(|| qemu::DEFAULT_MAC.to_string());
+            let config = crate::firecracker::config(
+                &cfg.vm,
+                &crate::firecracker::ConfigArgs {
+                    append: &self.vm.append,
+                    vsock_uds: &uds,
+                    tap: tap.as_deref(),
+                    mac: &mac,
+                },
+            )
+            .map_err(StartError::Fatal)?;
+            let config_path = rt.dir.0.join(format!("firecracker-{generation}.json"));
+            let log_path = rt.dir.0.join(format!("firecracker-{generation}.log"));
+            std::fs::write(&config_path, gondolin_wire::json::to_string(&config))
+                .and_then(|()| std::fs::write(&log_path, b""))
+                .map_err(|e| StartError::Fatal(format!("cannot write firecracker config: {e}")))?;
+            let program = crate::firecracker::binary_path(&cfg.vm);
+            (program, crate::firecracker::args(&config_path, &log_path))
+        } else if qemu::is_krun(&cfg.vm) {
             let virtio_fs = rt.virtiofs.as_ref().map(|v| crate::krun::VirtioFsDevice {
                 socket: v.path.to_str().unwrap_or_default(),
                 tag: qemu::VIRTIOFS_TAG,
@@ -1337,8 +1419,13 @@ impl Session {
             });
             (cfg.vm.qemu_path.clone(), args)
         };
+        // Firecracker runs in the namespace of its tap
+        #[cfg(target_os = "linux")]
+        let netns = rt.tap.as_ref().map(|t| t.netns());
+        #[cfg(not(target_os = "linux"))]
+        let netns = None;
         self.set_vm_state(State::Starting);
-        match VmmProcess::spawn(&qemu_path, &args, generation, self.vmm_tx.clone()) {
+        match VmmProcess::spawn_in(&qemu_path, &args, generation, self.vmm_tx.clone(), netns) {
             Ok(child) => {
                 crate::timing::mark("vmm spawned");
                 self.vm.child = Some(child);
@@ -1511,7 +1598,11 @@ impl Session {
 
     /// Backend name used in diagnostics.
     fn vmm_label(&self) -> &'static str {
-        if self.configured.as_ref().is_some_and(|c| qemu::is_krun(&c.vm)) { "krun" } else { "qemu" }
+        match self.configured.as_ref() {
+            Some(c) if qemu::is_krun(&c.vm) => "krun",
+            Some(c) if crate::firecracker::is_firecracker(&c.vm) => "firecracker",
+            _ => "qemu",
+        }
     }
 
     pub(crate) fn is_started(&self) -> bool {
@@ -1607,8 +1698,13 @@ fn describe_client_message(t: &str, f: &Fields<'_>) -> String {
 
 /// Fails early (with a clear message) when the VMM binary cannot run.
 fn check_vmm_binary(vm: &gondolin_proto::session::VmConfig) -> Result<(), String> {
-    let program =
-        if qemu::is_krun(vm) { crate::krun::runner_path(vm) } else { vm.qemu_path.clone() };
+    let program = if qemu::is_krun(vm) {
+        crate::krun::runner_path(vm)
+    } else if crate::firecracker::is_firecracker(vm) {
+        crate::firecracker::binary_path(vm)
+    } else {
+        vm.qemu_path.clone()
+    };
     match std::process::Command::new(&program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -1620,6 +1716,13 @@ fn check_vmm_binary(vm: &gondolin_proto::session::VmConfig) -> Result<(), String
         Ok(status) => Err(format!("{program} --version failed ({status})")),
         Err(err) => Err(format!("cannot run {program}: {err}")),
     }
+}
+
+/// Distinguishes the taps of one daemon (Firecracker sessions).
+#[cfg(target_os = "linux")]
+fn next_tap_id() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Creates the private socket directory (mode 0700). macOS uses `/tmp`

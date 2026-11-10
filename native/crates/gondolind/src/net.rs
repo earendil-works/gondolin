@@ -380,6 +380,23 @@ impl NetBackend for Net {
             }
         })
     }
+
+    fn serve_frames<'a>(
+        &'a self,
+        socket: Arc<dyn gondolin_netstack::FrameSocket>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            match crate::panics::CatchUnwind::new(self.stack.serve_frames(socket)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    gondolin_log::warn!(target: "gondolin::net", "tap netdev failed: {err}");
+                }
+                Err(panic) => {
+                    crate::panics::fail_closed(&format!("network stack panicked: {panic}"))
+                }
+            }
+        })
+    }
 }
 
 /// Routes the network area's controller messages to [`Net`].

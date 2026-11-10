@@ -40,7 +40,7 @@ pub struct CommonOptions {
     pub hooks_script: Option<String>,
     /// image selector (asset dir, build id, or name:tag)
     pub image: Option<String>,
-    /// `qemu` or `krun`
+    /// `qemu`, `krun` or `firecracker`
     pub vmm: Option<String>,
     /// minimum rootfs size (`2G`, ...)
     pub rootfs_size: Option<String>,
@@ -277,7 +277,11 @@ pub fn parse_tcp_map(spec: &str) -> std::result::Result<(String, String), String
 /// `parseVmmOption`
 pub fn parse_vmm(value: &str) -> std::result::Result<String, String> {
     let v = value.trim().to_lowercase();
-    if v == "qemu" || v == "krun" { Ok(v) } else { Err("--vmm must be one of: qemu, krun".into()) }
+    if v == "qemu" || v == "krun" || v == "firecracker" {
+        Ok(v)
+    } else {
+        Err("--vmm must be one of: qemu, krun, firecracker".into())
+    }
 }
 
 /// `parseDiskSizeToBytes`

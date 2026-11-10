@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use gondolin_assets::{Arch, Assets, ProgressEvent, ResolvedImage, RootfsMode};
-use gondolin_proto::session::{RootDisk, VmConfig};
+use gondolin_proto::session::{NitroConfig, RootDisk, VmConfig};
 use gondolin_wire::Value as Json;
 use gondolin_wire::Value;
 
@@ -280,7 +280,7 @@ pub fn prepare_with_image(
     // --- VMM and paths (resolveSandboxServerOptions)
     let (vmm, detected_runner) =
         match common.vmm.clone().or_else(|| env_opt("GONDOLIN_VMM").map(|v| v.to_lowercase())) {
-            Some(v) if v == "qemu" || v == "krun" => (v, None),
+            Some(v) if v == "qemu" || v == "krun" || v == "firecracker" => (v, None),
             // the default may only pick krun when the checkpoint allows it
             _ if resume.is_some_and(|r| !r.data.compatible_vmm().iter().any(|v| v == "krun")) => {
                 ("qemu".into(), None)
@@ -288,6 +288,8 @@ pub fn prepare_with_image(
             _ => default_vmm(&image),
         };
     let krun = vmm == "krun";
+    // AWS Nitro Sandboxes through Firecracker (never the default)
+    let firecracker = vmm == "firecracker";
     let arch = image.arch.unwrap_or_else(Arch::host);
     if krun && arch != Arch::host() {
         return Err(format!(
@@ -326,7 +328,12 @@ pub fn prepare_with_image(
     let vm = VmConfig {
         vmm: Some(vmm.clone()),
         krun_runner_path: krun.then(|| detected_runner.unwrap_or_else(krun_runner_path)),
-        qemu_path: if krun { String::new() } else { qemu_path },
+        firecracker_path: if firecracker { env_opt("GONDOLIN_FIRECRACKER") } else { None },
+        nitro: firecracker.then(|| NitroConfig {
+            mode: env_opt("GONDOLIN_NITRO_MODE").unwrap_or_else(|| "direct".into()),
+            cpu_overcommit: env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT").is_none_or(|v| v != "0"),
+        }),
+        qemu_path: if krun || firecracker { String::new() } else { qemu_path },
         image: None,
         arch: None,
         kernel_path: kernel.display().to_string(),
@@ -343,13 +350,14 @@ pub fn prepare_with_image(
         cpus: 2,
         machine_type: None,
         accel: None,
-        cpu: if krun { None } else { env_opt("GONDOLIN_CPU") },
+        cpu: if krun || firecracker { None } else { env_opt("GONDOLIN_CPU") },
         console: None,
         append: None,
         append_extra: Vec::new(),
         mac: Some(DEFAULT_MAC.into()),
         auto_restart: false,
-        idle_pause_ms: (!krun && cfg!(target_os = "macos")).then_some(DARWIN_IDLE_PAUSE_MS),
+        idle_pause_ms: (!krun && !firecracker && cfg!(target_os = "macos"))
+            .then_some(DARWIN_IDLE_PAUSE_MS),
     };
     if let Some(r) = resume {
         // `VmCheckpoint.resume`: the session rebases the checkpoint onto this
@@ -479,7 +487,7 @@ pub fn prepare_with_image(
     let mut vm_json = gondolin_wire::ToValue::to_value(&vm);
     vm_json.remove("image");
     vm_json.remove("arch");
-    if krun {
+    if krun || firecracker {
         vm_json.remove("idle_pause_ms");
     }
     let configure = gondolin_wire::value!({

@@ -75,7 +75,7 @@ pub fn apply_image(
             .into();
         }
     }
-    if vm.qemu_path.is_empty() && !qemu::is_krun(vm) {
+    if vm.qemu_path.is_empty() && !qemu::is_krun(vm) && !crate::firecracker::is_firecracker(vm) {
         let arch = image.arch.unwrap_or_else(Arch::host);
         vm.qemu_path = match arch {
             Arch::Aarch64 => "qemu-system-aarch64",

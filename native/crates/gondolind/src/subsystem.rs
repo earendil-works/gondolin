@@ -94,6 +94,12 @@ pub trait NetBackend: Send + Sync + 'static {
     /// connection (QEMU restart) is served by a new call; the previous one is
     /// dropped first.
     fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()>;
+    /// Serves raw frames (Firecracker: a packet socket on the VM's tap) until
+    /// the socket fails or the future is dropped.
+    fn serve_frames<'a>(
+        &'a self,
+        socket: Arc<dyn gondolin_netstack::FrameSocket>,
+    ) -> crate::BoxFuture<'a, ()>;
     /// Releases resources at session shutdown.
     fn close<'a>(&'a self) -> crate::BoxFuture<'a, ()> {
         Box::pin(async move {})
