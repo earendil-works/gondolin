@@ -570,6 +570,9 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 root_device="/dev/vda"
 root_fstype="ext4"
 gondolin_vsock=0
+# the root disk is a read-only base whose writes go to a tmpfs overlay
+# (gondolin.overlay; the host attaches the disk read-only and nothing is copied)
+gondolin_overlay=0
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -579,6 +582,9 @@ if [ -r /proc/cmdline ]; then
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
+        ;;
+      gondolin.overlay)
+        gondolin_overlay=1
         ;;
       gondolin.vsock)
         gondolin_vsock=1
@@ -627,10 +633,34 @@ if ! wait_for_block "\${root_device}"; then
   exec sh
 fi
 
+# overlay root: the read-only disk under a tmpfs that takes the writes (and
+# goes with the VM)
+mount_overlay_root() {
+  modprobe overlay > /dev/null 2>&1 || true
+  mkdir -p /lower /overlay
+  mount -t "\${root_fstype}" -o ro "\${root_device}" /lower || return 1
+  if mount -t tmpfs -o mode=0755 tmpfs /overlay \
+    && mkdir -p /overlay/upper /overlay/work \
+    && mount -t overlay overlay \
+      -o lowerdir=/lower,upperdir=/overlay/upper,workdir=/overlay/work /newroot; then
+    return 0
+  fi
+  umount /overlay > /dev/null 2>&1 || true
+  umount /lower > /dev/null 2>&1 || true
+  return 1
+}
+
 mkdir -p /newroot
-if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
-  log "[initramfs] failed to mount \${root_device}"
-  exec sh
+if [ "\${gondolin_overlay}" = 1 ] && mount_overlay_root; then
+  :
+else
+  if [ "\${gondolin_overlay}" = 1 ]; then
+    log "[initramfs] overlay root failed, mounting \${root_device} directly"
+  fi
+  if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
+    log "[initramfs] failed to mount \${root_device}"
+    exec sh
+  fi
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
