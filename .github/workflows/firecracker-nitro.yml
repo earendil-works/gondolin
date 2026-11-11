@@ -1,0 +1,56 @@
+name: Firecracker on Nitro Sandboxes
+
+# AWS Nitro Sandboxes need an EC2 parent instance with Nitro Enclaves enabled,
+# which GitHub-hosted runners are not. This workflow runs the firecracker test
+# files there on a self-hosted runner labelled `nitro` (set up as in
+# docs/nitro.md#parent-instance-setup, with scripts/setup-nitro-host.sh, plus
+# Node.js 24, pnpm, a Rust toolchain, uv and passwordless sudo). It is off
+# until the repository variable NITRO_RUNNER is `true`.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: firecracker-nitro
+  cancel-in-progress: false
+
+jobs:
+  nitro:
+    name: Firecracker backend (Nitro Sandbox, jailed)
+    if: vars.NITRO_RUNNER == 'true'
+    runs-on: [self-hosted, linux, nitro]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Zig
+        run: scripts/install-zig.sh 0.17.0
+
+      - name: Install Firecracker and its jailer
+        run: scripts/install-firecracker.sh
+
+      - name: Check the parent instance
+        run: scripts/setup-nitro-host.sh --check
+
+      - name: Build gondolind
+        working-directory: native
+        run: cargo build --release --locked -p gondolind
+
+      - name: Build the guest image
+        run: |
+          pnpm install
+          cd guest
+          zig build -Doptimize=ReleaseSmall
+          GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" make assets NODE="$(command -v node)"
+          chmod -R o+rX image/out
+
+      - name: Run host tests on a Nitro Sandbox
+        timeout-minutes: 30
+        run: scripts/ci-firecracker.sh
+        env:
+          GONDOLIN_DAEMON_BIN: ${{ github.workspace }}/native/target/release/gondolind
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          GONDOLIN_NITRO_MODE: direct
+          WS_TIMEOUT: "120000"

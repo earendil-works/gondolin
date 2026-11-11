@@ -179,6 +179,78 @@ fn select_target(vm: &mut VmConfig, kvm: bool, nitro_device: bool) -> Result<(),
     ))
 }
 
+/// The Nitro Enclaves driver's sysfs directory (pool and slot budgets).
+const NITRO_SYSFS: &str = "/sys/class/misc/nitro_enclaves";
+
+/// What the docs say about setting up the pool, appended to pool errors.
+const NITRO_POOL_HINT: &str = "see docs/nitro.md#parent-instance-setup";
+
+fn sysfs_u64(dir: &Path, name: &str) -> Option<u64> {
+    std::fs::read_to_string(dir.join(name)).ok()?.trim().parse().ok()
+}
+
+/// Checks that the Nitro Enclaves memory pool (`dir`: [`NITRO_SYSFS`]) can
+/// hold a sandbox of `memory_mib` right now, so a launch that cannot work
+/// fails with numbers and the fix instead of Firecracker's allocation error.
+/// Hosts without the counters are not checked.
+fn check_nitro_pool(dir: &Path, memory_mib: u64) -> Result<(), String> {
+    let mib = |bytes: u64| bytes >> 20;
+    let Some(total) = sysfs_u64(dir, "mem_pool/total") else { return Ok(()) };
+    if total == 0 {
+        return Err(format!(
+            "no memory is reserved for Nitro Sandboxes: add nitro_enclaves.mempool=<size> \
+             (e.g. 8G) to the kernel command line and reboot; {NITRO_POOL_HINT}"
+        ));
+    }
+    let Some(free) = sysfs_u64(dir, "mem_pool/free") else { return Ok(()) };
+    // each sandbox takes its memory plus 2 MiB of the pool
+    let need = memory_mib + 2;
+    if need > mib(free) {
+        return Err(format!(
+            "this Nitro Sandbox needs {need} MiB of the Nitro Enclaves memory pool, which has \
+             {} MiB free of {} MiB: stop other sandboxes, give this one less memory, or \
+             reserve a larger pool (nitro_enclaves.mempool on the kernel command line); \
+             {NITRO_POOL_HINT}",
+            mib(free),
+            mib(total)
+        ));
+    }
+    Ok(())
+}
+
+/// An explanation for a Nitro Sandbox launch that failed with `output`
+/// (Firecracker's stderr), when it is one of the resource errors operators
+/// hit: the memory pool (`CmaAlloc ... Out of memory`, e.g. lost to a
+/// concurrent launch) or no pool or slot left (`No space left on device`).
+pub fn nitro_failure_hint(output: &str) -> Option<String> {
+    let dir = Path::new(NITRO_SYSFS);
+    let pool = || match (sysfs_u64(dir, "mem_pool/free"), sysfs_u64(dir, "mem_pool/total")) {
+        (Some(free), Some(total)) => {
+            format!("{} MiB free of {} MiB", free >> 20, total >> 20)
+        }
+        _ => "size unknown".into(),
+    };
+    if output.contains("CmaAlloc") || output.contains("Out of memory") {
+        return Some(format!(
+            "the Nitro Enclaves memory pool could not hold the sandbox ({}): stop other \
+             sandboxes, use less memory or reserve a larger pool; {NITRO_POOL_HINT}",
+            pool()
+        ));
+    }
+    if output.contains("No space left on device") {
+        let slots = match (sysfs_u64(dir, "pcie_slots"), sysfs_u64(dir, "pcie_slots_total")) {
+            (Some(n), Some(total)) => format!("{n} of {total}"),
+            _ => "unknown".into(),
+        };
+        return Some(format!(
+            "no Nitro Enclaves memory pool or slot is left (pool: {}; slot budget: {slots}, \
+             raise it in {NITRO_SYSFS}/pcie_slots); {NITRO_POOL_HINT}",
+            pool()
+        ));
+    }
+    None
+}
+
 /// Validates `vm` and settles the parts this host decides: KVM or Nitro
 /// ([`select_target`]) and, on KVM, the uncompressed kernel that replaces
 /// `vm.kernel_path`.
@@ -187,6 +259,9 @@ pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
     select_target(vm, kvm_usable(), Path::new(NITRO_DEVICE).exists())?;
     validate(vm)?;
     check_image(Path::new(&vm.kernel_path))?;
+    if vm.nitro.is_some() {
+        check_nitro_pool(Path::new(NITRO_SYSFS), memory_mib(vm)?)?;
+    }
     if vm.nitro.is_none() {
         let cache = gondolin_assets::store::gondolin_cache_dir().join("firecracker-kernels");
         vm.kernel_path =
@@ -533,6 +608,34 @@ pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use gondolin_proto::session::{NitroConfig, RootDisk};
+
+    #[test]
+    fn nitro_pool_check() {
+        let dir = std::env::temp_dir().join(format!("gondolin-fc-pool-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("mem_pool")).unwrap();
+        assert!(check_nitro_pool(&dir, 1024).is_ok(), "no counters: not checked");
+        std::fs::write(dir.join("mem_pool/total"), "0\n").unwrap();
+        let err = check_nitro_pool(&dir, 1024).unwrap_err();
+        assert!(err.contains("nitro_enclaves.mempool=<size>"), "{err}");
+        std::fs::write(dir.join("mem_pool/total"), format!("{}\n", 6u64 << 30)).unwrap();
+        std::fs::write(dir.join("mem_pool/free"), format!("{}\n", 1u64 << 30)).unwrap();
+        let err = check_nitro_pool(&dir, 1024).unwrap_err();
+        assert!(
+            err.contains("needs 1026 MiB") && err.contains("1024 MiB free of 6144 MiB"),
+            "{err}"
+        );
+        assert!(check_nitro_pool(&dir, 512).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nitro_failure_hints() {
+        let oom = "Error: RunWithoutApiError(BuildMicroVMFromJson(StartMicroVM(Enclave(EnclaveVm(CmaAlloc(MmapRegionError(Mmap(Os { code: 12, kind: OutOfMemory, message: \"Out of memory\" })))))))))";
+        assert!(nitro_failure_hint(oom).unwrap().contains("memory pool could not hold"));
+        let enospc = "Error: ... No space left on device (os error 28)";
+        assert!(nitro_failure_hint(enospc).unwrap().contains("pcie_slots"));
+        assert_eq!(nitro_failure_hint("Error: something else"), None);
+    }
 
     #[test]
     fn image_features() {

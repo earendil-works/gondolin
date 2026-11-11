@@ -27,6 +27,12 @@ policy and HTTP hooks, mounts, SSH and ingress. The differences are listed in
 
 ## Parent Instance Setup
 
+On an instance launched as in step 1, `scripts/setup-nitro-host.sh` from a
+Gondolin checkout does steps 2 to 4 (pool, a slot budget that survives
+reboots, Firecracker and its jailer); after the reboot it asks for,
+`scripts/setup-nitro-host.sh --check` reports whether the host is ready. The
+steps by hand:
+
 1. Launch an instance type that supports Nitro Enclaves, with Nitro Enclaves
    enabled, from the Amazon Linux 2023 kernel 6.18 AMI (which has the
    parent-side driver from `6.18.51-120.162.amzn2023` on; on Graviton use
@@ -59,7 +65,13 @@ policy and HTTP hooks, mounts, SSH and ingress. The differences are listed in
     echo 8 | sudo tee /sys/class/misc/nitro_enclaves/pcie_slots
     ```
 
-    This does not survive a reboot.
+    This does not survive a reboot (the setup script installs a systemd unit,
+    `gondolin-nitro-slots.service`, that sets it at boot).
+
+    Before starting a sandbox the daemon checks that the pool has room for it
+    and otherwise fails with the free and total pool size and what to change;
+    a launch that still runs out (for example to a concurrent one) reports the
+    same.
 
 4. Install Firecracker 1.18 or newer. From a Gondolin checkout,
    `scripts/install-firecracker.sh` downloads the pinned release, checks its
