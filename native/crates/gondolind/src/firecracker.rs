@@ -62,10 +62,21 @@ pub fn binary_path(vm: &VmConfig) -> String {
     vm.firecracker_path.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "firecracker".into())
 }
 
-/// The vsock device's socket in `dir`; Firecracker binds it itself.
-pub fn vsock_uds(dir: &Path) -> PathBuf {
-    dir.join("vsock.sock")
+/// The directory (in session directory `dir`) holding the vsock device's
+/// socket and the guest channel listeners: the only part of the session
+/// directory a jailed Firecracker gets to see.
+pub fn vsock_dir(dir: &Path) -> PathBuf {
+    dir.join("vsock")
 }
+
+/// The vsock device's socket of session directory `dir`; Firecracker binds
+/// it itself.
+pub fn vsock_uds(dir: &Path) -> PathBuf {
+    vsock_dir(dir).join(VSOCK_SOCKET)
+}
+
+/// File name of the vsock device's socket in [`vsock_dir`].
+pub const VSOCK_SOCKET: &str = "vsock.sock";
 
 /// Where the daemon listens for each guest channel: Firecracker connects to
 /// `<uds>_<port>` when the guest connects to `port` on the host.
@@ -415,6 +426,96 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     Ok(config)
 }
 
+/// A jailed Firecracker ready to spawn ([`jailed`]).
+pub struct Jailed {
+    pub jail: crate::jailer::Jail,
+    /// the jailer and its arguments
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Prepares VMM `generation` of `vm` (session directory `dir`) under the
+/// jailer: a fresh jail with the kernel, initrd, root disk and the vsock
+/// directory bound in, the config file (with the paths as the chroot shows
+/// them) and log written into it, and the guest channel listeners handed to
+/// the jail's user. The returned jail's bind mounts go to
+/// `SpawnExtra::binds`.
+pub fn jailed(
+    settings: &crate::jailer::JailerSettings,
+    generation: u64,
+    vm: &VmConfig,
+    dir: &Path,
+    append: &str,
+    tap: Option<&str>,
+    console: bool,
+) -> Result<Jailed, String> {
+    use crate::jailer::{Jail, chown, others_may};
+    let mut jail = Jail::create(settings, generation)?;
+    let readable = |path: &str, what: &str| -> Result<(), String> {
+        if others_may(Path::new(path), false) {
+            Ok(())
+        } else {
+            Err(format!(
+                "the {what} {path} must be readable by all users for the jailed Firecracker \
+                 (uid {}); make it readable (chmod o+r) or set GONDOLIN_JAILER=0",
+                settings.uid
+            ))
+        }
+    };
+    let mut jailed_vm = vm.clone();
+    readable(&vm.kernel_path, "kernel")?;
+    jailed_vm.kernel_path = jail.bind(Path::new(&vm.kernel_path), "kernel", true)?;
+    if !vm.initrd_path.is_empty() {
+        readable(&vm.initrd_path, "initrd")?;
+        jailed_vm.initrd_path = jail.bind(Path::new(&vm.initrd_path), "initrd", true)?;
+    }
+    if let (Some(disk), Some(jailed_disk)) = (&vm.root_disk, jailed_vm.root_disk.as_mut()) {
+        let writable = !(disk.read_only || disk.snapshot);
+        let path = Path::new(&disk.path);
+        if writable && path.starts_with(dir) {
+            // the session's own copy (rootfs.size): the jail's user owns it
+            chown(path, settings.uid, settings.gid)
+                .map_err(|e| format!("cannot hand {} to the jail: {e}", path.display()))?;
+        } else if writable && !others_may(path, true) {
+            return Err(format!(
+                "the writable root disk {} must be writable by all users for the jailed \
+                 Firecracker (uid {}); use a copy-on-write rootfs mode or set GONDOLIN_JAILER=0",
+                disk.path, settings.uid
+            ));
+        } else if !writable {
+            readable(&disk.path, "root disk")?;
+        }
+        jailed_disk.path = jail.bind(path, "rootfs", !writable)?;
+    }
+    // the guest channel listeners and the vsock socket's directory
+    let vsock = vsock_dir(dir);
+    let handover = |p: &Path| {
+        chown(p, settings.uid, settings.gid)
+            .map_err(|e| format!("cannot hand {} to the jail: {e}", p.display()))
+    };
+    handover(&vsock)?;
+    for entry in std::fs::read_dir(&vsock).map_err(|e| format!("{}: {e}", vsock.display()))? {
+        handover(&entry.map_err(|e| e.to_string())?.path())?;
+    }
+    let jailed_vsock = jail.bind(&vsock, "vsock", false)?;
+    let uds = PathBuf::from(format!("{jailed_vsock}/{VSOCK_SOCKET}"));
+    let mac = vm.mac.clone().unwrap_or_else(|| crate::qemu::DEFAULT_MAC.to_string());
+    let config =
+        config(&jailed_vm, &ConfigArgs { append, vsock_uds: &uds, tap, mac: &mac, console })?;
+    let config_path =
+        jail.write("firecracker.json", gondolin_wire::json::to_string(&config).as_bytes())?;
+    let log_path = jail.write("firecracker.log", b"")?;
+    let limits = crate::jailer::cgroup_limits(
+        vm.cpus,
+        memory_mib(vm)?,
+        vm.nitro.is_some(),
+        &settings.controllers,
+    );
+    let (program, args) =
+        jail.command(&args(Path::new(&config_path), Path::new(&log_path)), &limits);
+    Ok(Jailed { jail, program, args })
+}
+
 /// Command line arguments for a config file written to `config_path`.
 pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
     vec![
@@ -588,10 +689,10 @@ mod tests {
     #[test]
     fn channels_listen_where_firecracker_forwards_guest_connections() {
         let paths = chardev_paths(Path::new("/run/s"));
-        assert_eq!(paths.control, PathBuf::from("/run/s/vsock.sock_1024"));
-        assert_eq!(paths.fs, PathBuf::from("/run/s/vsock.sock_1025"));
-        assert_eq!(paths.ssh, PathBuf::from("/run/s/vsock.sock_1026"));
-        assert_eq!(paths.ingress, PathBuf::from("/run/s/vsock.sock_1027"));
+        assert_eq!(paths.control, PathBuf::from("/run/s/vsock/vsock.sock_1024"));
+        assert_eq!(paths.fs, PathBuf::from("/run/s/vsock/vsock.sock_1025"));
+        assert_eq!(paths.ssh, PathBuf::from("/run/s/vsock/vsock.sock_1026"));
+        assert_eq!(paths.ingress, PathBuf::from("/run/s/vsock/vsock.sock_1027"));
     }
 
     #[test]
