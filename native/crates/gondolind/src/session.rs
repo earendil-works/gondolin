@@ -134,6 +134,8 @@ struct Runtime {
     /// with the tap, once dropped and the VMM has exited)
     #[cfg(target_os = "linux")]
     tap: Option<crate::tap::TapNet>,
+    /// Firecracker: how its VMMs are jailed (none: run as the daemon's user)
+    jailer: Option<crate::jailer::JailerSettings>,
     dir: SocketDir,
 }
 
@@ -203,6 +205,8 @@ pub(crate) struct VmState {
     guest_seen: bool,
     /// why the daemon stopped the current generation (reported with its exit)
     exit_reason: Option<String>,
+    /// the current generation's jail (removed once its VMM exited)
+    jail: Option<crate::jailer::Jail>,
 }
 
 /// What to do once a stopped VMM exited.
@@ -737,9 +741,11 @@ impl Session {
     fn start_runtime(&mut self) -> Result<(), String> {
         let dir = make_socket_dir().map_err(|e| format!("cannot create socket directory: {e}"))?;
         let mut firecracker = false;
+        let mut jailer = None;
         if let Some(cfg) = self.configured.as_mut() {
             firecracker = crate::firecracker::is_firecracker(&cfg.vm);
             if firecracker {
+                jailer = crate::jailer::settings(&cfg.vm)?;
                 crate::rootdisk::prepare_raw(&mut cfg.vm, &dir.0)?;
                 self.ckpt.overlay = None;
                 self.ckpt.export_blocker = Some(
@@ -762,6 +768,9 @@ impl Session {
         let path = |name: &str| dir.0.join(name);
         let chardevs = if firecracker {
             // where Firecracker forwards the guest's vsock connections
+            let vsock = crate::firecracker::vsock_dir(&dir.0);
+            std::fs::create_dir_all(&vsock)
+                .map_err(|e| format!("cannot create {}: {e}", vsock.display()))?;
             crate::firecracker::chardev_paths(&dir.0)
         } else {
             ChardevPaths {
@@ -821,7 +830,10 @@ impl Session {
                 // Firecracker attaches the guest NIC to a tap; the stack
                 // reads the guest's frames with a packet socket on it
                 let name = crate::tap::tap_name(std::process::id(), next_tap_id());
-                let mut created = crate::tap::TapNet::create(&name).map_err(|e| e.to_string())?;
+                // a jailed Firecracker attaches to the tap as the jail's user
+                let owner = jailer.as_ref().map(|j: &crate::jailer::JailerSettings| (j.uid, j.gid));
+                let mut created =
+                    crate::tap::TapNet::create(&name, owner).map_err(|e| e.to_string())?;
                 let socket = created.take_socket().map_err(|e| format!("tap {name}: {e}"))?;
                 let backend = backend.clone();
                 let task =
@@ -862,6 +874,7 @@ impl Session {
             fs_handler,
             #[cfg(target_os = "linux")]
             tap,
+            jailer,
             dir,
         });
         Ok(())
@@ -1368,7 +1381,33 @@ impl Session {
             Some(_) => format!("{append} sandboxfs.virtiofs={}", qemu::VIRTIOFS_TAG),
             None => append.to_string(),
         };
-        let (qemu_path, args) = if crate::firecracker::is_firecracker(&cfg.vm) {
+        let mut spawn_extra = crate::vmm::SpawnExtra::default();
+        let (qemu_path, args) = if let Some(settings) =
+            rt.jailer.as_ref().filter(|_| crate::firecracker::is_firecracker(&cfg.vm))
+        {
+            // Firecracker binds the vsock socket itself (a previous run's is stale)
+            let _ = std::fs::remove_file(crate::firecracker::vsock_uds(&rt.dir.0));
+            #[cfg(target_os = "linux")]
+            let tap = rt.tap.as_ref().map(|t| t.name().to_string());
+            #[cfg(not(target_os = "linux"))]
+            let tap: Option<String> = None;
+            let console =
+                crate::firecracker::wants_console(&cfg.vm, self.debug_enabled("protocol"));
+            let jailed = crate::firecracker::jailed(
+                settings,
+                generation,
+                &cfg.vm,
+                &rt.dir.0,
+                &self.vm.append,
+                tap.as_deref(),
+                console,
+            )
+            .map_err(StartError::Fatal)?;
+            spawn_extra.binds = jailed.jail.binds().to_vec();
+            spawn_extra.watchdog = true;
+            self.vm.jail = Some(jailed.jail);
+            (jailed.program, jailed.args)
+        } else if crate::firecracker::is_firecracker(&cfg.vm) {
             let uds = crate::firecracker::vsock_uds(&rt.dir.0);
             // Firecracker binds the vsock socket itself (a previous run's is stale)
             let _ = std::fs::remove_file(&uds);
@@ -1441,9 +1480,16 @@ impl Session {
         let netns = rt.tap.as_ref().map(|t| t.netns());
         #[cfg(not(target_os = "linux"))]
         let netns = None;
+        spawn_extra.netns = netns;
         let guest_deadline = crate::firecracker::is_firecracker(&cfg.vm);
         self.set_vm_state(State::Starting);
-        match VmmProcess::spawn_in(&qemu_path, &args, generation, self.vmm_tx.clone(), netns) {
+        match VmmProcess::spawn_with(
+            &qemu_path,
+            &args,
+            generation,
+            self.vmm_tx.clone(),
+            &spawn_extra,
+        ) {
             Ok(child) => {
                 crate::timing::mark("vmm spawned");
                 self.vm.child = Some(child);
@@ -1472,6 +1518,7 @@ impl Session {
         self.idle.invalidate();
         self.cleanup_qmp_socket();
         self.vm.child = None;
+        self.vm.jail = None;
         self.set_vm_state(State::Stopped);
         self.vm_exited_server(None, None, Some(error));
     }
@@ -1564,6 +1611,7 @@ impl Session {
             self.idle.invalidate();
             self.cleanup_qmp_socket();
             self.vm.child = None;
+            self.vm.jail = None;
             self.set_vm_state(State::Stopped);
             let reason = self.vm.exit_reason.take();
             self.vm_exited_server(code, signal.map(vmm::signal_name), reason);

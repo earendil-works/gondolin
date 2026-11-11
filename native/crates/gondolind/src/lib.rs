@@ -22,6 +22,7 @@ pub mod guest;
 pub mod guestmsg;
 pub mod idle;
 pub mod image;
+pub mod jailer;
 pub mod krun;
 pub mod mitm_ca;
 pub mod net;
@@ -82,7 +83,7 @@ const USAGE: &str = "usage: gondolind                     speak the controller p
        gondolind --mitm-ca [DIR]     load or create the MITM CA, print its certificate
        gondolind --qemu-args         print the QEMU argv for a configure payload (JSON on stdin)
        gondolind --disk-info PATH    print a disk image's format, virtual size and backing file (JSON)
-       gondolind --vmm-watchdog PID  (macOS, internal) kill the VMM PID when the daemon exits";
+       gondolind --vmm-watchdog PID  (internal) kill the VMM PID when the daemon exits";
 
 /// Process entry point (argument handling, runtime setup).
 pub fn main() {
@@ -123,7 +124,7 @@ pub fn main_with_args(args: Vec<String>) {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         Some("--vmm-watchdog") => {
             let pid = args.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
             std::process::exit(if pid > 0 { vmm::run_watchdog(pid) } else { 2 });

@@ -78,16 +78,45 @@ policy and HTTP hooks, mounts, SSH and ingress. The differences are listed in
     releases with an error saying so.
 
 5. Run Gondolin as root. The daemon creates a network namespace and a tap
-   device for each VM and opens `/dev/nitro_enclaves`, which needs
-   `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW` and access to the device.
-   Without root, give the daemon binary (the static `gondolin` CLI, or
-   `gondolind` for the SDK) these capabilities and the user access to the
-   device; Firecracker itself needs no capabilities:
+   device for each VM and runs Firecracker under its jailer (see
+   [Isolation](#isolation)), which needs root. Without root, give the daemon
+   binary (the static `gondolin` CLI, or `gondolind` for the SDK)
+   `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and `CAP_NET_RAW` and the user access to
+   the device; Firecracker then runs unjailed as that user:
 
     ```bash
     sudo setcap cap_sys_admin,cap_net_admin,cap_net_raw+ep "$(command -v gondolin)"
     sudo chgrp "$(id -gn)" /dev/nitro_enclaves && sudo chmod g+rw /dev/nitro_enclaves
     ```
+
+## Isolation
+
+When the daemon runs as root and finds Firecracker's `jailer` (beside the
+`firecracker` binary or on `PATH`; `scripts/install-firecracker.sh` installs
+both), each VMM runs jailed, on KVM and on Nitro Sandboxes alike:
+
+- in a chroot under `/srv/jailer/firecracker/gondolin-<daemon pid>-<n>/root`
+  holding only the kernel, initrd and root disk (bind-mounted read-only, in a
+  mount namespace of the VMM's own), the VM's vsock sockets, its config file
+  and the device nodes it needs;
+- as an unprivileged uid and gid of its own (`1600000000 + daemon pid`), with
+  no capabilities, inside Firecracker's seccomp filter;
+- in a cgroup (`/sys/fs/cgroup/gondolin/<id>`) limiting it to the VM's vCPUs
+  plus one core, the VM's memory plus 256 MiB (on a Nitro Sandbox, whose
+  memory comes from the enclave pool, 512 MiB) and `64 + vCPUs` processes;
+- in the network namespace that holds only its tap device.
+
+A guest that escapes into the VMM is then confined to that chroot and user.
+The image files must be readable by all users (`chmod o+r`; images Gondolin
+downloads or builds are). The jail and its cgroup are removed when the VM
+exits, and a watchdog process kills the VMM if the daemon dies; jails left by
+a daemon that was killed are removed when the next VM starts.
+
+| Variable | Effect |
+|---|---|
+| `GONDOLIN_JAILER` | jailer binary to use, or `0` to run Firecracker unjailed |
+| `GONDOLIN_JAILER_DIR` | chroot base directory (default `/srv/jailer`) |
+| `GONDOLIN_JAILER_UID` | first uid/gid; the VMM of daemon process `pid` runs as `uid + pid` (default `1600000000`) |
 
 ## Guest Image
 

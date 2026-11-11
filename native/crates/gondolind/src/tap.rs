@@ -44,6 +44,8 @@ mod linux {
     const IFNAMSIZ: usize = 16;
     const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
     const TUNSETPERSIST: libc::c_ulong = 0x4004_54cb;
+    const TUNSETOWNER: libc::c_ulong = 0x4004_54cc;
+    const TUNSETGROUP: libc::c_ulong = 0x4004_54ce;
     const IFF_TAP: libc::c_short = 0x0002;
     const IFF_NO_PI: libc::c_short = 0x1000;
     const IFF_VNET_HDR: libc::c_short = 0x4000;
@@ -127,8 +129,10 @@ mod linux {
 
     impl TapNet {
         /// Creates a namespace holding tap `name` (up, no addresses, no ARP,
-        /// IPv6 off) and a packet socket bound to it.
-        pub fn create(name: &str) -> io::Result<TapNet> {
+        /// IPv6 off) and a packet socket bound to it. With `owner`
+        /// (uid, gid) that user can attach to the tap without privileges
+        /// (a jailed Firecracker).
+        pub fn create(name: &str, owner: Option<(u32, u32)>) -> io::Result<TapNet> {
             let name = name.to_string();
             ifreq(&name, 0)?; // validate the name before doing anything
             // namespaces are per thread: do the setup on a thread that leaves
@@ -160,6 +164,15 @@ mod linux {
                             format!("cannot create tap {name} (needs CAP_NET_ADMIN): {e}"),
                         )
                     })?;
+                    if let Some((uid, gid)) = owner {
+                        // SAFETY: TUNSETOWNER/TUNSETGROUP take an integer.
+                        cvt(unsafe {
+                            libc::ioctl(fd.as_raw_fd(), TUNSETOWNER as _, libc::c_ulong::from(uid))
+                        })?;
+                        cvt(unsafe {
+                            libc::ioctl(fd.as_raw_fd(), TUNSETGROUP as _, libc::c_ulong::from(gid))
+                        })?;
+                    }
                     set_persist(&fd, true)?;
                     drop(fd);
                     // /proc/sys/net shows the namespace of the opening thread;

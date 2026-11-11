@@ -64,6 +64,18 @@ impl Signaller {
     }
 }
 
+/// Setup of [`VmmProcess::spawn_with`] beyond the command line (Linux only).
+#[derive(Debug, Default)]
+pub struct SpawnExtra {
+    /// network namespace to run in (an open `/proc/.../ns/net` descriptor)
+    pub netns: Option<std::os::fd::RawFd>,
+    /// bind mounts made in a private mount namespace before exec
+    pub binds: Vec<crate::jailer::Bind>,
+    /// start the watchdog that kills the VMM when the daemon dies (always on
+    /// macOS)
+    pub watchdog: bool,
+}
+
 impl VmmProcess {
     /// Spawns `program args`; events are delivered through `events` as
     /// `(generation, event)`. The child is watched by std threads (one waiter,
@@ -86,13 +98,38 @@ impl VmmProcess {
         events: mpsc::Sender<(u64, VmmEvent)>,
         netns: Option<std::os::fd::RawFd>,
     ) -> std::io::Result<Self> {
+        let extra = SpawnExtra { netns, ..Default::default() };
+        Self::spawn_with(program, args, generation, events, &extra)
+    }
+
+    /// [`VmmProcess::spawn`] with the Linux-only `extra` setup.
+    pub fn spawn_with(
+        program: &str,
+        args: &[String],
+        generation: u64,
+        events: mpsc::Sender<(u64, VmmEvent)>,
+        extra: &SpawnExtra,
+    ) -> std::io::Result<Self> {
         let mut cmd = Command::new(program);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let netns = extra.netns;
         #[cfg(target_os = "linux")]
         {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
             use std::os::unix::process::CommandExt;
-            // SAFETY: prctl and setns are async-signal-safe; kill the VMM if
-            // the daemon dies. `netns` is still open in the child before exec.
+            let cstr = |p: &std::path::Path| {
+                CString::new(p.as_os_str().as_bytes())
+                    .map_err(|_| std::io::Error::other(format!("NUL in {}", p.display())))
+            };
+            let binds = extra
+                .binds
+                .iter()
+                .map(|b| Ok((cstr(&b.source)?, cstr(&b.target)?, b.read_only)))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            // SAFETY: prctl, setns, unshare and mount are async-signal-safe
+            // and the closure allocates nothing; kill the VMM if the daemon
+            // dies. `netns` is still open in the child before exec.
             unsafe {
                 cmd.pre_exec(move || {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -101,22 +138,62 @@ impl VmmProcess {
                     {
                         return Err(std::io::Error::last_os_error());
                     }
+                    if !binds.is_empty() {
+                        // the bind mounts exist only in this process's own
+                        // mount namespace and go away with it
+                        let null = std::ptr::null();
+                        if libc::unshare(libc::CLONE_NEWNS) != 0
+                            || libc::mount(
+                                null,
+                                c"/".as_ptr(),
+                                null,
+                                libc::MS_REC | libc::MS_PRIVATE,
+                                null.cast(),
+                            ) != 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        for (source, target, read_only) in &binds {
+                            if libc::mount(
+                                source.as_ptr(),
+                                target.as_ptr(),
+                                null,
+                                libc::MS_BIND,
+                                null.cast(),
+                            ) != 0
+                            {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if *read_only
+                                && libc::mount(
+                                    null,
+                                    target.as_ptr(),
+                                    null,
+                                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                                    null.cast(),
+                                ) != 0
+                            {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                    }
                     Ok(())
                 });
             }
         }
         #[cfg(not(target_os = "linux"))]
-        if netns.is_some() {
+        if netns.is_some() || !extra.binds.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "network namespaces are Linux-only",
+                "network and mount namespaces are Linux-only",
             ));
         }
         let mut child = cmd.spawn()?;
         let pid = child.id();
         CURRENT_PID.store(pid as i32, Ordering::SeqCst);
-        // macOS has no PR_SET_PDEATHSIG: a helper kills QEMU if we die
-        let watchdog = spawn_watchdog(pid);
+        // macOS has no PR_SET_PDEATHSIG, and a process that changes its
+        // credentials (the jailer) loses it: a helper kills the VMM if we die
+        let watchdog = spawn_watchdog(pid, extra.watchdog);
 
         // log readers: one thread per pipe; each reports when it is done
         let mut readers = Vec::new();
@@ -223,9 +300,11 @@ fn wait_exit_nowait(pid: i32) {
     }
 }
 
-/// Starts `gondolind --vmm-watchdog <pid>` with a pipe on its stdin (macOS).
-fn spawn_watchdog(pid: u32) -> Option<std::process::Child> {
-    if !cfg!(target_os = "macos") || cfg!(test) || pid == 0 {
+/// Starts `gondolind --vmm-watchdog <pid>` with a pipe on its stdin (macOS,
+/// and on Linux when `needed`).
+fn spawn_watchdog(pid: u32, needed: bool) -> Option<std::process::Child> {
+    let wanted = cfg!(target_os = "macos") || (cfg!(target_os = "linux") && needed);
+    if !wanted || cfg!(test) || pid == 0 {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
@@ -284,6 +363,53 @@ pub fn run_watchdog(pid: i32) -> i32 {
                     && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted)
             {
                 libc::kill(pid, libc::SIGKILL);
+                return 0;
+            }
+        }
+    }
+}
+
+/// Body of `gondolind --vmm-watchdog <pid>` on Linux: as on macOS, with a
+/// pidfd for the process, so a recycled pid is never signalled.
+#[cfg(target_os = "linux")]
+pub fn run_watchdog(pid: i32) -> i32 {
+    // SAFETY: plain pidfd_open/poll/read/pidfd_send_signal calls on fds we own.
+    unsafe {
+        let pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as libc::c_int;
+        if pidfd < 0 {
+            // the process is already gone
+            return 0;
+        }
+        loop {
+            let mut fds = [
+                libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: pidfd, events: libc::POLLIN, revents: 0 },
+            ];
+            if libc::poll(fds.as_mut_ptr(), 2, -1) < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return 1;
+            }
+            if fds[1].revents != 0 {
+                return 0;
+            }
+            if fds[0].revents == 0 {
+                continue;
+            }
+            let mut buf = [0u8; 256];
+            let r = libc::read(0, buf.as_mut_ptr().cast(), buf.len());
+            if r == 0
+                || (r < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted)
+            {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    pidfd,
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
                 return 0;
             }
         }

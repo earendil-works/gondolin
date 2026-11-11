@@ -49,6 +49,9 @@ These affect `gondolin build` and the SDK's image build API (Node only; see
 | --- | --- | --- |
 | `GONDOLIN_VMM` | SDK, static CLI | Backend when `sandbox.vmm` / `--vmm` is not set: `qemu`, `krun` or `firecracker`. Default: `krun` where it can run, else `qemu` (see [VM Backends](./backends.md#default-backend-selection)) |
 | `GONDOLIN_FIRECRACKER` | SDK, static CLI | Path of the `firecracker` binary for `vmm=firecracker` when `sandbox.firecrackerPath` is not set. Default: `firecracker` on `PATH` (see [AWS Nitro Sandboxes](./nitro.md)) |
+| `GONDOLIN_JAILER` | daemon | Firecracker's `jailer` binary for `vmm=firecracker`, or `0` to run Firecracker unjailed. Default: `jailer` beside the `firecracker` binary or on `PATH`, used when the daemon runs as root (see [Isolation](./nitro.md#isolation)) |
+| `GONDOLIN_JAILER_DIR` | daemon | Chroot base directory of jailed Firecracker VMs. Default: `/srv/jailer` |
+| `GONDOLIN_JAILER_UID` | daemon | First uid/gid of jailed Firecracker VMs; the VMM of daemon process `pid` runs as `uid + pid`. Default: `1600000000` |
 | `GONDOLIN_NITRO_MODE` | SDK, static CLI | Nitro Sandbox mode for `vmm=firecracker` when `sandbox.nitro.mode` is not set: `direct` or `confidential`. Setting it (or `GONDOLIN_NITRO_CPU_OVERCOMMIT`) runs a Nitro Sandbox even where KVM is available. Default: `direct` |
 | `GONDOLIN_NITRO_CPU_OVERCOMMIT` | SDK, static CLI | `0`: give Nitro Sandboxes dedicated cores instead of time-shared vCPUs (`sandbox.nitro.cpuOvercommit`). Default: time-shared |
 | `GONDOLIN_KRUN_RUNNER` | SDK, static CLI | Path of the krun runner binary; checked before the other runner locations and counts as an installed runner for the default backend selection |
