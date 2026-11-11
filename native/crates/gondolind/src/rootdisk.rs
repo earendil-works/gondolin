@@ -367,12 +367,14 @@ pub fn prepare(
     Ok(created)
 }
 
-/// [`prepare`] for VMMs that only attach raw disks (Firecracker): every
-/// writable mode (`auto`, `cow`, `memory`) gets a raw copy of the base in
-/// `dir` (a reflink on XFS/btrfs, so it costs nothing there) whose writes are
-/// discarded with the session; `readonly` attaches the base itself.
-/// Checkpoints need a qcow2 overlay, so `checkpoint` is refused and a prepared
-/// disk is never exportable.
+/// [`prepare`] for VMMs that only attach raw disks (Firecracker). The
+/// writable modes (`auto`, `cow`, `memory`) discard their writes with the
+/// session: the base is attached as a `snapshot` (read-only, the guest keeps
+/// its writes in a tmpfs overlay, see [`crate::firecracker::config`]), so
+/// nothing is copied and every VM shares the base's page cache. With
+/// `rootfs.size` the disk must grow, so it gets a raw copy in `dir` instead.
+/// `readonly` attaches the base itself. Checkpoints need a qcow2 overlay, so
+/// `checkpoint` is refused and a prepared disk is never exportable.
 pub fn prepare_raw(vm: &mut VmConfig, dir: &Path) -> Result<(), String> {
     let Some(disk) = vm.root_disk.as_mut() else { return Ok(()) };
     if !disk.path.is_empty() {
@@ -415,9 +417,18 @@ pub fn prepare_raw(vm: &mut VmConfig, dir: &Path) -> Result<(), String> {
         disk.snapshot = false;
         Ok(())
     };
+    // writes discarded: an overlay over the read-only base, or a copy to grow
+    let discard_writes = |disk: &mut RootDisk| -> Result<(), String> {
+        if size.is_some() {
+            return copy(disk);
+        }
+        disk.read_only = false;
+        disk.snapshot = true;
+        Ok(())
+    };
     match disk.mode.take().as_deref() {
         // the controller's own disk: as is, unless its writes are to be discarded
-        None if disk.snapshot => copy(disk)?,
+        None if disk.snapshot => discard_writes(disk)?,
         None => {}
         Some("readonly") => {
             if size.is_some() {
@@ -429,7 +440,7 @@ pub fn prepare_raw(vm: &mut VmConfig, dir: &Path) -> Result<(), String> {
             disk.read_only = true;
             disk.snapshot = false;
         }
-        Some("auto" | "cow" | "memory") => copy(disk)?,
+        Some("auto" | "cow" | "memory") => discard_writes(disk)?,
         Some("checkpoint") => {
             return Err("checkpoints are not supported with vmm=firecracker".into());
         }
@@ -499,16 +510,22 @@ mod tests {
         let session = t.0.join("session");
         std::fs::create_dir_all(&session).unwrap();
 
-        // writable modes: a private copy, the base untouched
+        // writable modes: the base as a snapshot (the guest overlays its
+        // writes), nothing copied
         for mode in ["auto", "cow", "memory"] {
             let mut vm = raw_vm(Some(mode), &base);
             prepare_raw(&mut vm, &session).unwrap();
             let d = vm.root_disk.unwrap();
-            assert_eq!(PathBuf::from(&d.path), session.join("rootfs.raw"), "{mode}");
+            assert_eq!(PathBuf::from(&d.path), base, "{mode}");
             assert_eq!(d.format, "raw");
-            assert!(!d.read_only && !d.snapshot);
-            assert_eq!(std::fs::read(&d.path).unwrap(), vec![7u8; 4096]);
+            assert!(d.snapshot && !d.read_only, "{mode}");
+            assert!(!session.join("rootfs.raw").exists());
         }
+        // the controller's own snapshot disk too
+        let mut vm = raw_vm(None, &base);
+        vm.root_disk.as_mut().unwrap().snapshot = true;
+        prepare_raw(&mut vm, &session).unwrap();
+        assert_eq!(PathBuf::from(&vm.root_disk.unwrap().path), base);
 
         // readonly: the base itself
         let mut vm = raw_vm(Some("readonly"), &base);
@@ -517,10 +534,14 @@ mod tests {
         assert_eq!(PathBuf::from(&d.path), base);
         assert!(d.read_only);
 
-        // rootfs.size grows the copy, not the base
+        // rootfs.size: a private copy that grows, the base untouched
         let mut vm = raw_vm(Some("cow"), &base);
         vm.root_disk.as_mut().unwrap().size = Some(1 << 20);
         prepare_raw(&mut vm, &session).unwrap();
+        let d = vm.root_disk.unwrap();
+        assert_eq!(PathBuf::from(&d.path), session.join("rootfs.raw"));
+        assert!(!d.read_only && !d.snapshot);
+        assert_eq!(std::fs::read(&d.path).unwrap()[..4096], vec![7u8; 4096]);
         assert_eq!(std::fs::metadata(session.join("rootfs.raw")).unwrap().len(), 1 << 20);
         assert_eq!(std::fs::metadata(&base).unwrap().len(), 4096);
 
