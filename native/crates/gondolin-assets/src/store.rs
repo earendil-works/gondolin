@@ -211,8 +211,47 @@ impl Store {
         Ok(link)
     }
 
+    /// Whether ref `link` exists and leads to something (a dangling link, to
+    /// a removed object, counts as absent). Following the link reads it, which
+    /// can briefly fail while a concurrent [`Store::set_ref`] replaces it (see
+    /// [`Store::link_target`]): a link that is there but cannot be followed is
+    /// retried a few times before it counts as dangling.
+    fn link_resolves(link: &Path) -> bool {
+        for _ in 0..8 {
+            if link.exists() {
+                return true;
+            }
+            if fs::symlink_metadata(link).is_err() {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        link.exists()
+    }
+
+    /// Where ref `link` points. It was a symlink a moment ago (callers check
+    /// with `symlink_metadata`), so `EINVAL` (not a symlink) or `ENOENT` mean
+    /// a concurrent [`Store::set_ref`] is replacing it: on macOS (APFS) a
+    /// reader can briefly miss a symlink that is being renamed over. Retried
+    /// a few times before giving up.
     fn link_target(link: &Path) -> Result<PathBuf, AssetsError> {
-        let target = fs::read_link(link).map_err(|e| AssetsError::io(link, e))?;
+        let mut attempt = 0;
+        let target = loop {
+            match fs::read_link(link) {
+                Ok(target) => break target,
+                Err(e)
+                    if attempt < 8
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+                        ) =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(AssetsError::io(link, e)),
+            }
+        };
         Ok(resolve_lexical(link.parent().unwrap_or(Path::new("/")), &target))
     }
 
@@ -242,7 +281,7 @@ impl Store {
         let mut targets = indexed::Map::default();
         for arch in Arch::ALL {
             let link = self.ref_link_path(r, arch)?;
-            if !link.exists() {
+            if !Self::link_resolves(&link) {
                 continue;
             }
             targets.insert(arch, self.build_id_from_link(&link)?);
@@ -269,6 +308,11 @@ impl Store {
         let link_dir = link.parent().expect("ref link has a parent");
         fs::create_dir_all(link_dir).map_err(|e| AssetsError::io(link_dir, e))?;
         let target = relative_path(link_dir, &object);
+        // already pointing there (e.g. concurrent resolves of one image, all
+        // setting the same ref): leave it, so readers never see it replaced
+        if fs::read_link(&link).is_ok_and(|current| current == target) {
+            return Ok(());
+        }
         let tmp = link.with_file_name(format!("{arch}.tmp-{}", random_suffix()));
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &tmp).map_err(|e| AssetsError::io(&tmp, e))?;
