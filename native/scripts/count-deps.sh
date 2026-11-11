@@ -28,7 +28,10 @@ done
 FIRST_PARTY='^djs-[a-z0-9-]+ v[^ ]+ \(https://github\.com/earendil-works/djs(\.git)?[?#]'
 
 tree() { # target
-  (cd "$NATIVE" && cargo tree -q --locked -p gondolin-cli -e normal --prefix none --target "$1")
+  # --color never: with CARGO_TERM_COLOR=always (set by CI's Rust toolchain
+  # action) the " (*)" marks of repeated crates are colored, the filters below
+  # miss them and those crates count twice
+  (cd "$NATIVE" && cargo tree -q --locked --color never -p gondolin-cli -e normal --prefix none --target "$1")
 }
 
 crates() { # target
