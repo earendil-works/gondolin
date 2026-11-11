@@ -385,12 +385,15 @@ slower JS path).
 ### Write-Back and Close Errors
 
 With `commit: "close"`, a failing `writeFile` surfaces as the error of the
-guest's `close()` or `fsync()` when the guest uses
-[virtio-fs](#transport-virtio-fs-and-sandboxfs). Over sandboxfs it cannot:
-the guest's FUSE helper does not forward those calls. The data then stays
-cached and is written again when the next writer closes the file, and the
-failure is reported as an error of the `release` operation (in `vfs` debug
-output and to [`after` hooks](#vfs-hooks)).
+guest's `close()` or `fsync()`, over both
+[transports](#transport-virtio-fs-and-sandboxfs). Over sandboxfs this needs
+guest helpers and a daemon newer than Gondolin 0.14.0; with older ones the
+`close()` succeeds. Only handles that commit on close pay for this: other
+files are opened so that the kernel skips the flush on `close()`.
+
+When the commit fails, the data stays cached and is written again when the
+next writer closes the file. The failure of the final `release` is reported in
+`vfs` debug output and to [`after` hooks](#vfs-hooks).
 
 ## Provider Composition
 

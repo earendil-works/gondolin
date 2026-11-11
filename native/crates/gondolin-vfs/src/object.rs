@@ -1242,6 +1242,12 @@ impl FileHandle for ObjectHandle {
         })
     }
 
+    fn wants_flush(&self) -> bool {
+        // `commit: write` commits with each write; only `commit: close`
+        // buffers until flush/release
+        (self.flags.write || self.flags.append) && self.inner.cfg.commit == CommitMode::Close
+    }
+
     fn flush<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
         Box::pin(async move {
             if !(self.flags.write || self.flags.append) {

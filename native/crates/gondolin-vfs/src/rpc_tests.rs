@@ -1119,12 +1119,45 @@ async fn routing_readonly_and_object_mounts_body() {
     g.release(fh).await;
     assert_eq!(backend.get("/guest.txt").unwrap(), b"guest-data");
 
+    // `commit: close` writers get FLUSH (no FOPEN_NOFLUSH) and commit on it,
+    // so the guest's close() sees the result; everything else skips FLUSH
+    const FOPEN_NOFLUSH: u64 = 1 << 5;
+    let r = g
+        .call(
+            "create",
+            vec![
+                ("parent_ino", int(app)),
+                ("name", text("flushed.txt")),
+                ("mode", int(0o644)),
+                ("flags", int(O_WRONLY)),
+            ],
+        )
+        .await
+        .ok();
+    assert_eq!(uint(&r, "open_flags") & FOPEN_NOFLUSH, 0);
+    let fh = uint(&r, "fh");
+    g.write(fh, 0, b"flushed").await;
+    g.call("flush", vec![("fh", int(fh))]).await.ok();
+    assert_eq!(backend.get("/flushed.txt").unwrap(), b"flushed");
+    g.call("fsync", vec![("fh", int(fh))]).await.ok();
+    g.release(fh).await;
+    let ro_open = g.open(email, O_RDONLY).await.ok();
+    assert_ne!(uint(&ro_open, "open_flags") & FOPEN_NOFLUSH, 0, "readers have nothing to flush");
+    g.release(uint(&ro_open, "fh")).await;
+    let r = g
+        .call("create", vec![("parent_ino", int(1)), ("name", text("m")), ("mode", int(0o644))])
+        .await
+        .ok();
+    assert_ne!(uint(&r, "open_flags") & FOPEN_NOFLUSH, 0, "memory files commit nothing");
+    assert_eq!(g.call("flush", vec![("fh", int(uint(&r, "fh")))]).await.err, 0);
+    g.release(uint(&r, "fh")).await;
+
     // controller fs API on the same table
     let r = svc.controller_call(FsCall::Readdir { path: "/app".into() }).await;
     assert!(r.ok);
     let mut names: Vec<String> = r.entries.unwrap().into_iter().map(|e| e.name).collect();
     names.sort();
-    assert_eq!(names, vec!["email.eml", "guest.txt"]);
+    assert_eq!(names, vec!["email.eml", "flushed.txt", "guest.txt"]);
     let r = svc
         .controller_call(FsCall::Open { path: "/notes.txt".into(), flags: "w".into(), mode: None })
         .await;

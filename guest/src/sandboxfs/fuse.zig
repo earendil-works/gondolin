@@ -266,6 +266,19 @@ pub const SetattrIn = extern struct {
     unused5: u32,
 };
 
+pub const FlushIn = extern struct {
+    fh: u64,
+    unused: u32,
+    padding: u32,
+    lock_owner: u64,
+};
+
+pub const FsyncIn = extern struct {
+    fh: u64,
+    fsync_flags: u32,
+    padding: u32,
+};
+
 pub const ReleaseIn = extern struct {
     fh: u64,
     flags: u32,

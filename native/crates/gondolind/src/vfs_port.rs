@@ -57,6 +57,9 @@ impl FsPortHandler {
                 (Value::Text("mount".into()), Value::Text(config.fuse_mount.clone())),
                 // the backend serves `readdirplus` (sandboxfs READDIRPLUS)
                 (Value::Text("readdirplus".into()), Value::Bool(true)),
+                // ... and `flush`/`fsync` (sandboxfs forwards FLUSH and FSYNC
+                // instead of answering them itself)
+                (Value::Text("flush".into()), Value::Bool(true)),
                 // largest read/write the backend takes (sandboxfs: 60 KiB without it)
                 (
                     Value::Text("max_data".into()),
@@ -120,6 +123,14 @@ fn fs_response(id: u32, op: String, reply: FsReply) -> Value {
     ])
 }
 
+/// Requests are handled one at a time, in the order the guest sent them
+/// (`serve_connection` awaits each `frame` before reading the next), and
+/// their responses are queued in that order. sandboxfs relies on it: it
+/// answers RELEASE to the kernel without waiting for the host
+/// (`sendUnanswered`), so a later request on the same file (an `open`
+/// after a `commit: close` release, say) must not be handled before the
+/// release. Handling requests concurrently would need sandboxfs to wait for
+/// releases again, or per-file ordering here.
 impl PortHandler for FsPortHandler {
     fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
