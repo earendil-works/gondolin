@@ -195,18 +195,19 @@ function checkoutBinary(
     host !== null &&
     host.platform === target.platform &&
     host.arch === target.arch;
-  if (isHost) {
-    const candidates = ["release", "debug"].flatMap((profile) =>
-      BINARY_NAMES.map((name) => path.join(native, profile, name)),
-    );
-    return newest(candidates.filter((f) => matches(f, target)));
-  }
+  // `scripts/build-release.sh` output: the multi-call binary first
   const dist = path.join(native, "dist", nativeRustTarget(target));
-  for (const name of BINARY_NAMES) {
-    const file = path.join(dist, name);
-    if (matches(file, target)) return file;
-  }
-  return null;
+  const fromDist =
+    BINARY_NAMES.map((name) => path.join(dist, name)).find((f) =>
+      matches(f, target),
+    ) ?? null;
+  if (!isHost) return fromDist;
+  // this platform: `cargo build` output too; the newest wins
+  const candidates = ["release", "debug"].flatMap((profile) =>
+    BINARY_NAMES.map((name) => path.join(native, profile, name)),
+  );
+  if (fromDist) candidates.push(fromDist);
+  return newest(candidates.filter((f) => matches(f, target)));
 }
 
 function packagedBinary(target: NativeBinaryTarget): string | null {

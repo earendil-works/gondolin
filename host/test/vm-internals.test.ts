@@ -373,6 +373,9 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
     vfs: null,
   });
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
@@ -397,6 +400,9 @@ test("vm internals: start timeout also applies when ensureRunning stalls", async
     vfs: null,
   });
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
@@ -423,6 +429,9 @@ test("vm internals: timed out startup does not run late session setup", async ()
 
   let ensureSessionIpcCalls = 0;
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
