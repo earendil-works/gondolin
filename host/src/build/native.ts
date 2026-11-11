@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import { buildAlpineImages } from "./alpine.ts";
 import { gondolinCacheDir } from "../cache.ts";
@@ -284,7 +284,12 @@ async function ensureKrunKernelInCache(
     krunfwVersion,
     archName,
   );
-  const digestPath = path.join(indexDir, "kernel.sha256");
+  // x86_64 kernels are wrapped in an ELF since the raw bundle lost its load
+  // and entry addresses: a raw kernel cached by older builds must not be used
+  const digestPath = path.join(
+    indexDir,
+    archName === "x86_64" ? "kernel-elf.sha256" : "kernel.sha256",
+  );
 
   if (fs.existsSync(digestPath)) {
     const digest = fs.readFileSync(digestPath, "utf8").trim();
@@ -303,7 +308,10 @@ async function ensureKrunKernelInCache(
     cacheDir,
     log,
   );
-  const kernel = await extractKrunKernelFromArchive(archive, archName, log);
+  const kernel = krunKernelImage(
+    await extractKrunKernelFromArchive(archive, archName, log),
+    archName,
+  );
   const digest = sha256(kernel);
 
   const casDir = path.join(cacheDir, "cas", "sha256");
@@ -368,11 +376,75 @@ async function downloadKrunArchive(
   return { archivePath: sharedPath, kind: "shared" };
 }
 
+/** The kernel of a libkrunfw release: what `krunfw_get_kernel` returns. */
+type KrunfwKernel = {
+  /** raw kernel image (`KERNEL_BUNDLE`) */
+  bundle: Buffer;
+  /** guest physical address the bundle is loaded at (when known) */
+  loadAddr?: number;
+  /** guest physical entry point (when known) */
+  entryAddr?: number;
+};
+
+/**
+ * The kernel file for the image's `krunKernel`. libkrun maps a raw kernel at
+ * its default address (0x80000000), which is where libkrunfw's aarch64
+ * kernels expect to run; its x86_64 kernels load at 0x1000000 with their own
+ * entry point, so they are wrapped in an ELF that carries both (the krun
+ * runner passes ELF kernels as `KRUN_KERNEL_FORMAT_ELF`).
+ */
+function krunKernelImage(
+  kernel: KrunfwKernel,
+  archName: "aarch64" | "x86_64",
+): Buffer {
+  if (archName !== "x86_64") {
+    return kernel.bundle;
+  }
+  if (kernel.loadAddr === undefined || kernel.entryAddr === undefined) {
+    throw new Error(
+      "cannot determine the load and entry addresses of the libkrunfw x86_64 kernel",
+    );
+  }
+  return wrapKernelInElf(kernel.bundle, kernel.loadAddr, kernel.entryAddr);
+}
+
+/** An x86_64 `ET_EXEC` ELF with `bundle` as its only (RWX) segment. */
+function wrapKernelInElf(
+  bundle: Buffer,
+  loadAddr: number,
+  entryAddr: number,
+): Buffer {
+  const ehdrSize = 64;
+  const phdrSize = 56;
+  const dataOffset = 0x1000;
+  const header = Buffer.alloc(dataOffset);
+  header.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0); // ELF64, LE, version 1
+  header.writeUInt16LE(2, 16); // ET_EXEC
+  header.writeUInt16LE(62, 18); // EM_X86_64
+  header.writeUInt32LE(1, 20);
+  header.writeBigUInt64LE(BigInt(entryAddr), 24);
+  header.writeBigUInt64LE(BigInt(ehdrSize), 32); // e_phoff
+  header.writeUInt16LE(ehdrSize, 52);
+  header.writeUInt16LE(phdrSize, 54);
+  header.writeUInt16LE(1, 56); // e_phnum
+  header.writeUInt16LE(64, 58); // e_shentsize (no sections)
+  const ph = ehdrSize;
+  header.writeUInt32LE(1, ph); // PT_LOAD
+  header.writeUInt32LE(7, ph + 4); // PF_R | PF_W | PF_X
+  header.writeBigUInt64LE(BigInt(dataOffset), ph + 8);
+  header.writeBigUInt64LE(BigInt(loadAddr), ph + 16); // p_vaddr
+  header.writeBigUInt64LE(BigInt(loadAddr), ph + 24); // p_paddr
+  header.writeBigUInt64LE(BigInt(bundle.length), ph + 32); // p_filesz
+  header.writeBigUInt64LE(BigInt(bundle.length), ph + 40); // p_memsz
+  header.writeBigUInt64LE(0x1000n, ph + 48); // p_align
+  return Buffer.concat([header, bundle]);
+}
+
 async function extractKrunKernelFromArchive(
   archive: KrunArchive,
   archName: "aarch64" | "x86_64",
   log: (msg: string) => void,
-): Promise<Buffer> {
+): Promise<KrunfwKernel> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-krunfw-"));
 
   try {
@@ -569,7 +641,7 @@ function isOctalDigit(code: number): boolean {
   return code >= 0x30 && code <= 0x37;
 }
 
-function extractKernelFromPrebuiltArchive(extractDir: string): Buffer {
+function extractKernelFromPrebuiltArchive(extractDir: string): KrunfwKernel {
   const kernelCPath = path.join(extractDir, "libkrunfw", "kernel.c");
   if (!fs.existsSync(kernelCPath)) {
     throw new Error(
@@ -577,21 +649,33 @@ function extractKernelFromPrebuiltArchive(extractDir: string): Buffer {
     );
   }
 
-  const kernel = extractKernelBundleFromCSource(
-    fs.readFileSync(kernelCPath, "utf8"),
-  );
+  const source = fs.readFileSync(kernelCPath, "utf8");
+  const kernel = extractKernelBundleFromCSource(source);
 
   if (kernel.length === 0) {
     throw new Error("libkrunfw prebuilt archive contains an empty kernel");
   }
 
-  return kernel;
+  return { bundle: kernel, ...addressesFromCSource(source) };
+}
+
+/** `*load_addr = …;` / `*entry_addr = …;` of a generated `kernel.c`. */
+function addressesFromCSource(
+  source: string,
+): Pick<KrunfwKernel, "loadAddr" | "entryAddr"> {
+  const value = (name: string) => {
+    const m = new RegExp(
+      `\\*\\s*${name}\\s*=\\s*(0x[0-9a-fA-F]+|[0-9]+)\\s*;`,
+    ).exec(source);
+    return m ? Number(m[1]) : undefined;
+  };
+  return { loadAddr: value("load_addr"), entryAddr: value("entry_addr") };
 }
 
 function extractKernelFromSharedArchive(
   extractDir: string,
   archName: "aarch64" | "x86_64",
-): Buffer {
+): KrunfwKernel {
   const lib64Path = path.join(extractDir, "lib64", "libkrunfw.so");
   const libPath = path.join(extractDir, "lib", "libkrunfw.so");
   const sharedLibPath = fs.existsSync(lib64Path)
@@ -608,7 +692,21 @@ function extractKernelFromSharedArchive(
 
   const sharedLib = fs.readFileSync(sharedLibPath);
   try {
-    return extractKernelBundleFromSharedLibraryBytes(sharedLib, archName);
+    const bundle = extractKernelBundleFromSharedLibraryBytes(
+      sharedLib,
+      archName,
+    );
+    if (archName !== "x86_64") {
+      return { bundle };
+    }
+    return {
+      bundle,
+      ...readKrunfwAddressesFromSharedLibraryBytes(
+        sharedLib,
+        archName,
+        bundle.length,
+      ),
+    };
   } catch (parseErr) {
     const hostArch = hostKrunArch();
     if (hostArch !== archName) {
@@ -630,7 +728,7 @@ function extractKernelFromSharedArchive(
 function extractKernelFromSharedArchiveByExecution(
   sharedLibPath: string,
   archName: "aarch64" | "x86_64",
-): Buffer {
+): KrunfwKernel {
   const libDir = path.dirname(sharedLibPath);
   const buildDir = path.join(path.dirname(sharedLibPath), "build-shared");
   fs.mkdirSync(buildDir, { recursive: true });
@@ -646,11 +744,10 @@ function extractKernelFromSharedArchiveByExecution(
       "int main(void) {",
       "  size_t load_addr = 0, entry_addr = 0, size = 0;",
       "  char *kernel = krunfw_get_kernel(&load_addr, &entry_addr, &size);",
-      "  (void)load_addr;",
-      "  (void)entry_addr;",
       "  if (!kernel || size == 0) {",
       "    return 1;",
       "  }",
+      '  fprintf(stderr, "%zu %zu\\n", load_addr, entry_addr);',
       "  return fwrite(kernel, 1, size, stdout) == size ? 0 : 1;",
       "}",
       "",
@@ -681,7 +778,7 @@ function extractKernelFromSharedArchiveByExecution(
   }
 
   try {
-    const kernel = execFileSync(extractorPath, [], {
+    const run = spawnSync(extractorPath, [], {
       env: {
         ...process.env,
         LD_LIBRARY_PATH: `${libDir}:${process.env.LD_LIBRARY_PATH ?? ""}`,
@@ -689,12 +786,24 @@ function extractKernelFromSharedArchiveByExecution(
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 512 * 1024 * 1024,
     });
+    if (run.error) throw run.error;
+    if (run.status !== 0) {
+      throw new Error(
+        `extractor exited with ${run.status}: ${run.stderr.toString().trim()}`,
+      );
+    }
+    const kernel = run.stdout;
 
     if (kernel.length === 0) {
       throw new Error("libkrunfw shared extractor produced an empty kernel");
     }
 
-    return kernel;
+    const [loadAddr, entryAddr] = run.stderr
+      .toString()
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    return { bundle: kernel, loadAddr, entryAddr };
   } catch (err) {
     throw new Error(
       `failed to run libkrunfw kernel extractor for ${archName}: ${formatExecError(err)}`,
@@ -723,6 +832,19 @@ function extractKernelBundleFromSharedLibraryBytes(
   bytes: Buffer,
   archName: "aarch64" | "x86_64",
 ): Buffer {
+  const bundle = readDynamicSymbolBytes(bytes, archName, "KERNEL_BUNDLE");
+  if (!bundle) {
+    throw new Error("ELF does not expose KERNEL_BUNDLE symbol");
+  }
+  return normalizeKrunKernelBundle(bundle);
+}
+
+/** The file bytes of the dynamic symbol `symbolName` (`null`: no such symbol). */
+function readDynamicSymbolBytes(
+  bytes: Buffer,
+  archName: "aarch64" | "x86_64",
+  symbolName: string,
+): Buffer | null {
   if (bytes.length < 64) {
     throw new Error("ELF header is truncated");
   }
@@ -788,7 +910,7 @@ function extractKernelBundleFromSharedLibraryBytes(
     }
 
     const name = readCString(dynstrBytes, nameOffset);
-    if (name !== "KERNEL_BUNDLE") {
+    if (name !== symbolName) {
       continue;
     }
 
@@ -799,7 +921,7 @@ function extractKernelBundleFromSharedLibraryBytes(
   }
 
   if (symbolValue < 0 || symbolSize <= 0) {
-    throw new Error("ELF does not expose KERNEL_BUNDLE symbol");
+    return null;
   }
 
   const bySection = tryResolveSymbolOffsetFromSection(
@@ -809,9 +931,7 @@ function extractKernelBundleFromSharedLibraryBytes(
     symbolSize,
   );
   if (bySection !== null) {
-    return normalizeKrunKernelBundle(
-      sliceChecked(bytes, bySection, symbolSize),
-    );
+    return sliceChecked(bytes, bySection, symbolSize);
   }
 
   const byLoadSegment = tryResolveSymbolOffsetFromProgramHeaders(
@@ -821,12 +941,71 @@ function extractKernelBundleFromSharedLibraryBytes(
     symbolSize,
   );
   if (byLoadSegment !== null) {
-    return normalizeKrunKernelBundle(
-      sliceChecked(bytes, byLoadSegment, symbolSize),
-    );
+    return sliceChecked(bytes, byLoadSegment, symbolSize);
   }
 
-  throw new Error("failed to map KERNEL_BUNDLE symbol to file bytes");
+  throw new Error(`failed to map ${symbolName} symbol to file bytes`);
+}
+
+/**
+ * The load and entry addresses `krunfw_get_kernel` reports, read from its
+ * machine code: it stores both as constants (`movq $imm32, (reg)`). Of the
+ * 32-bit immediates stored to memory, exactly one pair must be plausible
+ * (the load address page aligned, the entry inside the `bundleSize` byte
+ * kernel), else the build fails rather than guessing.
+ */
+function readKrunfwAddressesFromSharedLibraryBytes(
+  bytes: Buffer,
+  archName: "x86_64",
+  bundleSize: number,
+): { loadAddr: number; entryAddr: number } {
+  const code = readDynamicSymbolBytes(bytes, archName, "krunfw_get_kernel");
+  if (!code) {
+    throw new Error("ELF does not expose krunfw_get_kernel");
+  }
+  const immediates = new Set<number>();
+  for (const value of x86ImmediateStores(code)) {
+    // the size store (`size` or `size - 1`, see normalizeKrunKernelBundle)
+    if (value > 0 && Math.abs(value - bundleSize) > 1) immediates.add(value);
+  }
+  const candidates = [...immediates];
+  const pairs: Array<[number, number]> = [];
+  for (const load of candidates) {
+    if (load % 0x1000 !== 0) continue;
+    for (const entry of candidates) {
+      if (entry >= load && entry < load + bundleSize) pairs.push([load, entry]);
+    }
+  }
+  // a load address that is also the entry point is stored twice but seen once
+  const distinct = pairs.filter(([l, e]) => l !== e);
+  const chosen = distinct.length > 0 ? distinct : pairs;
+  if (chosen.length !== 1) {
+    const hex = candidates.map((v) => `0x${v.toString(16)}`).join(", ");
+    throw new Error(
+      `cannot tell the load and entry addresses apart in krunfw_get_kernel (constants: ${hex || "none"})`,
+    );
+  }
+  const [loadAddr, entryAddr] = chosen[0]!;
+  return { loadAddr, entryAddr };
+}
+
+/** Immediates of x86_64 `REX.W C7 /0` stores (`movq $imm32, disp(reg)`). */
+function x86ImmediateStores(code: Buffer): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + 3 <= code.length; i += 1) {
+    if ((code[i]! & 0xf8) !== 0x48 || code[i + 1] !== 0xc7) continue;
+    const modrm = code[i + 2]!;
+    const mod = modrm >> 6;
+    const reg = (modrm >> 3) & 7;
+    const rm = modrm & 7;
+    // no SIB byte, no RIP-relative operand, a memory destination
+    if (reg !== 0 || rm === 4 || mod === 3 || (mod === 0 && rm === 5)) continue;
+    const displacement = mod === 1 ? 1 : mod === 2 ? 4 : 0;
+    const at = i + 3 + displacement;
+    if (at + 4 > code.length) continue;
+    out.push(code.readInt32LE(at));
+  }
+  return out;
 }
 
 function normalizeKrunKernelBundle(bytes: Buffer): Buffer {
@@ -1027,6 +1206,9 @@ function sha256(buf: Buffer): string {
 
 export const __test = {
   downloadKrunArchive,
+  krunKernelImage,
+  readKrunfwAddressesFromSharedLibraryBytes,
+  wrapKernelInElf,
   extractKernelBundleFromCSource,
   extractKernelBundleFromSharedLibraryBytes,
 };

@@ -61,19 +61,21 @@ function buildFakeSharedLib(
   machine: 62 | 183,
   payload: Buffer,
   payloadOffsetInSection = 3,
+  getKernelCode?: Buffer,
 ): Buffer {
-  const dynstr = Buffer.from("\0KERNEL_BUNDLE\0", "utf8");
+  const dynstr = Buffer.from("\0KERNEL_BUNDLE\0krunfw_get_kernel\0", "utf8");
   const shstr = Buffer.from("\0.dynsym\0.dynstr\0.bundle\0.shstrtab\0", "utf8");
 
   const dynstrOffset = 0x100;
   const dynsymOffset = 0x140;
-  const bundleOffset = 0x180;
+  const bundleOffset = 0x200;
   const bundleAddress = 0x5000;
+  // krunfw_get_kernel's code follows the bundle (and its sentinel area)
+  const codeInSection = payloadOffsetInSection + payload.length + 8;
+  const code = getKernelCode ?? Buffer.alloc(0);
+  const symbolCount = getKernelCode ? 3 : 2;
 
-  const shstrOffset = align(
-    bundleOffset + payloadOffsetInSection + payload.length + 8,
-    0x10,
-  );
+  const shstrOffset = align(bundleOffset + codeInSection + code.length, 0x10);
   const sectionHeaderOffset = align(shstrOffset + shstr.length, 0x40);
   const sectionCount = 5;
   const totalSize = sectionHeaderOffset + sectionCount * SECTION_HEADER_SIZE;
@@ -108,6 +110,15 @@ function buildFakeSharedLib(
   writeU64LE(buf, symbolOffset + 16, payload.length);
 
   payload.copy(buf, bundleOffset + payloadOffsetInSection);
+  if (getKernelCode) {
+    const funcOffset = symbolOffset + DYNSYM_ENTRY_SIZE;
+    writeU32LE(buf, funcOffset + 0, dynstr.indexOf("krunfw_get_kernel"));
+    buf.writeUInt8(0x12, funcOffset + 4); // STB_GLOBAL | STT_FUNC
+    writeU16LE(buf, funcOffset + 6, 3);
+    writeU64LE(buf, funcOffset + 8, bundleAddress + codeInSection);
+    writeU64LE(buf, funcOffset + 16, code.length);
+    code.copy(buf, bundleOffset + codeInSection);
+  }
   shstr.copy(buf, shstrOffset);
 
   writeSectionHeader(buf, sectionHeaderOffset, 1, {
@@ -115,7 +126,7 @@ function buildFakeSharedLib(
     type: 11,
     address: dynsymOffset,
     fileOffset: dynsymOffset,
-    size: DYNSYM_ENTRY_SIZE * 2,
+    size: DYNSYM_ENTRY_SIZE * symbolCount,
     link: 2,
     align: 8,
     entrySize: DYNSYM_ENTRY_SIZE,
@@ -135,7 +146,7 @@ function buildFakeSharedLib(
     type: 1,
     address: bundleAddress,
     fileOffset: bundleOffset,
-    size: payloadOffsetInSection + payload.length + 8,
+    size: codeInSection + code.length,
     align: 16,
   });
 
@@ -281,4 +292,97 @@ test("downloadKrunArchive does not fallback on message-only 404 text", async () 
   } finally {
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
+});
+
+/** `krunfw_get_kernel` of libkrunfw v5.2.1 for x86_64 (built without optimization) */
+const GET_KERNEL_O0 = Buffer.from(
+  "f30f1efa554889e548897df8488975f0488955e8488b45f848c70000000001" +
+    "488b45f048c70023010001488b45e848c70000002301488b05a32e00005dc3",
+  "hex",
+);
+
+test("readKrunfwAddressesFromSharedLibraryBytes reads libkrunfw's x86_64 addresses", () => {
+  // the size store (0x1230000) is the bundle's size and is skipped
+  const bundleSize = 0x1230000;
+  const fake = buildFakeSharedLib(62, Buffer.from("bundle"), 3, GET_KERNEL_O0);
+  assert.deepEqual(
+    nativeBuildTest.readKrunfwAddressesFromSharedLibraryBytes(
+      fake,
+      "x86_64",
+      bundleSize,
+    ),
+    { loadAddr: 0x1000000, entryAddr: 0x1000123 },
+  );
+
+  // optimized code stores through the argument registers, in any order
+  const o2 = Buffer.from(
+    "48c70200002301" + "48c70623010001" + "48c70700000001" + "c3",
+    "hex",
+  );
+  const fakeO2 = buildFakeSharedLib(62, Buffer.from("bundle"), 3, o2);
+  assert.deepEqual(
+    nativeBuildTest.readKrunfwAddressesFromSharedLibraryBytes(
+      fakeO2,
+      "x86_64",
+      bundleSize,
+    ),
+    { loadAddr: 0x1000000, entryAddr: 0x1000123 },
+  );
+});
+
+test("readKrunfwAddressesFromSharedLibraryBytes refuses to guess", () => {
+  // two plausible entry points
+  const code = Buffer.from(
+    "48c70700000001" + "48c70623010001" + "48c70245010001" + "c3",
+    "hex",
+  );
+  const fake = buildFakeSharedLib(62, Buffer.from("bundle"), 3, code);
+  assert.throws(
+    () =>
+      nativeBuildTest.readKrunfwAddressesFromSharedLibraryBytes(
+        fake,
+        "x86_64",
+        0x1230000,
+      ),
+    /cannot tell the load and entry addresses apart/,
+  );
+  // no krunfw_get_kernel
+  assert.throws(
+    () =>
+      nativeBuildTest.readKrunfwAddressesFromSharedLibraryBytes(
+        buildFakeSharedLib(62, Buffer.from("bundle")),
+        "x86_64",
+        0x1230000,
+      ),
+    /does not expose krunfw_get_kernel/,
+  );
+});
+
+test("krunKernelImage wraps x86_64 kernels in an ELF with their addresses", () => {
+  const bundle = Buffer.from("kernel-bytes");
+  const elf = nativeBuildTest.krunKernelImage(
+    { bundle, loadAddr: 0x1000000, entryAddr: 0x1000123 },
+    "x86_64",
+  );
+  assert.deepEqual(elf.subarray(0, 4), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  assert.equal(elf.readUInt16LE(16), 2); // ET_EXEC
+  assert.equal(elf.readUInt16LE(18), 62); // EM_X86_64
+  assert.equal(elf.readBigUInt64LE(24), 0x1000123n); // e_entry
+  assert.equal(elf.readUInt16LE(56), 1); // one program header
+  const ph = Number(elf.readBigUInt64LE(32));
+  assert.equal(elf.readUInt32LE(ph), 1); // PT_LOAD
+  const offset = Number(elf.readBigUInt64LE(ph + 8));
+  assert.equal(elf.readBigUInt64LE(ph + 24), 0x1000000n); // p_paddr
+  assert.equal(elf.readBigUInt64LE(ph + 32), BigInt(bundle.length));
+  assert.deepEqual(elf.subarray(offset), bundle);
+
+  // aarch64 kernels stay raw (libkrun's default address is theirs)
+  assert.deepEqual(
+    nativeBuildTest.krunKernelImage({ bundle }, "aarch64"),
+    bundle,
+  );
+  assert.throws(
+    () => nativeBuildTest.krunKernelImage({ bundle }, "x86_64"),
+    /cannot determine the load and entry addresses/,
+  );
 });

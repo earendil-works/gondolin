@@ -285,6 +285,21 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 # install Zig 0.17.0 for your Linux architecture
 ```
 
+On Fedora, RHEL and Amazon Linux 2023:
+
+```bash
+sudo dnf install \
+  gcc make git clang clang-devel llvm-devel lld libcap-ng-devel \
+  glibc-static pkgconf xz patch
+```
+
+(`glibc-static` provides the static C library libkrun links its guest `init`
+against; Debian and Ubuntu ship it in `libc6-dev`, part of `build-essential`.)
+Then install Rust and Zig as above.
+
+The Linux runner is built for glibc 2.34 or newer (`KRUN_RUNNER_GLIBC` in the
+`Makefile`), whatever the build machine has.
+
 ## Troubleshooting
 
 ### `gondolind binary not found`

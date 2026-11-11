@@ -308,6 +308,20 @@ jobs:
           node scripts/prepare-krun-runner-package.mjs \
             --package packages/gondolin-krun-runner-linux-x64
 
+      # the published runner must keep working on glibc 2.34 (Amazon Linux
+      # 2023, RHEL 9): see KRUN_RUNNER_GLIBC in the Makefile
+      - name: Check the runner's glibc floor
+        run: |
+          set -eu
+          for f in packages/gondolin-krun-runner-linux-x64/bin/gondolin-krun-runner \
+                   packages/gondolin-krun-runner-linux-x64/lib/libkrun.so.*.*; do
+            need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$f: glibc $need"
+            if [ "$(printf '%s\n2.34\n' "$need" | sort -V | tail -1)" != 2.34 ]; then
+              echo "::error::$f needs glibc $need (> 2.34)"; exit 1
+            fi
+          done
+
       - name: Smoke test packed linux runner package
         run: |
           PKG_DIR="packages/gondolin-krun-runner-linux-x64"
@@ -371,10 +385,21 @@ jobs:
       - name: Build krun runner
         run: make krun-runner
 
+      # the SDK runs VMs of both backends through gondolind; built here
+      # rather than taken from the native job so this job does not depend
+      # on that job's lint and dependency checks
+      - name: Build gondolind
+        working-directory: native
+        run: |
+          cargo build --release --locked -p gondolind
+          echo "GONDOLIN_NATIVE_BIN=$PWD/target/release/gondolind" >> "$GITHUB_ENV"
+
+      # x86_64 krun must work here (the runner has /dev/kvm): a failed probe
+      # fails the job instead of letting the krun tests skip themselves
       - name: Probe krun runtime availability
         run: |
           cd host
-          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); } else { console.log('krun precheck: available'); }"
+          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); process.exit(1); } else { console.log('krun precheck: available'); }"
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
 
@@ -386,8 +411,7 @@ jobs:
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
-          # krun runtime is best-effort on shared CI runners; tests self-skip when precheck fails
-          GONDOLIN_REQUIRE_KRUN: "0"
+          GONDOLIN_REQUIRE_KRUN: "1"
 
   test:
     name: Test
