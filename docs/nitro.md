@@ -100,8 +100,11 @@ qualifies on both architectures.
 Nitro Sandboxes have no virtio-serial device, so the guest helpers connect to
 the host over vsock instead (the daemon adds `gondolin.vsock` to the kernel
 command line). That needs a guest image built with vsock support (this
-release or newer); older images wait for virtio-serial ports that never
-appear.
+release or newer). Such images list `"vsock"` in their manifest's
+`features`; the daemon refuses an image whose manifest lacks it before
+starting the VM. With explicit asset paths and no manifest beside the kernel
+it cannot tell, and a guest that has not connected after 30 s is stopped with
+an error.
 
 ## Modes
 
