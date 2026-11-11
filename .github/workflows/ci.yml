@@ -371,10 +371,12 @@ jobs:
       - name: Build krun runner
         run: make krun-runner
 
+      # x86_64 krun must work here (the runner has /dev/kvm): a failed probe
+      # fails the job instead of letting the krun tests skip themselves
       - name: Probe krun runtime availability
         run: |
           cd host
-          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); } else { console.log('krun precheck: available'); }"
+          node --input-type=module -e "import { getKrunRuntimeSkipReason } from './test/helpers/vm-fixture.ts'; const reason = await getKrunRuntimeSkipReason(); if (reason) { console.log('krun precheck: unavailable ->', reason); process.exit(1); } else { console.log('krun precheck: available'); }"
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
 
@@ -386,8 +388,7 @@ jobs:
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
-          # krun runtime is best-effort on shared CI runners; tests self-skip when precheck fails
-          GONDOLIN_REQUIRE_KRUN: "0"
+          GONDOLIN_REQUIRE_KRUN: "1"
 
   test:
     name: Test
