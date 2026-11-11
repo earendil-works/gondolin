@@ -160,23 +160,48 @@ fn kvm_usable() -> bool {
     std::fs::OpenOptions::new().read(true).write(true).open(KVM_DEVICE).is_ok()
 }
 
-/// Fills in where the VM runs when `vm.nitro` is unset: KVM when usable, else
-/// a Nitro Sandbox with the default settings when the host has the device.
-fn select_target(vm: &mut VmConfig, kvm: bool, nitro_device: bool) -> Result<(), String> {
-    if vm.nitro.is_some() || kvm {
-        return Ok(());
+/// `vm.nitro.mode` asking for a KVM microVM (`sandbox.nitro: false`,
+/// `GONDOLIN_NITRO_MODE=off`) instead of the host's default.
+pub const NITRO_MODE_OFF: &str = "off";
+
+/// Settles where the VM runs. Unset `vm.nitro`: a Nitro Sandbox with the
+/// default settings when the host is ready for one (`nitro_ready`: the
+/// device and a reserved memory pool), else a KVM microVM when `/dev/kvm`
+/// is usable. Mode `off` asks for KVM; any other mode for a Nitro Sandbox.
+fn select_target(vm: &mut VmConfig, kvm: bool, nitro_ready: bool) -> Result<(), String> {
+    match vm.nitro.as_ref().map(|n| n.mode.as_str()) {
+        Some(NITRO_MODE_OFF) => {
+            vm.nitro = None;
+            if kvm {
+                Ok(())
+            } else {
+                Err(format!(
+                    "a KVM microVM was requested (sandbox.nitro: false / GONDOLIN_NITRO_MODE=off) \
+                     but {KVM_DEVICE} is not usable (needs read-write access)"
+                ))
+            }
+        }
+        Some(_) => Ok(()),
+        None if nitro_ready => {
+            vm.nitro = Some(gondolin_proto::session::NitroConfig {
+                mode: "direct".into(),
+                cpu_overcommit: true,
+            });
+            Ok(())
+        }
+        None if kvm => Ok(()),
+        None => Err(format!(
+            "vmm=firecracker needs {NITRO_DEVICE} with a reserved memory pool (AWS Nitro \
+             Sandboxes; {NITRO_POOL_HINT}) or {KVM_DEVICE} (read-write access for KVM microVMs)"
+        )),
     }
-    if nitro_device {
-        vm.nitro = Some(gondolin_proto::session::NitroConfig {
-            mode: "direct".into(),
-            cpu_overcommit: true,
-        });
-        return Ok(());
-    }
-    Err(format!(
-        "vmm=firecracker needs {KVM_DEVICE} (read-write access for KVM microVMs) or \
-         {NITRO_DEVICE} (AWS Nitro Sandboxes)"
-    ))
+}
+
+/// Whether this host can run Nitro Sandboxes: the device exists and memory
+/// is reserved for them (without a pool every launch fails, so the default
+/// is then KVM; an explicit Nitro request reports the missing pool).
+fn nitro_ready(dir: &Path, device: &Path) -> bool {
+    device.exists() && sysfs_u64(dir, "mem_pool/total").is_none_or(|total| total > 0)
 }
 
 /// The Nitro Enclaves driver's sysfs directory (pool and slot budgets).
@@ -256,7 +281,7 @@ pub fn nitro_failure_hint(output: &str) -> Option<String> {
 /// `vm.kernel_path`.
 pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
     check_host()?;
-    select_target(vm, kvm_usable(), Path::new(NITRO_DEVICE).exists())?;
+    select_target(vm, kvm_usable(), nitro_ready(Path::new(NITRO_SYSFS), Path::new(NITRO_DEVICE)))?;
     validate(vm)?;
     check_image(Path::new(&vm.kernel_path))?;
     if vm.nitro.is_some() {
@@ -863,11 +888,32 @@ mod tests {
             v.nitro = nitro;
             select_target(&mut v, kvm, dev).map(|()| v.nitro)
         };
-        assert_eq!(pick(None, true, true).unwrap(), None, "KVM wins when usable");
-        assert_eq!(pick(None, false, true).unwrap(), direct, "else a Nitro Sandbox");
+        assert_eq!(
+            pick(None, true, true).unwrap(),
+            direct,
+            "a Nitro Sandbox when the host is ready"
+        );
+        assert_eq!(pick(None, true, false).unwrap(), None, "else a KVM microVM");
+        assert_eq!(pick(None, false, true).unwrap(), direct);
         let chosen = Some(NitroConfig { mode: "confidential".into(), cpu_overcommit: false });
         assert_eq!(pick(chosen.clone(), true, false).unwrap(), chosen, "explicit Nitro stays");
+        let off = Some(NitroConfig { mode: "off".into(), cpu_overcommit: true });
+        assert_eq!(pick(off.clone(), true, true).unwrap(), None, "mode off: KVM");
+        assert!(pick(off, false, true).unwrap_err().contains("KVM microVM was requested"));
         assert!(pick(None, false, false).unwrap_err().contains("/dev/kvm"));
+
+        // ready for Nitro: the device and a reserved pool (or no counters)
+        let dir = std::env::temp_dir().join(format!("gondolin-fc-ready-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("mem_pool")).unwrap();
+        let device = dir.join("nitro_enclaves");
+        assert!(!nitro_ready(&dir, &device), "no device");
+        std::fs::write(&device, "").unwrap();
+        assert!(nitro_ready(&dir, &device), "device, no counters");
+        std::fs::write(dir.join("mem_pool/total"), "0\n").unwrap();
+        assert!(!nitro_ready(&dir, &device), "no pool reserved");
+        std::fs::write(dir.join("mem_pool/total"), "6442450944\n").unwrap();
+        assert!(nitro_ready(&dir, &device));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The start of a kernel [`bootable_on_kvm`] accepts.
