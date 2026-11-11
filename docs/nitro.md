@@ -6,10 +6,11 @@ a lightweight VM that the Nitro System runs next to the instance and isolates
 from it, launched through [Firecracker](https://github.com/firecracker-microvm/firecracker/tree/main/docs/nitro-sandboxes).
 This works on ordinary (non-metal) x86_64 and Graviton instance types that
 support Nitro Enclaves, with no nested virtualization. Select it with the
-`firecracker` backend; on a host without a usable `/dev/kvm` it runs Nitro
-Sandboxes by default, and `sandbox.nitro` (or `GONDOLIN_NITRO_MODE`) asks for
-one explicitly (on hosts that also have KVM, it otherwise runs a KVM microVM,
-see [VM Backends](./backends.md#firecracker)):
+`firecracker` backend: on a host set up as below it runs Nitro Sandboxes by
+default, even where KVM is available too. `sandbox.nitro` (or
+`GONDOLIN_NITRO_MODE`) chooses the settings, and `sandbox.nitro: false` (or
+`GONDOLIN_NITRO_MODE=off`) asks for a KVM microVM instead (see
+[VM Backends](./backends.md#firecracker)):
 
 ```bash
 sudo gondolin exec --vmm firecracker -- uname -a

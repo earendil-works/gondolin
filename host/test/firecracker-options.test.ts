@@ -89,6 +89,23 @@ test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) =
     () => resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
   );
   assert.deepEqual(fromEnv.nitro, { mode: "direct", cpuOvercommit: true });
+  // `nitro: false` / GONDOLIN_NITRO_MODE=off ask for a KVM microVM
+  for (const off of [
+    withEnv(CLEAN_ENV, () =>
+      resolveSandboxServerOptions({
+        imagePath: dir,
+        vmm: "firecracker",
+        nitro: false,
+      }),
+    ),
+    withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "off" }, () =>
+      resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
+    ),
+  ]) {
+    assert.deepEqual(off.nitro, { mode: "off", cpuOvercommit: true });
+    const vm = buildNativeConfigure(off, {}, {}).vm as Record<string, unknown>;
+    assert.deepEqual(vm.nitro, { mode: "off", cpu_overcommit: true });
+  }
   // the regular image assets, not krun's
   assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
   assert.equal(path.basename(resolved.initrdPath), "initramfs.cpio.lz4");

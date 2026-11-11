@@ -121,10 +121,12 @@ from its `PATH`.
       virtualization such as EC2 `m8i`/`c8i`/`r8i` instances)
     - AWS Nitro Sandboxes: an x86_64 or Graviton EC2 instance with Nitro
       Enclaves enabled; setup in [AWS Nitro Sandboxes](./nitro.md)
-- Where the VM runs: a Nitro Sandbox when `sandbox.nitro` (or
-  `GONDOLIN_NITRO_MODE` / `GONDOLIN_NITRO_CPU_OVERCOMMIT`) is set; otherwise
-  the daemon picks KVM when `/dev/kvm` is usable, else a Nitro Sandbox (direct
-  mode) when the host has `/dev/nitro_enclaves`
+- Where the VM runs: by default a Nitro Sandbox (direct mode) when the host
+  is set up for them (`/dev/nitro_enclaves` and a reserved memory pool), else
+  a KVM microVM. `sandbox.nitro` (or `GONDOLIN_NITRO_MODE` /
+  `GONDOLIN_NITRO_CPU_OVERCOMMIT`) asks for a Nitro Sandbox with those
+  settings, `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) for a KVM
+  microVM
 - Boots the image's regular kernel and initramfs; the kernel needs
   virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
   `linux-virt` qualifies). On KVM Firecracker only boots an uncompressed kernel,

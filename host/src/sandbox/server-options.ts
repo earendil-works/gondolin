@@ -68,9 +68,9 @@ export type NitroOptions = {
   cpuOvercommit?: boolean;
 };
 
-/** Resolved {@link NitroOptions} */
+/** Resolved {@link NitroOptions}; mode `off`: a KVM microVM was requested */
 export type ResolvedNitroOptions = {
-  mode: "direct" | "confidential";
+  mode: "direct" | "confidential" | "off";
   cpuOvercommit: boolean;
 };
 
@@ -105,11 +105,12 @@ export type SandboxServerOptions = {
   /**
    * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
    * settings (defaults: `GONDOLIN_NITRO_MODE`, `GONDOLIN_NITRO_CPU_OVERCOMMIT`;
-   * setting either variable also selects a Nitro Sandbox). Unset: a KVM
-   * microVM when the daemon's host has a usable `/dev/kvm`, else a Nitro
-   * Sandbox when it has `/dev/nitro_enclaves`.
+   * setting either variable also selects a Nitro Sandbox), or `false` for a
+   * KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro Sandbox when the
+   * daemon's host is set up for them (`/dev/nitro_enclaves` and a memory
+   * pool), else a KVM microVM.
    */
-  nitro?: NitroOptions;
+  nitro?: NitroOptions | false;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -388,15 +389,18 @@ function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
  * Sandbox
  */
 function resolveNitroOptions(
-  options: NitroOptions | undefined,
+  options: NitroOptions | false | undefined,
 ): ResolvedNitroOptions | undefined {
   const envMode = process.env.GONDOLIN_NITRO_MODE?.trim().toLowerCase();
   const envOvercommit = process.env.GONDOLIN_NITRO_CPU_OVERCOMMIT?.trim();
+  if (options === false || (options === undefined && envMode === "off")) {
+    return { mode: "off", cpuOvercommit: true };
+  }
   if (options === undefined && !envMode && !envOvercommit) return undefined;
   const mode = options?.mode ?? (envMode || "direct");
   if (mode !== "direct" && mode !== "confidential") {
     throw new Error(
-      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct" or "confidential")`,
+      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct", "confidential" or "off")`,
     );
   }
   const cpuOvercommit =
