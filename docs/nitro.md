@@ -61,15 +61,21 @@ policy and HTTP hooks, mounts, SSH and ingress. The differences are listed in
 
     This does not survive a reboot.
 
-4. Install Firecracker 1.18 or newer:
+4. Install Firecracker 1.18 or newer. From a Gondolin checkout,
+   `scripts/install-firecracker.sh` downloads the pinned release, checks its
+   SHA256 and installs `firecracker` and `jailer` into `/usr/local/bin`. By
+   hand:
 
     ```bash
     V=v1.18.0 ARCH=$(uname -m)
     curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/$V/firecracker-$V-$ARCH.tgz | tar -xz
     sudo install -m 0755 release-$V-$ARCH/firecracker-$V-$ARCH /usr/local/bin/firecracker
+    sudo install -m 0755 release-$V-$ARCH/jailer-$V-$ARCH /usr/local/bin/jailer
     ```
 
     Or point `GONDOLIN_FIRECRACKER` / `sandbox.firecrackerPath` at the binary.
+    The daemon checks the version when a VM is configured and refuses older
+    releases with an error saying so.
 
 5. Run Gondolin as root. The daemon creates a network namespace and a tap
    device for each VM and opens `/dev/nitro_enclaves`, which needs

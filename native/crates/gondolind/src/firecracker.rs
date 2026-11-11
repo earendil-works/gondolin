@@ -88,6 +88,50 @@ pub fn memory_mib(vm: &VmConfig) -> Result<u64, String> {
     Ok(mib.div_ceil(2) * 2)
 }
 
+/// Oldest Firecracker release with what the backend uses (Nitro Sandboxes,
+/// the vsock and config file behaviour it relies on).
+pub const MIN_VERSION: (u32, u32) = (1, 18);
+
+/// How to get a usable binary, appended to errors about it.
+const INSTALL_HINT: &str = "install Firecracker 1.18 or newer (scripts/install-firecracker.sh \
+     in the Gondolin repository, or a release from \
+     https://github.com/firecracker-microvm/firecracker/releases) or point \
+     sandbox.firecrackerPath / GONDOLIN_FIRECRACKER at it";
+
+/// `(major, minor)` of `firecracker --version` output (`Firecracker v1.18.0`).
+pub fn parse_version(output: &str) -> Option<(u32, u32)> {
+    let line = output.lines().next()?;
+    let version = line.split_whitespace().find_map(|w| w.strip_prefix('v'))?;
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Runs `<binary> --version` and checks it is at least [`MIN_VERSION`].
+/// Blocking.
+pub fn check_binary(vm: &VmConfig) -> Result<(), String> {
+    let program = binary_path(vm);
+    let out = std::process::Command::new(&program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("cannot run {program}: {err}; {INSTALL_HINT}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match parse_version(&text) {
+        Some(version) if out.status.success() && version >= MIN_VERSION => Ok(()),
+        Some((major, minor)) if out.status.success() => Err(format!(
+            "{program} is Firecracker {major}.{minor}; the firecracker backend needs {}.{} or \
+             newer: {INSTALL_HINT}",
+            MIN_VERSION.0, MIN_VERSION.1
+        )),
+        _ => Err(format!(
+            "{program} --version did not report a Firecracker version ({}): {INSTALL_HINT}",
+            out.status
+        )),
+    }
+}
+
 /// Whether this daemon's host can run the backend at all.
 pub fn check_host() -> Result<(), String> {
     if !cfg!(target_os = "linux") {
@@ -363,6 +407,20 @@ pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use gondolin_proto::session::{NitroConfig, RootDisk};
+
+    #[test]
+    fn version_parsing() {
+        assert_eq!(
+            parse_version(
+                "Firecracker v1.18.0\n\nSupported snapshot data format versions: v8.0.0\n"
+            ),
+            Some((1, 18))
+        );
+        assert_eq!(parse_version("Firecracker v1.9.2-dev\n"), Some((1, 9)));
+        assert!(parse_version("Firecracker v1.9.2").unwrap() < MIN_VERSION);
+        assert_eq!(parse_version("usage: something"), None);
+        assert_eq!(parse_version(""), None);
+    }
 
     fn vm() -> VmConfig {
         VmConfig {
