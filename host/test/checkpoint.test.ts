@@ -10,12 +10,14 @@ import { diskInfo } from "./helpers/disk-info.ts";
 import { VM } from "../src/vm/core.ts";
 import {
   shouldSkipVmTests,
+  skipOnFirecracker,
   scheduleForceExit,
   getKrunRuntimeSkipReason,
   resolveKrunRunnerPath,
 } from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
+const skipCheckpoints = skipVmTests || skipOnFirecracker("disk checkpoints");
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
 
 async function skipIfKrunUnavailable(t: test.TestContext): Promise<boolean> {
@@ -32,7 +34,7 @@ test.after(() => {
 });
 
 test("disk checkpoints can be resumed (qcow2 backing)", {
-  skip: skipVmTests,
+  skip: skipCheckpoints,
   timeout: timeoutMs,
 }, async () => {
   let base: VM | null = null;
@@ -144,7 +146,7 @@ test("disk checkpoints can be resumed (qcow2 backing)", {
 });
 
 test("checkpoint resume rebases qcow2 backing to resolved rootfs", {
-  skip: skipVmTests,
+  skip: skipCheckpoints,
   timeout: timeoutMs,
 }, async (t) => {
   let base: VM | null = null;
@@ -267,7 +269,7 @@ test("checkpoint resume rebases qcow2 backing to resolved rootfs", {
 });
 
 test("checkpoint overwrite after resume preserves canonical backing and data", {
-  skip: skipVmTests,
+  skip: skipCheckpoints,
   timeout: timeoutMs,
 }, async () => {
   let base: VM | null = null;

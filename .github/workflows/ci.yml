@@ -413,6 +413,61 @@ jobs:
           WS_TIMEOUT: "120000"
           GONDOLIN_REQUIRE_KRUN: "1"
 
+  firecracker:
+    name: Firecracker backend (KVM, jailed)
+    needs: [check, build-guest, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/setup@v3
+        with:
+          install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Download guest assets
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolin-guest-x64
+          path: .
+
+      - name: Extract guest assets
+        run: |
+          mkdir -p guest/image/out
+          tar -xzvf gondolin-guest-x64.tar.gz -C guest/image/out
+          # the jailed VMM (an unprivileged uid) reads the image files
+          chmod -R o+rX guest/image/out
+
+      - name: Download native binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: gondolin-native-linux-x64
+          path: native-bin
+
+      - name: Install native binaries
+        run: |
+          chmod +x native-bin/gondolind native-bin/gondolin
+          echo "GONDOLIN_DAEMON_BIN=$PWD/native-bin/gondolind" >> "$GITHUB_ENV"
+
+      - name: Install Firecracker and its jailer
+        run: scripts/install-firecracker.sh
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # the daemon runs as root (scripts/gondolind-sudo.sh): network
+      # namespaces, taps and the jailer; the tests run as the runner user
+      - name: Run host tests on firecracker
+        timeout-minutes: 20
+        run: scripts/ci-firecracker.sh
+        env:
+          GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
+          WS_TIMEOUT: "120000"
+
   test:
     name: Test
     needs: [check, build-guest, native]

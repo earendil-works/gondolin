@@ -28,6 +28,16 @@ export function hasHardwareAccel(): boolean {
  * Whether VM tests should be skipped (no hardware acceleration available).
  * Can be overridden by setting GONDOLIN_FORCE_VM_TESTS=1.
  */
+/**
+ * Skip reason for a test of `feature` when the suite runs on Firecracker
+ * (`GONDOLIN_VMM=firecracker`), which does not support it; `false` otherwise.
+ */
+export function skipOnFirecracker(feature: string): string | false {
+  return process.env.GONDOLIN_VMM?.trim() === "firecracker"
+    ? `vmm=firecracker does not support ${feature}`
+    : false;
+}
+
 export function shouldSkipVmTests(): boolean {
   if (process.env.GONDOLIN_FORCE_VM_TESTS === "1") {
     return false;
