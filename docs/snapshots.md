@@ -57,7 +57,7 @@ around disposable VMs.
 
 | Mode | Behavior |
 |---|---|
-| `readonly` | the root disk is read-only (`EROFS` on writes) |
+| `readonly` | the root disk is read-only (`EROFS` on writes); scratch paths (`/tmp`, `/root`, `/var/tmp`, ...) stay writable tmpfs, and mounts need a mount point that exists in the image or lies below a writable path |
 | `memory` | writable, thrown away on close; on `qemu` this uses QEMU's snapshot mode, on `krun` a temporary qcow2 overlay on disk (not RAM-backed), deleted on close |
 | `cow` | writable qcow2 copy-on-write overlay (default); deleted on close and never written back into the image, but it can be [checkpointed](#disk-checkpoints) |
 
