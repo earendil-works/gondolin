@@ -1748,6 +1748,9 @@ fn describe_client_message(t: &str, f: &Fields<'_>) -> String {
 
 /// Fails early (with a clear message) when the VMM binary cannot run.
 fn check_vmm_binary(vm: &gondolin_proto::session::VmConfig) -> Result<(), String> {
+    if crate::firecracker::is_firecracker(vm) {
+        return crate::firecracker::check_binary(vm);
+    }
     let program = if qemu::is_krun(vm) {
         crate::krun::runner_path(vm)
     } else if crate::firecracker::is_firecracker(vm) {
