@@ -1672,7 +1672,15 @@ impl Session {
             Some(error) => format!("{base}: {error}"),
             None => base,
         };
-        let message = format!("{base}{}", self.log_tail.format_hint_for(self.vmm_label()));
+        let hint = self.log_tail.format_hint_for(self.vmm_label());
+        let mut message = format!("{base}{hint}");
+        // Nitro Sandbox resource errors: what ran out and how to fix it
+        if self.configured.as_ref().is_some_and(|c| c.vm.nitro.is_some())
+            && let Some(extra) = crate::firecracker::nitro_failure_hint(&hint)
+        {
+            message.push_str(": ");
+            message.push_str(&extra);
+        }
         self.fail_inflight("sandbox_stopped", &message);
         self.ctl.send(ps::EXIT, 0, &ps::Exit { code, signal, error });
     }
