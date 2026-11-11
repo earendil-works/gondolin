@@ -28,6 +28,10 @@ use crate::qemu::ChardevPaths;
 /// Kernel command line flag that selects the guest's vsock transport.
 pub const VSOCK_APPEND: &str = "gondolin.vsock";
 
+/// Kernel command line flag for a `snapshot` root disk: the initramfs mounts
+/// the (read-only) disk under a tmpfs overlay that takes the guest's writes.
+pub const OVERLAY_APPEND: &str = "gondolin.overlay";
+
 /// Default kernel command line. The serial port is `ttyS0` on both
 /// architectures; `panic=1` (and `reboot=k` on x86_64, which resets through the
 /// i8042) turn a guest panic into a VMM exit, and the i8042 flags skip probing
@@ -262,6 +266,10 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     let debug = args.console;
 
     let mut boot_args = format!("{} {VSOCK_APPEND}", args.append.trim());
+    if vm.root_disk.as_ref().is_some_and(|d| d.snapshot) {
+        boot_args.push(' ');
+        boot_args.push_str(OVERLAY_APPEND);
+    }
     let sets_loglevel = args
         .append
         .split_whitespace()
@@ -291,7 +299,8 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
             // the guest's init mounts /dev/vda itself; Firecracker would
             // otherwise append its own root= argument
             "is_root_device": false,
-            "is_read_only": disk.read_only,
+            // a snapshot's writes stay in the guest's overlay
+            "is_read_only": disk.read_only || disk.snapshot,
         }));
     }
 
@@ -510,6 +519,23 @@ mod tests {
         let mut v = vm();
         v.idle_pause_ms = Some(1000);
         assert!(validate(&v).unwrap_err().contains("idle_pause_ms"));
+    }
+
+    #[test]
+    fn snapshot_disks_are_read_only_under_a_guest_overlay() {
+        let uds = PathBuf::from("/s/v.sock");
+        let plain = config(&vm(), &args(&uds)).unwrap();
+        assert_eq!(plain["drives"].as_array().unwrap()[0]["is_read_only"].as_bool(), Some(false));
+        assert!(!plain["boot-source"]["boot_args"].as_str().unwrap().contains(OVERLAY_APPEND));
+
+        let mut vm = vm();
+        vm.root_disk.as_mut().unwrap().snapshot = true;
+        let snapshot = config(&vm, &args(&uds)).unwrap();
+        assert_eq!(snapshot["drives"].as_array().unwrap()[0]["is_read_only"].as_bool(), Some(true));
+        assert_eq!(
+            snapshot["boot-source"]["boot_args"].as_str(),
+            Some("console=ttyS0 initramfs_async=1 gondolin.vsock gondolin.overlay")
+        );
     }
 
     #[test]
