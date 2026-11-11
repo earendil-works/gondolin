@@ -601,3 +601,62 @@ fn import_dir_copies_and_validates() {
     let err = s.import_dir(evil.path(), gondolin_assets::ImportMode::Copy).unwrap_err();
     assert!(err.message.contains("resolved path escapes"), "{err}");
 }
+
+/// Imports a minimal aarch64 object with build id `id`.
+fn import_minimal(s: &Store, id: &str) {
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(
+        src.path().join("manifest.json"),
+        format!(
+            r#"{{"buildId":"{id}","config":{{"arch":"arm64"}},"assets":{{"kernel":"k","initramfs":"i","rootfs":"r"}}}}"#
+        ),
+    )
+    .unwrap();
+    for f in ["k", "i", "r"] {
+        std::fs::write(src.path().join(f), id).unwrap();
+    }
+    s.import_dir(src.path(), gondolin_assets::ImportMode::Copy).unwrap();
+}
+
+#[test]
+fn ref_reads_survive_concurrent_ref_updates() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::AtomicBool;
+
+    let store = tempfile::tempdir().unwrap();
+    let s = Store::new(store.path());
+    let ids = ["33333333-3333-5333-8333-333333333333", "44444444-4444-5444-8444-444444444444"];
+    for id in ids {
+        import_minimal(&s, id);
+    }
+    s.set_ref("race/img:1", ids[0], Arch::Aarch64).unwrap();
+    let link = store.path().join("refs/race/img/1/aarch64");
+    let inode = || std::fs::symlink_metadata(&link).unwrap().ino();
+    let before = inode();
+    // concurrent resolves of one image all set the same ref: leave it alone
+    s.set_ref("race/img:1", ids[0], Arch::Aarch64).unwrap();
+    assert_eq!(inode(), before, "a ref already pointing at the object is not replaced");
+
+    // readers never fail while another process repoints the ref (on macOS a
+    // symlink being renamed over can briefly be unreadable)
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let s = Store::new(store.path());
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut n = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                s.set_ref("race/img:1", ids[n % 2], Arch::Aarch64).unwrap();
+                n += 1;
+            }
+        })
+    };
+    let r = gondolin_assets::ImageRef::parse("race/img:1").unwrap();
+    for _ in 0..3000 {
+        let targets = s.ref_targets(&r).unwrap();
+        let id = targets.get(&Arch::Aarch64).expect("the ref exists throughout");
+        assert!(ids.contains(&id.as_str()), "{id}");
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}
