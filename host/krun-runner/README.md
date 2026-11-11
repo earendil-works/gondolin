@@ -43,6 +43,10 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 # install Zig 0.17.0 for your Linux architecture
 ```
 
+The Linux runner targets glibc 2.34 (Amazon Linux 2023, RHEL 9, Ubuntu 22.04
+and newer) regardless of the build machine's glibc; set `KRUN_RUNNER_GLIBC`
+to change it.
+
 ## Manual build (advanced)
 
 ```bash

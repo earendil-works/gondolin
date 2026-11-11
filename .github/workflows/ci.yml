@@ -308,6 +308,20 @@ jobs:
           node scripts/prepare-krun-runner-package.mjs \
             --package packages/gondolin-krun-runner-linux-x64
 
+      # the published runner must keep working on glibc 2.34 (Amazon Linux
+      # 2023, RHEL 9): see KRUN_RUNNER_GLIBC in the Makefile
+      - name: Check the runner's glibc floor
+        run: |
+          set -eu
+          for f in packages/gondolin-krun-runner-linux-x64/bin/gondolin-krun-runner \
+                   packages/gondolin-krun-runner-linux-x64/lib/libkrun.so.*.*; do
+            need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$f: glibc $need"
+            if [ "$(printf '%s\n2.34\n' "$need" | sort -V | tail -1)" != 2.34 ]; then
+              echo "::error::$f needs glibc $need (> 2.34)"; exit 1
+            fi
+          done
+
       - name: Smoke test packed linux runner package
         run: |
           PKG_DIR="packages/gondolin-krun-runner-linux-x64"

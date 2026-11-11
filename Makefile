@@ -24,6 +24,12 @@ else
 LIBKRUN_TARGET_ARCH := $(UNAME_M)
 endif
 
+# oldest glibc the Linux krun runner runs on: zig would otherwise target the
+# build host's glibc (2.39 on ubuntu-latest), and its std then uses
+# arc4random_buf (glibc 2.36), which Amazon Linux 2023 and RHEL 9 (2.34) lack;
+# libkrun itself needs 2.34
+KRUN_RUNNER_GLIBC ?= 2.34
+
 ifeq ($(UNAME_S),Darwin)
 BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
 LIBKRUN_LLVM_CLANG ?= $(BREW_PREFIX)/opt/llvm/bin/clang
@@ -179,7 +185,9 @@ krun-runner: libkrun
 			PKG_CONFIG_LIBDIR="$(LIBKRUN_PREFIX)/lib64/pkgconfig:$(LIBKRUN_PREFIX)/lib/pkgconfig" \
 			C_INCLUDE_PATH="$(LIBKRUN_PREFIX)/include:$$C_INCLUDE_PATH" \
 			LIBRARY_PATH="$(LIBKRUN_PREFIX)/lib64:$(LIBKRUN_PREFIX)/lib:$$LIBRARY_PATH" \
-			zig build -Doptimize=ReleaseSafe -Dlibkrun-prefix="$(LIBKRUN_PREFIX)"; \
+			zig build -Doptimize=ReleaseSafe \
+				-Dtarget=$(LIBKRUN_TARGET_ARCH)-linux-gnu.$(KRUN_RUNNER_GLIBC) \
+				-Dlibkrun-prefix="$(LIBKRUN_PREFIX)"; \
 		fi
 	@rm -rf host/krun-runner/zig-out/lib
 	@mkdir -p host/krun-runner/zig-out/lib

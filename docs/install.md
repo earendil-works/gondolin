@@ -285,6 +285,9 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 # install Zig 0.17.0 for your Linux architecture
 ```
 
+The Linux runner is built for glibc 2.34 or newer (`KRUN_RUNNER_GLIBC` in the
+`Makefile`), whatever the build machine has.
+
 ## Troubleshooting
 
 ### `gondolind binary not found`
