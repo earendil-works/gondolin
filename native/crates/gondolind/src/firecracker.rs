@@ -175,12 +175,37 @@ pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
     check_host()?;
     select_target(vm, kvm_usable(), Path::new(NITRO_DEVICE).exists())?;
     validate(vm)?;
+    check_image(Path::new(&vm.kernel_path))?;
     if vm.nitro.is_none() {
         let cache = gondolin_assets::store::gondolin_cache_dir().join("firecracker-kernels");
         vm.kernel_path =
             uncompressed_kernel(Path::new(&vm.kernel_path), &cache)?.display().to_string();
     }
     Ok(())
+}
+
+/// Refuses an image whose `manifest.json` (beside its kernel) shows it was
+/// built without the vsock transport: its guest would never connect. Images
+/// without a manifest next to the kernel (explicit asset paths) are not
+/// checked; the guest deadline catches those.
+fn check_image(kernel: &Path) -> Result<(), String> {
+    let Some(dir) = kernel.parent() else { return Ok(()) };
+    let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else { return Ok(()) };
+    let Ok(manifest) = gondolin_wire::json::parse(&text) else { return Ok(()) };
+    image_supports_vsock(&manifest).then_some(()).ok_or_else(|| {
+        format!(
+            "the guest image in {} was built without vsock support (its manifest.json lists no \
+             \"vsock\" feature), which vmm=firecracker needs: use an image built with this \
+             version of Gondolin",
+            dir.display()
+        )
+    })
+}
+
+/// `"vsock"` in a manifest's `features`.
+fn image_supports_vsock(manifest: &Value) -> bool {
+    let features = crate::fields::Fields::of(manifest).get("features");
+    matches!(features, Some(Value::Array(items)) if items.iter().any(|f| f.as_text() == Some("vsock")))
 }
 
 /// Whether `data` is a kernel Firecracker boots on KVM on this architecture.
@@ -407,6 +432,25 @@ pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use gondolin_proto::session::{NitroConfig, RootDisk};
+
+    #[test]
+    fn image_features() {
+        let parse = |t: &str| gondolin_wire::json::parse(t).unwrap();
+        assert!(image_supports_vsock(&parse(r#"{"version":1,"features":["vsock"]}"#)));
+        assert!(!image_supports_vsock(&parse(r#"{"version":1,"features":[]}"#)));
+        assert!(!image_supports_vsock(&parse(r#"{"version":1}"#)));
+
+        let dir = std::env::temp_dir().join(format!("gondolin-fc-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kernel = dir.join("vmlinuz-virt");
+        assert!(check_image(&kernel).is_ok(), "no manifest: not checked");
+        std::fs::write(dir.join("manifest.json"), r#"{"version":1,"assets":{}}"#).unwrap();
+        let err = check_image(&kernel).unwrap_err();
+        assert!(err.contains("without vsock support"), "{err}");
+        std::fs::write(dir.join("manifest.json"), r#"{"version":1,"features":["vsock"]}"#).unwrap();
+        assert!(check_image(&kernel).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn version_parsing() {
