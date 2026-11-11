@@ -65,6 +65,9 @@ pub struct Controller {
     capacity: Notify,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, CallError>>>>,
     next_id: AtomicU64,
+    /// the controller stopped sending (its input reached EOF): requests to
+    /// it can never be answered
+    deaf: std::sync::atomic::AtomicBool,
 }
 
 impl Controller {
@@ -75,7 +78,18 @@ impl Controller {
             capacity: Notify::new(),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            deaf: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// The controller will send nothing more: fails pending and later
+    /// requests at once (they could only wait forever) while output keeps
+    /// flowing until [`Controller::close`].
+    pub fn stop_requests(&self) {
+        self.deaf.store(true, Ordering::SeqCst);
+        for (_, tx) in self.pending.lock().unwrap().drain() {
+            let _ = tx.send(Err(CallError::Disconnected));
+        }
     }
 
     /// Queues one message. Returns `false` when the connection is closed or the
@@ -145,7 +159,14 @@ impl Controller {
     pub async fn request<P: ToValue + ?Sized>(&self, t: &str, p: &P) -> Result<Value, CallError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        {
+            // checked under the lock `stop_requests` drains
+            let mut pending = self.pending.lock().unwrap();
+            if self.deaf.load(Ordering::SeqCst) {
+                return Err(CallError::Disconnected);
+            }
+            pending.insert(id, tx);
+        }
         if !self.send(t, id, p) {
             self.pending.lock().unwrap().remove(&id);
             return Err(CallError::Disconnected);
@@ -352,6 +373,20 @@ impl Dispatcher {
         ctl: Arc<Controller>,
         session: mpsc::Sender<RawEnvelope>,
     ) -> Result<(), WireError> {
+        let result = self.read_frames(r, &ctl, &session).await;
+        // whatever ended the input (EOF, an error, the session gone), the
+        // controller can no longer answer: shutdown work such as committing
+        // dirty object files must not wait for it
+        ctl.stop_requests();
+        result
+    }
+
+    async fn read_frames<R: AsyncRead + Unpin>(
+        &self,
+        r: R,
+        ctl: &Arc<Controller>,
+        session: &mpsc::Sender<RawEnvelope>,
+    ) -> Result<(), WireError> {
         let mut reader = FrameReader::new(r);
         loop {
             let skipped = reader.skipped_frames;
@@ -368,7 +403,7 @@ impl Dispatcher {
                     continue;
                 }
             };
-            if !self.dispatch(msg, &ctl, &session).await {
+            if !self.dispatch(msg, ctl, session).await {
                 return Ok(());
             }
         }
@@ -506,5 +541,26 @@ mod tests {
             writer.await.unwrap();
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn requests_fail_once_the_controller_stopped_sending() {
+        {
+            let ctl = Controller::new();
+            let pending = {
+                let ctl = ctl.clone();
+                tokio::spawn(async move { ctl.request("vfs_call", &Value::Null).await })
+            };
+            // wait for the request to be queued
+            while ctl.pending.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+            ctl.stop_requests();
+            assert!(matches!(pending.await.unwrap(), Err(CallError::Disconnected)));
+            assert!(matches!(
+                ctl.request("vfs_call", &Value::Null).await,
+                Err(CallError::Disconnected)
+            ));
+        }
     }
 }
