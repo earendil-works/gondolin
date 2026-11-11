@@ -113,11 +113,39 @@ function createGondolinEditOps(vm: VM, localCwd: string): EditOperations {
   return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
 }
 
-function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
+// Pi scrubs the session variables from `process.env` and re-injects them only
+// into its own bash tool env, so a custom `BashOperations` never sees them.
+// Read them from `ctx` and forward this allowlist: it is non-secret metadata.
+function createGuestEnv(
+  ctx: ExtensionContext | undefined,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  const sessionFile = ctx?.sessionManager?.getSessionFile?.();
+  if (sessionFile) env.PI_SESSION_FILE = sessionFile;
+  const sessionId = ctx?.sessionManager?.getSessionId?.();
+  if (sessionId) env.PI_SESSION_ID = sessionId;
+  if (ctx?.model) {
+    env.PI_MODEL = ctx.model.id;
+    env.PI_PROVIDER = ctx.model.provider;
+  }
+  if (ctx?.thinkingLevel) env.PI_REASONING_LEVEL = ctx.thinkingLevel;
+  for (const key of ["PI_CODING_AGENT", "AI_AGENT"] as const) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}
+
+function createGondolinBashOps(
+  vm: VM,
+  localCwd: string,
+  env: Record<string, string>,
+): BashOperations {
   return {
     // The host environment passed by pi is intentionally not forwarded: it
-    // usually contains API keys and other credentials.  Configure secrets for
-    // the guest with `httpHooks` (see docs/secrets.md) instead.
+    // usually contains API keys and other credentials.  Only the non-secret
+    // `PI_*` session metadata in `env` is passed.  Configure secrets for the
+    // guest with `httpHooks` (see docs/secrets.md) instead.
     exec: async (command, cwd, { onData, signal, timeout }) => {
       const guestCwd = toGuestPath(localCwd, cwd);
 
@@ -138,6 +166,7 @@ function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
         // `/bin/bash -lc` for a familiar environment (pipelines, expansions, etc.)
         const proc = vm.exec(["/bin/bash", "-lc", command], {
           cwd: guestCwd,
+          env,
           signal: ac.signal,
           stdout: "pipe",
           stderr: "pipe",
@@ -268,16 +297,22 @@ export default function (pi: ExtensionAPI) {
     async execute(id, params, signal, onUpdate, ctx) {
       const activeVm = await ensureVm(ctx);
       const tool = createBashTool(localCwd, {
-        operations: createGondolinBashOps(activeVm, localCwd),
+        operations: createGondolinBashOps(
+          activeVm,
+          localCwd,
+          createGuestEnv(ctx),
+        ),
       });
       return tool.execute(id, params, signal, onUpdate);
     },
   });
 
   // Run user `!` commands inside the VM too
-  pi.on("user_bash", (_event, _ctx) => {
+  pi.on("user_bash", (_event, ctx) => {
     if (!vm) return;
-    return { operations: createGondolinBashOps(vm, localCwd) };
+    return {
+      operations: createGondolinBashOps(vm, localCwd, createGuestEnv(ctx)),
+    };
   });
 
   // Replace the CWD line in the system prompt so the model sees /workspace

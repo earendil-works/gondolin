@@ -44,6 +44,7 @@ All notable changes to Gondolin are documented here.
   - After an upload fails, its remaining `file_write_data` frames are dropped silently instead of each producing an `invalid_request` error.
   - `sandboxssh`/`sandboxingress` wait for the host to reconnect their port instead of exiting.
   - Per-frame and per-exec logging on the serial console is now debug-level only.
+- The `pi-gondolin.ts` example extension forwards the non-secret Pi session metadata (`PI_SESSION_FILE`, `PI_SESSION_ID`, `PI_MODEL`, `PI_PROVIDER`, `PI_REASONING_LEVEL`) to the guest, so an agent running in the sandbox can locate its own session log. Pi scrubs these variables from `process.env` and only re-injects them into its own bash tool env, so the extension now reads them from `ctx` like Pi does; the host environment is still not forwarded.
 
 ## 0.14.0
 
