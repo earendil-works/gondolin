@@ -215,6 +215,30 @@ export HOME=/root
 export TMPDIR=/tmp
 export UV_SYSTEM_CERTS=true
 
+# rootfs.mode "readonly": nothing can be created on the root filesystem, so
+# mount points must come with the image and the resolver configuration lives
+# on /run (images built by gondolin link /etc/resolv.conf there)
+root_ro=0
+if ! touch /.gondolin-rw-check 2> /dev/null; then
+  root_ro=1
+  log "[init] root filesystem is read-only"
+else
+  rm -f /.gondolin-rw-check
+fi
+if [ "\${root_ro}" = 1 ] && [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+  : > /run/resolv.conf
+  mount --bind /run/resolv.conf /etc/resolv.conf || log "[init] cannot redirect /etc/resolv.conf to /run"
+fi
+
+# message for a mount point that cannot be created
+mount_point_error() {
+  if [ "\${root_ro}" = 1 ]; then
+    printf "cannot create the mount point %s: the root filesystem is read-only (rootfs mode readonly); add the directory to the image or mount below a writable path such as /tmp" "$1"
+  else
+    printf "cannot create the mount point %s" "$1"
+  fi
+}
+
 log "[init] /dev entries:"
 log_cmd ls -l /dev
 if [ -d /dev/virtio-ports ]; then
@@ -287,14 +311,20 @@ wait_for_sandboxfs() {
   return 1
 }
 
-mkdir -p "\${sandboxfs_mount}"
-
 sandboxfs_ready=0
 sandboxfs_error="sandboxfs mount not ready"
+sandboxfs_mountpoint=1
+if ! mkdir -p "\${sandboxfs_mount}" 2> /dev/null; then
+  sandboxfs_mountpoint=0
+  sandboxfs_error="$(mount_point_error "\${sandboxfs_mount}")"
+  log "[init] \${sandboxfs_error}"
+fi
 
 setup_virtio_ports
 
-if [ -x /usr/bin/sandboxfs ]; then
+if [ "\${sandboxfs_mountpoint}" = 0 ]; then
+  :
+elif [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at \${sandboxfs_mount}"
   SANDBOXFS_LOG="\${CONSOLE:-/dev/null}"
   if [ -z "\${SANDBOXFS_LOG}" ]; then
@@ -328,7 +358,13 @@ if [ -x /usr/bin/sandboxfs ]; then
         if [ -z "\${bind}" ]; then
           continue
         fi
-        mkdir -p "\${bind}"
+        if ! mkdir -p "\${bind}" 2> /dev/null; then
+          # reported to the host instead of stopping init
+          sandboxfs_ready=0
+          sandboxfs_error="$(mount_point_error "\${bind}")"
+          log "[init] \${sandboxfs_error}"
+          continue
+        fi
         if [ "\${sandboxfs_mount}" = "/" ]; then
           bind_source="\${bind}"
         else

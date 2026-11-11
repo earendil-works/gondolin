@@ -20,6 +20,7 @@ import {
   assertSafeWritePath,
   ensureRootfsShell,
   hardenExtractedRootfs,
+  pathEntryExists,
 } from "../alpine/rootfs.ts";
 import { exportOciRootfs } from "../alpine/oci.ts";
 import { installPackages, runPostBuildCommands } from "../alpine/packages.ts";
@@ -203,6 +204,7 @@ export async function buildAlpineImages(
 
   ensureRuntimeDirs(rootfsDir);
   ensureRuntimeDirs(initramfsDir);
+  ensureGuestMountPoints(rootfsDir);
 
   syncKernelModules(rootfsDir, initramfsDir, log, {
     copyRootfsToInitramfs: !opts.ociRootfs,
@@ -269,5 +271,50 @@ function ensureRuntimeDirs(rootDir: string): void {
   }
 }
 
+/**
+ * Mount points the guest's init uses (the VFS mount, the default binds and
+ * scratch tmpfs paths) and a resolver configuration on /run: with
+ * `rootfs.mode: "readonly"` the guest cannot create them itself.
+ */
+function ensureGuestMountPoints(rootfsDir: string): void {
+  for (const sub of [
+    "data",
+    "etc/gondolin/mitm",
+    "home",
+    "root",
+    "tmp",
+    "var/cache",
+    "var/log",
+    "var/tmp",
+  ]) {
+    const target = path.join(rootfsDir, sub);
+    if (pathEntryExists(target)) continue;
+    assertSafeWritePath(target, rootfsDir);
+    fs.mkdirSync(target, { recursive: true });
+  }
+  // DHCP and the init write it; /run is a tmpfs in every rootfs mode
+  const resolv = path.join(rootfsDir, "etc/resolv.conf");
+  if (pathEntryExists(resolv)) return;
+  assertSafeWritePath(resolv, rootfsDir);
+  fs.symlinkSync("/run/resolv.conf", resolv);
+  // Alpine's udhcpc script writes a temporary file beside RESOLV_CONF and
+  // renames it, which a read-only /etc refuses: point it at /run (its
+  // config file is sourced after the default is set)
+  if (fs.existsSync(path.join(rootfsDir, "usr/share/udhcpc/default.script"))) {
+    const conf = path.join(rootfsDir, "etc/udhcpc/udhcpc.conf");
+    assertSafeWritePath(conf, rootfsDir);
+    const current = fs.existsSync(conf) ? fs.readFileSync(conf, "utf8") : "";
+    if (!/^RESOLV_CONF=/m.test(current)) {
+      fs.mkdirSync(path.dirname(conf), { recursive: true });
+      fs.writeFileSync(
+        conf,
+        `${current}${current && !current.endsWith("\n") ? "\n" : ""}` +
+          "# gondolin: /etc/resolv.conf links here (the root may be read-only)\n" +
+          'RESOLV_CONF="/run/resolv.conf"\n',
+      );
+    }
+  }
+}
+
 /** @internal */
-export const __test = { stageInstalledKernel };
+export const __test = { stageInstalledKernel, ensureGuestMountPoints };
