@@ -7,7 +7,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { VM } from "../src/vm/core.ts";
-import { scheduleForceExit, shouldSkipVmTests } from "./helpers/vm-fixture.ts";
+import {
+  scheduleForceExit,
+  shouldSkipVmTests,
+  skipOnFirecracker,
+} from "./helpers/vm-fixture.ts";
 
 /**
  * The CLI with real VMs.
@@ -109,7 +113,7 @@ test("cli: --native-command selects the daemon", {
 });
 
 test("cli: list, exec --sock, attach and snapshot/resume a running session", {
-  skip,
+  skip: skip || skipOnFirecracker("snapshots"),
   timeout: 240_000,
 }, async () => {
   const label = `cli-vm-test-${randomUUID()}`;

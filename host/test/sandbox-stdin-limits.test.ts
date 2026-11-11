@@ -50,6 +50,7 @@ test("resolveSandboxServerOptions ensures queued stdin caps are >= maxStdinBytes
   try {
     const resolved = resolveSandboxServerOptions({
       imagePath: dir,
+      vmm: "qemu",
       qemuPath: "qemu-system-aarch64",
       maxStdinBytes: 16 * 1024 * 1024,
     });

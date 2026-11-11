@@ -13,7 +13,7 @@ import {
 } from "../src/native/transport.ts";
 import { nativeDaemonCommand } from "../src/native/binary.ts";
 import { resolveSandboxEngine } from "../src/native/config.ts";
-import { shouldSkipVmTests } from "./helpers/vm-fixture.ts";
+import { shouldSkipVmTests, skipOnFirecracker } from "./helpers/vm-fixture.ts";
 
 function findBinary(): string | null {
   try {
@@ -148,7 +148,8 @@ test("gondolind resolves an image selector and boots it", {
     ? "gondolind binary not built"
     : shouldSkipVmTests()
       ? "hardware virtualization unavailable"
-      : false,
+      : // the selector resolves a published image, without vsock support
+        skipOnFirecracker("published images built before vsock support"),
   timeout: 60_000,
 }, async () => {
   const transport = new NativeTransport(binary!);
