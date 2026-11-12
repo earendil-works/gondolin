@@ -49,7 +49,7 @@ These affect `gondolin build` and the SDK's image build API (Node only; see
 | --- | --- | --- |
 | `GONDOLIN_VMM` | SDK, static CLI | Backend when `sandbox.vmm` / `--vmm` is not set: `qemu`, `krun` or `firecracker`. Default: `krun` where it can run, else `qemu` (see [VM Backends](./backends.md#default-backend-selection)) |
 | `GONDOLIN_FIRECRACKER` | SDK, static CLI | Path of the `firecracker` binary for `vmm=firecracker` when `sandbox.firecrackerPath` is not set. Default: `firecracker` on `PATH` (see [AWS Nitro Sandboxes](./nitro.md)) |
-| `GONDOLIN_JAILER` | daemon | Firecracker's `jailer` binary for `vmm=firecracker`, or `0` to run Firecracker unjailed. Default: `jailer` beside the `firecracker` binary or on `PATH`, used when the daemon runs as root (see [Isolation](./nitro.md#isolation)) |
+| `GONDOLIN_JAILER` | daemon | Firecracker's `jailer` binary for `vmm=firecracker`, or `0` to run Firecracker unjailed. Default: `jailer` beside the `firecracker` binary or on `PATH`, used when the daemon runs as root; a root daemon that finds none refuses to start Firecracker VMs (see [Isolation](./nitro.md#isolation)) |
 | `GONDOLIN_JAILER_DIR` | daemon | Chroot base directory of jailed Firecracker VMs. Default: `/srv/jailer` |
 | `GONDOLIN_JAILER_UID` | daemon | First uid/gid of jailed Firecracker VMs; the VMM of daemon process `pid` runs as `uid + pid`. Default: `1600000000` |
 | `GONDOLIN_NITRO_MODE` | SDK, static CLI | Nitro Sandbox mode for `vmm=firecracker` when `sandbox.nitro.mode` is not set: `direct` or `confidential`, or `off` for a KVM microVM (`sandbox.nitro: false`). Without it the daemon runs a Nitro Sandbox when its host is set up for them (`/dev/nitro_enclaves` and a memory pool), else a KVM microVM. Default: `direct` |

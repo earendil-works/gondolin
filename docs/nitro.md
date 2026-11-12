@@ -120,6 +120,9 @@ both), each VMM runs jailed, on KVM and on Nitro Sandboxes alike:
 - in the network namespace that holds only its tap device.
 
 A guest that escapes into the VMM is then confined to that chroot and user.
+A daemon running as root refuses to start a VM when it finds no jailer, since
+the VMM would otherwise run as root with the host's whole filesystem and no
+limits; `GONDOLIN_JAILER=0` runs it unjailed on purpose.
 The image files must be readable by all users (`chmod o+r`; images Gondolin
 downloads or builds are). The jail and its cgroup are removed when the VM
 exits, and a watchdog process kills the VMM if the daemon dies; jails left by
