@@ -432,12 +432,11 @@ pub struct ConfigArgs<'a> {
 }
 
 /// Whether the debug console is worth its cost: in confidential mode it zeroes
-/// the attestation PCRs. On only when `vm.console` is explicitly `stdio` or
-/// the protocol debug output (which shows it) is on. Without it the kernel
-/// also gets `quiet`: it writes its boot log to the emulated UART inline
-/// whether or not anyone reads it (~0.45 s per boot).
+/// the attestation PCRs. On only when someone reads the boot log
+/// ([`crate::qemu::boot_log_wanted`]); the session boots the kernel `quiet`
+/// otherwise ([`crate::qemu::quiet_boot`]).
 pub fn wants_console(vm: &VmConfig, protocol_debug: bool) -> bool {
-    vm.console.as_deref() == Some("stdio") || protocol_debug
+    crate::qemu::boot_log_wanted(vm, protocol_debug)
 }
 
 /// Why a guest that never connected (within `secs`) most likely failed. In
@@ -471,13 +470,6 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     if vm.root_disk.as_ref().is_some_and(|d| d.snapshot) {
         boot_args.push(' ');
         boot_args.push_str(OVERLAY_APPEND);
-    }
-    let sets_loglevel = args
-        .append
-        .split_whitespace()
-        .any(|a| a == "quiet" || a == "debug" || a.starts_with("loglevel="));
-    if !debug && !sets_loglevel {
-        boot_args.push_str(" quiet");
     }
     let mut boot = gondolin_wire::value!({
         "kernel_image_path": vm.kernel_path.clone(),
@@ -793,19 +785,10 @@ mod tests {
         let uds = PathBuf::from("/s/v.sock");
         let config = config(&vm, &ConfigArgs { console: false, ..args(&uds) }).unwrap();
         assert_eq!(config["enclave"]["debug_mode"].as_bool(), Some(false));
+        // the session's command line (made quiet there) is passed through
         assert_eq!(
             config["boot-source"]["boot_args"].as_str(),
-            Some("console=ttyS0 initramfs_async=1 gondolin.vsock quiet")
-        );
-        // a log level chosen by the caller wins
-        let chosen = super::config(
-            &vm,
-            &ConfigArgs { console: false, append: "console=ttyS0 loglevel=7", ..args(&uds) },
-        )
-        .unwrap();
-        assert_eq!(
-            chosen["boot-source"]["boot_args"].as_str(),
-            Some("console=ttyS0 loglevel=7 gondolin.vsock")
+            Some("console=ttyS0 initramfs_async=1 gondolin.vsock")
         );
     }
 

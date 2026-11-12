@@ -65,7 +65,7 @@ Two cases keep `qemu` as the default:
 | `sandbox.qemuIdlePauseMs` | ✓ |  |  | Rejected unless `vmm=qemu`; see [QEMU: Idle Pause](./qemu.md#idle-pause) |
 | `sandbox.cpus` | ✓ | ✓ | ✓ | Shared high-level CPU count option; Firecracker with dedicated cores (`nitro.cpuOvercommit: false`) needs an even count |
 | `sandbox.memory` | ✓ | ✓ | ✓ | `krun` and `firecracker` parse memory and pass MiB (Firecracker: rounded up to 2 MiB, at least 64 MiB) |
-| `sandbox.console` | ✓ | ✓ | ✓ | Firecracker boots the kernel with `quiet` (the boot log to the emulated UART costs ~0.45 s) and on Nitro turns the debug console off, unless `"stdio"` or `protocol` debugging |
+| `sandbox.console` | ✓ | ✓ | ✓ | QEMU and Firecracker boot the kernel with `quiet` unless `"stdio"` or `protocol` debugging (see [Boot log](./debug.md#boot-log)); Firecracker on Nitro also turns the debug console off then |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | ✓ | Supported on all backends; Firecracker needs a raw disk; not with a [remote daemon](./remote.md) |
 | `rootfs.mode = "memory"` | ✓ | ✓ | ✓ | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay the daemon creates; Firecracker attaches the image read-only and the guest keeps its writes in a tmpfs overlay (in guest memory; half of it at most), or with `rootfs.size` a raw copy in the session directory; writes are discarded on all |
 | `rootfs.mode = "cow"` | ✓ | ✓ | ✓ | QEMU and krun: a writable qcow2 copy-on-write overlay; Firecracker (raw disks only): like `memory`, writes go to a guest tmpfs overlay and are discarded. The original rootfs image is never modified |
