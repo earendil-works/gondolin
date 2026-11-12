@@ -10,8 +10,8 @@
 //! With `vm.nitro` the `enclave` block makes Firecracker launch the VM through
 //! `/dev/nitro_enclaves` instead of KVM.  Direct mode (the default) runs an
 //! unpatched guest kernel; confidential mode needs the DMB virtio patches and
-//! rejects the entropy device.  Without `vm.nitro` the daemon picks KVM when
-//! `/dev/kvm` is usable, else a Nitro Sandbox ([`prepare`]).
+//! rejects the entropy device.  Without `vm.nitro` the daemon picks a Nitro
+//! Sandbox when the host is set up for them, else KVM ([`select_target`]).
 //!
 //! On KVM Firecracker boots only an uncompressed kernel (an ELF `vmlinux` on
 //! x86_64, an arm64 `Image` on aarch64); [`prepare`] decompresses the image's
@@ -197,11 +197,13 @@ fn select_target(vm: &mut VmConfig, kvm: bool, nitro_ready: bool) -> Result<(), 
     }
 }
 
-/// Whether this host can run Nitro Sandboxes: the device exists and memory
-/// is reserved for them (without a pool every launch fails, so the default
-/// is then KVM; an explicit Nitro request reports the missing pool).
+/// Whether this host can run Nitro Sandboxes: the daemon can open the device
+/// read-write (as Firecracker will; like [`kvm_usable`]) and memory is
+/// reserved for them (without a pool every launch fails, so the default is
+/// then KVM; an explicit Nitro request reports the missing pool).
 fn nitro_ready(dir: &Path, device: &Path) -> bool {
-    device.exists() && sysfs_u64(dir, "mem_pool/total").is_none_or(|total| total > 0)
+    std::fs::OpenOptions::new().read(true).write(true).open(device).is_ok()
+        && sysfs_u64(dir, "mem_pool/total").is_none_or(|total| total > 0)
 }
 
 /// The Nitro Enclaves driver's sysfs directory (pool and slot budgets).
@@ -244,10 +246,19 @@ fn check_nitro_pool(dir: &Path, memory_mib: u64) -> Result<(), String> {
 }
 
 /// An explanation for a Nitro Sandbox launch that failed with `output`
-/// (Firecracker's stderr), when it is one of the resource errors operators
-/// hit: the memory pool (`CmaAlloc ... Out of memory`, e.g. lost to a
-/// concurrent launch) or no pool or slot left (`No space left on device`).
+/// (the VMM's log tail), when it is one of the resource errors operators
+/// hit: the memory pool (`CmaAlloc`, e.g. lost to a concurrent launch) or no
+/// pool or slot left (`No space left on device`). Only Firecracker's own
+/// error lines (`Error: ...`) count: the tail can hold guest console output,
+/// where a guest's `Out of memory: Killed process` or a full disk would
+/// otherwise point at the pool.
 pub fn nitro_failure_hint(output: &str) -> Option<String> {
+    let errors: Vec<&str> = output
+        .lines()
+        .flat_map(|l| l.split("; "))
+        .filter(|l| l.contains("Error: ") || l.trim_start().starts_with("Error:"))
+        .collect();
+    let has = |needle: &str| errors.iter().any(|l| l.contains(needle));
     let dir = Path::new(NITRO_SYSFS);
     let pool = || match (sysfs_u64(dir, "mem_pool/free"), sysfs_u64(dir, "mem_pool/total")) {
         (Some(free), Some(total)) => {
@@ -255,14 +266,14 @@ pub fn nitro_failure_hint(output: &str) -> Option<String> {
         }
         _ => "size unknown".into(),
     };
-    if output.contains("CmaAlloc") || output.contains("Out of memory") {
+    if has("CmaAlloc") {
         return Some(format!(
             "the Nitro Enclaves memory pool could not hold the sandbox ({}): stop other \
              sandboxes, use less memory or reserve a larger pool; {NITRO_POOL_HINT}",
             pool()
         ));
     }
-    if output.contains("No space left on device") {
+    if has("No space left on device") {
         let slots = match (sysfs_u64(dir, "pcie_slots"), sysfs_u64(dir, "pcie_slots_total")) {
             (Some(n), Some(total)) => format!("{n} of {total}"),
             _ => "unknown".into(),
@@ -674,6 +685,13 @@ mod tests {
         let enospc = "Error: ... No space left on device (os error 28)";
         assert!(nitro_failure_hint(enospc).unwrap().contains("pcie_slots"));
         assert_eq!(nitro_failure_hint("Error: something else"), None);
+        // guest console lines in the same tail are not Firecracker's errors
+        let guest = "[   12.3] Out of memory: Killed process 42 (node)\ndd: error writing \
+                     '/tmp/x': No space left on device\nError: something else";
+        assert_eq!(nitro_failure_hint(guest), None);
+        // the tail as the session formats it: "(firecracker: line; line)"
+        let tail = format!("(firecracker: [  1.0] booting; {oom})");
+        assert!(nitro_failure_hint(&tail).unwrap().contains("memory pool could not hold"));
     }
 
     #[test]
