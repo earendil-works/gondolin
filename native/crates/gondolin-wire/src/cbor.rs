@@ -76,6 +76,38 @@ fn head(out: &mut Vec<u8>, major: u8, n: u64) {
     }
 }
 
+/// Length of an item head (major type and argument `n`) in `bytes`.
+fn head_len(n: u64) -> usize {
+    match n {
+        0..24 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
+/// Length of `value`'s encoding (what [`encode_into`] appends) in `bytes`.
+pub fn encoded_len(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Bool(_) => 1,
+        Value::Integer(i) => head_len(
+            if *i >= 0 { u64::try_from(*i) } else { u64::try_from(-1 - *i) }.unwrap_or(u64::MAX),
+        ),
+        Value::Float(f) => {
+            let single = *f as f32;
+            if single as f64 == *f || f.is_nan() { 5 } else { 9 }
+        }
+        Value::Bytes(b) => head_len(b.len() as u64) + b.len(),
+        Value::Text(s) => head_len(s.len() as u64) + s.len(),
+        Value::Array(a) => head_len(a.len() as u64) + a.iter().map(encoded_len).sum::<usize>(),
+        Value::Map(m) => {
+            head_len(m.len() as u64)
+                + m.iter().map(|(k, v)| encoded_len(k) + encoded_len(v)).sum::<usize>()
+        }
+    }
+}
+
 /// Appends one item to `out`.
 pub fn encode_into(value: &Value, out: &mut Vec<u8>) {
     match value {
@@ -283,6 +315,39 @@ fn half_to_f64(h: u16) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn encoded_len_matches_the_encoding() {
+        let values = vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::Integer(0),
+            Value::Integer(23),
+            Value::Integer(24),
+            Value::Integer(255),
+            Value::Integer(256),
+            Value::Integer(65_535),
+            Value::Integer(65_536),
+            Value::Integer(u32::MAX as i128 + 1),
+            Value::Integer(-1),
+            Value::Integer(-25),
+            Value::Integer(i64::MIN as i128),
+            Value::Float(1.5),
+            Value::Float(0.1),
+            Value::Bytes(vec![7; 70_000]),
+            Value::Text("x".repeat(300)),
+            Value::Array(vec![Value::Integer(1); 30]),
+            Value::Map(vec![(Value::Text("data".into()), Value::Bytes(vec![1; 1 << 20]))]),
+        ];
+        for v in &values {
+            assert_eq!(encoded_len(v), encode(v).len(), "{v:?}");
+        }
+        let all = Value::Array(values);
+        assert_eq!(encoded_len(&all), encode(&all).len());
+        let framed = crate::frame_value(&all).unwrap();
+        assert_eq!(framed, crate::frame(&encode(&all)).unwrap());
+    }
+
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {

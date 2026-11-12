@@ -122,6 +122,8 @@ struct Runtime {
     qmp_path: Option<PathBuf>,
     /// vhost-user-fs device served by the daemon
     virtiofs: Option<VirtioFsRuntime>,
+    /// the fs channel's handler (its `timing` statistics)
+    fs_handler: Arc<crate::vfs_port::FsPortHandler>,
     dir: SocketDir,
 }
 
@@ -735,7 +737,7 @@ impl Session {
             self.debug_enabled("protocol").then(|| self.ctl.clone()),
         ));
         ports.push(
-            GuestPort::listen("fs", &chardevs.fs, fs_outbox, fs_handler)
+            GuestPort::listen("fs", &chardevs.fs, fs_outbox, fs_handler.clone())
                 .map_err(|e| format!("cannot listen on the fs channel: {e}"))?,
         );
         let mut forwarders = Vec::new();
@@ -784,8 +786,16 @@ impl Session {
         };
         let qmp_path = self.idle.enabled().then(|| path("qmp.sock"));
         let virtiofs = self.setup_virtiofs(&path("virtiofs.sock"))?;
-        self.runtime =
-            Some(Runtime { chardevs, ports, netdev_path, netdev_task, qmp_path, virtiofs, dir });
+        self.runtime = Some(Runtime {
+            chardevs,
+            ports,
+            netdev_path,
+            netdev_task,
+            qmp_path,
+            virtiofs,
+            fs_handler,
+            dir,
+        });
         Ok(())
     }
 
@@ -873,6 +883,9 @@ impl Session {
             return;
         }
         crate::timing::mark("shutdown requested");
+        if let Some(rt) = &self.runtime {
+            rt.fs_handler.report_timing();
+        }
         self.shutting_down = true;
         self.close_server();
         if self.close_vm() {

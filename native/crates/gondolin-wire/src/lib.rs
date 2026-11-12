@@ -112,6 +112,20 @@ impl AsRef<Value> for Value {
     }
 }
 
+/// Encodes `value` as one frame (`u32` big-endian length, then the CBOR) in a
+/// single allocation, without an intermediate payload copy (large `Bytes`).
+pub fn frame_value(value: &Value) -> Result<Vec<u8>, WireError> {
+    let len = cbor::encoded_len(value);
+    if len > MAX_FRAME {
+        return Err(WireError::FrameTooLarge(len));
+    }
+    let mut out = Vec::with_capacity(4 + len);
+    out.extend_from_slice(&(len as u32).to_be_bytes());
+    cbor::encode_into(value, &mut out);
+    debug_assert_eq!(out.len(), 4 + len);
+    Ok(out)
+}
+
 /// Prefixes `payload` with its `u32` big-endian length.
 pub fn frame(payload: &[u8]) -> Result<Vec<u8>, WireError> {
     if payload.len() > MAX_FRAME {

@@ -29,10 +29,16 @@ pub const panic = shared.runtime.panic;
 
 const log = std.log.scoped(.sandboxfs);
 
-/// Largest data payload of one read/write RPC (also the FUSE `max_write`) in `bytes`
-const max_rpc_data: u32 = 60 * 1024;
+/// Largest data payload of one read/write RPC (also the FUSE `max_write` and
+/// request size) in `bytes`: what the host advertises (`max_data` in the
+/// `mounts` reply), at most this
+const max_rpc_data: u32 = 1024 * 1024;
+/// The limit of hosts that do not advertise one, in `bytes`
+const legacy_rpc_data: u32 = 60 * 1024;
 /// Request buffer size; must exceed `max_write` plus headers, in `bytes`
-const request_buf_size = 128 * 1024;
+const request_buf_size = max_rpc_data + 4096;
+/// Page size the FUSE `max_pages` limit counts in, in `bytes`
+const fuse_page_size: u32 = 4096;
 
 const default_attr_ttl_ms: u64 = 1000;
 const default_entry_ttl_ms: u64 = 1000;
@@ -82,11 +88,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // The bind list is written before mounting so that init can rely on the
     // file being complete once the fuse mount shows up in /proc/mounts.
-    if (binds_file) |path| {
-        if (fs.rpc != null) fs.writeBindsFile(path) catch |err| {
-            log.warn("unable to fetch bind mounts: {t}", .{err});
-        };
-    }
+    if (fs.rpc != null) fs.fetchMounts(binds_file) catch |err| {
+        log.warn("unable to fetch bind mounts: {t}", .{err});
+    };
 
     // The host serves the tree over virtio-fs: mount that and exit (the
     // kernel talks to the host directly). Fall back to FUSE over the RPC
@@ -102,6 +106,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     try mountFuse(fuse_fd, mount_point);
     log.info("mounted sandboxfs at {s}", .{mount_point});
+    fs.readahead_path = readaheadPath(gpa, mount_point) catch |err| blk: {
+        log.warn("cannot find the mount's readahead setting: {t}", .{err});
+        break :blk null;
+    };
+    defer if (fs.readahead_path) |p| gpa.free(p);
     try fs.run();
 }
 
@@ -122,6 +131,37 @@ fn mountVirtiofs(tag: []const u8, mount_point: []const u8) !void {
     const target = try sys.toPathZ(&path_buf, mount_point);
     const err = sys.mount(source, target, "virtiofs", linux.MS.NOSUID | linux.MS.NODEV, "");
     if (err != .SUCCESS) return error.MountFailed;
+}
+
+/// `/sys/class/bdi/MAJOR:MINOR/read_ahead_kb` of the FUSE mount at
+/// `mount_point`, from `/proc/self/mountinfo` (a stat would be a FUSE request
+/// that nobody serves yet).
+fn readaheadPath(gpa: Allocator, mount_point: []const u8) ![:0]const u8 {
+    const fd = try sys.openZ("/proc/self/mountinfo", .{ .ACCMODE = .RDONLY }, 0);
+    defer sys.close(fd);
+    var buf: [64 * 1024]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = try sys.read(fd, buf[len..]);
+        if (n == 0) break;
+        len += n;
+    }
+    var lines = std.mem.splitScalar(u8, buf[0..len], '\n');
+    var found: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        // id parent MAJOR:MINOR root mount-point options ... - fstype ...
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const dev = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const point = fields.next() orelse continue;
+        if (!std.mem.eql(u8, point, mount_point)) continue;
+        if (std.mem.indexOf(u8, line, " - fuse.sandboxfs ") == null) continue;
+        found = dev; // the last one: mounted on top
+    }
+    const dev = found orelse return error.MountNotFound;
+    return std.fmt.allocPrintSentinel(gpa, "/sys/class/bdi/{s}/read_ahead_kb", .{dev}, 0);
 }
 
 fn mountFuse(fuse_fd: sys.fd_t, mount_point: []const u8) !void {
@@ -162,6 +202,13 @@ const Fs = struct {
     host_errno: E = .SUCCESS,
     /// opcodes already reported as unsupported
     unsupported_logged: std.StaticBitSet(64) = .empty,
+    /// largest read/write RPC payload the host takes, in `bytes`
+    rpc_data: u32 = legacy_rpc_data,
+    /// the host serves `readdirplus` (READDIRPLUS is negotiated at INIT)
+    host_readdirplus: bool = false,
+    /// `/sys/class/bdi/<dev>/read_ahead_kb` of the mount, tuned once the
+    /// kernel has processed INIT (which resets it)
+    readahead_path: ?[:0]const u8 = null,
 
     fn deinit(self: *Fs) void {
         if (self.rpc) |*rpc| {
@@ -208,7 +255,23 @@ const Fs = struct {
                 },
             };
             if (try self.sendReply(header.unique, reply) == .unmounted) return;
+            if (header.opcode == @backingInt(fuse.Opcode.init)) self.tuneReadahead();
         }
+    }
+
+    /// Reads ahead as much as one request carries (the kernel defaults to
+    /// 128 KiB, cut into small requests): sequential reads become few large
+    /// RPCs. Best effort.
+    fn tuneReadahead(self: *Fs) void {
+        const path = self.readahead_path orelse return;
+        var value_buf: [16]u8 = undefined;
+        const value = std.fmt.bufPrint(&value_buf, "{d}", .{self.rpc_data / 1024}) catch return;
+        const fd = sys.openZ(path, .{ .ACCMODE = .WRONLY }, 0) catch |err| {
+            log.warn("cannot open {s}: {t}", .{ path, err });
+            return;
+        };
+        defer sys.close(fd);
+        sys.writeAll(fd, value) catch |err| log.warn("cannot write {s}: {t}", .{ path, err });
     }
 
     fn sendReply(self: *Fs, unique: u64, reply: Reply) !enum { ok, unmounted } {
@@ -295,12 +358,18 @@ const Fs = struct {
             },
             .opendir => self.ok(fuse.OpenOut{ .fh = h.nodeid, .open_flags = 0 }),
             .readdir => self.readdir(h, payload),
+            .readdirplus => self.readdirplus(h, payload),
             .read => self.read(payload),
             .write => self.write(payload),
             .create => self.create(h, payload),
             .release => blk: {
+                // the kernel ignores RELEASE errors: reply now instead of
+                // after a round trip (one of open/read/release per small
+                // file). The host handles requests in order, so later ones
+                // on this handle's file still come after it.
                 const release, _ = try fuse.parse(fuse.ReleaseIn, payload);
-                _ = try self.call("release", .{ .fh = release.fh });
+                const rpc = if (self.rpc) |*rpc| rpc else break :blk empty;
+                try rpc.sendUnanswered("release", .{ .fh = release.fh });
                 break :blk empty;
             },
             .releasedir, .fsync, .fsyncdir, .flush, .destroy => empty,
@@ -348,13 +417,19 @@ const Fs = struct {
         const in, _ = try fuse.parse(fuse.InitIn, payload);
         // FUSE_ATOMIC_O_TRUNC: the kernel forwards O_TRUNC in OPEN and the host
         // truncates through the opened handle instead of a separate SETATTR.
+        // FUSE_MAX_PAGES: requests as large as one RPC (the default is 128 KiB)
+        // READDIRPLUS: listings carry each entry's attributes, so `find`,
+        // `ls -l` and friends need no LOOKUP round trip per entry
+        const plus: u32 = if (self.host_readdirplus) fuse.init_flags.do_readdirplus else 0;
+        const flags = in.flags & (fuse.init_flags.big_writes | fuse.init_flags.atomic_o_trunc | fuse.init_flags.max_pages | plus);
         return self.ok(fuse.InitOut{
             .major = in.major,
             .minor = in.minor,
             .max_readahead = in.max_readahead,
-            .flags = in.flags & (fuse.init_flags.big_writes | fuse.init_flags.atomic_o_trunc),
-            .max_write = max_rpc_data,
+            .flags = flags,
+            .max_write = self.rpc_data,
             .time_gran = 1,
+            .max_pages = if (flags & fuse.init_flags.max_pages != 0) @intCast(self.rpc_data / fuse_page_size) else 0,
         });
     }
 
@@ -468,6 +543,40 @@ const Fs = struct {
         return .{ .data = out.items };
     }
 
+    fn readdirplus(self: *Fs, h: fuse.InHeader, payload: []const u8) HandlerError!Reply {
+        const req, _ = try fuse.parse(fuse.ReadIn, payload);
+        // the host returns only what fits `max_bytes`: each entry with an
+        // `entry` is a lookup the kernel will FORGET
+        const res = try self.call("readdirplus", .{ .ino = h.nodeid, .offset = req.offset, .max_bytes = req.size });
+        const entries = switch (res.get("entries") orelse return error.InvalidResponse) {
+            .array => |a| a,
+            else => return error.InvalidResponse,
+        };
+
+        var out: std.ArrayList(u8) = try .initCapacity(self.arena.allocator(), req.size);
+        for (entries) |entry| {
+            const name = try expectText(entry.get("name"));
+            const record = fuse.direntplusSize(name.len);
+            if (out.items.len + record > req.size) {
+                log.warn("readdirplus reply exceeds {d} bytes", .{req.size});
+                break;
+            }
+            // without one (removed meanwhile) the kernel only lists the name
+            const entry_out: fuse.EntryOut = if (entry.get("entry")) |e| try entryOut(e) else std.mem.zeroes(fuse.EntryOut);
+            const dirent: fuse.Dirent = .{
+                .ino = getU64(entry, "ino") orelse return error.InvalidResponse,
+                .off = getU64(entry, "offset") orelse 0,
+                .namelen = @intCast(name.len),
+                .type = getU32(entry, "type") orelse 0,
+            };
+            out.appendSliceAssumeCapacity(std.mem.asBytes(&entry_out));
+            out.appendSliceAssumeCapacity(std.mem.asBytes(&dirent));
+            out.appendSliceAssumeCapacity(name);
+            out.appendNTimesAssumeCapacity(0, record - @sizeOf(fuse.EntryOut) - @sizeOf(fuse.Dirent) - name.len);
+        }
+        return .{ .data = out.items };
+    }
+
     fn read(self: *Fs, payload: []const u8) HandlerError!Reply {
         const req, _ = try fuse.parse(fuse.ReadIn, payload);
         // Fill the whole request: a short reply for a non-EOF region makes the
@@ -475,7 +584,7 @@ const Fs = struct {
         // several RPCs.
         var out: std.ArrayList(u8) = try .initCapacity(self.arena.allocator(), req.size);
         while (out.items.len < req.size) {
-            const chunk: u32 = @min(req.size - @as(u32, @intCast(out.items.len)), max_rpc_data);
+            const chunk: u32 = @min(req.size - @as(u32, @intCast(out.items.len)), self.rpc_data);
             const res = try self.call("read", .{ .fh = req.fh, .offset = req.offset + out.items.len, .size = chunk });
             const data = switch (res.get("data") orelse return error.InvalidResponse) {
                 .bytes => |b| b,
@@ -490,7 +599,7 @@ const Fs = struct {
 
     fn write(self: *Fs, payload: []const u8) HandlerError!Reply {
         const req, const data = try fuse.parse(fuse.WriteIn, payload);
-        const size: u32 = @intCast(@min(req.size, data.len, max_rpc_data));
+        const size: u32 = @intCast(@min(req.size, data.len, self.rpc_data));
         const res = try self.call("write", .{ .fh = req.fh, .offset = req.offset, .data = cbor.Bytes{ .data = data[0..size] } });
         return self.ok(fuse.WriteOut{ .size = getU32(res.res, "size") orelse size });
     }
@@ -512,15 +621,21 @@ const Fs = struct {
         return self.ok(out);
     }
 
-    /// Fetch the bind mount list from the host and write it newline separated
-    /// to `path`.  The file is only created when the host supports `mounts`
-    /// so that init can fall back to the kernel command line list.
-    fn writeBindsFile(self: *Fs, path: []const u8) !void {
+    /// Fetch the host's limits and bind mount list (`mounts`) and write the
+    /// list newline separated to `binds_path`.  The file is only created when
+    /// the host supports `mounts` so that init can fall back to the kernel
+    /// command line list.
+    fn fetchMounts(self: *Fs, binds_path: ?[]const u8) !void {
         defer _ = self.arena.reset(.retain_capacity);
         const res = self.call("mounts", .{}) catch |err| switch (err) {
             error.HostErrno => return error.MountsUnavailable,
             else => return err,
         };
+        if (getU32(res.res, "max_data")) |host_max| {
+            self.rpc_data = std.math.clamp(host_max, legacy_rpc_data, max_rpc_data);
+        }
+        if (res.get("readdirplus")) |v| self.host_readdirplus = v == .bool and v.bool;
+        const path = binds_path orelse return;
         const binds = switch (res.get("binds") orelse return error.InvalidResponse) {
             .array => |a| a,
             else => return error.InvalidResponse,

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use gondolin_wire::{Envelope, Value};
+use gondolin_wire::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bootcfg::SandboxFsConfig;
@@ -24,6 +24,20 @@ pub struct FsPortHandler {
     events: mpsc::UnboundedSender<Event>,
     /// set when `protocol` debugging is enabled
     debug: Option<Arc<Controller>>,
+    /// per-op host time while `timing` debugging is on, reported when the
+    /// guest disconnects ([`OpStats`])
+    stats: Mutex<std::collections::BTreeMap<String, OpStats>>,
+}
+
+/// Host time of one fs op: from receiving the request to queueing the
+/// response, and the part spent waiting for the session to admit it
+/// (`VfsBegin`, the idle-pause gate).
+#[derive(Default)]
+struct OpStats {
+    count: u64,
+    total: std::time::Duration,
+    gate: std::time::Duration,
+    max: std::time::Duration,
 }
 
 impl FsPortHandler {
@@ -34,13 +48,20 @@ impl FsPortHandler {
         events: mpsc::UnboundedSender<Event>,
         debug: Option<Arc<Controller>>,
     ) -> Self {
-        FsPortHandler { outbox, backend, boot, events, debug }
+        FsPortHandler { outbox, backend, boot, events, debug, stats: Default::default() }
     }
 
     fn mounts_reply(&self) -> FsReply {
         match self.boot.lock().unwrap().as_ref() {
             Some(config) => FsReply::ok(Value::Map(vec![
                 (Value::Text("mount".into()), Value::Text(config.fuse_mount.clone())),
+                // the backend serves `readdirplus` (sandboxfs READDIRPLUS)
+                (Value::Text("readdirplus".into()), Value::Bool(true)),
+                // largest read/write the backend takes (sandboxfs: 60 KiB without it)
+                (
+                    Value::Text("max_data".into()),
+                    Value::Integer((gondolin_vfs::rpc::MAX_RPC_DATA as u64).into()),
+                ),
                 (
                     Value::Text("binds".into()),
                     Value::Array(
@@ -67,25 +88,48 @@ impl FsPortHandler {
     }
 }
 
-gondolin_wire::wire_encode! {
-    struct FsResponse<'a> {
-        op: &'a str,
-        err: i64,
-        res: Option<Value>,
-        message: Option<String>,
+/// Moves the value of `key` out of the map `value` (`Null` when absent): the
+/// request and response carry up to 1 MiB of data, which is never cloned.
+fn take_field(value: &mut Value, key: &str) -> Value {
+    if let Value::Map(entries) = value {
+        for (k, v) in entries.iter_mut() {
+            if matches!(k, Value::Text(t) if t == key) {
+                return std::mem::take(v);
+            }
+        }
     }
+    Value::Null
+}
+
+/// The `fs_response` envelope `{ v, t, id, p: { op, err, res?, message? } }`.
+fn fs_response(id: u32, op: String, reply: FsReply) -> Value {
+    let text = |s: &str| Value::Text(s.into());
+    let mut p =
+        vec![(text("op"), Value::Text(op)), (text("err"), Value::Integer(reply.err.into()))];
+    if let Some(res) = reply.res {
+        p.push((text("res"), res));
+    }
+    if let Some(message) = reply.message {
+        p.push((text("message"), Value::Text(message)));
+    }
+    Value::Map(vec![
+        (text("v"), Value::Integer(1)),
+        (text("t"), text("fs_response")),
+        (text("id"), Value::Integer(id.into())),
+        (text("p"), Value::Map(p)),
+    ])
 }
 
 impl PortHandler for FsPortHandler {
     fn frame<'a>(&'a self, frame: Bytes) -> crate::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let msg: Value = gondolin_wire::decode_guest(&frame).map_err(|e| e.to_string())?;
+            let mut msg: Value = gondolin_wire::decode_guest(&frame).map_err(|e| e.to_string())?;
+            drop(frame);
             let f = Fields::of(&msg);
-            let t = f.text("t").unwrap_or("");
+            let t = f.text("t").unwrap_or("").to_string();
             let id = fields::request_id(f.get("id"));
-            let p = f.get("p").cloned().unwrap_or(Value::Null);
-            let pf = Fields::of(&p);
-            let op = pf.text("op").unwrap_or("").to_string();
+            let mut p = take_field(&mut msg, "p");
+            let op = Fields::of(&p).text("op").unwrap_or("").to_string();
             if let Some(ctl) = &self.debug {
                 let id_text = id.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
                 let extra = if t == "fs_request" { format!(" op={op}") } else { String::new() };
@@ -99,11 +143,17 @@ impl PortHandler for FsPortHandler {
             if t != "fs_request" {
                 return Ok(());
             }
-            let req = pf.get("req").cloned().unwrap_or(Value::Map(vec![]));
+            let req = match take_field(&mut p, "req") {
+                Value::Null => Value::Map(vec![]),
+                req => req,
+            };
 
+            let started = crate::timing::enabled().then(std::time::Instant::now);
             let (tx, rx) = oneshot::channel();
             let _ = self.events.send(Event::VfsBegin(tx));
-            let reply = match rx.await {
+            let admitted = rx.await;
+            let gate = started.map(|s| s.elapsed());
+            let reply = match admitted {
                 // a panicking request fails with EIO; sandboxfs keeps serving
                 Ok(Ok(())) => match crate::panics::CatchUnwind::new(self.serve(&op, req)).await {
                     Ok(reply) => reply,
@@ -114,16 +164,28 @@ impl PortHandler for FsPortHandler {
             };
             let _ = self.events.send(Event::VfsEnd);
 
-            let response = Envelope::new(
-                "fs_response",
-                u64::from(id),
-                FsResponse { op: &op, err: reply.err, res: reply.res, message: reply.message },
-            );
-            if !self.outbox.send(&response) {
+            let timed_op = started.map(|_| op.clone());
+            let sent = match gondolin_wire::frame_value(&fs_response(id, op, reply)) {
+                Ok(frame) => self.outbox.send_frame(frame),
+                Err(err) => {
+                    eprintln!("gondolind: cannot encode fs_response: {err}");
+                    false
+                }
+            };
+            if !sent {
                 let _ = self.events.send(Event::PortError {
                     port: "fs",
                     message: "virtio bridge queue exceeded".into(),
                 });
+            }
+            if let (Some(started), Some(op)) = (started, timed_op) {
+                let total = started.elapsed();
+                let mut stats = self.stats.lock().unwrap();
+                let s = stats.entry(op).or_default();
+                s.count += 1;
+                s.total += total;
+                s.gate += gate.unwrap_or_default();
+                s.max = s.max.max(total);
             }
             Ok(())
         })
@@ -131,5 +193,27 @@ impl PortHandler for FsPortHandler {
 
     fn error(&self, message: String) {
         let _ = self.events.send(Event::PortError { port: "fs", message });
+    }
+
+    fn disconnected(&self) {
+        self.report_timing();
+    }
+}
+
+impl FsPortHandler {
+    /// Reports (once) the per-op host times collected while `timing`
+    /// debugging is on.
+    pub(crate) fn report_timing(&self) {
+        let stats = std::mem::take(&mut *self.stats.lock().unwrap());
+        for (op, s) in stats {
+            let us = |d: std::time::Duration| d.as_micros() / u128::from(s.count.max(1));
+            crate::timing::mark(format!(
+                "fs {op}: {} requests, host {} µs each (session gate {} µs), max {} µs",
+                s.count,
+                us(s.total),
+                us(s.gate),
+                s.max.as_micros()
+            ));
+        }
     }
 }
