@@ -1546,10 +1546,9 @@ impl Session {
             return;
         }
         let Some(child) = self.vm.child.as_mut() else { return };
-        let message = format!(
-            "the guest did not connect within {} s; images for vmm=firecracker need the guest \
-             helpers' vsock transport (built with this version of Gondolin)",
-            FIRECRACKER_GUEST_DEADLINE.as_secs()
+        let message = crate::firecracker::guest_deadline_message(
+            self.configured.as_ref().and_then(|c| c.vm.nitro.as_ref()),
+            FIRECRACKER_GUEST_DEADLINE.as_secs(),
         );
         gondolin_log::warn!("{message}");
         self.vm.exit_reason = Some(message);
