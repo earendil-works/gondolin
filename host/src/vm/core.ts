@@ -141,9 +141,10 @@ function normalizeStartTimeoutMs(
   return Math.max(0, Math.trunc(value));
 }
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
+// the mounts land a few ms after the guest reports the VFS ready: poll often
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
-  0.1,
+  0.01,
 );
 const VFS_READY_TIMEOUT_MS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_TIMEOUT_MS",
@@ -1895,7 +1896,9 @@ fi
     }
 
     const source = `${this.fuseMount}${mountPoint}`;
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -qF -- " $3 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
+    // bind it ourselves when the guest's init hasn't yet, and check again
+    // right away (not only after the next sleep)
+    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -qF -- " $3 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; if grep -qF -- " $3 " /proc/mounts; then exit 0; fi; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
 
     const result = await this.execInternalNoVfsWait([
       "/bin/sh",

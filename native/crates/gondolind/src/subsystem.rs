@@ -98,6 +98,12 @@ pub trait NetBackend: Send + Sync + 'static {
     fn close<'a>(&'a self) -> crate::BoxFuture<'a, ()> {
         Box::pin(async move {})
     }
+    /// The guest's address, gateway and DNS servers (what DHCP would hand
+    /// out) as a kernel command line argument for its init, which then skips
+    /// DHCP (~40 ms of busybox udhcpc per boot); see [`crate::net::guest_net_arg`].
+    fn guest_net_arg(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Network attachment of the VM.

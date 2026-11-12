@@ -14,9 +14,10 @@ use crate::configure::{Prepared, json_to_cbor};
 use crate::engine::{ClientEvent, Engine};
 use crate::etc_mount::EtcStore;
 
-/// `VFS_READY_ATTEMPTS` x `VFS_READY_SLEEP_SECONDS`
-const VFS_READY_ATTEMPTS: u32 = 300;
-const VFS_READY_SLEEP_SECONDS: &str = "0.1";
+/// `VFS_READY_ATTEMPTS` x `VFS_READY_SLEEP_SECONDS` (30 s): the mounts land a
+/// few ms after the guest reports the VFS ready, so poll often
+const VFS_READY_ATTEMPTS: u32 = 3000;
+const VFS_READY_SLEEP_SECONDS: &str = "0.01";
 /// Default output window of an exec in `bytes` (`DEFAULT_WINDOW_BYTES`)
 pub const DEFAULT_WINDOW_BYTES: u32 = 256 * 1024;
 /// stdin message size in `bytes` (the server's per-message limit)
@@ -410,7 +411,9 @@ impl Vm {
             }
             let source = format!("{fuse}{bind}");
             let script = format!(
-                "for i in $(seq 1 {VFS_READY_ATTEMPTS}); do if grep -qF -- \" $3 \" /proc/mounts; then exit 0; fi; mkdir -p \"$1\"; mount --bind \"$2\" \"$1\" > /dev/null 2>&1 || true; sleep {VFS_READY_SLEEP_SECONDS}; done; exit 1"
+                // bind it ourselves when the guest's init hasn't yet, and
+                // check again right away (not only after the next sleep)
+                "for i in $(seq 1 {VFS_READY_ATTEMPTS}); do if grep -qF -- \" $3 \" /proc/mounts; then exit 0; fi; mkdir -p \"$1\"; mount --bind \"$2\" \"$1\" > /dev/null 2>&1 || true; if grep -qF -- \" $3 \" /proc/mounts; then exit 0; fi; sleep {VFS_READY_SLEEP_SECONDS}; done; exit 1"
             );
             let r = self
                 .run(&["/bin/sh", "-c", &script, "sh", bind, &source, &escape_proc_mounts(bind)])

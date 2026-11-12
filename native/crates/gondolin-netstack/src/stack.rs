@@ -182,6 +182,11 @@ impl NetStack {
         &self.shared.config
     }
 
+    /// The DNS servers the guest is offered over DHCP.
+    pub fn guest_dns_servers(&self) -> Vec<Ipv4Addr> {
+        crate::dhcp::offered_dns(&self.shared.dhcp_dns)
+    }
+
     pub fn stats(&self) -> NetStats {
         let st = self.shared.lock();
         NetStats {

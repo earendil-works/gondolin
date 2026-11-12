@@ -37,6 +37,16 @@ pub struct DhcpReply {
 }
 
 /// Handles one BOOTREQUEST; returns the reply for DISCOVER/REQUEST.
+/// The DNS servers a reply offers for the stack's `dns_servers`.
+pub fn offered_dns(dns_servers: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+    if dns_servers.is_empty() {
+        vec![Ipv4Addr::new(8, 8, 8, 8)]
+    } else {
+        // Option length is a byte: at most 63 servers.
+        dns_servers.iter().copied().take(63).collect()
+    }
+}
+
 pub fn handle(request: &[u8], config: &NetConfig, dns_servers: &[Ipv4Addr]) -> Option<DhcpReply> {
     if request.len() < 240 || request[0] != 1 {
         return None;
@@ -88,12 +98,7 @@ pub fn handle(request: &[u8], config: &NetConfig, dns_servers: &[Ipv4Addr]) -> O
     out[28..44].copy_from_slice(chaddr);
     out[236..240].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
 
-    let dns: Vec<Ipv4Addr> = if dns_servers.is_empty() {
-        vec![Ipv4Addr::new(8, 8, 8, 8)]
-    } else {
-        // Option length is a byte: at most 63 servers.
-        dns_servers.iter().copied().take(63).collect()
-    };
+    let dns = offered_dns(dns_servers);
 
     let mut opts: Vec<u8> = Vec::with_capacity(64);
     opts.extend_from_slice(&[OPT_MSG_TYPE, 1, reply_type]);

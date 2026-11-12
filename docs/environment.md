@@ -21,6 +21,7 @@ Paths under `~/.cache/gondolin` move to `$XDG_CACHE_HOME/gondolin` when
 | --- | --- | --- |
 | `GONDOLIN_DEFAULT_IMAGE` | SDK, static CLI, daemon | Image selector used when none is given (`name:tag`, build id or directory). Default: `alpine-base:latest` |
 | `GONDOLIN_GUEST_DIR` | SDK, static CLI, daemon | Asset directory (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets) used instead of the default image; also searched for the assets of a checkpoint on resume |
+| `GONDOLIN_GUEST_DHCP` | daemon | `1`: configure the guest network with DHCP instead of passing `gondolin.net=` on the kernel command line (for images whose init cannot apply it). Default: off |
 | `GONDOLIN_IMAGE_STORE` | SDK, static CLI, daemon | Local image store (refs and objects). Default: `~/.cache/gondolin/images` |
 | `GONDOLIN_IMAGE_REGISTRY_URL` | SDK, static CLI, daemon | URL of the builtin image registry JSON. Default: `https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json` |
 | `XDG_CACHE_HOME` | SDK, static CLI, daemon | Base of the Gondolin cache (`$XDG_CACHE_HOME/gondolin`). Default: `~/.cache` |
@@ -90,7 +91,7 @@ secret's value from `$NAME` when no `=VALUE` is given, and `--ssh-credential
 | `GONDOLIN_DEBUG` | SDK, static CLI | Comma-separated debug flags: `net`, `exec`, `vfs` (alias `fs`), `protocol`, or `all` (also `*`, `1`, `true`); `sandbox.debug` wins (see [Debugging and Troubleshooting](./debug.md)) |
 | `GONDOLIN_START_TIMEOUT_MS` | SDK, static CLI | How long to wait for the VM to boot, in `ms`, when `startTimeoutMs` is not set. Default: `120000` (SDK), `60000` (static CLI) |
 | `GONDOLIN_VFS_READY_TIMEOUT_MS` | SDK | How long to wait for the guest filesystem mounts after boot, in `ms`. Default: `30000` |
-| `GONDOLIN_VFS_READY_SLEEP_SECONDS` | SDK | Polling interval of that wait, in seconds. Default: `0.1` |
+| `GONDOLIN_VFS_READY_SLEEP_SECONDS` | SDK | Polling interval of that wait, in seconds. Default: `0.01` |
 | `CI` | SDK | `true` turns off the image download progress display |
 
 Raise the timeouts on slow hosts (for example nested virtualization or

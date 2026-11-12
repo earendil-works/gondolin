@@ -605,3 +605,20 @@ async fn reads_wait_for_push_or_hold_timeout() {
     assert_eq!(rest, b"bye");
     assert_eq!(h.stack.stats().read_hold_timeouts, 1);
 }
+
+#[tokio::test]
+async fn guest_dns_servers_match_the_dhcp_offer() {
+    let stack = |mode, resolvers: Vec<Ipv4Addr>| {
+        let config =
+            NetConfig { dns: DnsConfig { mode, ..DnsConfig::default() }, ..NetConfig::default() };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        NetStack::with_system_resolvers(config, Arc::new(ChannelHandler(tx)), resolvers).unwrap()
+    };
+    let gateway = NetConfig::default().gateway_ip;
+    // the stack answers DNS itself
+    assert_eq!(stack(DnsMode::Synthetic, vec![]).guest_dns_servers(), vec![gateway]);
+    // the host's resolvers, else a public one
+    let resolver = Ipv4Addr::new(1, 1, 1, 1);
+    assert_eq!(stack(DnsMode::Open, vec![resolver]).guest_dns_servers(), vec![resolver]);
+    assert_eq!(stack(DnsMode::Open, vec![]).guest_dns_servers(), vec![Ipv4Addr::new(8, 8, 8, 8)]);
+}
