@@ -34,7 +34,8 @@ Set `GONDOLIN_DEBUG` to a comma-separated list of flags:
 - `exec`: exec + stdin/pty control messages
 - `vfs`: VFS operations and the guest filesystem transport (`fs` is accepted
   as an alias)
-- `protocol`: virtio/control-protocol traffic and QEMU log forwarding
+- `protocol`: virtio/control-protocol traffic and QEMU log forwarding,
+  including the guest's full boot log (see [Boot log](#boot-log))
 - `timing`: when each step of starting and stopping the VM finished (root
   disk, network, VMM spawn, guest channels, first guest messages, shutdown),
   in milliseconds since the session was created and since the previous step;
@@ -181,6 +182,20 @@ gondolind assets resolve alpine-base:latest --offline --json
 `gondolin version` (Node CLI) prints the package version and the `gondolind`
 command it would start, or why none was found. The static CLI prints
 `gondolin X.Y.Z (static)`.
+
+## Boot log
+
+On QEMU, guests boot with `quiet` on the kernel command line, so the kernel
+and the guest's init print only warnings and errors (panics included). QEMU's
+consoles are emulated serial ports (`ttyS0`, `ttyAMA0`), where the full boot
+log costs about 0.9 s per boot whether or not anyone reads it. krun's virtio
+console is cheap, so krun guests keep the full log. You get it back on QEMU
+with:
+
+- `GONDOLIN_DEBUG=protocol` (or `sandbox.debug: ["protocol"]`), which also
+  forwards it, or
+- `sandbox.console: "stdio"`, or
+- a `sandbox.append` that sets the log level itself (`loglevel=7`, `debug`).
 
 ## Troubleshooting
 

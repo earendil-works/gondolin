@@ -668,7 +668,11 @@ impl Session {
         self.debug = cfg.debug.iter().cloned().collect();
         crate::timing::enable(self.debug_enabled("timing").then(|| self.ctl.clone()));
         crate::timing::mark("configured");
-        self.base_append = qemu::base_append(&cfg.vm, &self.host);
+        self.base_append = qemu::quiet_boot(
+            qemu::base_append(&cfg.vm, &self.host),
+            &cfg.vm,
+            self.debug_enabled("protocol"),
+        );
         if let Some(arg) = match &net {
             NetSetup::Native(backend) => backend.guest_net_arg(),
             NetSetup::None => None,
