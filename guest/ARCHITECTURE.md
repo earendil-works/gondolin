@@ -1,7 +1,8 @@
 # Guest helper architecture
 
 This document specifies the guest-side userland of Gondolin: the four helper
-binaries that run inside the micro-VM and talk to the host over virtio-serial.
+binaries that run inside the micro-VM and talk to the host over virtio-serial
+(or vsock, see §3.1).
 It is the reference for every implementation of the helpers (the Zig code in
 `src/`, and ports to other languages).  Anything observable by the host —
 message formats, error codes, flow control, process semantics — is normative.
@@ -24,7 +25,7 @@ Contents:
 
 ## 1. Overview
 
-| Binary           | virtio-serial port | Role |
+| Binary           | host channel       | Role |
 |------------------|--------------------|------|
 | `sandboxd`       | `virtio-port`      | PID 1 supervisor: runs commands, file transfer, clock sync, VFS status |
 | `sandboxfs`      | `virtio-fs`        | FUSE daemon; forwards filesystem operations to the host VFS (or mounts the host's virtio-fs device and exits) |
@@ -78,7 +79,21 @@ All helpers are single-threaded.  `sandboxd` and the TCP forwarders are
 
 ## 3. Wire format
 
-### 3.1 virtio-serial ports
+### 3.1 Host channels: virtio-serial ports or vsock
+
+Each helper talks to the host over one named channel (§1).  Two transports
+carry the same byte stream; the framing (§3.2) and everything above it are
+identical.
+
+**Transport selection.**  The helpers use vsock when the kernel command line
+contains `gondolin.vsock` or `gondolin.vsock=<value>` with a value other than
+`0`, `off`, `false` or `no` (case-insensitive; the last occurrence wins), and
+virtio-serial otherwise.  The init scripts parse the flag the same way: with
+vsock the initramfs does not wait for virtio-serial ports and the rootfs init
+loads `vmw_vsock_virtio_transport` before starting the helpers.  The host
+sets the flag for VMMs without virtio-serial (e.g. Firecracker).
+
+#### virtio-serial
 
 Ports are opened by name: `/dev/virtio-ports/<name>` if present, otherwise
 the `/dev/vport*` device whose `/sys/class/virtio-ports/<dev>/name` equals
@@ -99,6 +114,37 @@ Host connection state (Linux `virtio_console` semantics):
   after reconnect) and keeps all exec sessions running.  The TCP forwarders
   drop all streams and queued output on disconnect (the host side of those
   streams is gone).
+
+#### vsock
+
+Each channel is an `AF_VSOCK` stream socket connected to the host (CID 2) on a
+fixed port:
+
+| Channel          | vsock port |
+|------------------|------------|
+| `virtio-port`    | 1024       |
+| `virtio-fs`      | 1025       |
+| `virtio-ssh`     | 1026       |
+| `virtio-ingress` | 1027       |
+
+- Opening a channel connects to its port; a refused or unanswered connect
+  (no listener yet, transport module not loaded yet) is retried like a missing
+  virtio-serial port (every 100 ms; `sandboxfs`: 50 attempts).  A connect
+  waits at most 100 ms for the host to answer.  `sandboxfs`'s `--rpc-path`
+  only names the channel (its basename); there is no device node.
+- The host closing the connection shows up as EOF / `POLLHUP` as with
+  virtio-serial, but the socket never recovers.  Event-loop helpers therefore
+  reconnect with a new socket instead of probing the old one: at most every
+  100 ms while disconnected, replacing the channel's fd on success.  What
+  survives a reconnect is the same as for virtio-serial (`sandboxd` keeps its
+  queued output and sessions; the forwarders drop theirs).
+- `sandboxfs` reconnects after an RPC fails because the connection was closed
+  (EOF, `EPIPE`, `ECONNRESET`, ...); the failed request still returns `EIO`
+  and is not retried, since it may not be idempotent.
+- Helpers never half-close a channel (`shutdown(SHUT_WR)`): end of input is
+  always signalled in-band (e.g. `stdin` with `eof`).  Some vsock
+  implementations do not pass a half-close on to the host (Firecracker before
+  [firecracker#6349](https://github.com/firecracker-microvm/firecracker/pull/6349)).
 
 ### 3.2 Framing
 
@@ -778,6 +824,8 @@ the host).
 | `max_frame_len` | 4 MiB | all ports, both directions |
 | CBOR max depth / container allocation | 64 / 8 MiB | decoder |
 | Port open retry | 100 ms (sandboxfs: 50 attempts) | all |
+| vsock ports | 1024–1027 (§3.1) | all, with `gondolin.vsock` |
+| vsock connect timeout | 100 ms | all, with `gondolin.vsock` |
 | Reconnect probe interval | 100 ms | sandboxd, forwarders |
 | Port read size | 64 KiB per wakeup | event loops |
 | sandboxd outbox high-water | 1 MiB | §5.4 |
@@ -803,7 +851,7 @@ src/shared/cbor.zig          CBOR subset + comptime struct parse/encode
 src/shared/protocol.zig      message types/payload structs, envelope
 src/shared/framing.zig       FrameReader, Outbox, blocking frame I/O
 src/shared/channel.zig       non-blocking port + connection tracking
-src/shared/virtio_port.zig   port discovery
+src/shared/virtio_port.zig   port discovery, transport selection, vsock connect
 src/shared/request_path.zig  file request path resolution
 src/shared/fs_rpc.zig        sandboxfs RPC client
 src/shared/tcp_forwarder.zig sandboxssh/sandboxingress implementation

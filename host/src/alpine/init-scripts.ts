@@ -182,6 +182,8 @@ gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
 # static network configuration from the host, instead of DHCP:
 # "ADDRESS/PREFIX,GATEWAY,DNS[+DNS...]" (gondolin.net)
 gondolin_net=""
+# host channels over vsock instead of virtio-serial (gondolin.vsock)
+gondolin_vsock=0
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -200,6 +202,15 @@ if [ -r /proc/cmdline ]; then
         ;;
       gondolin.net=*)
         gondolin_net="\${arg#gondolin.net=}"
+        ;;
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
         ;;
     esac
   done
@@ -283,6 +294,12 @@ if modprobe virtio_console > /dev/null 2>&1; then
   log "[init] loaded virtio_console"
 fi
 setup_virtio_ports
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # the helpers connect to the host over vsock (see guest/ARCHITECTURE.md)
+  if modprobe vmw_vsock_virtio_transport > /dev/null 2>&1; then
+    log "[init] loaded vmw_vsock_virtio_transport"
+  fi
+fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
@@ -552,6 +569,10 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 root_device="/dev/vda"
 root_fstype="ext4"
+gondolin_vsock=0
+# the root disk is a read-only base whose writes go to a tmpfs overlay
+# (gondolin.overlay; the host attaches the disk read-only and nothing is copied)
+gondolin_overlay=0
 
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
@@ -561,6 +582,18 @@ if [ -r /proc/cmdline ]; then
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
+        ;;
+      gondolin.overlay)
+        gondolin_overlay=1
+        ;;
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
         ;;
     esac
   done
@@ -573,7 +606,10 @@ modprobe virtio_rng > /dev/null 2>&1 || true
 modprobe virtio_net > /dev/null 2>&1 || true
 modprobe fuse > /dev/null 2>&1 || true
 
-if ! wait_for_virtio_ports; then
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # host channels use vsock; there are no virtio-serial ports to wait for
+  :
+elif ! wait_for_virtio_ports; then
   log "[initramfs] virtio ports not ready"
 fi
 
@@ -597,10 +633,34 @@ if ! wait_for_block "\${root_device}"; then
   exec sh
 fi
 
+# overlay root: the read-only disk under a tmpfs that takes the writes (and
+# goes with the VM)
+mount_overlay_root() {
+  modprobe overlay > /dev/null 2>&1 || true
+  mkdir -p /lower /overlay
+  mount -t "\${root_fstype}" -o ro "\${root_device}" /lower || return 1
+  if mount -t tmpfs -o mode=0755 tmpfs /overlay \
+    && mkdir -p /overlay/upper /overlay/work \
+    && mount -t overlay overlay \
+      -o lowerdir=/lower,upperdir=/overlay/upper,workdir=/overlay/work /newroot; then
+    return 0
+  fi
+  umount /overlay > /dev/null 2>&1 || true
+  umount /lower > /dev/null 2>&1 || true
+  return 1
+}
+
 mkdir -p /newroot
-if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
-  log "[initramfs] failed to mount \${root_device}"
-  exec sh
+if [ "\${gondolin_overlay}" = 1 ] && mount_overlay_root; then
+  :
+else
+  if [ "\${gondolin_overlay}" = 1 ]; then
+    log "[initramfs] overlay root failed, mounting \${root_device} directly"
+  fi
+  if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
+    log "[initramfs] failed to mount \${root_device}"
+    exec sh
+  fi
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run

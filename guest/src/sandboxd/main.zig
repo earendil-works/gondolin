@@ -47,7 +47,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     log.info("starting", .{});
     const fd = try shared.virtio_port.open("virtio-port", .nonblocking);
-    defer sys.close(fd);
     log.info("opened virtio port", .{});
 
     // SIGCHLD is consumed through a signalfd; the original mask is restored
@@ -58,13 +57,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var daemon: Daemon = .{
         .gpa = gpa,
-        .channel = .init(gpa, fd),
+        .channel = .initPort(gpa, fd, "virtio-port"),
         .sigchld_fd = sigchld_fd,
         .spawn_ctx = .{ .environ = init.environ.block.slice.ptr, .sigmask = sigmask },
         .transfers = .init(gpa, "/"),
         .arena = .init(gpa),
     };
     defer daemon.deinit();
+    // the channel may replace its fd when it reconnects (vsock)
+    defer sys.close(daemon.channel.fd);
 
     daemon.sendVfsStatus();
     try daemon.run();

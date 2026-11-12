@@ -191,9 +191,20 @@ export function computeAssetBuildId(input: AssetBuildIdInput): string {
 /**
  * Manifest describing the built assets.
  */
+/**
+ * What images built by this version support, recorded as
+ * `manifest.features`: `vsock`, the guest helpers reach the host over vsock
+ * with `gondolin.vsock` (needed by `vmm: "firecracker"`, which has no
+ * virtio-serial device)
+ */
+export const GUEST_IMAGE_FEATURES = ["vsock"] as const;
+
 export interface AssetManifest {
   /** manifest schema version */
   version: 1;
+
+  /** guest capabilities of the image (see `GUEST_IMAGE_FEATURES`; absent on older images) */
+  features?: string[];
 
   /** deterministic content-derived build identifier (uuid) */
   buildId?: string;

@@ -285,10 +285,12 @@ pub fn main(port_name: []const u8) !void {
 
     log.info("starting on {s}", .{port_name});
     const fd = try virtio_port.open(port_name, .nonblocking);
-    defer sys.close(fd);
 
     var forwarder: Forwarder = .init(gpa, fd);
+    forwarder.channel.name = port_name;
     defer forwarder.deinit();
+    // the channel may replace its fd when it reconnects (vsock)
+    defer sys.close(forwarder.channel.fd);
     try forwarder.run();
 }
 

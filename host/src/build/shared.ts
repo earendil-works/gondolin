@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
 
 import {
+  GUEST_IMAGE_FEATURES,
   MANIFEST_FILENAME,
   computeAssetBuildId,
   type AssetManifest,
@@ -535,6 +536,7 @@ export function writeAssetManifest(
     buildId: computeAssetBuildId({ checksums, arch: config.arch }),
     config,
     buildTime: new Date().toISOString(),
+    features: [...GUEST_IMAGE_FEATURES],
     assets,
     checksums,
   };

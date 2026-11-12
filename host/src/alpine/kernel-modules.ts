@@ -6,6 +6,9 @@ import type { KernelModuleSyncOptions } from "./types.ts";
 
 const MODULE_FILE_SUFFIXES = [".ko", ".ko.gz", ".ko.xz", ".ko.zst"] as const;
 const REQUIRED_INITRAMFS_MODULES = ["virtio_blk", "ext4"] as const;
+// copied when the kernel has them as modules; overlay: the root disk under a
+// tmpfs overlay (`gondolin.overlay`, the guest mounts the disk directly without)
+const OPTIONAL_INITRAMFS_MODULES = ["overlay"] as const;
 
 export function syncKernelModules(
   rootfsDir: string,
@@ -93,6 +96,10 @@ function copyInitramfsModules(srcDir: string, dstDir: string): void {
         `Required kernel module "${moduleName}" was not found in ${srcDir}`,
       );
     }
+  }
+  for (const moduleName of OPTIONAL_INITRAMFS_MODULES) {
+    const resolvedPath = modulePathByName.get(normalizeModuleName(moduleName));
+    if (resolvedPath) stack.push(resolvedPath);
   }
 
   // Resolve transitive dependencies from modules.dep
