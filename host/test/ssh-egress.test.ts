@@ -60,14 +60,31 @@ type Upstream = {
   close(): Promise<void>;
 };
 
+/**
+ * An ed25519 key pair from ssh2. ssh2 drops a leading zero byte of the
+ * public key (1 in 256 keys), which leaves an OpenSSH key it cannot parse
+ * itself ("Malformed OpenSSH private key"), so draw again in that case.
+ */
+function ed25519KeyPair(): { private: string; public: string } {
+  for (;;) {
+    const keys = ssh2.utils.generateKeyPairSync("ed25519");
+    if (
+      !(ssh2.utils.parseKey(keys.private) instanceof Error) &&
+      !(ssh2.utils.parseKey(keys.public) instanceof Error)
+    ) {
+      return keys;
+    }
+  }
+}
+
 let upstreamPromise: Promise<Upstream | null> | null = null;
 
 function upstream(): Promise<Upstream | null> {
   upstreamPromise ??= (async () => {
     const host = await loopbackHostname();
     if (!host) return null;
-    const hostKey = ssh2.utils.generateKeyPairSync("ed25519");
-    const clientKey = ssh2.utils.generateKeyPairSync("ed25519");
+    const hostKey = ed25519KeyPair();
+    const clientKey = ed25519KeyPair();
     const allowedClient = ssh2.utils.parseKey(clientKey.public);
     if (allowedClient instanceof Error) throw allowedClient;
     const execs: string[] = [];
