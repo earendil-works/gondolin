@@ -75,6 +75,8 @@ pub enum Event {
     ImageResolved { id: u64, result: Box<Result<(Configure, Value), String>> },
     /// a guest channel reported an error
     PortError { port: &'static str, message: String },
+    /// the network session of VMM `generation` (Firecracker's tap) failed
+    NetdevFailed { generation: u64, error: String },
 }
 
 /// Timers, tagged so stale ones can be ignored.
@@ -134,6 +136,14 @@ struct Runtime {
     /// with the tap, once dropped and the VMM has exited)
     #[cfg(target_os = "linux")]
     tap: Option<crate::tap::TapNet>,
+    /// Firecracker: the packet socket on the tap, kept across VMM restarts
+    #[cfg(target_os = "linux")]
+    frames: Option<Arc<crate::tap::PacketSocket>>,
+    /// Firecracker: the network session of the current VMM generation; each
+    /// start replaces it ([`Session::restart_frames`]), like a new netdev
+    /// connection on QEMU and krun
+    #[cfg(target_os = "linux")]
+    frames_task: Option<AbortOnDrop>,
     /// Firecracker: how its VMMs are jailed (none: run as the daemon's user)
     jailer: Option<crate::jailer::JailerSettings>,
     dir: SocketDir,
@@ -485,6 +495,7 @@ impl Session {
                 self.schedule_idle_pause();
             }
             Event::PortError { port, message } => self.port_error(port, message),
+            Event::NetdevFailed { generation, error } => self.netdev_failed(generation, error),
             Event::ImageResolved { id, result } => self.configure_resolved(id, *result),
         }
     }
@@ -824,6 +835,8 @@ impl Session {
         }
         #[cfg(target_os = "linux")]
         let mut tap = None;
+        #[cfg(target_os = "linux")]
+        let mut frames = None;
         let (netdev_path, netdev_task) = match &self.net {
             #[cfg(target_os = "linux")]
             NetSetup::Native(backend) if firecracker => {
@@ -835,12 +848,11 @@ impl Session {
                 let mut created =
                     crate::tap::TapNet::create(&name, owner).map_err(|e| e.to_string())?;
                 let socket = created.take_socket().map_err(|e| format!("tap {name}: {e}"))?;
-                let backend = backend.clone();
-                let task =
-                    tokio::spawn(async move { backend.serve_frames(Arc::new(socket)).await });
+                let _ = backend;
+                frames = Some(Arc::new(socket));
                 tap = Some(created);
                 crate::timing::mark("tap ready");
-                (None, Some(task))
+                (None, None)
             }
             NetSetup::Native(backend) => {
                 let p = path("net.sock");
@@ -874,6 +886,10 @@ impl Session {
             fs_handler,
             #[cfg(target_os = "linux")]
             tap,
+            #[cfg(target_os = "linux")]
+            frames,
+            #[cfg(target_os = "linux")]
+            frames_task: None,
             jailer,
             dir,
         });
@@ -1003,6 +1019,8 @@ impl Session {
             if let Some(task) = rt.netdev_task.take() {
                 task.abort();
             }
+            #[cfg(target_os = "linux")]
+            drop(rt.frames_task.take());
         }
     }
 
@@ -1366,6 +1384,8 @@ impl Session {
         self.vm.restart_pending = false;
         self.vm.generation += 1;
         let generation = self.vm.generation;
+        #[cfg(target_os = "linux")]
+        self.restart_frames(generation);
         let cfg = self.configured.as_ref().unwrap();
         let rt = self.runtime.as_ref().unwrap();
         let net_socket = match &self.net {
@@ -1537,6 +1557,39 @@ impl Session {
         child.stop(false);
         self.vm.stop_waiters.entry(self.vm.generation).or_default();
         true
+    }
+
+    /// Starts the network session for VMM `generation` on the tap's packet
+    /// socket (Firecracker), replacing the previous generation's: a restarted
+    /// guest must not inherit the dead one's TCP flows (and their upstream
+    /// connections), DHCP and ARP state or queued frames.
+    #[cfg(target_os = "linux")]
+    fn restart_frames(&mut self, generation: u64) {
+        let NetSetup::Native(backend) = &self.net else { return };
+        let Some(rt) = self.runtime.as_mut() else { return };
+        let Some(socket) = rt.frames.clone() else { return };
+        drop(rt.frames_task.take());
+        let backend = backend.clone();
+        let events = self.events.clone();
+        rt.frames_task = Some(AbortOnDrop(tokio::spawn(async move {
+            if let Err(error) = backend.serve_frames(socket).await {
+                let _ = events.send(Event::NetdevFailed { generation, error });
+            }
+        })));
+    }
+
+    /// The network session of `generation` failed: the guest has no network
+    /// from now on, so stop its VM and say why (no automatic restart).
+    fn netdev_failed(&mut self, generation: u64, error: String) {
+        let message = format!("the guest network stopped: {error}");
+        gondolin_log::warn!("{message}");
+        if generation != self.vm.generation {
+            return;
+        }
+        let Some(child) = self.vm.child.as_mut() else { return };
+        self.vm.exit_reason = Some(message);
+        self.vm.manual_stop = true;
+        child.stop(true);
     }
 
     /// The guest of `generation` never sent a control message: stop the VM

@@ -384,15 +384,14 @@ impl NetBackend for Net {
     fn serve_frames<'a>(
         &'a self,
         socket: Arc<dyn gondolin_netstack::FrameSocket>,
-    ) -> crate::BoxFuture<'a, ()> {
+    ) -> crate::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             match crate::panics::CatchUnwind::new(self.stack.serve_frames(socket)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    gondolin_log::warn!(target: "gondolin::net", "tap netdev failed: {err}");
-                }
+                Ok(result) => result.map_err(|err| err.to_string()),
                 Err(panic) => {
-                    crate::panics::fail_closed(&format!("network stack panicked: {panic}"))
+                    // the daemon is exiting: nothing left to report here
+                    crate::panics::fail_closed(&format!("network stack panicked: {panic}"));
+                    Ok(())
                 }
             }
         })
