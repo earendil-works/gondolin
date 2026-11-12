@@ -68,7 +68,9 @@ gondolin_wire::wire_struct! {
         pub krun_runner_path: Option<String>,
         /// `firecracker` binary (vmm `firecracker`; absent: `firecracker` in `PATH`)
         pub firecracker_path: Option<String>,
-        /// run the VM as an AWS Nitro Sandbox (vmm `firecracker`; currently required)
+        /// AWS Nitro Sandbox settings (vmm `firecracker`; absent: the daemon
+        /// picks a Nitro Sandbox when the host supports them, else KVM; mode
+        /// `off` asks for KVM)
         pub nitro: Option<NitroConfig>,
         /// qemu binary (path or name looked up in `PATH`; empty: by guest arch)
         pub qemu_path: String = Default::default(),

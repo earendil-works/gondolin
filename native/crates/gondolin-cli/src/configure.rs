@@ -329,8 +329,8 @@ pub fn prepare_with_image(
         vmm: Some(vmm.clone()),
         krun_runner_path: krun.then(|| detected_runner.unwrap_or_else(krun_runner_path)),
         firecracker_path: if firecracker { env_opt("GONDOLIN_FIRECRACKER") } else { None },
-        // a Nitro Sandbox when either setting is given, else the daemon picks
-        // (KVM when usable)
+        // a Nitro Sandbox when either setting is given (mode `off`: KVM),
+        // else the daemon picks (a Nitro Sandbox when the host supports them)
         nitro: (firecracker
             && (env_opt("GONDOLIN_NITRO_MODE").is_some()
                 || env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT").is_some()))
