@@ -525,7 +525,7 @@ pub fn boot_log_wanted(vm: &VmConfig, protocol_debug: bool) -> bool {
 /// or `append` already sets the log level (`quiet`, `debug`, `loglevel=`).
 /// The kernel writes its boot log to the console inline whether or not anyone
 /// reads it, which costs ~0.9 s per boot on an emulated UART (QEMU's `ttyS0`
-/// and `ttyAMA0`); errors and panics still get through
+/// and `ttyAMA0`, Firecracker's `ttyS0`); errors and panics still get through
 /// under `quiet`, and the guest's init stays quiet too. krun is left alone:
 /// its virtio console is cheap (~14 ms per boot).
 pub fn quiet_boot(append: String, vm: &VmConfig, protocol_debug: bool) -> String {
@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn boots_quiet_unless_the_boot_log_is_wanted() {
         let a = || "console=ttyS0 initramfs_async=1".to_string();
-        for vmm in [None, Some("qemu")] {
+        for vmm in [None, Some("qemu"), Some("firecracker")] {
             let mut vm = vm();
             vm.vmm = vmm.map(String::from);
             vm.console = None;

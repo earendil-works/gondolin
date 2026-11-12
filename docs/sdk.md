@@ -95,7 +95,7 @@ when the daemon runs on a [remote machine](./remote.md).
 | `memory` | `string` | `"1G"` | Same as `VMOptions.memory` |
 | `cpus` | `number` | `2` | Same as `VMOptions.cpus` |
 | `append` | `string` | — | Extra kernel command line |
-| `console` | `"stdio" \| "none"` | console forwarded, boot log quiet (QEMU) | Guest console output; `"none"` discards it, `"stdio"` also keeps the full boot log (see [Boot log](./debug.md#boot-log)) |
+| `console` | `"stdio" \| "none"` | console forwarded, boot log quiet (QEMU, Firecracker) | Guest console output; `"none"` discards it, `"stdio"` also keeps the full boot log (see [Boot log](./debug.md#boot-log)) |
 | `autoRestart` | `boolean` | `false` | Restart the VM when it exits unexpectedly |
 | `tmpfs` | `GuestTmpfsMounts` | built-in set | Same as `VMOptions.tmpfs` |
 | `rootDiskPath` | `string` | throwaway overlay | Use this disk image as `/dev/vda`; overrides `rootfs.mode` (*local*) ([Persistence and Snapshots](./snapshots.md)) |

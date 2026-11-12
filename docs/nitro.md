@@ -210,5 +210,5 @@ Firecracker. Smaller sandboxes (`sandbox.memory`) start and stop faster:
 - The Nitro debug console (the guest's serial output, shown with
   `GONDOLIN_DEBUG=protocol`) is off unless `sandbox.console` is `"stdio"` or
   protocol debugging is on (in confidential mode it disables attestation).
-  Without it the kernel command line also gets `quiet` (unless it already sets
-  a log level): the boot log to the emulated UART costs about 0.45 s per boot.
+  The guest boots `quiet` in that case, as on QEMU (see
+  [Boot log](./debug.md#boot-log)).
