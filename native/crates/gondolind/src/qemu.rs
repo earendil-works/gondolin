@@ -502,6 +502,30 @@ pub fn base_append(vm: &VmConfig, host: &HostInfo) -> String {
         .join(" ")
 }
 
+/// Whether someone reads the guest's boot log: the console is explicitly
+/// `stdio`, or protocol debugging (which forwards it) is on.
+pub fn boot_log_wanted(vm: &VmConfig, protocol_debug: bool) -> bool {
+    vm.console.as_deref() == Some("stdio") || protocol_debug
+}
+
+/// `append` plus `quiet` unless the boot log is wanted ([`boot_log_wanted`])
+/// or `append` already sets the log level (`quiet`, `debug`, `loglevel=`).
+/// The kernel writes its boot log to the console inline whether or not anyone
+/// reads it, which costs ~0.9 s per boot on an emulated UART (QEMU's `ttyS0`
+/// and `ttyAMA0`); errors and panics still get through
+/// under `quiet`, and the guest's init stays quiet too. krun is left alone:
+/// its virtio console is cheap (~14 ms per boot).
+pub fn quiet_boot(append: String, vm: &VmConfig, protocol_debug: bool) -> String {
+    let sets_level = append
+        .split_whitespace()
+        .any(|a| a == "quiet" || a == "debug" || a.starts_with("loglevel="));
+    if is_krun(vm) || boot_log_wanted(vm, protocol_debug) || sets_level {
+        append
+    } else {
+        format!("{append} quiet")
+    }
+}
+
 /// Bounded tail of QEMU's stderr lines used to enrich exit errors. stdout is
 /// never used for hints because it may carry untrusted guest console output.
 #[derive(Debug, Default)]
@@ -971,6 +995,34 @@ mod tests {
         );
         vm.append = Some("  console=hvc0 ".into());
         assert_eq!(base_append(&vm, &mac_arm()), "console=hvc0 gondolin.tmpfs=none");
+    }
+
+    #[test]
+    fn boots_quiet_unless_the_boot_log_is_wanted() {
+        let a = || "console=ttyS0 initramfs_async=1".to_string();
+        for vmm in [None, Some("qemu")] {
+            let mut vm = vm();
+            vm.vmm = vmm.map(String::from);
+            vm.console = None;
+            assert_eq!(quiet_boot(a(), &vm, false), format!("{} quiet", a()), "{vmm:?}");
+            // protocol debugging and an explicit stdio console show the log
+            assert_eq!(quiet_boot(a(), &vm, true), a());
+            vm.console = Some("stdio".into());
+            assert_eq!(quiet_boot(a(), &vm, false), a());
+            // `none` discards it anyway
+            vm.console = Some("none".into());
+            assert!(quiet_boot(a(), &vm, false).ends_with(" quiet"));
+            // a command line that sets the log level itself is left alone
+            for level in ["quiet", "debug", "loglevel=7"] {
+                let own = format!("console=ttyS0 {level}");
+                assert_eq!(quiet_boot(own.clone(), &vm, false), own);
+            }
+        }
+        // krun's virtio console is cheap: its boot log stays
+        let mut vm = vm();
+        vm.vmm = Some("krun".into());
+        vm.console = None;
+        assert_eq!(quiet_boot(a(), &vm, false), a());
     }
 
     #[test]
