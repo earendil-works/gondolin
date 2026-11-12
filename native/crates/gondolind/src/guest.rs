@@ -207,6 +207,8 @@ async fn serve_connection(stream: UnixStream, outbox: Arc<Outbox>, handler: Arc<
         loop {
             match read_guest_frame(&mut read).await {
                 Ok(Some(frame)) => {
+                    // one frame at a time: the fs channel relies on requests
+                    // being handled in order (see `FsPortHandler`)
                     // a panicking handler costs this connection, not the daemon
                     match crate::panics::CatchUnwind::new(handler.frame(frame)).await {
                         Ok(Ok(())) => {}

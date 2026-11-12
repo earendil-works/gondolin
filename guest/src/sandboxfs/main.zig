@@ -206,6 +206,10 @@ const Fs = struct {
     rpc_data: u32 = legacy_rpc_data,
     /// the host serves `readdirplus` (READDIRPLUS is negotiated at INIT)
     host_readdirplus: bool = false,
+    /// the host serves `flush` and `fsync`: FLUSH (sent only for handles the
+    /// host opened without FOPEN_NOFLUSH) and FSYNC go to it, so commit
+    /// errors reach `close()`/`fsync()`; older hosts get both answered here
+    host_flush: bool = false,
     /// `/sys/class/bdi/<dev>/read_ahead_kb` of the mount, tuned once the
     /// kernel has processed INIT (which resets it)
     readahead_path: ?[:0]const u8 = null,
@@ -372,7 +376,19 @@ const Fs = struct {
                 try rpc.sendUnanswered("release", .{ .fh = release.fh });
                 break :blk empty;
             },
-            .releasedir, .fsync, .fsyncdir, .flush, .destroy => empty,
+            .flush => blk: {
+                if (!self.host_flush) break :blk empty;
+                const flush, _ = try fuse.parse(fuse.FlushIn, payload);
+                _ = try self.call("flush", .{ .fh = flush.fh });
+                break :blk empty;
+            },
+            .fsync => blk: {
+                if (!self.host_flush) break :blk empty;
+                const fsync, _ = try fuse.parse(fuse.FsyncIn, payload);
+                _ = try self.call("fsync", .{ .fh = fsync.fh });
+                break :blk empty;
+            },
+            .releasedir, .fsyncdir, .destroy => empty,
             .access => blk: {
                 const access, _ = try fuse.parse(fuse.AccessIn, payload);
                 _ = try self.call("access", .{ .ino = h.nodeid, .mask = access.mask, .uid = h.uid, .gid = h.gid });
@@ -635,6 +651,7 @@ const Fs = struct {
             self.rpc_data = std.math.clamp(host_max, legacy_rpc_data, max_rpc_data);
         }
         if (res.get("readdirplus")) |v| self.host_readdirplus = v == .bool and v.bool;
+        if (res.get("flush")) |v| self.host_flush = v == .bool and v.bool;
         const path = binds_path orelse return;
         const binds = switch (res.get("binds") orelse return error.InvalidResponse) {
             .array => |a| a,

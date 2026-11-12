@@ -41,6 +41,12 @@ pub trait FileHandle: Send + Sync {
     fn flush<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
         Box::pin(async move { Ok(()) })
     }
+    /// Whether [`flush`](Self::flush) does anything: handles that don't are
+    /// opened with `FOPEN_NOFLUSH` over sandboxfs, so `close()` costs no
+    /// round trip to the host.
+    fn wants_flush(&self) -> bool {
+        false
+    }
     /// Releases the handle; commit failures of buffering providers surface here.
     fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>>;
 }

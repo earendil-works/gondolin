@@ -126,10 +126,6 @@ through sandboxfs (FUSE over virtio-serial) unless you build QEMU yourself; see
 [QEMU Backend](./qemu.md#virtio-fs-and-vhost-user). The default `krun`
 backend on Apple silicon is not affected.
 
-With sandboxfs, an error of a provider's `close`-time write (for example an
-object mount with `commit: "close"`) cannot be reported to the guest's
-`close()` or `fsync()`; see [Files and Mounts](./vfs.md).
-
 ## Remote Daemons Have Restrictions
 
 A [daemon on another machine](./remote.md) cannot see your files, so some

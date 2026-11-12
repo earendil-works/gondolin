@@ -317,6 +317,10 @@ impl FileHandle for HookedHandle {
         Box::pin(async move { self.inner.flush().await })
     }
 
+    fn wants_flush(&self) -> bool {
+        self.inner.wants_flush()
+    }
+
     fn close<'a>(&'a self) -> BoxFuture<'a, VfsResult<()>> {
         Box::pin(async move {
             let c = ctx("release", &self.path);

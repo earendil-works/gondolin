@@ -160,6 +160,19 @@ pub fn direntplus_size(name_len: usize) -> usize {
     (128 + 24 + name_len).next_multiple_of(8)
 }
 
+/// FUSE `FOPEN_NOFLUSH`: the kernel sends no FLUSH when a descriptor of the
+/// handle is closed (Linux 5.19+; older kernels send it and get an answer).
+const FOPEN_NOFLUSH: u64 = 1 << 5;
+
+/// `open_flags` of a new handle: FOPEN_NOFLUSH unless its flush commits
+/// something (sandboxfs then forwards FLUSH, see `flush`).
+fn open_flags(core: &FsCore, fh: u64) -> u64 {
+    match core.file_handle(fh) {
+        Ok(handle) if handle.wants_flush() => 0,
+        _ => FOPEN_NOFLUSH,
+    }
+}
+
 fn statfs_value(s: StatFs) -> Value {
     map(vec![
         ("blocks", int(s.blocks)),
@@ -327,7 +340,7 @@ impl RpcSession {
             }
             "open" => {
                 let fh = core.open(u("ino")?, u("flags")?).await?;
-                map(vec![("fh", int(fh)), ("open_flags", int(0))])
+                map(vec![("fh", int(fh)), ("open_flags", int(open_flags(core, fh)))])
             }
             "read" => {
                 let size = ud("size", 0)? as usize;
@@ -356,7 +369,7 @@ impl RpcSession {
                 map(vec![
                     ("entry", entry_value(e.ino, &e.attr)),
                     ("fh", int(fh)),
-                    ("open_flags", int(0)),
+                    ("open_flags", int(open_flags(core, fh))),
                 ])
             }
             "mkdir" => {
@@ -425,6 +438,17 @@ impl RpcSession {
             }
             "release" => {
                 core.release(u("fh")?).await?;
+                map(vec![])
+            }
+            // `close()` of a descriptor: buffering providers commit here and
+            // the error reaches the guest program (only for handles opened
+            // without FOPEN_NOFLUSH)
+            "flush" => {
+                core.flush(u("fh")?).await?;
+                map(vec![])
+            }
+            "fsync" => {
+                core.fsync(u("fh")?).await?;
                 map(vec![])
             }
             "statfs" => map(vec![("statfs", statfs_value(core.statfs(u("ino")?).await?))]),
