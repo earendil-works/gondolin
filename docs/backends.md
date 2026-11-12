@@ -4,9 +4,10 @@ Gondolin supports three VM backends:
 
 - `krun` (default where it can run; uses `libkrun` via the `gondolin-krun-runner` helper)
 - `qemu` (the fallback everywhere else, broader feature support and tuning knobs)
-- `firecracker` (Firecracker microVMs on Linux KVM, or AWS Nitro Sandboxes on
-  EC2; never selected automatically, see [firecracker](#firecracker) and
-  [AWS Nitro Sandboxes](./nitro.md))
+- `firecracker` (never selected automatically): each VM runs in Firecracker,
+  as an AWS Nitro Sandbox when the host supports them, otherwise as a microVM
+  on Linux KVM; see [firecracker](#firecracker) and
+  [AWS Nitro Sandboxes](./nitro.md)
 
 All backends are started and driven by the Gondolin daemon (`gondolind`; see
 [Architecture](./architecture.md)): the VMM process is a child of the daemon,
@@ -116,17 +117,19 @@ from its `PATH`.
 
 ### firecracker
 
-- Linux daemon host only, with Firecracker 1.18 or newer and one of:
-    - KVM: read-write access to `/dev/kvm` (bare metal, or a VM with nested
-      virtualization such as EC2 `m8i`/`c8i`/`r8i` instances)
-    - AWS Nitro Sandboxes: an x86_64 or Graviton EC2 instance with Nitro
-      Enclaves enabled; setup in [AWS Nitro Sandboxes](./nitro.md)
-- Where the VM runs: by default a Nitro Sandbox (direct mode) when the host
-  is set up for them (`/dev/nitro_enclaves` and a reserved memory pool), else
-  a KVM microVM. `sandbox.nitro` (or `GONDOLIN_NITRO_MODE` /
-  `GONDOLIN_NITRO_CPU_OVERCOMMIT`) asks for a Nitro Sandbox with those
-  settings, `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) for a KVM
-  microVM
+- Where the VM runs:
+    - as an AWS Nitro Sandbox (direct mode) when the host is set up for them:
+      an x86_64 or Graviton EC2 instance with Nitro Enclaves enabled and a
+      reserved memory pool (`/dev/nitro_enclaves`; setup in
+      [AWS Nitro Sandboxes](./nitro.md)). The VM runs beside the instance on
+      AWS's hypervisor, so no nested virtualization is needed
+    - otherwise as a microVM on Linux KVM: read-write access to `/dev/kvm`
+      (bare metal, or a VM with nested virtualization such as EC2
+      `m8i`/`c8i`/`r8i` instances)
+    - `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) asks for KVM;
+      `sandbox.nitro` (or `GONDOLIN_NITRO_MODE` /
+      `GONDOLIN_NITRO_CPU_OVERCOMMIT`) configures the Nitro Sandbox
+- Linux daemon host only, with Firecracker 1.18 or newer
 - Boots the image's regular kernel and initramfs; the kernel needs
   virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
   `linux-virt` qualifies). On KVM Firecracker only boots an uncompressed kernel,
