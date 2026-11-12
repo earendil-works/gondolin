@@ -58,8 +58,8 @@ impl Blowfish {
     /// `Blowfish_expandstate` (with `data`) / `Blowfish_expand0state` (without).
     fn expand(&mut self, data: Option<&[u8]>, key: &[u8]) {
         let mut j = 0;
-        for i in 0..18 {
-            self.p[i] ^= stream_word(key, &mut j);
+        for p in &mut self.p {
+            *p ^= stream_word(key, &mut j);
         }
         let mut j = 0;
         let (mut l, mut r) = (0u32, 0u32);
