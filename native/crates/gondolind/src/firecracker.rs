@@ -440,6 +440,28 @@ pub fn wants_console(vm: &VmConfig, protocol_debug: bool) -> bool {
     vm.console.as_deref() == Some("stdio") || protocol_debug
 }
 
+/// Why a guest that never connected (within `secs`) most likely failed. In
+/// confidential mode that is a guest kernel without the DMB virtio patches:
+/// its disk I/O never completes, so the boot stalls before the helpers start.
+pub fn guest_deadline_message(
+    nitro: Option<&gondolin_proto::session::NitroConfig>,
+    secs: u64,
+) -> String {
+    if nitro.is_some_and(|n| n.mode == "confidential") {
+        format!(
+            "the guest did not connect within {secs} s; Nitro confidential mode needs a guest \
+             kernel with the DMB virtio patches (Gondolin's images use Alpine's linux-virt, which \
+             lacks them, and stall at the first disk access); use mode direct or an image with \
+             such a kernel (docs/nitro.md#modes)"
+        )
+    } else {
+        format!(
+            "the guest did not connect within {secs} s; images for vmm=firecracker need the guest \
+             helpers' vsock transport (built with this version of Gondolin)"
+        )
+    }
+}
+
 /// The Firecracker configuration file for `vm` (after `rootdisk::prepare_raw`).
 pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
     validate(vm)?;
@@ -784,6 +806,17 @@ mod tests {
         assert_eq!(
             chosen["boot-source"]["boot_args"].as_str(),
             Some("console=ttyS0 loglevel=7 gondolin.vsock")
+        );
+    }
+
+    #[test]
+    fn a_guest_that_never_connects_gets_a_mode_specific_reason() {
+        let mode = |m: &str| NitroConfig { mode: m.into(), cpu_overcommit: true };
+        assert!(guest_deadline_message(None, 30).contains("vsock transport"));
+        assert!(guest_deadline_message(Some(&mode("direct")), 30).contains("vsock transport"));
+        let confidential = guest_deadline_message(Some(&mode("confidential")), 30);
+        assert!(
+            confidential.contains("within 30 s") && confidential.contains("DMB virtio patches")
         );
     }
 

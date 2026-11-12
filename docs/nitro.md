@@ -155,11 +155,16 @@ an error.
 - `direct` (default): the parent instance can read the VM's memory, as with a
   nested VM. Works with an unpatched guest kernel.
 - `confidential`: the Nitro System keeps the VM's memory out of the parent's
-  reach. Needs a guest kernel with the DMB virtio patches (the Amazon Linux
-  2023 6.18 kernels and Firecracker's CI kernels have them; Alpine's does not),
-  and has no entropy device. Attesting what the VM runs (`/dev/nsm`) also needs
-  the kernel's NSM driver (`CONFIG_NSM=y`) and an image whose measurements you
-  know.
+  reach. Needs a guest kernel with the DMB virtio patches, and has no entropy
+  device. Gondolin's images use Alpine's `linux-virt` kernel, which lacks the
+  patches: the guest stalls at its first disk access and the VM is stopped
+  after 30 s with an error saying so. With an Amazon Linux 2023 6.18 kernel
+  (and its modules) in an otherwise standard image, the backend's test suite
+  passes in confidential mode, and a boot takes ~0.15 s longer than in
+  `direct` mode. Attesting what the VM runs (`/dev/nsm`, present only in this
+  mode) needs the kernel's NSM driver (`nsm`, a module on Amazon Linux) and an
+  image whose measurements you know; Gondolin does not load the driver or
+  attest anything itself.
 
 `sandbox.nitro.cpuOvercommit` (`GONDOLIN_NITRO_CPU_OVERCOMMIT`, default `true`)
 time-shares the VM's vCPUs over the parent's CPUs. With `false`, each vCPU
