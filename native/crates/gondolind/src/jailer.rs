@@ -346,8 +346,36 @@ fn process_alive(pid: u32) -> bool {
     exists || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Never follows a symlink: some of these paths sit in directories the jail's
+/// user can write to.
 pub fn chown(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
-    std::os::unix::fs::chown(path, Some(uid), Some(gid))
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+}
+
+/// Hands the guest channel listener at `path` to the jail's user with
+/// `chown`, if it is still the socket the daemon created: the jail's user
+/// owns its directory, so a compromised VMM can have replaced it with a
+/// symlink or a hard link to a host file, which a root daemon must not hand
+/// over. `Ok(false)`: there is no listener at `path` (the channel is off).
+pub fn hand_over_listener(
+    path: &Path,
+    chown: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> Result<bool, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if !meta.file_type().is_socket() || meta.nlink() != 1 {
+        return Err(format!(
+            "{} is no longer the daemon's guest channel socket (it may have been replaced \
+             by the VMM); refusing to hand it to the jail",
+            path.display()
+        ));
+    }
+    chown(path).map_err(|e| format!("cannot hand {} to the jail: {e}", path.display()))?;
+    Ok(true)
 }
 
 /// Whether the jail's uid (neither the owner nor in the group of `path`) can
@@ -362,6 +390,64 @@ pub fn others_may(path: &Path, write: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_daemons_own_listener_sockets_are_handed_over() {
+        use std::cell::RefCell;
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("gondolin-handover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host_file = dir.join("host-secret");
+        std::fs::write(&host_file, "x").unwrap();
+
+        let chowned = RefCell::new(Vec::new());
+        let record = |p: &Path| {
+            chowned.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        };
+
+        // the daemon's listener: handed over
+        let control = dir.join("vsock.sock_1024");
+        let _listener = UnixListener::bind(&control).unwrap();
+        assert_eq!(hand_over_listener(&control, &record), Ok(true));
+        // a channel that is off: nothing to do
+        assert_eq!(hand_over_listener(&dir.join("vsock.sock_1027"), &record), Ok(false));
+
+        // a listener the VMM replaced with a symlink to a host file
+        let fs = dir.join("vsock.sock_1025");
+        std::os::unix::fs::symlink(&host_file, &fs).unwrap();
+        assert!(hand_over_listener(&fs, &record).unwrap_err().contains("refusing"));
+        // a symlink to a socket (only the link would be checked)
+        let ssh = dir.join("vsock.sock_1026");
+        std::os::unix::fs::symlink(&control, &ssh).unwrap();
+        assert!(hand_over_listener(&ssh, &record).is_err());
+        // a second hard link to the daemon's socket: chown would reach the
+        // inode through either name
+        std::fs::remove_file(&ssh).unwrap();
+        std::fs::hard_link(&control, &ssh).unwrap();
+        assert!(hand_over_listener(&ssh, &record).is_err());
+        assert!(hand_over_listener(&control, &record).is_err());
+
+        assert_eq!(*chowned.borrow(), vec![control.clone()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn chown_does_not_follow_symlinks() {
+        // lchown on a symlink changes the link only; as an unprivileged user,
+        // to our own ids, it must succeed without touching the target
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("gondolin-lchown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("/nonexistent/target", &link).unwrap();
+        let me = std::fs::symlink_metadata(&dir).unwrap();
+        // chown (following) would fail with NotFound on the dangling target
+        chown(&link, me.uid(), me.gid()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_root_daemon_needs_a_jailer_unless_told_otherwise() {
