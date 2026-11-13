@@ -143,7 +143,7 @@ struct Runtime {
     /// start replaces it ([`Session::restart_frames`]), like a new netdev
     /// connection on QEMU and krun
     #[cfg(target_os = "linux")]
-    frames_task: Option<AbortOnDrop>,
+    frames_task: crate::guest::Sequential,
     /// Firecracker: how its VMMs are jailed (none: run as the daemon's user)
     jailer: Option<crate::jailer::JailerSettings>,
     dir: SocketDir,
@@ -889,7 +889,7 @@ impl Session {
             #[cfg(target_os = "linux")]
             frames,
             #[cfg(target_os = "linux")]
-            frames_task: None,
+            frames_task: Default::default(),
             jailer,
             dir,
         });
@@ -1020,7 +1020,7 @@ impl Session {
                 task.abort();
             }
             #[cfg(target_os = "linux")]
-            drop(rt.frames_task.take());
+            rt.frames_task.stop();
         }
     }
 
@@ -1568,14 +1568,14 @@ impl Session {
         let NetSetup::Native(backend) = &self.net else { return };
         let Some(rt) = self.runtime.as_mut() else { return };
         let Some(socket) = rt.frames.clone() else { return };
-        drop(rt.frames_task.take());
         let backend = backend.clone();
         let events = self.events.clone();
-        rt.frames_task = Some(AbortOnDrop(tokio::spawn(async move {
+        // starts once the previous generation's session has shut down
+        rt.frames_task.replace(async move {
             if let Err(error) = backend.serve_frames(socket).await {
                 let _ = events.send(Event::NetdevFailed { generation, error });
             }
-        })));
+        });
     }
 
     /// The network session of `generation` failed: the guest has no network

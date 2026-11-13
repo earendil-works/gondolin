@@ -142,6 +142,42 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// One task at a time, each replacing the previous one: [`Self::replace`]
+/// aborts the running task and starts the new one only once the old one's
+/// future has been dropped (its cleanup done). Aborting merely schedules the
+/// cancellation, so without the wait the new task can run first on another
+/// worker and find the old one's state still in place (the network stack's
+/// "already serving a netdev stream").
+#[derive(Default)]
+pub struct Sequential {
+    /// held by a task for as long as its future lives
+    turn: Arc<tokio::sync::Mutex<()>>,
+    current: Option<AbortOnDrop>,
+}
+
+impl Sequential {
+    /// Aborts the current task and spawns `task` to run after it.
+    pub fn replace<F>(&mut self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        drop(self.current.take());
+        let turn = self.turn.clone();
+        self.current = Some(AbortOnDrop(tokio::spawn(async move {
+            let turn = turn.lock_owned().await;
+            // a tuple drops its fields in order: `task` (when aborted, its
+            // cleanup) before the turn is released
+            let mut held = (Box::pin(task), turn);
+            held.0.as_mut().await;
+        })));
+    }
+
+    /// Aborts the current task.
+    pub fn stop(&mut self) {
+        drop(self.current.take());
+    }
+}
+
 /// A listening guest channel.
 pub struct GuestPort {
     pub name: &'static str,
@@ -357,5 +393,74 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod sequential_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Like the network stack's session: refuses to start while the previous
+    /// one is still running; the flag is cleared when its future is dropped.
+    fn session(
+        running: Arc<AtomicBool>,
+        collisions: Arc<AtomicUsize>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        async move {
+            if running.swap(true, Ordering::SeqCst) {
+                collisions.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            let _guard = Guard(running);
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Replaces the task 2000 times from a worker thread, where the daemon's
+    /// session runs (spawns there go to the worker's LIFO slot, ahead of the
+    /// aborted task); the number of sessions that found the previous one
+    /// still running.
+    async fn replace_many(naive: bool) -> usize {
+        tokio::spawn(replace_many_on_worker(naive)).await.unwrap()
+    }
+
+    async fn replace_many_on_worker(naive: bool) -> usize {
+        let running = Arc::new(AtomicBool::new(false));
+        let collisions = Arc::new(AtomicUsize::new(0));
+        let mut seq = Sequential::default();
+        let mut naive_task: Option<AbortOnDrop> = None;
+        for _ in 0..2000 {
+            let task = session(running.clone(), collisions.clone());
+            if naive {
+                drop(naive_task.take());
+                naive_task = Some(AbortOnDrop(tokio::spawn(task)));
+            } else {
+                seq.replace(task);
+            }
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+        }
+        seq.stop();
+        drop(naive_task);
+        collisions.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replacement_starts_after_the_previous_task_is_gone() {
+        assert_eq!(replace_many(false).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "shows the race: run with --ignored"]
+    async fn aborting_and_spawning_right_away_races() {
+        assert!(replace_many(true).await > 0);
     }
 }
