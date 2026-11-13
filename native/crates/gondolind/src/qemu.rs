@@ -2,7 +2,7 @@
 //! for exit diagnostics.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gondolin_proto::session::VmConfig;
 
@@ -73,6 +73,13 @@ pub struct ChardevPaths {
     pub fs: PathBuf,
     pub ssh: PathBuf,
     pub ingress: PathBuf,
+}
+
+impl ChardevPaths {
+    /// All four listener paths.
+    pub fn all(&self) -> [&Path; 4] {
+        [&self.control, &self.fs, &self.ssh, &self.ingress]
+    }
 }
 
 /// Everything `build_qemu_args` needs.

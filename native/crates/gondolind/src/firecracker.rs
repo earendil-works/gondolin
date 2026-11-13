@@ -619,8 +619,12 @@ pub fn jailed(
             .map_err(|e| format!("cannot hand {} to the jail: {e}", p.display()))
     };
     handover(&vsock)?;
-    for entry in std::fs::read_dir(&vsock).map_err(|e| format!("{}: {e}", vsock.display()))? {
-        handover(&entry.map_err(|e| e.to_string())?.path())?;
+    // only the listeners the daemon created, never whatever else is in the
+    // directory: the jail's user owns it, and this runs again as root on
+    // every restart of the session
+    let chown_listener = |p: &Path| chown(p, settings.uid, settings.gid);
+    for listener in chardev_paths(dir).all() {
+        crate::jailer::hand_over_listener(listener, &chown_listener)?;
     }
     let jailed_vsock = jail.bind(&vsock, "vsock", false)?;
     let uds = PathBuf::from(format!("{jailed_vsock}/{VSOCK_SOCKET}"));
