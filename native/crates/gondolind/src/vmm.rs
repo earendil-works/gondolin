@@ -193,7 +193,25 @@ impl VmmProcess {
         CURRENT_PID.store(pid as i32, Ordering::SeqCst);
         // macOS has no PR_SET_PDEATHSIG, and a process that changes its
         // credentials (the jailer) loses it: a helper kills the VMM if we die
-        let watchdog = spawn_watchdog(pid, extra.watchdog);
+        let watchdog = match spawn_watchdog(pid, extra.watchdog) {
+            Ok(watchdog) => watchdog,
+            // nothing else would kill a jailed VMM if the daemon died: do
+            // not run it unguarded
+            Err(e) if extra.watchdog => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ =
+                    CURRENT_PID.compare_exchange(pid as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("cannot start the VMM watchdog: {e}"),
+                ));
+            }
+            Err(e) => {
+                gondolin_log::warn!("cannot start the VMM watchdog: {e}");
+                None
+            }
+        };
 
         // log readers: one thread per pipe; each reports when it is done
         let mut readers = Vec::new();
@@ -301,21 +319,27 @@ fn wait_exit_nowait(pid: i32) {
 }
 
 /// Starts `gondolind --vmm-watchdog <pid>` with a pipe on its stdin (macOS,
-/// and on Linux when `needed`).
-fn spawn_watchdog(pid: u32, needed: bool) -> Option<std::process::Child> {
+/// and on Linux when `needed`); `Ok(None)` when none is wanted.
+fn spawn_watchdog(pid: u32, needed: bool) -> std::io::Result<Option<std::process::Child>> {
     let wanted = cfg!(target_os = "macos") || (cfg!(target_os = "linux") && needed);
     if !wanted || cfg!(test) || pid == 0 {
-        return None;
+        return Ok(None);
     }
-    let exe = std::env::current_exe().ok()?;
-    Command::new(exe)
+    start_watchdog(std::env::current_exe(), pid).map(Some)
+}
+
+/// Runs `exe --vmm-watchdog <pid>` (`exe`: this daemon's binary).
+fn start_watchdog(
+    exe: std::io::Result<std::path::PathBuf>,
+    pid: u32,
+) -> std::io::Result<std::process::Child> {
+    Command::new(exe?)
         .arg("--vmm-watchdog")
         .arg(pid.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
-        .ok()
 }
 
 /// Body of `gondolind --vmm-watchdog <pid>`: SIGKILLs `pid` when stdin reaches
@@ -470,6 +494,14 @@ pub fn signal_name(sig: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_watchdog_that_cannot_start_is_an_error() {
+        let gone = std::io::Error::new(std::io::ErrorKind::NotFound, "no exe");
+        assert_eq!(start_watchdog(Err(gone), 1).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        let missing = std::path::PathBuf::from("/nonexistent/gondolind");
+        assert!(start_watchdog(Ok(missing), 1).is_err());
+    }
 
     #[tokio::test]
     async fn spawn_log_and_exit() {
