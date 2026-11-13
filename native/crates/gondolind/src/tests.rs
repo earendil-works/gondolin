@@ -32,6 +32,8 @@ pub(crate) fn test_vm() -> VmConfig {
         image: None,
         vmm: None,
         krun_runner_path: None,
+        firecracker_path: None,
+        nitro: None,
         arch: None,
         kernel_path: "/k".into(),
         initrd_path: "/i".into(),

@@ -61,7 +61,7 @@ Command Options:
   --env KEY=VALUE                 Set environment variable (can repeat)
   --resume ID_OR_PATH             Resume from a snapshot ID or .qcow2 path
   --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)
-  --vmm BACKEND                   VM backend: qemu|krun (default: krun when usable, else qemu)
+  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: krun when usable, else qemu)
   --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE
 
 {COMMON}
@@ -98,7 +98,7 @@ Use -- to pass a command and its arguments directly.
 Arguments apply to the most recent --cmd.
 
   --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)
-  --vmm BACKEND                   VM backend: qemu|krun (default: krun when usable, else qemu)
+  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: krun when usable, else qemu)
   --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE
 
 {COMMON}"

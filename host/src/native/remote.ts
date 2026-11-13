@@ -79,6 +79,7 @@ export function resolveRemoteSandboxOptions(
       rootDiskPath: "",
       qemuPath: options.qemuPath ?? "",
       krunRunnerPath: options.krunRunnerPath ?? "",
+      firecrackerPath: options.firecrackerPath ?? "",
       // the controller's platform default (macOS + hvf) says nothing about
       // the daemon's machine: only an explicit idle pause applies
       qemuIdlePauseMs:

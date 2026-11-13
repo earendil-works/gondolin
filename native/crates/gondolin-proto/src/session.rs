@@ -62,10 +62,16 @@ gondolin_wire::wire_struct! {
     /// QEMU/VM settings. Paths are paths on the daemon's machine.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct VmConfig {
-        /// VM backend: `qemu` (default) or `krun`
+        /// VM backend: `qemu` (default), `krun` or `firecracker`
         pub vmm: Option<String>,
         /// `gondolin-krun-runner` binary (vmm `krun`)
         pub krun_runner_path: Option<String>,
+        /// `firecracker` binary (vmm `firecracker`; absent: `firecracker` in `PATH`)
+        pub firecracker_path: Option<String>,
+        /// AWS Nitro Sandbox settings (vmm `firecracker`; absent: the daemon
+        /// picks a Nitro Sandbox when the host supports them, else KVM; mode
+        /// `off` asks for KVM)
+        pub nitro: Option<NitroConfig>,
         /// qemu binary (path or name looked up in `PATH`; empty: by guest arch)
         pub qemu_path: String = Default::default(),
         /// guest image selector (`name:tag`, build id or directory; empty: the
@@ -92,7 +98,8 @@ gondolin_wire::wire_struct! {
         pub accel: Option<String>,
         /// qemu cpu model override
         pub cpu: Option<String>,
-        /// guest console: `stdio` (default) or `none`
+        /// guest console: `stdio` (default) or `none` (vmm `firecracker`: off
+        /// unless `stdio` or protocol debugging, see `firecracker::wants_console`)
         pub console: Option<String>,
         /// kernel cmdline replacing the default (`console=... initramfs_async=1`)
         pub append: Option<String>,
@@ -104,6 +111,19 @@ gondolin_wire::wire_struct! {
         pub auto_restart: bool = Default::default(),
         /// pause the VM via QMP after this much idle time in `ms` (absent: never)
         pub idle_pause_ms: Option<u64>,
+    }
+}
+
+gondolin_wire::wire_struct! {
+    /// AWS Nitro Sandbox settings (vmm `firecracker`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NitroConfig {
+        /// `direct` (the parent instance can read guest memory; no attestation)
+        /// or `confidential` (needs a guest kernel with the DMB virtio patches)
+        pub mode: String = String::from("direct"),
+        /// time-share the vCPUs over the parent's CPUs instead of claiming
+        /// dedicated cores from the Nitro Enclaves CPU pool
+        pub cpu_overcommit: bool = true,
     }
 }
 

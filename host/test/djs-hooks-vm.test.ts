@@ -203,6 +203,11 @@ test("tier-2 hooks: static CLI --hooks-script", {
   skip:
     skipVmTests ||
     (!cli && "static gondolin CLI not built") ||
+    // the CLI runs its daemon in-process as this user, and Firecracker's
+    // network namespace needs root (the other tests use a root daemon)
+    (process.env.GONDOLIN_VMM?.trim() === "firecracker" &&
+      process.getuid?.() !== 0 &&
+      "the static CLI needs root for vmm=firecracker") ||
     (!guestDir && "no local guest assets"),
   timeout: timeoutMs,
 }, async () => {

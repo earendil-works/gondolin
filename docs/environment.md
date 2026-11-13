@@ -47,7 +47,13 @@ These affect `gondolin build` and the SDK's image build API (Node only; see
 
 | Variable | Read by | Meaning |
 | --- | --- | --- |
-| `GONDOLIN_VMM` | SDK, static CLI | Backend when `sandbox.vmm` / `--vmm` is not set: `qemu` or `krun`. Default: `krun` where it can run, else `qemu` (see [VM Backends](./backends.md#default-backend-selection)) |
+| `GONDOLIN_VMM` | SDK, static CLI | Backend when `sandbox.vmm` / `--vmm` is not set: `qemu`, `krun` or `firecracker`. Default: `krun` where it can run, else `qemu` (see [VM Backends](./backends.md#default-backend-selection)) |
+| `GONDOLIN_FIRECRACKER` | SDK, static CLI | Path of the `firecracker` binary for `vmm=firecracker` when `sandbox.firecrackerPath` is not set. Default: `firecracker` on `PATH` (see [AWS Nitro Sandboxes](./nitro.md)) |
+| `GONDOLIN_JAILER` | daemon | Firecracker's `jailer` binary for `vmm=firecracker`, or `0` to run Firecracker unjailed. Default: `jailer` beside the `firecracker` binary or on `PATH`, used when the daemon runs as root; a root daemon that finds none refuses to start Firecracker VMs (see [Isolation](./nitro.md#isolation)) |
+| `GONDOLIN_JAILER_DIR` | daemon | Chroot base directory of jailed Firecracker VMs. Default: `/srv/jailer` |
+| `GONDOLIN_JAILER_UID` | daemon | First uid/gid of jailed Firecracker VMs; the VMM of daemon process `pid` runs as `uid + pid`. Default: `1600000000` |
+| `GONDOLIN_NITRO_MODE` | SDK, static CLI | Nitro Sandbox mode for `vmm=firecracker` when `sandbox.nitro.mode` is not set: `direct` or `confidential`, or `off` for a KVM microVM (`sandbox.nitro: false`). Without it the daemon runs a Nitro Sandbox when its host is set up for them (`/dev/nitro_enclaves` and a memory pool), else a KVM microVM. Default: `direct` |
+| `GONDOLIN_NITRO_CPU_OVERCOMMIT` | SDK, static CLI | `0`: give Nitro Sandboxes dedicated cores instead of time-shared vCPUs (`sandbox.nitro.cpuOvercommit`). Default: time-shared |
 | `GONDOLIN_KRUN_RUNNER` | SDK, static CLI | Path of the krun runner binary; checked before the other runner locations and counts as an installed runner for the default backend selection |
 | `GONDOLIN_CPU` | SDK, static CLI | QEMU CPU model when `sandbox.cpu` is not set, for example `cortex-a72`. Applies only when QEMU is the backend; it does not select QEMU |
 | `GONDOLIN_VIRTIOFS` | SDK, static CLI | Guest filesystem transport: `1` (`true`, `on`) asks for virtio-fs and warns when it is unavailable, `0` (`false`, `off`) forces sandboxfs. Default: virtio-fs when the backend and image support it, else sandboxfs (see [Files and Mounts](./vfs.md)) |

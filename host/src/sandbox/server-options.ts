@@ -51,7 +51,28 @@ const require = createRequire(import.meta.url);
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "qemu" | "krun";
+export type SandboxVmm = "qemu" | "krun" | "firecracker";
+
+/** AWS Nitro Sandbox settings (`vmm: "firecracker"`) */
+export type NitroOptions = {
+  /**
+   * `direct` (default: the parent instance can read guest memory, no
+   * attestation) or `confidential` (needs a guest kernel with the DMB virtio
+   * patches)
+   */
+  mode?: "direct" | "confidential";
+  /**
+   * time-share the vCPUs over the parent's CPUs instead of claiming dedicated
+   * cores from the Nitro Enclaves CPU pool (default: `true`)
+   */
+  cpuOvercommit?: boolean;
+};
+
+/** Resolved {@link NitroOptions}; mode `off`: a KVM microVM was requested */
+export type ResolvedNitroOptions = {
+  mode: "direct" | "confidential" | "off";
+  cpuOvercommit: boolean;
+};
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
@@ -69,13 +90,28 @@ const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
 export type SandboxServerOptions = {
   /**
    * vm backend implementation (default: `GONDOLIN_VMM`, else `krun` where it
-   * can run, else `qemu`)
+   * can run, else `qemu`; `firecracker` is never picked automatically)
    */
   vmm?: SandboxVmm;
   /** qemu binary path */
   qemuPath?: string;
   /** krun runner binary path */
   krunRunnerPath?: string;
+  /**
+   * firecracker binary path (`vmm: "firecracker"`; default:
+   * `GONDOLIN_FIRECRACKER`, else `firecracker` in `PATH`)
+   */
+  firecrackerPath?: string;
+  /**
+   * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
+   * settings (defaults: `GONDOLIN_NITRO_MODE`, `GONDOLIN_NITRO_CPU_OVERCOMMIT`;
+   * setting either variable also selects a Nitro Sandbox; with an object,
+   * `GONDOLIN_NITRO_MODE=off` does not apply), or `false` for a
+   * KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro Sandbox when the
+   * daemon's host is set up for them (`/dev/nitro_enclaves` and a memory
+   * pool), else a KVM microVM.
+   */
+  nitro?: NitroOptions | false;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -185,6 +221,13 @@ export type ResolvedSandboxServerOptions = {
   qemuPath: string;
   /** krun runner binary path */
   krunRunnerPath: string;
+  /** firecracker binary path */
+  firecrackerPath: string;
+  /**
+   * Nitro Sandbox settings (`vmm: "firecracker"`; unset: the daemon picks
+   * KVM or a Nitro Sandbox)
+   */
+  nitro?: ResolvedNitroOptions;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -331,10 +374,43 @@ function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
 function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
+}
+
+/**
+ * {@link NitroOptions} with the `GONDOLIN_NITRO_*` defaults applied, or
+ * `undefined` when neither the options nor the variables ask for a Nitro
+ * Sandbox
+ */
+function resolveNitroOptions(
+  options: NitroOptions | false | undefined,
+): ResolvedNitroOptions | undefined {
+  const envMode = process.env.GONDOLIN_NITRO_MODE?.trim().toLowerCase();
+  const envOvercommit = process.env.GONDOLIN_NITRO_CPU_OVERCOMMIT?.trim();
+  if (options === false || (options === undefined && envMode === "off")) {
+    return { mode: "off", cpuOvercommit: true };
+  }
+  if (options === undefined && !envMode && !envOvercommit) return undefined;
+  // an explicit `nitro` object asks for a Nitro Sandbox: the environment
+  // only supplies its defaults, so its `off` does not apply
+  const envDefault = envMode === "off" ? undefined : envMode;
+  const mode = options?.mode ?? (envDefault || "direct");
+  if (mode !== "direct" && mode !== "confidential") {
+    throw new Error(
+      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct" or "confidential"; ` +
+        `nitro: false or GONDOLIN_NITRO_MODE=off runs a KVM microVM instead)`,
+    );
+  }
+  const cpuOvercommit =
+    options?.cpuOvercommit ?? (envOvercommit ? envOvercommit !== "0" : true);
+  return { mode, cpuOvercommit };
 }
 
 function normalizeArch(
@@ -939,7 +1015,7 @@ export function resolveSandboxServerOptions(
   const explicitVmm = normalizeVmm(options.vmm ?? null);
   if (options.vmm !== undefined && !explicitVmm) {
     throw new Error(
-      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu" or "krun")`,
+      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu", "krun" or "firecracker")`,
     );
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
@@ -990,7 +1066,7 @@ export function resolveSandboxServerOptions(
       ? (detectedKrunRunnerPath ?? resolveDefaultKrunRunnerPathFn())
       : "gondolin-krun-runner");
 
-  if (vmm === "krun") {
+  if (vmm === "krun" || vmm === "firecracker") {
     const unsupported: string[] = [];
     if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
     if (options.machineType !== undefined)
@@ -1002,11 +1078,28 @@ export function resolveSandboxServerOptions(
 
     if (unsupported.length > 0) {
       throw new Error(
-        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=krun: ${unsupported.join(", ")}. ` +
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=${vmm}: ${unsupported.join(", ")}. ` +
           "These options are only supported with vmm=qemu.",
       );
     }
   }
+  if (vmm !== "firecracker") {
+    const unsupported: string[] = [];
+    if (options.firecrackerPath !== undefined)
+      unsupported.push("sandbox.firecrackerPath");
+    if (options.nitro !== undefined) unsupported.push("sandbox.nitro");
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=${vmm}: ${unsupported.join(", ")}. ` +
+          "These options are only supported with vmm=firecracker.",
+      );
+    }
+  }
+  const firecrackerPath =
+    options.firecrackerPath ??
+    (process.env.GONDOLIN_FIRECRACKER?.trim() || "firecracker");
+  const nitro =
+    vmm === "firecracker" ? resolveNitroOptions(options.nitro) : undefined;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
@@ -1057,11 +1150,12 @@ export function resolveSandboxServerOptions(
   } else if (guestFromManifest) {
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
+      const backend = vmm === "krun" ? "libkrun" : vmm;
       throw new Error(
-        "Guest image architecture mismatch for libkrun backend.\n" +
+        `Guest image architecture mismatch for ${backend} backend.\n` +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
           `  host arch:    ${host}\n\n` +
-          "Fix: select a guest image that matches the host architecture when using vmm=krun.",
+          `Fix: select a guest image that matches the host architecture when using vmm=${vmm}.`,
       );
     }
   }
@@ -1093,6 +1187,8 @@ export function resolveSandboxServerOptions(
     vmm,
     qemuPath,
     krunRunnerPath,
+    firecrackerPath,
+    ...(nitro ? { nitro } : {}),
     kernelPath,
     initrdPath,
     rootfsPath,

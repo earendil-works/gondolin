@@ -2,7 +2,7 @@
 //! for exit diagnostics.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gondolin_proto::session::VmConfig;
 
@@ -73,6 +73,13 @@ pub struct ChardevPaths {
     pub fs: PathBuf,
     pub ssh: PathBuf,
     pub ingress: PathBuf,
+}
+
+impl ChardevPaths {
+    /// All four listener paths.
+    pub fn all(&self) -> [&Path; 4] {
+        [&self.control, &self.fs, &self.ssh, &self.ingress]
+    }
 }
 
 /// Everything `build_qemu_args` needs.
@@ -492,10 +499,21 @@ pub fn is_krun(vm: &VmConfig) -> bool {
     vm.vmm.as_deref() == Some("krun")
 }
 
+/// Whether the configuration selects the QEMU backend (the default).
+pub fn uses_qemu(vm: &VmConfig) -> bool {
+    matches!(vm.vmm.as_deref(), None | Some("qemu"))
+}
+
 /// Base kernel command line: `append` (or the default) plus extra pieces.
 pub fn base_append(vm: &VmConfig, host: &HostInfo) -> String {
     let first = vm.append.clone().unwrap_or_else(|| {
-        if is_krun(vm) { crate::krun::DEFAULT_APPEND.to_string() } else { default_append(host) }
+        if is_krun(vm) {
+            crate::krun::DEFAULT_APPEND.to_string()
+        } else if crate::firecracker::is_firecracker(vm) {
+            crate::firecracker::DEFAULT_APPEND.to_string()
+        } else {
+            default_append(host)
+        }
     });
     std::iter::once(first.trim().to_string())
         .chain(vm.append_extra.iter().map(|s| s.to_string()))
@@ -514,7 +532,7 @@ pub fn boot_log_wanted(vm: &VmConfig, protocol_debug: bool) -> bool {
 /// or `append` already sets the log level (`quiet`, `debug`, `loglevel=`).
 /// The kernel writes its boot log to the console inline whether or not anyone
 /// reads it, which costs ~0.9 s per boot on an emulated UART (QEMU's `ttyS0`
-/// and `ttyAMA0`); errors and panics still get through
+/// and `ttyAMA0`, Firecracker's `ttyS0`); errors and panics still get through
 /// under `quiet`, and the guest's init stays quiet too. krun is left alone:
 /// its virtio console is cheap (~14 ms per boot).
 pub fn quiet_boot(append: String, vm: &VmConfig, protocol_debug: bool) -> String {
@@ -574,6 +592,18 @@ impl LogTail {
             }
         }
         done
+    }
+
+    /// Puts `lines` (normalized here) before the remembered ones: output that
+    /// happened earlier than the VMM's last stderr lines, like Firecracker's
+    /// log file, which then only becomes the hint when stderr has nothing.
+    pub fn prepend(&mut self, lines: &[String]) {
+        for line in lines.iter().rev().filter_map(|l| normalize_hint_line(l)) {
+            if self.lines.len() >= TAIL_LINES {
+                break;
+            }
+            self.lines.push_front(line);
+        }
     }
 
     /// Flushes unterminated lines (on exit); returns them like [`LogTail::push`]
@@ -793,12 +823,28 @@ mod tests {
     use super::*;
     use gondolin_proto::session::RootDisk;
 
+    #[test]
+    fn prepended_lines_are_the_hint_only_without_stderr() {
+        let earlier = vec!["Firecracker panicked at x.rs:1".to_string()];
+        // stderr's last line stays the hint
+        let mut tail = LogTail::default();
+        tail.push(true, b"Error: RunWithoutApiError(...)\n");
+        tail.prepend(&earlier);
+        assert_eq!(tail.select_hint(), Some("Error: RunWithoutApiError(...)"));
+        // nothing on stderr (a panic aborts): the log file's line
+        let mut tail = LogTail::default();
+        tail.prepend(&earlier);
+        assert_eq!(tail.select_hint(), Some("Firecracker panicked at x.rs:1"));
+    }
+
     fn vm() -> VmConfig {
         VmConfig {
             qemu_path: "qemu-system-aarch64".into(),
             image: None,
             vmm: None,
             krun_runner_path: None,
+            firecracker_path: None,
+            nitro: None,
             arch: None,
             kernel_path: "/img/vmlinuz".into(),
             initrd_path: "/img/initrd".into(),
@@ -1005,7 +1051,7 @@ mod tests {
     #[test]
     fn boots_quiet_unless_the_boot_log_is_wanted() {
         let a = || "console=ttyS0 initramfs_async=1".to_string();
-        for vmm in [None, Some("qemu")] {
+        for vmm in [None, Some("qemu"), Some("firecracker")] {
             let mut vm = vm();
             vm.vmm = vmm.map(String::from);
             vm.console = None;
