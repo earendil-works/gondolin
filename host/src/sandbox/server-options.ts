@@ -105,7 +105,8 @@ export type SandboxServerOptions = {
   /**
    * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
    * settings (defaults: `GONDOLIN_NITRO_MODE`, `GONDOLIN_NITRO_CPU_OVERCOMMIT`;
-   * setting either variable also selects a Nitro Sandbox), or `false` for a
+   * setting either variable also selects a Nitro Sandbox; with an object,
+   * `GONDOLIN_NITRO_MODE=off` does not apply), or `false` for a
    * KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro Sandbox when the
    * daemon's host is set up for them (`/dev/nitro_enclaves` and a memory
    * pool), else a KVM microVM.
@@ -397,10 +398,14 @@ function resolveNitroOptions(
     return { mode: "off", cpuOvercommit: true };
   }
   if (options === undefined && !envMode && !envOvercommit) return undefined;
-  const mode = options?.mode ?? (envMode || "direct");
+  // an explicit `nitro` object asks for a Nitro Sandbox: the environment
+  // only supplies its defaults, so its `off` does not apply
+  const envDefault = envMode === "off" ? undefined : envMode;
+  const mode = options?.mode ?? (envDefault || "direct");
   if (mode !== "direct" && mode !== "confidential") {
     throw new Error(
-      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct", "confidential" or "off")`,
+      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct" or "confidential"; ` +
+        `nitro: false or GONDOLIN_NITRO_MODE=off runs a KVM microVM instead)`,
     );
   }
   const cpuOvercommit =

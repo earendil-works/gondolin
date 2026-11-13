@@ -149,8 +149,19 @@ test("firecracker options and their environment defaults", (t) => {
       withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "fast" }, () =>
         resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
       ),
-    /invalid Nitro Sandbox mode: fast/,
+    /invalid Nitro Sandbox mode: fast \(expected "direct" or "confidential"/,
   );
+
+  // an explicit object asks for a Nitro Sandbox: GONDOLIN_NITRO_MODE=off
+  // (a default) does not apply to it
+  const partial = withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "off" }, () =>
+    resolveSandboxServerOptions({
+      imagePath: dir,
+      vmm: "firecracker",
+      nitro: { cpuOvercommit: false },
+    }),
+  );
+  assert.deepEqual(partial.nitro, { mode: "direct", cpuOvercommit: false });
 });
 
 test("firecracker is never selected by default", (t) => {
