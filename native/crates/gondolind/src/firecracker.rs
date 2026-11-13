@@ -645,6 +645,68 @@ pub fn jailed(
     Ok(Jailed { jail, program, args })
 }
 
+/// Lines kept from the end of a Firecracker log file.
+const LOG_TAIL_LINES: usize = 20;
+/// Bytes read from the end of a Firecracker log file.
+const LOG_TAIL_BYTES: u64 = 16 * 1024;
+
+/// The last problem lines of the Firecracker log file at `path`
+/// (`--log-path`), without their `<timestamp> [<instance>:<thread>] ` prefix:
+/// its logger, and its panic hook, write there and not to stderr. Only lines
+/// about a panic, an error or a failure count, minus the guest's routine
+/// probes of absent I/O ports (see [`is_problem_log_line`]); empty when there
+/// are none, so a VMM that was merely killed gets no misleading hint. A jailed
+/// VMM's file sits in a directory the jail's user can write, so a compromised
+/// VMM may have replaced it: only a regular file with a single link is read
+/// (not through a symlink, nor a FIFO that would block), and only its end.
+pub fn read_log_tail(path: &Path) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return Vec::new();
+    };
+    let Ok(meta) = file.metadata() else { return Vec::new() };
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Vec::new();
+    }
+    let start = meta.len().saturating_sub(LOG_TAIL_BYTES);
+    let mut data = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_err()
+        || file.take(LOG_TAIL_BYTES).read_to_end(&mut data).is_err()
+    {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&data);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0); // cut off in the middle
+    }
+    let problems: Vec<String> = lines
+        .iter()
+        .map(|line| match line.split_once("] ") {
+            Some((prefix, rest)) if prefix.contains(" [") => rest.to_string(),
+            _ => line.to_string(),
+        })
+        .filter(|line| is_problem_log_line(line))
+        .collect();
+    let keep = problems.len().saturating_sub(LOG_TAIL_LINES);
+    problems[keep..].to_vec()
+}
+
+/// Whether a Firecracker log line (without its prefix) reports a problem: a
+/// panic, an error or a failure, but not the guest kernel probing I/O ports
+/// with no device behind them (`vcpu: IO read @ 0x3e9:0x1 failed: Failed to
+/// find address range.`, its serial port probes on every boot).
+fn is_problem_log_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let problem = ["panic", "error", "fail"].iter().any(|w| lower.contains(w));
+    problem && !(lower.starts_with("vcpu: io ") && lower.ends_with("failed to find address range."))
+}
+
 /// Command line arguments for a config file written to `config_path`.
 pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
     vec![
@@ -679,6 +741,57 @@ mod tests {
             "{err}"
         );
         assert!(check_nitro_pool(&dir, 512).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_log_tail_is_read_from_a_plain_file_only() {
+        let dir = std::env::temp_dir().join(format!("gondolin-fclog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("firecracker.log");
+        // a real run's routine lines (KVM): no hint
+        let routine = "2026-11-13T18:08:18.722231458 [anonymous-instance:main] Running Firecracker v1.18.0\n\
+             2026-11-13T18:12:43.167673293 [gondolin-1-1:fc_vcpu 0] vcpu: IO read @ 0x3e9:0x1 failed: Failed to find address range.\n\
+             2026-11-13T18:12:43.167689828 [gondolin-1-1:fc_vcpu 0] vcpu: IO write @ 0x3e9:0x1 failed: Failed to find address range.\n\
+             2026-11-13T18:12:43.168392236 [gondolin-1-1:fc_vcpu 0] Received a VcpuEvent::Resume message with immediate_exit enabled. immediate_exit was disabled before proceeding\n";
+        std::fs::write(&log, routine).unwrap();
+        assert!(read_log_tail(&log).is_empty(), "routine lines are no hint");
+        // then a panic and an error line without the usual prefix
+        std::fs::write(
+            &log,
+            format!(
+                "{routine}2026-11-13T18:13:00.000000000 [gondolin-1-1:fc_vcpu 0] Firecracker panicked at x.rs:1\n\
+                 a block device error without a prefix\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_log_tail(&log),
+            vec!["Firecracker panicked at x.rs:1", "a block device error without a prefix"]
+        );
+        // only the end of a long file, without the line cut off at the start
+        let long: String = (0..5000).map(|i| format!("error {i}\n")).collect();
+        std::fs::write(&log, &long).unwrap();
+        let tail = read_log_tail(&log);
+        assert_eq!(tail.len(), LOG_TAIL_LINES);
+        assert_eq!(tail.last().unwrap(), "error 4999");
+
+        // what a compromised VMM could put there instead: none is read
+        let secret = dir.join("secret");
+        // would pass the filter if it were read
+        std::fs::write(&secret, "host secret error\n").unwrap();
+        let link = dir.join("symlink.log");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert!(read_log_tail(&link).is_empty());
+        let hard = dir.join("hardlink.log");
+        std::fs::hard_link(&secret, &hard).unwrap();
+        assert!(read_log_tail(&hard).is_empty());
+        let fifo = dir.join("fifo.log");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(read_log_tail(&fifo).is_empty(), "a FIFO must not block or be read");
+        assert!(read_log_tail(&dir.join("missing.log")).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

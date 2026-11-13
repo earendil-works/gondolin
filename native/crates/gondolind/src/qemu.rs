@@ -594,6 +594,18 @@ impl LogTail {
         done
     }
 
+    /// Puts `lines` (normalized here) before the remembered ones: output that
+    /// happened earlier than the VMM's last stderr lines, like Firecracker's
+    /// log file, which then only becomes the hint when stderr has nothing.
+    pub fn prepend(&mut self, lines: &[String]) {
+        for line in lines.iter().rev().filter_map(|l| normalize_hint_line(l)) {
+            if self.lines.len() >= TAIL_LINES {
+                break;
+            }
+            self.lines.push_front(line);
+        }
+    }
+
     /// Flushes unterminated lines (on exit); returns them like [`LogTail::push`]
     /// as `(stderr, line)` pairs.
     pub fn flush(&mut self) -> Vec<(bool, String)> {
@@ -810,6 +822,20 @@ fn has_zig_frame(t: &str) -> bool {
 mod tests {
     use super::*;
     use gondolin_proto::session::RootDisk;
+
+    #[test]
+    fn prepended_lines_are_the_hint_only_without_stderr() {
+        let earlier = vec!["Firecracker panicked at x.rs:1".to_string()];
+        // stderr's last line stays the hint
+        let mut tail = LogTail::default();
+        tail.push(true, b"Error: RunWithoutApiError(...)\n");
+        tail.prepend(&earlier);
+        assert_eq!(tail.select_hint(), Some("Error: RunWithoutApiError(...)"));
+        // nothing on stderr (a panic aborts): the log file's line
+        let mut tail = LogTail::default();
+        tail.prepend(&earlier);
+        assert_eq!(tail.select_hint(), Some("Firecracker panicked at x.rs:1"));
+    }
 
     fn vm() -> VmConfig {
         VmConfig {
