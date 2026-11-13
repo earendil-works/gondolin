@@ -391,7 +391,9 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
     args.push("-machine".into());
     let memory_backend = cfg.virtiofs.map(|_| ",memory-backend=mem").unwrap_or("");
     if microvm {
-        args.push(format!("microvm,isa-serial=on,auto-kernel-cmdline=on{memory_backend}"));
+        // rtc=on: without the clock (QEMU's default here) the guest kernel's
+        // rtc_cmos probe waits ~1.5 s for it on every boot
+        args.push(format!("microvm,isa-serial=on,rtc=on,auto-kernel-cmdline=on{memory_backend}"));
     } else {
         args.push(format!("{machine_type}{memory_backend}"));
     }
@@ -898,7 +900,10 @@ mod tests {
             host: &host,
         });
         let joined = args.join(" ");
-        assert!(joined.contains("microvm,isa-serial=on,auto-kernel-cmdline=on,memory-backend=mem"));
+        assert!(
+            joined
+                .contains("microvm,isa-serial=on,rtc=on,auto-kernel-cmdline=on,memory-backend=mem")
+        );
         assert!(joined.contains("-object memory-backend-memfd,id=mem,size=1G,share=on"));
         assert!(joined.contains("-device vhost-user-fs-device,chardev=vhostfs0"));
     }
@@ -949,7 +954,7 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("snapshot=on,readonly=on -device virtio-blk-device,drive=drive0"));
         assert!(joined.contains(
-            "-machine microvm,isa-serial=on,auto-kernel-cmdline=on -accel kvm -cpu host"
+            "-machine microvm,isa-serial=on,rtc=on,auto-kernel-cmdline=on -accel kvm -cpu host"
         ));
         assert!(joined.contains("-serial stdio"));
         assert!(joined.contains("virtio-serial-device,id=virtio-serial0"));
