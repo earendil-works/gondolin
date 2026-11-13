@@ -217,6 +217,9 @@ pub(crate) struct VmState {
     exit_reason: Option<String>,
     /// the current generation's jail (removed once its VMM exited)
     jail: Option<crate::jailer::Jail>,
+    /// the current generation's Firecracker log file (`--log-path`), read
+    /// into the exit message before its jail is removed
+    vmm_log: Option<PathBuf>,
 }
 
 /// What to do once a stopped VMM exited.
@@ -1425,6 +1428,7 @@ impl Session {
             .map_err(StartError::Fatal)?;
             spawn_extra.binds = jailed.jail.binds().to_vec();
             spawn_extra.watchdog = true;
+            self.vm.vmm_log = Some(jailed.jail.root().join("firecracker.log"));
             self.vm.jail = Some(jailed.jail);
             (jailed.program, jailed.args)
         } else if crate::firecracker::is_firecracker(&cfg.vm) {
@@ -1455,6 +1459,7 @@ impl Session {
             std::fs::write(&config_path, gondolin_wire::json::to_string(&config))
                 .and_then(|()| std::fs::write(&log_path, b""))
                 .map_err(|e| StartError::Fatal(format!("cannot write firecracker config: {e}")))?;
+            self.vm.vmm_log = Some(log_path.clone());
             let program = crate::firecracker::binary_path(&cfg.vm);
             (program, crate::firecracker::args(&config_path, &log_path))
         } else if qemu::is_krun(&cfg.vm) {
@@ -1538,6 +1543,7 @@ impl Session {
         self.idle.invalidate();
         self.cleanup_qmp_socket();
         self.vm.child = None;
+        self.take_vmm_log();
         self.vm.jail = None;
         self.set_vm_state(State::Stopped);
         self.vm_exited_server(None, None, Some(error));
@@ -1663,6 +1669,7 @@ impl Session {
             self.idle.invalidate();
             self.cleanup_qmp_socket();
             self.vm.child = None;
+            self.take_vmm_log();
             self.vm.jail = None;
             self.set_vm_state(State::Stopped);
             let reason = self.vm.exit_reason.take();
@@ -1735,6 +1742,15 @@ impl Session {
         }
         self.fail_inflight("sandbox_stopped", &message);
         self.ctl.send(ps::EXIT, 0, &ps::Exit { code, signal, error });
+    }
+
+    /// Reads the exited VMM's log file (Firecracker) into the log tail, ahead
+    /// of its stderr: its logger and panic hook write only there, and a jailed
+    /// one's file goes with the jail.
+    fn take_vmm_log(&mut self) {
+        if let Some(path) = self.vm.vmm_log.take() {
+            self.log_tail.prepend(&crate::firecracker::read_log_tail(&path));
+        }
     }
 
     /// Records a VMM log line produced by the daemon itself (like the node
