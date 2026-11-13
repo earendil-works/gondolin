@@ -1002,6 +1002,63 @@ test("vm internals: ensureRunning sends boot and resolves once running", async (
   }
 });
 
+test("vm internals: a VM that stopped after its boot is booted again", async () => {
+  const { vm, cleanup } = makeVm({ autoStart: true, vfs: null });
+  try {
+    const sent: any[] = [];
+    let onMessage: ((data: any, isBinary: boolean) => void) | null = null;
+    (vm as any).server = {
+      start: async () => {},
+      connect: (m: any) => {
+        onMessage = m;
+        return { send: (msg: any) => sent.push(msg), close: () => {} };
+      },
+    };
+    await (vm as any).ensureConnection();
+    const status = (state: string) =>
+      onMessage!(JSON.stringify({ type: "status", state }), false);
+    const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const boots = () => sent.filter((m) => m.type === "boot").length;
+
+    // first boot
+    let running = (vm as any).ensureRunning();
+    status("stopped");
+    await tick();
+    status("running");
+    await running;
+    assert.equal(boots(), 1);
+
+    // the VM exits and its restart fails: the daemon reports the failure
+    status("stopped");
+    running = (vm as any).ensureRunning();
+    await tick();
+    assert.equal(boots(), 2, "a stopped VM is booted again");
+    status("starting");
+    status("stopped");
+    onMessage!(
+      JSON.stringify({
+        type: "error",
+        code: "sandbox_start_failed",
+        message: "cannot start the sandbox: spawn /gone: No such file",
+      }),
+      false,
+    );
+    await assert.rejects(
+      running,
+      /sandbox_start_failed: cannot start the sandbox/,
+    );
+
+    // once the cause is gone, the next use starts it
+    running = (vm as any).ensureRunning();
+    await tick();
+    assert.equal(boots(), 3);
+    status("running");
+    await running;
+  } finally {
+    cleanup();
+  }
+});
+
 test("vm internals: ensureRunning throws when stopped and autoStart disabled", async () => {
   const { vm, cleanup } = makeVm({ autoStart: false, vfs: null });
   try {

@@ -261,6 +261,9 @@ export class VM {
   private statusResolve: ((state: SandboxState) => void) | null = null;
   private statusReject: ((error: Error) => void) | null = null;
   private state: SandboxState | "unknown" = "unknown";
+  /** errors without a request id so far, and the last one (a failed start) */
+  private sessionErrors = 0;
+  private lastSessionError: Error | null = null;
   private stateWaiters: Array<{
     state: SandboxState;
     resolve: () => void;
@@ -1813,10 +1816,20 @@ fi
       throw new Error("sandbox is stopped");
     }
 
+    // a VM that stopped after its boot (it exited and was not restarted, or
+    // its restart failed) is started again: waiting for the daemon to do it
+    // would wait out the start timeout
+    if (state === "stopped") this.bootSent = false;
+    const errors = this.sessionErrors;
     this.ensureBoot();
 
     const nextState = await this.waitForStatus();
     if (nextState === "running") return;
+    // a start that failed reports `starting`, `stopped` and the error back to
+    // back, possibly before this continuation runs: no waiter saw the error
+    if (this.sessionErrors !== errors && this.lastSessionError) {
+      throw this.lastSessionError;
+    }
 
     await this.waitForState("running");
   }
@@ -2072,6 +2085,8 @@ fi
   private handleError(message: ErrorMessage) {
     const error = new Error(`error ${message.code}: ${message.message}`);
     if (message.id === undefined) {
+      this.sessionErrors += 1;
+      this.lastSessionError = error;
       if (this.statusReject) {
         this.statusReject(error);
         this.statusReject = null;
