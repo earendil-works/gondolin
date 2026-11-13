@@ -1859,13 +1859,8 @@ fn check_vmm_binary(vm: &gondolin_proto::session::VmConfig) -> Result<(), String
     if crate::firecracker::is_firecracker(vm) {
         return crate::firecracker::check_binary(vm);
     }
-    let program = if qemu::is_krun(vm) {
-        crate::krun::runner_path(vm)
-    } else if crate::firecracker::is_firecracker(vm) {
-        crate::firecracker::binary_path(vm)
-    } else {
-        vm.qemu_path.clone()
-    };
+    let program =
+        if qemu::is_krun(vm) { crate::krun::runner_path(vm) } else { vm.qemu_path.clone() };
     match std::process::Command::new(&program)
         .arg("--version")
         .stdin(std::process::Stdio::null())

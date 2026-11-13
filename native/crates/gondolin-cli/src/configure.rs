@@ -267,6 +267,22 @@ pub async fn prepare(
     prepare_with_image(common, resume, image, &|name: &str| std::env::var(name))
 }
 
+/// The Nitro Sandbox settings from `GONDOLIN_NITRO_MODE` and
+/// `GONDOLIN_NITRO_CPU_OVERCOMMIT` (`env_opt`: trimmed, `None` when unset or
+/// empty), normalised as the SDK does: either variable selects a Nitro
+/// Sandbox (mode `off`: KVM); neither: `None`, the daemon picks.
+fn nitro_from_env(env_opt: &dyn Fn(&str) -> Option<String>) -> Option<NitroConfig> {
+    let mode = env_opt("GONDOLIN_NITRO_MODE").map(|v| v.to_lowercase());
+    let overcommit = env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT");
+    if mode.is_none() && overcommit.is_none() {
+        return None;
+    }
+    Some(NitroConfig {
+        mode: mode.unwrap_or_else(|| "direct".into()),
+        cpu_overcommit: overcommit.is_none_or(|v| v != "0"),
+    })
+}
+
 /// [`prepare`] with an already resolved image and an explicit environment.
 pub fn prepare_with_image(
     common: &CommonOptions,
@@ -331,13 +347,7 @@ pub fn prepare_with_image(
         firecracker_path: if firecracker { env_opt("GONDOLIN_FIRECRACKER") } else { None },
         // a Nitro Sandbox when either setting is given (mode `off`: KVM),
         // else the daemon picks (a Nitro Sandbox when the host supports them)
-        nitro: (firecracker
-            && (env_opt("GONDOLIN_NITRO_MODE").is_some()
-                || env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT").is_some()))
-        .then(|| NitroConfig {
-            mode: env_opt("GONDOLIN_NITRO_MODE").unwrap_or_else(|| "direct".into()),
-            cpu_overcommit: env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT").is_none_or(|v| v != "0"),
-        }),
+        nitro: if firecracker { nitro_from_env(&env_opt) } else { None },
         qemu_path: if krun || firecracker { String::new() } else { qemu_path },
         image: None,
         arch: None,
@@ -569,6 +579,24 @@ pub fn printable(prepared: &Prepared) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nitro_settings_from_the_environment() {
+        let with = |vars: &[(&str, &str)]| {
+            nitro_from_env(&|name: &str| {
+                vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.trim().to_string())
+            })
+        };
+        assert_eq!(with(&[]), None);
+        for (value, mode) in
+            [("Off", "off"), (" DIRECT ", "direct"), ("Confidential", "confidential")]
+        {
+            let nitro = with(&[("GONDOLIN_NITRO_MODE", value)]).unwrap();
+            assert_eq!((nitro.mode.as_str(), nitro.cpu_overcommit), (mode, true));
+        }
+        let nitro = with(&[("GONDOLIN_NITRO_CPU_OVERCOMMIT", "0")]).unwrap();
+        assert_eq!((nitro.mode.as_str(), nitro.cpu_overcommit), ("direct", false));
+    }
 
     #[test]
     fn debug_env() {
