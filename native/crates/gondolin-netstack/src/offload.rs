@@ -145,10 +145,19 @@ fn ipv4_header(frame: &[u8]) -> Option<(usize, u8)> {
     Some((ihl, ip[9]))
 }
 
+/// Smallest segment size accepted from the guest: Linux's own floor for the
+/// send MSS (`TCP_MIN_SND_MSS`). The size comes from the guest, and a tiny
+/// one would turn one 64 KiB frame into tens of thousands of segments for
+/// the host to build and process; at 48 bytes it is at most ~1,400.
+pub const MIN_GSO_SIZE: usize = 48;
+
 /// Cuts a TCP/IPv4 super-frame into segments of at most `mss` payload bytes,
 /// as the NIC would: consecutive sequence numbers and IP ids, FIN/PSH only on
 /// the last segment, CWR only on the first, full IP and TCP checksums.
 fn segment_tcpv4(frame: &[u8], mss: usize, out: &mut Vec<Bytes>) -> Result<(), Dropped> {
+    if mss < MIN_GSO_SIZE {
+        return Err(Dropped::Malformed);
+    }
     let (ihl, proto) = ipv4_header(frame).ok_or(Dropped::Malformed)?;
     if proto != IP_PROTO_TCP {
         return Err(Dropped::Malformed);
@@ -182,7 +191,7 @@ fn segment_tcpv4(frame: &[u8], mss: usize, out: &mut Vec<Bytes>) -> Result<(), D
         seg.extend_from_slice(&frame[..headers]);
         seg.extend_from_slice(chunk);
 
-        let ip_len = (ihl + doff + chunk.len()) as u16;
+        let ip_len = u16::try_from(ihl + doff + chunk.len()).map_err(|_| Dropped::Malformed)?;
         seg[ip_start + 2..ip_start + 4].copy_from_slice(&ip_len.to_be_bytes());
         seg[ip_start + 4..ip_start + 6].copy_from_slice(&id.wrapping_add(i as u16).to_be_bytes());
         seg[ip_start + 10..ip_start + 12].fill(0);
@@ -286,6 +295,33 @@ mod tests {
         assert_eq!(parsed, hdr);
         assert_eq!(rest, b"frame");
         assert!(VnetHdr::parse(&buf[..9]).is_none());
+    }
+
+    fn gso(gso_size: u16) -> VnetHdr {
+        VnetHdr { gso_type: GSO_TCPV4, gso_size, ..Default::default() }
+    }
+
+    #[test]
+    fn tiny_segment_sizes_are_dropped() {
+        let f = tcp_frame(1, 0x18, &[7u8; 60_000]);
+        let mut out = Vec::new();
+        assert_eq!(expand(&gso(1), &f, &mut out), Err(Dropped::Malformed));
+        assert_eq!(expand(&gso(MIN_GSO_SIZE as u16 - 1), &f, &mut out), Err(Dropped::Malformed));
+        assert!(out.is_empty());
+        expand(&gso(MIN_GSO_SIZE as u16), &f, &mut out).unwrap();
+        assert_eq!(out.len(), 60_000usize.div_ceil(MIN_GSO_SIZE));
+    }
+
+    #[test]
+    fn a_segment_too_long_for_ipv4_is_dropped() {
+        // the largest frame the stack reads: its IP length would be 65,536
+        let f = tcp_frame(1, 0x18, &vec![7u8; 65_550 - ETH_HEADER_LEN - 40]);
+        let mut out = Vec::new();
+        assert_eq!(expand(&gso(u16::MAX), &f, &mut out), Err(Dropped::Malformed));
+        // one byte less fits
+        let f = tcp_frame(1, 0x18, &vec![7u8; 65_549 - ETH_HEADER_LEN - 40]);
+        expand(&gso(u16::MAX), &f, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
