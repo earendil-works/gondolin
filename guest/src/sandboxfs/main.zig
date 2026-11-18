@@ -205,6 +205,8 @@ const Fs = struct {
     arena: std.heap.ArenaAllocator,
     /// errno of the last failed RPC (valid after `error.HostErrno`)
     host_errno: E = .SUCCESS,
+    /// result map of the last failed RPC (valid after `error.HostErrno`, `.null` when absent)
+    host_res: cbor.Value = .null,
     /// opcodes already reported as unsupported
     unsupported_logged: std.StaticBitSet(64) = .empty,
     /// largest read/write RPC payload the host takes, in `bytes`
@@ -323,7 +325,10 @@ const Fs = struct {
             if (isConnectionLost(err)) reconnectRpc(rpc);
             return err;
         };
-        if (response.err != .SUCCESS) return self.hostErrno(response.err);
+        if (response.err != .SUCCESS) {
+            self.host_res = response.res;
+            return self.hostErrno(response.err);
+        }
         return response;
     }
 
@@ -500,7 +505,17 @@ const Fs = struct {
             }
             return .{ .err = .NOENT };
         }
-        const res = try self.call("lookup", .{ .parent_ino = h.nodeid, .name = name });
+        const res = self.call("lookup", .{ .parent_ino = h.nodeid, .name = name }) catch |err| switch (err) {
+            // The kernel never caches an error reply, only a negative entry
+            // (nodeid 0): send one when the host gives the miss a ttl.
+            error.HostErrno => {
+                if (self.host_errno == .NOENT) {
+                    if (getU64(self.host_res, "entry_ttl_ms")) |ttl_ms| return self.ok(negativeEntryOut(ttl_ms));
+                }
+                return err;
+            },
+            else => return err,
+        };
         return self.ok(try entryOut(res.get("entry")));
     }
 
@@ -795,6 +810,12 @@ fn entryOutFromAttr(attr: fuse.Attr, attr_ttl_ms: u64, entry_ttl_ms: u64) fuse.E
     };
 }
 
+/// LOOKUP reply for a missing name, cached by the kernel for `ttl_ms`.
+fn negativeEntryOut(ttl_ms: u64) fuse.EntryOut {
+    const ttl = splitMs(ttl_ms);
+    return std.mem.zeroInit(fuse.EntryOut, .{ .entry_valid = ttl.sec, .entry_valid_nsec = ttl.nsec });
+}
+
 fn attrOut(attr: fuse.Attr, ttl_ms: u64) fuse.AttrOut {
     const ttl = splitMs(ttl_ms);
     return .{ .attr_valid = ttl.sec, .attr_valid_nsec = ttl.nsec, .attr = attr };
@@ -854,4 +875,36 @@ test "attribute parsing applies defaults" {
     try std.testing.expectEqual(@as(u32, 1), entry.attr.nlink);
     try std.testing.expectEqual(@as(u64, 1), entry.entry_valid);
     try std.testing.expectError(error.InvalidResponse, entryOut(null));
+}
+
+test "lookup misses with a host ttl become negative entries" {
+    var pair: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair)) != .SUCCESS) return error.SocketPairFailed;
+    defer sys.close(pair[1]);
+
+    // the host's answers to the two lookups below: a miss with a ttl, then one without
+    var outbox: shared.framing.Outbox = .init(std.testing.allocator);
+    defer outbox.deinit();
+    try outbox.sendRaw("fs_response", 1, .{ .op = "lookup", .err = -2, .res = .{ .entry_ttl_ms = @as(u64, 1250) } });
+    try outbox.sendRaw("fs_response", 2, .{ .op = "lookup", .err = -2 });
+    try sys.writeAll(pair[1], outbox.aw.writer.buffered());
+
+    var fs: Fs = .{
+        .gpa = std.testing.allocator,
+        .fuse_fd = -1,
+        .rpc = .init(std.testing.allocator, pair[0]),
+        .arena = .init(std.testing.allocator),
+    };
+    defer fs.deinit();
+    const h = std.mem.zeroInit(fuse.InHeader, .{ .opcode = @backingInt(fuse.Opcode.lookup), .nodeid = fuse.root_id });
+
+    const reply = try fs.lookup(h, "missing\x00");
+    try std.testing.expectEqual(@sizeOf(fuse.EntryOut), reply.data.len);
+    const entry = std.mem.bytesToValue(fuse.EntryOut, reply.data);
+    try std.testing.expectEqual(@as(u64, 0), entry.nodeid);
+    try std.testing.expectEqual(@as(u64, 1), entry.entry_valid);
+    try std.testing.expectEqual(@as(u32, 250_000_000), entry.entry_valid_nsec);
+
+    try std.testing.expectError(error.HostErrno, fs.lookup(h, "missing\x00"));
+    try std.testing.expectEqual(E.NOENT, fs.host_errno);
 }
