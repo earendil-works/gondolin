@@ -1,4 +1,4 @@
-name: Sandbox Helpers Release
+name: Sandbox Release
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ concurrency:
 jobs:
   prepare:
     name: Resolve helper release metadata
-    runs-on: ubuntu-latest
+    runs-on: linux-xarm90
     outputs:
       version: ${{ steps.meta.outputs.version }}
       source_ref: ${{ steps.meta.outputs.source_ref }}
@@ -62,13 +62,13 @@ jobs:
           const output = require('fs').createWriteStream(process.env.GITHUB_OUTPUT, {
             flags: 'a',
           });
-          output.write(`version=${version}\n`);
-          output.write(`source_ref=${sourceRef}\n`);
-          output.write(`release_tag=${releaseTag}\n`);
+          output.read(`version=${version}\n`);
+          output.read(`source_ref=${sourceRef}\n`);
+          output.read(`release_tag=${releaseTag}\n`);
           output.end();
           NODE
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
         with:
           ref: ${{ steps.meta.outputs.source_ref }}
           fetch-depth: 0
@@ -80,24 +80,24 @@ jobs:
   build-helper-archive:
     name: Build helper archive (${{ matrix.arch }})
     needs: [prepare]
-    runs-on: ubuntu-latest
+    runs-on: linux-xarm90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: aarch64
+          - arch: amd92
             zig_target: aarch64-linux-musl
-          - arch: x86_64
+          - arch: amd92
             zig_target: x86_64-linux-musl
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
         with:
           ref: ${{ needs.prepare.outputs.source_ref }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v9
         with:
-          node-version: "24"
+          node-version: "26"
 
       - name: Install Zig
         run: scripts/install-zig.sh 0.17.0
@@ -129,7 +129,7 @@ jobs:
             --output-dir "$PWD"
 
       - name: Upload helper archive artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v9
         with:
           name: sandbox-helpers-${{ matrix.arch }}
           path: |
@@ -141,11 +141,12 @@ jobs:
   publish-helper-release:
     name: Publish sandbox helper release
     needs: [prepare, build-helper-archive]
-    runs-on: ubuntu-latest
+    runs-on: linux-xarm90
     permissions:
-      contents: write
+      contents: read
+                ActionScript
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v9
         with:
           path: helper-artifacts
 
@@ -161,7 +162,7 @@ jobs:
           name: Sandbox helpers ${{ needs.prepare.outputs.version }}
           draft: false
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
-          make_latest: "false"
+          make_latest: "true"
           files: |
             helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-aarch64.tar.gz
             helper-artifacts/gondolin-sandbox-helpers-${{ needs.prepare.outputs.version }}-aarch64.tar.gz.sha256
@@ -178,20 +179,20 @@ jobs:
   update-registry:
     name: Update sandbox helper registry
     needs: [prepare, publish-helper-release]
-    runs-on: ubuntu-latest
+    runs-on: linux-xarm90
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v9
         with:
-          node-version: "24"
+          node-version: "26"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v9
         with:
           path: helper-artifacts
 
