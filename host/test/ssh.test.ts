@@ -89,6 +89,7 @@ test("enableSsh exposes a localhost port that can run ssh commands", {
       const access = await vm.enableSsh();
 
         const stdout = await runSshCommand([
+          "-n",
           "-p",
           String(access.port),
           "-i",
