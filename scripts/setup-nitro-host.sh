@@ -109,7 +109,7 @@ else
   reboot_needed=1
 fi
 
-echo "slot budget: $SLOTS (now and at boot)"
+echo "slot budget: asking for $SLOTS (now and at boot)"
 $SUDO tee /etc/systemd/system/gondolin-nitro-slots.service >/dev/null <<UNIT
 [Unit]
 Description=Nitro Enclaves slot budget for Gondolin's Nitro Sandboxes
@@ -124,7 +124,17 @@ ExecStart=/bin/sh -c 'echo $SLOTS > $sysfs/pcie_slots'
 WantedBy=multi-user.target
 UNIT
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now gondolin-nitro-slots.service >/dev/null
+# the driver only accepts a slot budget once a memory pool exists (ENOMEM
+# before): on a fresh instance the unit sets it at the boot that reserves it
+if [[ "$(cat "$sysfs/mem_pool/total" 2>/dev/null || echo 0)" -gt 0 ]]; then
+  # the driver may refuse or round the value (it rose to 12 with a 6 GiB pool)
+  $SUDO systemctl enable --now gondolin-nitro-slots.service >/dev/null ||
+    echo "  the driver refused $SLOTS; keeping its own budget"
+  echo "  slot budget now: $(cat "$sysfs/pcie_slots" 2>/dev/null || echo unknown)"
+else
+  $SUDO systemctl enable gondolin-nitro-slots.service >/dev/null
+  echo "  (set at the next boot, once the memory pool exists)"
+fi
 
 if firecracker --version 2>/dev/null | grep -qE 'v(1\.(1[89]|[2-9][0-9])|[2-9])' && command -v jailer >/dev/null 2>&1; then
   echo "Firecracker and jailer already installed"

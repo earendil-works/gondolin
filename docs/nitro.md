@@ -61,10 +61,13 @@ steps by hand:
     1 GiB by default, plus 2 MiB).
 
 3. Raise the slot budget (each running sandbox takes one slot; a fresh parent
-   may start with none):
+   may start with none). The driver only accepts it once the memory pool
+   exists (after the reboot), and may round it or refuse lowering it (with a
+   6 GiB pool it reported 12):
 
     ```bash
     echo 8 | sudo tee /sys/class/misc/nitro_enclaves/pcie_slots
+    cat /sys/class/misc/nitro_enclaves/pcie_slots
     ```
 
     This does not survive a reboot (the setup script installs a systemd unit,
