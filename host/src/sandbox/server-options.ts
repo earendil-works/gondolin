@@ -51,7 +51,7 @@ const require = createRequire(import.meta.url);
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "qemu" | "krun";
+export type SandboxVmm = "qemu" | "krun" | "firecracker";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
@@ -69,13 +69,25 @@ const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
 export type SandboxServerOptions = {
   /**
    * vm backend implementation (default: `GONDOLIN_VMM`, else `krun` where it
-   * can run, else `qemu`)
+   * can run, else `qemu`; `firecracker` is never picked automatically)
    */
   vmm?: SandboxVmm;
   /** qemu binary path */
   qemuPath?: string;
   /** krun runner binary path */
   krunRunnerPath?: string;
+  /**
+   * firecracker binary path (`vmm: "firecracker"`; default:
+   * `GONDOLIN_FIRECRACKER`, else `firecracker` in `PATH`)
+   */
+  firecrackerPath?: string;
+  /**
+   * AWS Nitro Sandbox toggle for `vmm: "firecracker"` (default:
+   * `GONDOLIN_NITRO`). `true` runs an AWS Nitro Sandbox, `false` runs a KVM
+   * microVM, unset runs a Nitro Sandbox when the daemon's host is set up for
+   * them (`/dev/nitro_enclaves` and a memory pool), else a KVM microVM.
+   */
+  nitro?: boolean;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -185,6 +197,13 @@ export type ResolvedSandboxServerOptions = {
   qemuPath: string;
   /** krun runner binary path */
   krunRunnerPath: string;
+  /** firecracker binary path */
+  firecrackerPath: string;
+  /**
+   * Nitro Sandbox settings (`vmm: "firecracker"`; unset: the daemon picks
+   * KVM or a Nitro Sandbox)
+   */
+  nitro?: boolean;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -331,10 +350,36 @@ function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
 function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
+}
+
+/**
+ * Resolves `sandbox.nitro` with `GONDOLIN_NITRO` as default (`1`/`true`/`yes`/`on`
+ * for Nitro, `0`/`false`/`no`/`off` for KVM, unset to let the daemon pick).
+ */
+function resolveNitroOptions(
+  options: boolean | undefined,
+): boolean | undefined {
+  if (options !== undefined) return options;
+  const raw = process.env.GONDOLIN_NITRO?.trim();
+  if (!raw) return undefined;
+  const lower = raw.toLowerCase();
+  if (lower === "1" || lower === "true" || lower === "yes" || lower === "on") {
+    return true;
+  }
+  if (lower === "0" || lower === "false" || lower === "no" || lower === "off") {
+    return false;
+  }
+  throw new Error(
+    `invalid GONDOLIN_NITRO: ${raw} (expected 1/true/on or 0/false/off)`,
+  );
 }
 
 function normalizeArch(
@@ -939,7 +984,7 @@ export function resolveSandboxServerOptions(
   const explicitVmm = normalizeVmm(options.vmm ?? null);
   if (options.vmm !== undefined && !explicitVmm) {
     throw new Error(
-      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu" or "krun")`,
+      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu", "krun" or "firecracker")`,
     );
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
@@ -990,7 +1035,7 @@ export function resolveSandboxServerOptions(
       ? (detectedKrunRunnerPath ?? resolveDefaultKrunRunnerPathFn())
       : "gondolin-krun-runner");
 
-  if (vmm === "krun") {
+  if (vmm === "krun" || vmm === "firecracker") {
     const unsupported: string[] = [];
     if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
     if (options.machineType !== undefined)
@@ -1002,11 +1047,28 @@ export function resolveSandboxServerOptions(
 
     if (unsupported.length > 0) {
       throw new Error(
-        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=krun: ${unsupported.join(", ")}. ` +
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=${vmm}: ${unsupported.join(", ")}. ` +
           "These options are only supported with vmm=qemu.",
       );
     }
   }
+  if (vmm !== "firecracker") {
+    const unsupported: string[] = [];
+    if (options.firecrackerPath !== undefined)
+      unsupported.push("sandbox.firecrackerPath");
+    if (options.nitro !== undefined) unsupported.push("sandbox.nitro");
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=${vmm}: ${unsupported.join(", ")}. ` +
+          "These options are only supported with vmm=firecracker.",
+      );
+    }
+  }
+  const firecrackerPath =
+    options.firecrackerPath ??
+    (process.env.GONDOLIN_FIRECRACKER?.trim() || "firecracker");
+  const nitro =
+    vmm === "firecracker" ? resolveNitroOptions(options.nitro) : undefined;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
@@ -1057,11 +1119,12 @@ export function resolveSandboxServerOptions(
   } else if (guestFromManifest) {
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
+      const backend = vmm === "krun" ? "libkrun" : vmm;
       throw new Error(
-        "Guest image architecture mismatch for libkrun backend.\n" +
+        `Guest image architecture mismatch for ${backend} backend.\n` +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
           `  host arch:    ${host}\n\n` +
-          "Fix: select a guest image that matches the host architecture when using vmm=krun.",
+          `Fix: select a guest image that matches the host architecture when using vmm=${vmm}.`,
       );
     }
   }
@@ -1093,6 +1156,8 @@ export function resolveSandboxServerOptions(
     vmm,
     qemuPath,
     krunRunnerPath,
+    firecrackerPath,
+    ...(nitro !== undefined ? { nitro } : {}),
     kernelPath,
     initrdPath,
     rootfsPath,

@@ -877,6 +877,7 @@ test("images: sandbox server options accept image refs", () => {
 
     const resolved = resolveSandboxServerOptions({
       imagePath: "default:latest",
+      vmm: "qemu",
       qemuPath: "qemu-system-aarch64",
       netEnabled: false,
     });

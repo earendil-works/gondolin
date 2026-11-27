@@ -34,7 +34,8 @@ pub fn main() {
         gondolind::main_with_args(args);
         return;
     }
-    // the VMM watchdog re-executes the current binary (macOS)
+    // the VMM watchdog re-executes the current binary (macOS, jailed
+    // Firecracker on Linux)
     if args.first().map(String::as_str) == Some("--vmm-watchdog") {
         gondolind::main_with_args(args);
         return;

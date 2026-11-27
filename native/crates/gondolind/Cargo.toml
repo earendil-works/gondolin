@@ -29,4 +29,6 @@ default = ["djs-hooks"]
 djs-hooks = ["dep:gondolin-hooks-djs"]
 
 [dev-dependencies]
+# gzip writer for the kernel decompression test
+flate2 = "1"
 tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }

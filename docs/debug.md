@@ -185,12 +185,12 @@ command it would start, or why none was found. The static CLI prints
 
 ## Boot log
 
-On QEMU, guests boot with `quiet` on the kernel command line, so the kernel
-and the guest's init print only warnings and errors (panics included). QEMU's
-consoles are emulated serial ports (`ttyS0`, `ttyAMA0`), where the full boot
-log costs about 0.9 s per boot whether or not anyone reads it. krun's virtio
-console is cheap, so krun guests keep the full log. You get it back on QEMU
-with:
+On QEMU and Firecracker, guests boot with `quiet` on the kernel command line,
+so the kernel and the guest's init print only warnings and errors (panics
+included). Their consoles are emulated serial ports (`ttyS0`, `ttyAMA0`),
+where the full boot log costs about 0.9 s per boot whether or not anyone reads
+it. krun's virtio console is cheap, so krun guests keep the full log. You get
+it back on QEMU and Firecracker with:
 
 - `GONDOLIN_DEBUG=protocol` (or `sandbox.debug: ["protocol"]`), which also
   forwards it, or

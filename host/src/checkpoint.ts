@@ -80,7 +80,11 @@ export type VmCheckpointData = {
 function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
@@ -93,7 +97,7 @@ function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm | null {
     const explicit = normalizeSandboxVmm(explicitRaw);
     if (!explicit) {
       throw new Error(
-        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu" or "krun")`,
+        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu", "krun" or "firecracker")`,
       );
     }
     return explicit;

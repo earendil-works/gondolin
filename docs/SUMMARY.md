@@ -20,6 +20,7 @@
 - [Images](images.md)
 - [Building Custom Images](custom-images.md)
 - [Remote Machines](remote.md)
+- [AWS Nitro Sandboxes](nitro.md)
 - [Debugging and Troubleshooting](debug.md)
 
 # Reference

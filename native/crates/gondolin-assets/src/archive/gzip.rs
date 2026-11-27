@@ -45,6 +45,8 @@ pub struct GzipReader<R> {
     /// uncompressed size of the current member modulo 2^32
     size: u32,
     phase: Phase,
+    /// decode the members that follow the first (else stop after it)
+    multi: bool,
 }
 
 impl<R: Read> GzipReader<R> {
@@ -59,7 +61,15 @@ impl<R: Read> GzipReader<R> {
             crc: Crc32::new(),
             size: 0,
             phase: Phase::Header { first: true },
+            multi: true,
         }
+    }
+
+    /// Like [`GzipReader::new`], but decodes only the first member and ignores
+    /// whatever follows it, as for a gzip payload embedded in a larger file
+    /// (a compressed kernel image).
+    pub fn first_member(inner: R) -> GzipReader<R> {
+        GzipReader { multi: false, ..GzipReader::new(inner) }
     }
 
     /// Refills the input buffer when it is empty; returns whether data is available.
@@ -221,7 +231,11 @@ impl<R: Read> Read for GzipReader<R> {
                     match r.status {
                         Ok(MZStatus::StreamEnd) => {
                             self.trailer()?;
-                            self.phase = Phase::Header { first: false };
+                            self.phase = if self.multi {
+                                Phase::Header { first: false }
+                            } else {
+                                Phase::Done
+                            };
                             if r.bytes_written > 0 {
                                 return Ok(r.bytes_written);
                             }
@@ -333,6 +347,21 @@ mod tests {
         gz.extend(c.value().to_le_bytes());
         gz.extend((data.len() as u32).to_le_bytes());
         assert_eq!(decode(&gz).unwrap(), data);
+    }
+
+    #[test]
+    fn first_member_ignores_what_follows() {
+        let mut embedded = stored_gzip(b"kernel", 0);
+        embedded.extend_from_slice(b"\x01rest of the image");
+        // a whole stream must end after its members
+        assert!(decode(&embedded).is_err());
+        let mut out = Vec::new();
+        GzipReader::first_member(&embedded[..]).read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"kernel");
+        // the first member is still checked
+        let n = embedded.len() - b"\x01rest of the image".len();
+        embedded[n - 8] ^= 1;
+        assert!(GzipReader::first_member(&embedded[..]).read_to_end(&mut out).is_err());
     }
 
     #[test]

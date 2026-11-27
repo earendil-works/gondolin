@@ -580,6 +580,10 @@ fn escape_proc_mounts(p: &str) -> String {
 fn check_vmm(prepared: &Prepared) -> Result<(), String> {
     let vm = &prepared.configure["vm"];
     let krun = vm["vmm"].as_text() == Some("krun");
+    if vm["vmm"].as_text() == Some("firecracker") {
+        // the daemon checks the binary (and reports a missing one) at start
+        return Ok(());
+    }
     let path = if krun {
         vm["krun_runner_path"].as_str().unwrap_or("gondolin-krun-runner")
     } else {

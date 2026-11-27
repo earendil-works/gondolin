@@ -84,6 +84,7 @@ test("resolveSandboxServerOptions fails fast on guest/qemu arch mismatch", () =>
       () =>
         resolveSandboxServerOptions({
           imagePath: dir,
+          vmm: "qemu",
           qemuPath: "qemu-system-x86_64",
         }),
       /Guest image architecture mismatch/,
@@ -101,6 +102,7 @@ test("resolveSandboxServerOptions auto-selects qemu binary from guest image arch
   try {
     const resolved = resolveSandboxServerOptions({
       imagePath: dir,
+      vmm: "qemu",
     });
 
     assert.equal(
@@ -117,6 +119,7 @@ test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {
   try {
     const resolved = resolveSandboxServerOptions({
       imagePath: dir,
+      vmm: "qemu",
       qemuPath: "qemu-system-aarch64",
     });
     assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
