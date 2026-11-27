@@ -61,17 +61,11 @@ export type NitroOptions = {
    * patches)
    */
   mode?: "direct" | "confidential";
-  /**
-   * time-share the vCPUs over the parent's CPUs instead of claiming dedicated
-   * cores from the Nitro Enclaves CPU pool (default: `true`)
-   */
-  cpuOvercommit?: boolean;
 };
 
 /** Resolved {@link NitroOptions}; mode `off`: a KVM microVM was requested */
 export type ResolvedNitroOptions = {
   mode: "direct" | "confidential" | "off";
-  cpuOvercommit: boolean;
 };
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
@@ -104,12 +98,11 @@ export type SandboxServerOptions = {
   firecrackerPath?: string;
   /**
    * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
-   * settings (defaults: `GONDOLIN_NITRO_MODE`, `GONDOLIN_NITRO_CPU_OVERCOMMIT`;
-   * setting either variable also selects a Nitro Sandbox; with an object,
-   * `GONDOLIN_NITRO_MODE=off` does not apply), or `false` for a
-   * KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro Sandbox when the
-   * daemon's host is set up for them (`/dev/nitro_enclaves` and a memory
-   * pool), else a KVM microVM.
+   * settings (default: `GONDOLIN_NITRO_MODE`; setting it also selects a Nitro
+   * Sandbox; with an object, `GONDOLIN_NITRO_MODE=off` does not apply), or
+   * `false` for a KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro
+   * Sandbox when the daemon's host is set up for them (`/dev/nitro_enclaves`
+   * and a memory pool), else a KVM microVM.
    */
   nitro?: NitroOptions | false;
   /** guest asset directory or explicit asset paths */
@@ -393,11 +386,10 @@ function resolveNitroOptions(
   options: NitroOptions | false | undefined,
 ): ResolvedNitroOptions | undefined {
   const envMode = process.env.GONDOLIN_NITRO_MODE?.trim().toLowerCase();
-  const envOvercommit = process.env.GONDOLIN_NITRO_CPU_OVERCOMMIT?.trim();
   if (options === false || (options === undefined && envMode === "off")) {
-    return { mode: "off", cpuOvercommit: true };
+    return { mode: "off" };
   }
-  if (options === undefined && !envMode && !envOvercommit) return undefined;
+  if (options === undefined && !envMode) return undefined;
   // an explicit `nitro` object asks for a Nitro Sandbox: the environment
   // only supplies its defaults, so its `off` does not apply
   const envDefault = envMode === "off" ? undefined : envMode;
@@ -408,9 +400,7 @@ function resolveNitroOptions(
         `nitro: false or GONDOLIN_NITRO_MODE=off runs a KVM microVM instead)`,
     );
   }
-  const cpuOvercommit =
-    options?.cpuOvercommit ?? (envOvercommit ? envOvercommit !== "0" : true);
-  return { mode, cpuOvercommit };
+  return { mode };
 }
 
 function normalizeArch(

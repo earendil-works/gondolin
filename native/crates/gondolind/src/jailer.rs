@@ -22,11 +22,12 @@
 //! Each jail (directory and cgroup) is removed when its VMM has exited; ones
 //! left behind by a daemon that died are swept when the next jail is created.
 //!
-//! Used when the daemon runs as root and finds `jailer` (beside the
-//! Firecracker binary or on `PATH`); `GONDOLIN_JAILER` names the binary, or
-//! `0` turns it off. `GONDOLIN_JAILER_DIR` is the chroot base (default
-//! `/srv/jailer`) and `GONDOLIN_JAILER_UID` the first uid/gid used (the VMM
-//! of daemon process `pid` runs as `uid + pid`, default 1600000000).
+//! Used for every Firecracker VM (the backend requires root; `jailer` is
+//! looked up beside the Firecracker binary or on `PATH`); `GONDOLIN_JAILER`
+//! names the binary, or `0` turns it off. `GONDOLIN_JAILER_DIR` is the chroot
+//! base (default `/srv/jailer`) and `GONDOLIN_JAILER_UID` the first uid/gid
+//! used (the VMM of daemon process `pid` runs as `uid + pid`, default
+//! 1600000000).
 
 use std::path::{Path, PathBuf};
 
@@ -71,52 +72,39 @@ fn find_program(name: &str) -> Option<PathBuf> {
 }
 
 /// Which jailer to use. `requested`: `GONDOLIN_JAILER` (not `0`); `found`:
-/// the one beside the Firecracker binary or on `PATH`. A daemon that is not
-/// root runs VMMs unjailed as its own user. A root daemon must find one: the
-/// VMM would otherwise run as root with the host's whole filesystem and no
-/// resource limits, so running unjailed takes an explicit
-/// `GONDOLIN_JAILER=0`.
+/// the one beside the Firecracker binary or on `PATH`. The Firecracker
+/// backend requires root, so a missing jailer is an error (the VMM would
+/// otherwise run as root with the host's whole filesystem and no resource
+/// limits); running unjailed takes an explicit `GONDOLIN_JAILER=0`.
 fn choose_jailer(
     requested: Option<&str>,
-    root: bool,
     found: impl FnOnce() -> Option<PathBuf>,
     resolve: impl FnOnce(&str) -> Option<PathBuf>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<PathBuf, String> {
     match requested {
-        Some(path) if !root => Err(format!(
-            "GONDOLIN_JAILER={path}: the jailer needs a daemon running as root (or set \
-             GONDOLIN_JAILER=0)"
-        )),
-        Some(path) => {
-            Ok(Some(resolve(path).ok_or_else(|| format!("GONDOLIN_JAILER: {path} not found"))?))
-        }
-        None if !root => Ok(None),
-        None => found().map(Some).ok_or_else(|| {
-            "the daemon runs as root but Firecracker's jailer was not found (beside the \
-             firecracker binary or on PATH): the VMM would run as root without a chroot or \
-             resource limits. Install it (scripts/install-firecracker.sh installs both) or set \
-             GONDOLIN_JAILER=0 to run Firecracker unjailed"
+        Some(path) => resolve(path).ok_or_else(|| format!("GONDOLIN_JAILER: {path} not found")),
+        None => found().ok_or_else(|| {
+            "Firecracker's jailer was not found (beside the firecracker binary or on PATH): \
+             the VMM would run as root without a chroot or resource limits. Install it \
+             (scripts/install-firecracker.sh installs both) or set GONDOLIN_JAILER=0 to run \
+             Firecracker unjailed"
                 .to_string()
         }),
     }
 }
 
-/// The jailer settings for `vm`, or `None` when VMMs run unjailed: the
-/// daemon is not root, or `GONDOLIN_JAILER=0`. A root daemon without a
-/// jailer, and an explicitly named jailer that cannot be used, are errors
-/// ([`choose_jailer`]).
+/// The jailer settings for `vm`, or `None` when `GONDOLIN_JAILER=0` opts out.
+/// A missing jailer, or an explicitly named one that cannot be found, is an
+/// error ([`choose_jailer`]).
 pub fn settings(vm: &VmConfig) -> Result<Option<JailerSettings>, String> {
     let requested = env("GONDOLIN_JAILER");
     if requested.as_deref().is_some_and(is_off) {
         return Ok(None);
     }
-    // SAFETY: geteuid has no preconditions.
-    let root = unsafe { libc::geteuid() } == 0;
     let firecracker = find_program(&crate::firecracker::binary_path(vm))
         .and_then(|p| std::fs::canonicalize(p).ok());
     let jailer = choose_jailer(
         requested.as_deref(),
-        root,
         // beside the Firecracker binary first: the two come from one release
         || {
             firecracker
@@ -127,7 +115,6 @@ pub fn settings(vm: &VmConfig) -> Result<Option<JailerSettings>, String> {
         },
         find_program,
     )?;
-    let Some(jailer) = jailer else { return Ok(None) };
     let firecracker = firecracker.ok_or_else(|| {
         format!("cannot resolve the Firecracker binary {}", crate::firecracker::binary_path(vm))
     })?;
@@ -450,26 +437,18 @@ mod tests {
     }
 
     #[test]
-    fn a_root_daemon_needs_a_jailer_unless_told_otherwise() {
+    fn a_jailer_is_required_unless_opted_out() {
         let found = || Some(PathBuf::from("/usr/local/bin/jailer"));
         let none = || None;
         let resolve = |p: &str| (p == "/opt/jailer").then(|| PathBuf::from(p));
-        // root: the jailer that was found, or an error naming the opt-out
-        assert_eq!(
-            choose_jailer(None, true, found, resolve),
-            Ok(Some(PathBuf::from("/usr/local/bin/jailer")))
-        );
-        let err = choose_jailer(None, true, none, resolve).unwrap_err();
+        assert_eq!(choose_jailer(None, found, resolve), Ok(PathBuf::from("/usr/local/bin/jailer")));
+        let err = choose_jailer(None, none, resolve).unwrap_err();
         assert!(err.contains("jailer was not found") && err.contains("GONDOLIN_JAILER=0"));
-        // not root: unjailed, as the daemon's own user
-        assert_eq!(choose_jailer(None, false, found, resolve), Ok(None));
-        // an explicit jailer must exist and needs root
         assert_eq!(
-            choose_jailer(Some("/opt/jailer"), true, none, resolve),
-            Ok(Some(PathBuf::from("/opt/jailer")))
+            choose_jailer(Some("/opt/jailer"), none, resolve),
+            Ok(PathBuf::from("/opt/jailer"))
         );
-        assert!(choose_jailer(Some("/missing"), true, found, resolve).is_err());
-        assert!(choose_jailer(Some("/opt/jailer"), false, found, resolve).is_err());
+        assert!(choose_jailer(Some("/missing"), found, resolve).is_err());
     }
 
     #[test]

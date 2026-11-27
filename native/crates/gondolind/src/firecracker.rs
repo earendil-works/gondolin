@@ -143,6 +143,18 @@ pub fn check_binary(vm: &VmConfig) -> Result<(), String> {
     }
 }
 
+/// Firecracker requires running the daemon as root (for the per-VM network
+/// namespace, tap device and jailer).
+pub fn require_root() -> Result<(), String> {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("the firecracker backend requires running the daemon as root \
+             (for the network namespace and jailer)"
+            .into());
+    }
+    Ok(())
+}
+
 /// Whether this daemon's host can run the backend at all.
 pub fn check_host() -> Result<(), String> {
     if !cfg!(target_os = "linux") {
@@ -183,10 +195,7 @@ fn select_target(vm: &mut VmConfig, kvm: bool, nitro_ready: bool) -> Result<(), 
         }
         Some(_) => Ok(()),
         None if nitro_ready => {
-            vm.nitro = Some(gondolin_proto::session::NitroConfig {
-                mode: "direct".into(),
-                cpu_overcommit: true,
-            });
+            vm.nitro = Some(gondolin_proto::session::NitroConfig { mode: "direct".into() });
             Ok(())
         }
         None if kvm => Ok(()),
@@ -391,19 +400,11 @@ pub fn uncompressed_kernel(path: &Path, cache: &Path) -> Result<PathBuf, String>
 
 /// Checks the parts of the configuration this backend supports.
 pub fn validate(vm: &VmConfig) -> Result<(), String> {
-    if let Some(nitro) = &vm.nitro {
-        if nitro.mode != "direct" && nitro.mode != "confidential" {
-            return Err(format!(
-                "vm.nitro.mode must be direct or confidential (got {:?})",
-                nitro.mode
-            ));
-        }
-        if !nitro.cpu_overcommit && !vm.cpus.is_multiple_of(2) {
-            return Err(format!(
-                "vm.cpus must be even with dedicated cores (vm.nitro.cpu_overcommit false): {}",
-                vm.cpus
-            ));
-        }
+    if let Some(nitro) = &vm.nitro
+        && nitro.mode != "direct"
+        && nitro.mode != "confidential"
+    {
+        return Err(format!("vm.nitro.mode must be direct or confidential (got {:?})", nitro.mode));
     }
     if vm.cpus < 1 || vm.cpus > 1024 {
         return Err(format!("invalid vm cpu count for the firecracker backend: {}", vm.cpus));
@@ -539,7 +540,7 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
             gondolin_wire::value!({
                 "debug_mode": debug,
                 "direct_mode": direct,
-                "cpu_overcommit": nitro.cpu_overcommit,
+                "cpu_overcommit": true,
             }),
         );
         // the Nitro System rejects virtio-rng in confidential mode
@@ -859,7 +860,7 @@ mod tests {
             }),
             memory: "1G".into(),
             cpus: 2,
-            nitro: Some(NitroConfig { mode: "direct".into(), cpu_overcommit: true }),
+            nitro: Some(NitroConfig { mode: "direct".into() }),
             console: None,
             qemu_path: String::new(),
             ..crate::tests::test_vm()
@@ -929,7 +930,7 @@ mod tests {
 
     #[test]
     fn a_guest_that_never_connects_gets_a_mode_specific_reason() {
-        let mode = |m: &str| NitroConfig { mode: m.into(), cpu_overcommit: true };
+        let mode = |m: &str| NitroConfig { mode: m.into() };
         assert!(guest_deadline_message(None, 30).contains("vsock transport"));
         assert!(guest_deadline_message(Some(&mode("direct")), 30).contains("vsock transport"));
         let confidential = guest_deadline_message(Some(&mode("confidential")), 30);
@@ -941,7 +942,7 @@ mod tests {
     #[test]
     fn confidential_mode_has_no_entropy_device() {
         let mut vm = vm();
-        vm.nitro = Some(NitroConfig { mode: "confidential".into(), cpu_overcommit: true });
+        vm.nitro = Some(NitroConfig { mode: "confidential".into() });
         let uds = PathBuf::from("/s/v.sock");
         let config = config(&vm, &args(&uds)).unwrap();
         assert_eq!(config["enclave"]["direct_mode"].as_bool(), Some(false));
@@ -982,12 +983,8 @@ mod tests {
         v.nitro = None;
         assert!(validate(&v).is_ok(), "KVM");
         let mut v = vm();
-        v.nitro = Some(NitroConfig { mode: "fast".into(), cpu_overcommit: true });
+        v.nitro = Some(NitroConfig { mode: "fast".into() });
         assert!(validate(&v).unwrap_err().contains("direct or confidential"));
-        let mut v = vm();
-        v.cpus = 3;
-        v.nitro = Some(NitroConfig { mode: "direct".into(), cpu_overcommit: false });
-        assert!(validate(&v).unwrap_err().contains("even"));
         let mut v = vm();
         v.memory = "32M".into();
         assert!(validate(&v).unwrap_err().contains("64 MiB"));
@@ -1033,7 +1030,7 @@ mod tests {
 
     #[test]
     fn target_selection() {
-        let direct = Some(NitroConfig { mode: "direct".into(), cpu_overcommit: true });
+        let direct = Some(NitroConfig { mode: "direct".into() });
         let pick = |nitro: Option<NitroConfig>, kvm, dev| {
             let mut v = vm();
             v.nitro = nitro;
@@ -1046,9 +1043,9 @@ mod tests {
         );
         assert_eq!(pick(None, true, false).unwrap(), None, "else a KVM microVM");
         assert_eq!(pick(None, false, true).unwrap(), direct);
-        let chosen = Some(NitroConfig { mode: "confidential".into(), cpu_overcommit: false });
+        let chosen = Some(NitroConfig { mode: "confidential".into() });
         assert_eq!(pick(chosen.clone(), true, false).unwrap(), chosen, "explicit Nitro stays");
-        let off = Some(NitroConfig { mode: "off".into(), cpu_overcommit: true });
+        let off = Some(NitroConfig { mode: "off".into() });
         assert_eq!(pick(off.clone(), true, true).unwrap(), None, "mode off: KVM");
         assert!(pick(off, false, true).unwrap_err().contains("KVM microVM was requested"));
         assert!(pick(None, false, false).unwrap_err().contains("/dev/kvm"));

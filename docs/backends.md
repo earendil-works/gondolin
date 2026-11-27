@@ -64,7 +64,7 @@ Two cases keep `qemu` as the default:
 | `sandbox.accel` | ✓ |  |  | Rejected unless `vmm=qemu`; the other backends' accelerator is implicit |
 | `sandbox.cpu` | ✓ |  |  | Rejected unless `vmm=qemu`; `GONDOLIN_CPU` only applies to `qemu` |
 | `sandbox.qemuIdlePauseMs` | ✓ |  |  | Rejected unless `vmm=qemu`; see [QEMU: Idle Pause](./qemu.md#idle-pause) |
-| `sandbox.cpus` | ✓ | ✓ | ✓ | Shared high-level CPU count option; Firecracker with dedicated cores (`nitro.cpuOvercommit: false`) needs an even count |
+| `sandbox.cpus` | ✓ | ✓ | ✓ | Shared high-level CPU count option |
 | `sandbox.memory` | ✓ | ✓ | ✓ | `krun` and `firecracker` parse memory and pass MiB (Firecracker: rounded up to 2 MiB, at least 64 MiB) |
 | `sandbox.console` | ✓ | ✓ | ✓ | QEMU and Firecracker boot the kernel with `quiet` unless `"stdio"` or `protocol` debugging (see [Boot log](./debug.md#boot-log)); Firecracker on Nitro also turns the debug console off then |
 | `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | ✓ | Supported on all backends; Firecracker needs a raw disk; not with a [remote daemon](./remote.md) |
@@ -121,14 +121,14 @@ from its `PATH`.
     - as an AWS Nitro Sandbox (direct mode) when the host is set up for them:
       an x86_64 or Graviton EC2 instance with Nitro Enclaves enabled and a
       reserved memory pool (`/dev/nitro_enclaves`; setup in
-      [AWS Nitro Sandboxes](./nitro.md)). The VM runs beside the instance on
-      AWS's hypervisor, so no nested virtualization is needed
+      [AWS Nitro Sandboxes](./nitro.md)). The VM runs on AWS's Nitro
+      hypervisor rather than nested inside the instance, using CPUs and memory
+      the instance sets aside
     - otherwise as a microVM on Linux KVM: read-write access to `/dev/kvm`
       (bare metal, or a VM with nested virtualization such as EC2
       `m8i`/`c8i`/`r8i` instances)
     - `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) asks for KVM;
-      `sandbox.nitro` (or `GONDOLIN_NITRO_MODE` /
-      `GONDOLIN_NITRO_CPU_OVERCOMMIT`) configures the Nitro Sandbox
+      `sandbox.nitro` (or `GONDOLIN_NITRO_MODE`) configures the Nitro Sandbox
 - Linux daemon host only, with Firecracker 1.18 or newer
 - Boots the image's regular kernel and initramfs; the kernel needs
   virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
@@ -144,9 +144,8 @@ from its `PATH`.
 - Requires a guest image built with vsock support (this release or newer):
   the guest helpers connect over vsock when the kernel command line has
   `gondolin.vsock`
-- The daemon needs root (more precisely `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
-  `CAP_NET_RAW` and access to `/dev/kvm` or `/dev/nitro_enclaves`): it
-  creates a network namespace and a tap device per VM
+- The daemon must run as root (for the per-VM network namespace, tap device
+  and jailer)
 - Binary resolution: `sandbox.firecrackerPath`, else `GONDOLIN_FIRECRACKER`,
   else `firecracker` on the daemon's `PATH` (a remote daemon only receives an
   explicit `sandbox.firecrackerPath`)

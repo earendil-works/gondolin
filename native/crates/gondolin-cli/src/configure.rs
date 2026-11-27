@@ -267,20 +267,12 @@ pub async fn prepare(
     prepare_with_image(common, resume, image, &|name: &str| std::env::var(name))
 }
 
-/// The Nitro Sandbox settings from `GONDOLIN_NITRO_MODE` and
-/// `GONDOLIN_NITRO_CPU_OVERCOMMIT` (`env_opt`: trimmed, `None` when unset or
-/// empty), normalised as the SDK does: either variable selects a Nitro
-/// Sandbox (mode `off`: KVM); neither: `None`, the daemon picks.
+/// The Nitro Sandbox settings from `GONDOLIN_NITRO_MODE` (`env_opt`: trimmed,
+/// `None` when unset or empty), normalised as the SDK does: set selects a
+/// Nitro Sandbox (mode `off`: KVM); unset: `None`, the daemon picks.
 fn nitro_from_env(env_opt: &dyn Fn(&str) -> Option<String>) -> Option<NitroConfig> {
-    let mode = env_opt("GONDOLIN_NITRO_MODE").map(|v| v.to_lowercase());
-    let overcommit = env_opt("GONDOLIN_NITRO_CPU_OVERCOMMIT");
-    if mode.is_none() && overcommit.is_none() {
-        return None;
-    }
-    Some(NitroConfig {
-        mode: mode.unwrap_or_else(|| "direct".into()),
-        cpu_overcommit: overcommit.is_none_or(|v| v != "0"),
-    })
+    let mode = env_opt("GONDOLIN_NITRO_MODE").map(|v| v.to_lowercase())?;
+    Some(NitroConfig { mode })
 }
 
 /// [`prepare`] with an already resolved image and an explicit environment.
@@ -592,10 +584,8 @@ mod tests {
             [("Off", "off"), (" DIRECT ", "direct"), ("Confidential", "confidential")]
         {
             let nitro = with(&[("GONDOLIN_NITRO_MODE", value)]).unwrap();
-            assert_eq!((nitro.mode.as_str(), nitro.cpu_overcommit), (mode, true));
+            assert_eq!(nitro.mode.as_str(), mode);
         }
-        let nitro = with(&[("GONDOLIN_NITRO_CPU_OVERCOMMIT", "0")]).unwrap();
-        assert_eq!((nitro.mode.as_str(), nitro.cpu_overcommit), ("direct", false));
     }
 
     #[test]

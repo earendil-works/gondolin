@@ -2,8 +2,9 @@
 
 On an EC2 instance, Gondolin can run each VM as an
 [AWS Nitro Sandbox](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nitro-sandboxes.html):
-a lightweight VM that the Nitro System runs next to the instance and isolates
-from it, launched through [Firecracker](https://github.com/firecracker-microvm/firecracker/tree/main/docs/nitro-sandboxes).
+a lightweight VM that runs on AWS's Nitro hypervisor rather than nested inside
+the instance, using CPUs and memory the instance sets aside, launched through
+[Firecracker](https://github.com/firecracker-microvm/firecracker/tree/main/docs/nitro-sandboxes).
 This works on ordinary (non-metal) x86_64 and Graviton instance types that
 support Nitro Enclaves, with no nested virtualization. Select it with the
 `firecracker` backend: on a host set up as below it runs Nitro Sandboxes by
@@ -90,23 +91,14 @@ steps by hand:
     The daemon checks the version when a VM is configured and refuses older
     releases with an error saying so.
 
-5. Run Gondolin as root. The daemon creates a network namespace and a tap
-   device for each VM and runs Firecracker under its jailer (see
-   [Isolation](#isolation)), which needs root. Without root, give the daemon
-   binary (the static `gondolin` CLI, or `gondolind` for the SDK)
-   `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and `CAP_NET_RAW` and the user access to
-   the device; Firecracker then runs unjailed as that user:
-
-    ```bash
-    sudo setcap cap_sys_admin,cap_net_admin,cap_net_raw+ep "$(command -v gondolin)"
-    sudo chgrp "$(id -gn)" /dev/nitro_enclaves && sudo chmod g+rw /dev/nitro_enclaves
-    ```
+5. Run Gondolin as root. The Firecracker backend requires root for the per-VM
+   network namespace, tap device and jailer (see [Isolation](#isolation)).
 
 ## Isolation
 
-When the daemon runs as root and finds Firecracker's `jailer` (beside the
+Every Firecracker VMM runs under Firecracker's `jailer` (looked up beside the
 `firecracker` binary or on `PATH`; `scripts/install-firecracker.sh` installs
-both), each VMM runs jailed, on KVM and on Nitro Sandboxes alike:
+both), on KVM and on Nitro Sandboxes alike:
 
 - in a chroot under `/srv/jailer/firecracker/gondolin-<daemon pid>-<n>/root`
   holding only the kernel, initrd and root disk (bind-mounted read-only, in a
@@ -120,9 +112,9 @@ both), each VMM runs jailed, on KVM and on Nitro Sandboxes alike:
 - in the network namespace that holds only its tap device.
 
 A guest that escapes into the VMM is then confined to that chroot and user.
-A daemon running as root refuses to start a VM when it finds no jailer, since
-the VMM would otherwise run as root with the host's whole filesystem and no
-limits; `GONDOLIN_JAILER=0` runs it unjailed on purpose.
+The daemon refuses to start a VM when it finds no jailer, since the VMM would
+otherwise run as root with the host's whole filesystem and no limits;
+`GONDOLIN_JAILER=0` runs it unjailed on purpose.
 The image files must be readable by all users (`chmod o+r`; images Gondolin
 downloads or builds are). The jail and its cgroup are removed when the VM
 exits, and a watchdog process kills the VMM if the daemon dies; jails left by
@@ -169,13 +161,8 @@ an error.
   image whose measurements you know; Gondolin does not load the driver or
   attest anything itself.
 
-`sandbox.nitro.cpuOvercommit` (`GONDOLIN_NITRO_CPU_OVERCOMMIT`, default `true`)
-time-shares the VM's vCPUs over the parent's CPUs. With `false`, each vCPU
-takes a dedicated core from the Nitro Enclaves CPU pool (and `sandbox.cpus`
-must be even on instances with SMT).
-
 The total vCPUs of all sandboxes on an instance can be at most five times the
-instance's vCPU count.
+instance's vCPU count (vCPUs are time-shared over the parent's CPUs).
 
 ## Networking
 

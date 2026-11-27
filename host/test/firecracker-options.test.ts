@@ -61,7 +61,6 @@ const CLEAN_ENV = {
   GONDOLIN_VMM: undefined,
   GONDOLIN_FIRECRACKER: undefined,
   GONDOLIN_NITRO_MODE: undefined,
-  GONDOLIN_NITRO_CPU_OVERCOMMIT: undefined,
 };
 
 test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) => {
@@ -83,12 +82,7 @@ test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) =
       nitro: {},
     }),
   );
-  assert.deepEqual(nitro.nitro, { mode: "direct", cpuOvercommit: true });
-  const fromEnv = withEnv(
-    { ...CLEAN_ENV, GONDOLIN_NITRO_CPU_OVERCOMMIT: "1" },
-    () => resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
-  );
-  assert.deepEqual(fromEnv.nitro, { mode: "direct", cpuOvercommit: true });
+  assert.deepEqual(nitro.nitro, { mode: "direct" });
   // `nitro: false` / GONDOLIN_NITRO_MODE=off ask for a KVM microVM
   for (const off of [
     withEnv(CLEAN_ENV, () =>
@@ -102,9 +96,9 @@ test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) =
       resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
     ),
   ]) {
-    assert.deepEqual(off.nitro, { mode: "off", cpuOvercommit: true });
+    assert.deepEqual(off.nitro, { mode: "off" });
     const vm = buildNativeConfigure(off, {}, {}).vm as Record<string, unknown>;
-    assert.deepEqual(vm.nitro, { mode: "off", cpu_overcommit: true });
+    assert.deepEqual(vm.nitro, { mode: "off" });
   }
   // the regular image assets, not krun's
   assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
@@ -120,16 +114,12 @@ test("firecracker options and their environment defaults", (t) => {
       GONDOLIN_VMM: "firecracker",
       GONDOLIN_FIRECRACKER: "/opt/fc/firecracker",
       GONDOLIN_NITRO_MODE: "confidential",
-      GONDOLIN_NITRO_CPU_OVERCOMMIT: "0",
     },
     () => resolveSandboxServerOptions({ imagePath: dir }),
   );
   assert.equal(fromEnv.vmm, "firecracker");
   assert.equal(fromEnv.firecrackerPath, "/opt/fc/firecracker");
-  assert.deepEqual(fromEnv.nitro, {
-    mode: "confidential",
-    cpuOvercommit: false,
-  });
+  assert.deepEqual(fromEnv.nitro, { mode: "confidential" });
 
   const explicit = withEnv(
     { ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "confidential" },
@@ -138,11 +128,11 @@ test("firecracker options and their environment defaults", (t) => {
         imagePath: dir,
         vmm: "firecracker",
         firecrackerPath: "/usr/local/bin/firecracker",
-        nitro: { mode: "direct", cpuOvercommit: true },
+        nitro: { mode: "direct" },
       }),
   );
   assert.equal(explicit.firecrackerPath, "/usr/local/bin/firecracker");
-  assert.deepEqual(explicit.nitro, { mode: "direct", cpuOvercommit: true });
+  assert.deepEqual(explicit.nitro, { mode: "direct" });
 
   assert.throws(
     () =>
@@ -158,10 +148,10 @@ test("firecracker options and their environment defaults", (t) => {
     resolveSandboxServerOptions({
       imagePath: dir,
       vmm: "firecracker",
-      nitro: { cpuOvercommit: false },
+      nitro: {},
     }),
   );
-  assert.deepEqual(partial.nitro, { mode: "direct", cpuOvercommit: false });
+  assert.deepEqual(partial.nitro, { mode: "direct" });
 });
 
 test("firecracker is never selected by default", (t) => {
@@ -222,7 +212,7 @@ test("the configure payload carries the firecracker settings", (t) => {
       imagePath: dir,
       vmm: "firecracker",
       firecrackerPath: "/usr/local/bin/firecracker",
-      nitro: { cpuOvercommit: false },
+      nitro: {},
       cpus: 2,
     }),
   );
@@ -234,7 +224,7 @@ test("the configure payload carries the firecracker settings", (t) => {
   const vm = payload.vm as Record<string, unknown>;
   assert.equal(vm.vmm, "firecracker");
   assert.equal(vm.firecracker_path, "/usr/local/bin/firecracker");
-  assert.deepEqual(vm.nitro, { mode: "direct", cpu_overcommit: false });
+  assert.deepEqual(vm.nitro, { mode: "direct" });
   assert.equal(vm.qemu_path, "");
   assert.equal(vm.krun_runner_path, undefined);
   assert.equal(vm.idle_pause_ms, undefined);

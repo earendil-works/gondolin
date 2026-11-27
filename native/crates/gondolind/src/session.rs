@@ -759,6 +759,7 @@ impl Session {
         if let Some(cfg) = self.configured.as_mut() {
             firecracker = crate::firecracker::is_firecracker(&cfg.vm);
             if firecracker {
+                crate::firecracker::require_root()?;
                 jailer = crate::jailer::settings(&cfg.vm)?;
                 crate::rootdisk::prepare_raw(&mut cfg.vm, &dir.0)?;
                 self.ckpt.overlay = None;

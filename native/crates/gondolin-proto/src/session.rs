@@ -121,9 +121,6 @@ gondolin_wire::wire_struct! {
         /// `direct` (the parent instance can read guest memory; no attestation)
         /// or `confidential` (needs a guest kernel with the DMB virtio patches)
         pub mode: String = String::from("direct"),
-        /// time-share the vCPUs over the parent's CPUs instead of claiming
-        /// dedicated cores from the Nitro Enclaves CPU pool
-        pub cpu_overcommit: bool = true,
     }
 }
 

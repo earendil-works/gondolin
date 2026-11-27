@@ -200,9 +200,7 @@ export function buildNativeConfigure(
   const firecracker = options.vmm === "firecracker";
   // the daemon's VMM binary, besides QEMU
   const noQemu = krun || firecracker;
-  const nitro = options.nitro
-    ? { mode: options.nitro.mode, cpu_overcommit: options.nitro.cpuOvercommit }
-    : undefined;
+  const nitro = options.nitro ? { mode: options.nitro.mode } : undefined;
   const disk = internal.rootDisk;
   const rootDisk = disk
     ? {
