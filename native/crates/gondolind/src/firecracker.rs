@@ -304,6 +304,9 @@ pub fn nitro_failure_hint(output: &str) -> Option<String> {
 /// `vm.kernel_path`.
 pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
     check_host()?;
+    // before the target: without root the devices look absent, which would
+    // otherwise be reported as a host without Nitro or KVM
+    require_root()?;
     select_target(vm, kvm_usable(), nitro_ready(Path::new(NITRO_SYSFS), Path::new(NITRO_DEVICE)))?;
     validate(vm)?;
     check_image(Path::new(&vm.kernel_path))?;
