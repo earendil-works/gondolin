@@ -57,6 +57,25 @@ tcg
 whpx
 ```
 
+`-accel help` only confirms that the QEMU build includes WHPX, not that Windows
+can initialize it. Gondolin probes WHPX with a paused **q35** machine (the same
+board used for Windows x64 guests). The architecture-neutral `none` machine is
+not a valid WHPX probe on affected QEMU builds and can cause a false TCG fallback.
+This does not change Linux KVM's `microvm` or ARM64's `virt` machine selection.
+
+Check the selected runtime accelerator from this checkout:
+
+```bash
+node --input-type=module -e 'import { selectAccel } from "./host/src/sandbox/controller.ts"; console.log(selectAccel("x64", "qemu-system-x86_64"));'
+```
+
+On native Windows x64 this prints `whpx` when the runtime probe succeeds, or
+`tcg` when WHPX is unavailable. Cross-architecture guests use TCG. The CLI warns
+when it falls back to software emulation; a successful guest command alone is
+not evidence of hardware acceleration. To validate a guest without allowing
+fallback, explicitly set `sandbox: { accel: "whpx" }` in `VM.create()`; startup
+then fails rather than silently using TCG if WHPX cannot initialize.
+
 ## 1. Prepare a demo workspace
 
 From the repo root in Git Bash:

@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 import { buildQemuFamilyCandidates } from "../../src/qemu/locate-binary.ts";
+import { buildAccelProbeArgs } from "../../src/qemu/accel-probe.ts";
 import type { LocalEndpoint } from "../../src/local-endpoint.ts";
 
 /**
@@ -46,7 +47,7 @@ function hasWindowsWhpx(): boolean {
 
       const probe = spawnSync(
         candidate,
-        ["-accel", "whpx", "-machine", "none", "-nodefaults", "-display", "none", "-S"],
+        buildAccelProbeArgs("whpx"),
         {
           timeout: 1500,
           windowsHide: true,
