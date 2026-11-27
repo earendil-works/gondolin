@@ -231,6 +231,7 @@ export class VM {
   /** guest filesystem operations */
   readonly fs: VmFs;
   private readonly autoStart: boolean;
+  private readonly autoRestart: boolean;
   /** `start()` was called (with `autoStart: false` only it boots the VM) */
   private startRequested = false;
   private readonly startTimeoutMs: number;
@@ -383,6 +384,7 @@ export class VM {
     this.remote = Boolean(native.remote);
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
+    this.autoRestart = Boolean(options.sandbox?.autoRestart);
     this.startTimeoutMs = normalizeStartTimeoutMs(options.startTimeoutMs);
     this.sessionLabel = options.sessionLabel ?? process.argv.join(" ");
     const rootfsSizeBytes =
@@ -680,7 +682,7 @@ export class VM {
 
   async start() {
     this.startRequested = true;
-    return this.startSingleflight.run(() => this.startInternal());
+    return this.startSingleflight.run(() => this.startInternal(true));
   }
 
   /**
@@ -694,7 +696,7 @@ export class VM {
         "vm is not started (autoStart: false); call vm.start() first",
       );
     }
-    return this.startSingleflight.run(() => this.startInternal());
+    return this.startSingleflight.run(() => this.startInternal(false));
   }
 
   /**
@@ -1350,7 +1352,7 @@ fi
     throw error;
   }
 
-  private async startInternal() {
+  private async startInternal(explicit = false) {
     if (this.closed) {
       throw new Error("vm is closed and cannot be restarted");
     }
@@ -1375,7 +1377,7 @@ fi
         await this.ensureConnection();
 
         this.ensureStartupGeneration(startupGeneration);
-        await this.ensureRunning();
+        await this.ensureRunning(explicit);
 
         this.ensureStartupGeneration(startupGeneration);
         await this.ensureRootfsResized();
@@ -1810,16 +1812,24 @@ fi
     });
   }
 
-  private async ensureRunning() {
+  private async ensureRunning(explicit = false) {
     const state = await this.waitForStatus();
     if (state === "stopped" && !this.autoStart && !this.startRequested) {
       throw new Error("sandbox is stopped");
     }
 
-    // a VM that stopped after its boot (it exited and was not restarted, or
-    // its restart failed) is started again: waiting for the daemon to do it
-    // would wait out the start timeout
-    if (state === "stopped") this.bootSent = false;
+    // A VM that already booted once and has since stopped:
+    // - with `autoRestart: true` or an explicit `vm.start()`, send `boot`
+    //   again so a failed restart reports its error (or recovers once fixed);
+    // - with `autoRestart: false` on an implicit start (e.g. `vm.exec()`),
+    //   fail immediately instead of silently rebooting or waiting out the
+    //   start timeout.
+    if (state === "stopped" && this.bootSent) {
+      if (!explicit && !this.autoRestart) {
+        throw new Error("sandbox is stopped");
+      }
+      this.bootSent = false;
+    }
     const errors = this.sessionErrors;
     this.ensureBoot();
 
