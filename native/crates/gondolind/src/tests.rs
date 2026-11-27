@@ -57,11 +57,14 @@ struct Harness {
 
 impl Harness {
     fn new(limits: Limits) -> Self {
+        Self::with_vm(limits, test_vm())
+    }
+
+    fn with_vm(limits: Limits, vm: VmConfig) -> Self {
         let ctl = Controller::new();
         let host = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
         let (mut s, _channels) = Session::new(ctl.clone(), Dispatcher::default(), host);
-        s.apply_configure(Configure { vm: test_vm(), limits, debug: vec![], vfs: None, net: None })
-            .unwrap();
+        s.apply_configure(Configure { vm, limits, debug: vec![], vfs: None, net: None }).unwrap();
         s.boot_config = Some(SandboxFsConfig { fuse_mount: "/data".into(), fuse_binds: vec![] });
         Harness { s, ctl }
     }
@@ -796,6 +799,51 @@ fn crafted_checkpoint_is_refused_at_start() {
     drop(h);
     // imported in place: the controller's file stays
     assert!(ckpt.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A VMM that cannot be spawned (its binary went away after the session
+/// started, as before an automatic restart) fails every attached client's
+/// waits with `sandbox_start_failed`, rather than only reporting `stopped`
+/// again, which leaves an SDK waiting for the VM to run.
+#[tokio::test]
+async fn a_failed_spawn_is_reported_to_every_client() {
+    let dir = std::env::temp_dir().join(format!("gondolind-spawn-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let vmm = dir.join("qemu-system-x86_64");
+    std::fs::copy("/usr/bin/true", &vmm).unwrap();
+    let vm = VmConfig { qemu_path: vmm.display().to_string(), ..test_vm() };
+    let mut h = Harness::with_vm(Limits::default(), vm);
+    h.msg("start", 1, Value::Map(vec![]));
+    let started = h.controller_frames();
+    assert!(
+        started.iter().any(|f| f.t == "start_result" && Fields::of(&f.p).bool("ok") == Some(true)),
+        "{started:?}"
+    );
+    h.open(1);
+    h.open(2);
+    std::fs::remove_file(&vmm).unwrap();
+    h.s.start_vm();
+    let frames = h.controller_frames();
+    for client in [1, 2] {
+        let errors: Vec<_> = frames
+            .iter()
+            .filter(|f| f.t == "client_error")
+            .map(|f| Fields::of(&f.p))
+            .filter(|f| f.int("client") == Some(client) && f.get_some("id").is_none())
+            .map(|f| {
+                (
+                    f.text("code").unwrap_or("").to_string(),
+                    f.text("message").unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "client {client}: {errors:?}");
+        assert_eq!(errors[0].0, "sandbox_start_failed");
+        assert!(errors[0].1.contains(&vmm.display().to_string()), "{}", errors[0].1);
+    }
+    assert!(h.s.vm.child.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

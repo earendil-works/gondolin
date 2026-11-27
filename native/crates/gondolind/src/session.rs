@@ -1359,6 +1359,14 @@ impl Session {
         self.cleanup_qmp_socket();
         self.vm.child = None;
         self.set_vm_state(State::Stopped);
+        // the clients only see the status go back to stopped, which the SDK
+        // cannot tell from a VM about to start: one waiting for it to run
+        // (an exec after a failed automatic restart) would wait forever
+        let message = format!("cannot start the sandbox: {error}");
+        let clients: Vec<_> = self.clients.iter().copied().collect();
+        for client in clients {
+            self.client_error(client, None, "sandbox_start_failed", &message);
+        }
         self.vm_exited_server(None, None, Some(error));
     }
 
