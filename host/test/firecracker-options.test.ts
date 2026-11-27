@@ -60,7 +60,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
 const CLEAN_ENV = {
   GONDOLIN_VMM: undefined,
   GONDOLIN_FIRECRACKER: undefined,
-  GONDOLIN_NITRO_MODE: undefined,
+  GONDOLIN_NITRO: undefined,
 };
 
 test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) => {
@@ -74,16 +74,24 @@ test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) =
   const payload = buildNativeConfigure(resolved, {}, {});
   assert.equal((payload.vm as Record<string, unknown>).nitro, undefined);
 
-  // any Nitro setting selects a Nitro Sandbox, with defaults for the rest
-  const nitro = withEnv(CLEAN_ENV, () =>
-    resolveSandboxServerOptions({
-      imagePath: dir,
-      vmm: "firecracker",
-      nitro: {},
-    }),
-  );
-  assert.deepEqual(nitro.nitro, { mode: "direct" });
-  // `nitro: false` / GONDOLIN_NITRO_MODE=off ask for a KVM microVM
+  // `nitro: true` / GONDOLIN_NITRO=1 asks for a Nitro Sandbox
+  for (const on of [
+    withEnv(CLEAN_ENV, () =>
+      resolveSandboxServerOptions({
+        imagePath: dir,
+        vmm: "firecracker",
+        nitro: true,
+      }),
+    ),
+    withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO: "1" }, () =>
+      resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
+    ),
+  ]) {
+    assert.equal(on.nitro, true);
+    const vm = buildNativeConfigure(on, {}, {}).vm as Record<string, unknown>;
+    assert.equal(vm.nitro, true);
+  }
+  // `nitro: false` / GONDOLIN_NITRO=0 asks for a KVM microVM
   for (const off of [
     withEnv(CLEAN_ENV, () =>
       resolveSandboxServerOptions({
@@ -92,13 +100,13 @@ test("firecracker leaves KVM or a Nitro Sandbox to the daemon by default", (t) =
         nitro: false,
       }),
     ),
-    withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "off" }, () =>
+    withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO: "0" }, () =>
       resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
     ),
   ]) {
-    assert.deepEqual(off.nitro, { mode: "off" });
+    assert.equal(off.nitro, false);
     const vm = buildNativeConfigure(off, {}, {}).vm as Record<string, unknown>;
-    assert.deepEqual(vm.nitro, { mode: "off" });
+    assert.equal(vm.nitro, false);
   }
   // the regular image assets, not krun's
   assert.equal(path.basename(resolved.kernelPath), "vmlinuz-virt");
@@ -113,45 +121,32 @@ test("firecracker options and their environment defaults", (t) => {
       ...CLEAN_ENV,
       GONDOLIN_VMM: "firecracker",
       GONDOLIN_FIRECRACKER: "/opt/fc/firecracker",
-      GONDOLIN_NITRO_MODE: "confidential",
+      GONDOLIN_NITRO: "true",
     },
     () => resolveSandboxServerOptions({ imagePath: dir }),
   );
   assert.equal(fromEnv.vmm, "firecracker");
   assert.equal(fromEnv.firecrackerPath, "/opt/fc/firecracker");
-  assert.deepEqual(fromEnv.nitro, { mode: "confidential" });
+  assert.equal(fromEnv.nitro, true);
 
-  const explicit = withEnv(
-    { ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "confidential" },
-    () =>
-      resolveSandboxServerOptions({
-        imagePath: dir,
-        vmm: "firecracker",
-        firecrackerPath: "/usr/local/bin/firecracker",
-        nitro: { mode: "direct" },
-      }),
-  );
-  assert.equal(explicit.firecrackerPath, "/usr/local/bin/firecracker");
-  assert.deepEqual(explicit.nitro, { mode: "direct" });
-
-  assert.throws(
-    () =>
-      withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "fast" }, () =>
-        resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
-      ),
-    /invalid Nitro Sandbox mode: fast \(expected "direct" or "confidential"/,
-  );
-
-  // an explicit object asks for a Nitro Sandbox: GONDOLIN_NITRO_MODE=off
-  // (a default) does not apply to it
-  const partial = withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO_MODE: "off" }, () =>
+  const explicit = withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO: "0" }, () =>
     resolveSandboxServerOptions({
       imagePath: dir,
       vmm: "firecracker",
-      nitro: {},
+      firecrackerPath: "/usr/local/bin/firecracker",
+      nitro: true,
     }),
   );
-  assert.deepEqual(partial.nitro, { mode: "direct" });
+  assert.equal(explicit.firecrackerPath, "/usr/local/bin/firecracker");
+  assert.equal(explicit.nitro, true);
+
+  assert.throws(
+    () =>
+      withEnv({ ...CLEAN_ENV, GONDOLIN_NITRO: "fast" }, () =>
+        resolveSandboxServerOptions({ imagePath: dir, vmm: "firecracker" }),
+      ),
+    /invalid GONDOLIN_NITRO: fast/,
+  );
 });
 
 test("firecracker is never selected by default", (t) => {
@@ -181,7 +176,7 @@ test("backend-specific options are rejected for other backends", (t) => {
         resolveSandboxServerOptions({
           imagePath: dir,
           vmm: "qemu",
-          nitro: { mode: "direct" },
+          nitro: true,
         }),
       /Unsupported sandbox option for vmm=qemu: sandbox\.nitro\. These options are only supported with vmm=firecracker/,
     );
@@ -212,7 +207,7 @@ test("the configure payload carries the firecracker settings", (t) => {
       imagePath: dir,
       vmm: "firecracker",
       firecrackerPath: "/usr/local/bin/firecracker",
-      nitro: {},
+      nitro: true,
       cpus: 2,
     }),
   );
@@ -224,7 +219,7 @@ test("the configure payload carries the firecracker settings", (t) => {
   const vm = payload.vm as Record<string, unknown>;
   assert.equal(vm.vmm, "firecracker");
   assert.equal(vm.firecracker_path, "/usr/local/bin/firecracker");
-  assert.deepEqual(vm.nitro, { mode: "direct" });
+  assert.equal(vm.nitro, true);
   assert.equal(vm.qemu_path, "");
   assert.equal(vm.krun_runner_path, undefined);
   assert.equal(vm.idle_pause_ms, undefined);

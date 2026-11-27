@@ -127,8 +127,8 @@ from its `PATH`.
     - otherwise as a microVM on Linux KVM: read-write access to `/dev/kvm`
       (bare metal, or a VM with nested virtualization such as EC2
       `m8i`/`c8i`/`r8i` instances)
-    - `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) asks for KVM;
-      `sandbox.nitro` (or `GONDOLIN_NITRO_MODE`) configures the Nitro Sandbox
+    - `sandbox.nitro: false` (or `GONDOLIN_NITRO=0`) asks for KVM;
+      `sandbox.nitro: true` (or `GONDOLIN_NITRO=1`) asks for a Nitro Sandbox
 - Linux daemon host only, with Firecracker 1.18 or newer
 - Boots the image's regular kernel and initramfs; the kernel needs
   virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
@@ -136,8 +136,7 @@ from its `PATH`.
   so the daemon decompresses the image's `vmlinuz` (a gzip-compressed bzImage
   on x86_64 or EFI zboot image on aarch64) once into
   `~/.cache/gondolin/firecracker-kernels/`. Nitro Sandboxes boot the
-  compressed kernel through UEFI firmware (x86_64: an EFI-stub `bzImage`);
-  confidential mode also needs the DMB virtio patches
+  compressed kernel through UEFI firmware (x86_64: an EFI-stub `bzImage`)
 - The default kernel command line is Firecracker's own (`console=ttyS0`,
   `panic=1`, and on x86_64 `reboot=k` and the i8042 flags), so a guest panic
   ends the VM instead of hanging it

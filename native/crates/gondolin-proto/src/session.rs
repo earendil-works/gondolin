@@ -68,10 +68,10 @@ gondolin_wire::wire_struct! {
         pub krun_runner_path: Option<String>,
         /// `firecracker` binary (vmm `firecracker`; absent: `firecracker` in `PATH`)
         pub firecracker_path: Option<String>,
-        /// AWS Nitro Sandbox settings (vmm `firecracker`; absent: the daemon
-        /// picks a Nitro Sandbox when the host supports them, else KVM; mode
-        /// `off` asks for KVM)
-        pub nitro: Option<NitroConfig>,
+        /// AWS Nitro Sandbox toggle (vmm `firecracker`; absent: the daemon
+        /// picks a Nitro Sandbox when the host supports them, else KVM;
+        /// `Some(true)` forces Nitro, `Some(false)` forces KVM)
+        pub nitro: Option<bool>,
         /// qemu binary (path or name looked up in `PATH`; empty: by guest arch)
         pub qemu_path: String = Default::default(),
         /// guest image selector (`name:tag`, build id or directory; empty: the
@@ -111,16 +111,6 @@ gondolin_wire::wire_struct! {
         pub auto_restart: bool = Default::default(),
         /// pause the VM via QMP after this much idle time in `ms` (absent: never)
         pub idle_pause_ms: Option<u64>,
-    }
-}
-
-gondolin_wire::wire_struct! {
-    /// AWS Nitro Sandbox settings (vmm `firecracker`).
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct NitroConfig {
-        /// `direct` (the parent instance can read guest memory; no attestation)
-        /// or `confidential` (needs a guest kernel with the DMB virtio patches)
-        pub mode: String = String::from("direct"),
     }
 }
 

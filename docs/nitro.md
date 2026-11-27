@@ -8,9 +8,9 @@ the instance, using CPUs and memory the instance sets aside, launched through
 This works on ordinary (non-metal) x86_64 and Graviton instance types that
 support Nitro Enclaves, with no nested virtualization. Select it with the
 `firecracker` backend: on a host set up as below it runs Nitro Sandboxes by
-default, even where KVM is available too. `sandbox.nitro` (or
-`GONDOLIN_NITRO_MODE`) chooses the settings, and `sandbox.nitro: false` (or
-`GONDOLIN_NITRO_MODE=off`) asks for a KVM microVM instead (see
+default, even where KVM is available too. `sandbox.nitro: true` (or
+`GONDOLIN_NITRO=1`) forces a Nitro Sandbox, and `sandbox.nitro: false` (or
+`GONDOLIN_NITRO=0`) asks for a KVM microVM instead (see
 [VM Backends](./backends.md#firecracker)):
 
 ```bash
@@ -19,7 +19,7 @@ sudo gondolin exec --vmm firecracker -- uname -a
 
 ```ts
 const vm = await VM.create({
-  sandbox: { vmm: "firecracker", nitro: { mode: "direct" } },
+  sandbox: { vmm: "firecracker" },
 });
 ```
 
@@ -143,23 +143,11 @@ starting the VM. With explicit asset paths and no manifest beside the kernel
 it cannot tell, and a guest that has not connected after 30 s is stopped with
 an error.
 
-## Modes
+## Mode and vCPUs
 
-`sandbox.nitro.mode` (`GONDOLIN_NITRO_MODE`):
-
-- `direct` (default): the parent instance can read the VM's memory, as with a
-  nested VM. Works with an unpatched guest kernel.
-- `confidential`: the Nitro System keeps the VM's memory out of the parent's
-  reach. Needs a guest kernel with the DMB virtio patches, and has no entropy
-  device. Gondolin's images use Alpine's `linux-virt` kernel, which lacks the
-  patches: the guest stalls at its first disk access and the VM is stopped
-  after 30 s with an error saying so. With an Amazon Linux 2023 6.18 kernel
-  (and its modules) in an otherwise standard image, the backend's test suite
-  passes in confidential mode, and a boot takes ~0.15 s longer than in
-  `direct` mode. Attesting what the VM runs (`/dev/nsm`, present only in this
-  mode) needs the kernel's NSM driver (`nsm`, a module on Amazon Linux) and an
-  image whose measurements you know; Gondolin does not load the driver or
-  attest anything itself.
+Gondolin launches Nitro Sandboxes in `direct` mode (the parent instance can
+read the VM's memory, as with a nested VM; works with an unpatched guest
+kernel). Confidential mode and attestation are not supported yet.
 
 The total vCPUs of all sandboxes on an instance can be at most five times the
 instance's vCPU count (vCPUs are time-shared over the parent's CPUs).
@@ -199,6 +187,5 @@ Firecracker. Smaller sandboxes (`sandbox.memory`) start and stop faster:
   or krun.
 - The Nitro debug console (the guest's serial output, shown with
   `GONDOLIN_DEBUG=protocol`) is off unless `sandbox.console` is `"stdio"` or
-  protocol debugging is on (in confidential mode it disables attestation).
-  The guest boots `quiet` in that case, as on QEMU (see
-  [Boot log](./debug.md#boot-log)).
+  protocol debugging is on. The guest boots `quiet` in that case, as on QEMU
+  (see [Boot log](./debug.md#boot-log)).

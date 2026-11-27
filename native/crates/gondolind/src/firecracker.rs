@@ -7,11 +7,10 @@
 //! the daemon's guest channels listen (the guest helpers connect there when
 //! the command line has `gondolin.vsock`, see `guest/ARCHITECTURE.md` §3.1).
 //!
-//! With `vm.nitro` the `enclave` block makes Firecracker launch the VM through
-//! `/dev/nitro_enclaves` instead of KVM.  Direct mode (the default) runs an
-//! unpatched guest kernel; confidential mode needs the DMB virtio patches and
-//! rejects the entropy device.  Without `vm.nitro` the daemon picks a Nitro
-//! Sandbox when the host is set up for them, else KVM ([`select_target`]).
+//! With `vm.nitro == Some(true)` the `enclave` block makes Firecracker launch
+//! the VM through `/dev/nitro_enclaves` (direct mode) instead of KVM.  With
+//! `vm.nitro == None` the daemon picks a Nitro Sandbox when the host is set up
+//! for them, else KVM ([`select_target`]).
 //!
 //! On KVM Firecracker boots only an uncompressed kernel (an ELF `vmlinux` on
 //! x86_64, an arm64 `Image` on aarch64); [`prepare`] decompresses the image's
@@ -172,33 +171,37 @@ fn kvm_usable() -> bool {
     std::fs::OpenOptions::new().read(true).write(true).open(KVM_DEVICE).is_ok()
 }
 
-/// `vm.nitro.mode` asking for a KVM microVM (`sandbox.nitro: false`,
-/// `GONDOLIN_NITRO_MODE=off`) instead of the host's default.
-pub const NITRO_MODE_OFF: &str = "off";
+/// Whether `vm` is configured to run as an AWS Nitro Sandbox (after
+/// [`prepare`], `vm.nitro` is settled to `Some(true)` or `Some(false)`).
+pub fn is_nitro(vm: &VmConfig) -> bool {
+    vm.nitro == Some(true)
+}
 
-/// Settles where the VM runs. Unset `vm.nitro`: a Nitro Sandbox with the
-/// default settings when the host is ready for one (`nitro_ready`: the
-/// device and a reserved memory pool), else a KVM microVM when `/dev/kvm`
-/// is usable. Mode `off` asks for KVM; any other mode for a Nitro Sandbox.
+/// Settles where the VM runs. Unset `vm.nitro`: a Nitro Sandbox when the host
+/// is ready for one (`nitro_ready`: the device and a reserved memory pool),
+/// else a KVM microVM when `/dev/kvm` is usable. `Some(false)` asks for KVM;
+/// `Some(true)` asks for a Nitro Sandbox.
 fn select_target(vm: &mut VmConfig, kvm: bool, nitro_ready: bool) -> Result<(), String> {
-    match vm.nitro.as_ref().map(|n| n.mode.as_str()) {
-        Some(NITRO_MODE_OFF) => {
-            vm.nitro = None;
+    match vm.nitro {
+        Some(false) => {
             if kvm {
                 Ok(())
             } else {
                 Err(format!(
-                    "a KVM microVM was requested (sandbox.nitro: false / GONDOLIN_NITRO_MODE=off) \
+                    "a KVM microVM was requested (sandbox.nitro: false / GONDOLIN_NITRO=0) \
                      but {KVM_DEVICE} is not usable (needs read-write access)"
                 ))
             }
         }
-        Some(_) => Ok(()),
+        Some(true) => Ok(()),
         None if nitro_ready => {
-            vm.nitro = Some(gondolin_proto::session::NitroConfig { mode: "direct".into() });
+            vm.nitro = Some(true);
             Ok(())
         }
-        None if kvm => Ok(()),
+        None if kvm => {
+            vm.nitro = Some(false);
+            Ok(())
+        }
         None => Err(format!(
             "vmm=firecracker needs {NITRO_DEVICE} with a reserved memory pool (AWS Nitro \
              Sandboxes; {NITRO_POOL_HINT}) or {KVM_DEVICE} (read-write access for KVM microVMs)"
@@ -304,10 +307,9 @@ pub fn prepare(vm: &mut VmConfig) -> Result<(), String> {
     select_target(vm, kvm_usable(), nitro_ready(Path::new(NITRO_SYSFS), Path::new(NITRO_DEVICE)))?;
     validate(vm)?;
     check_image(Path::new(&vm.kernel_path))?;
-    if vm.nitro.is_some() {
+    if is_nitro(vm) {
         check_nitro_pool(Path::new(NITRO_SYSFS), memory_mib(vm)?)?;
-    }
-    if vm.nitro.is_none() {
+    } else {
         let cache = gondolin_assets::store::gondolin_cache_dir().join("firecracker-kernels");
         vm.kernel_path =
             uncompressed_kernel(Path::new(&vm.kernel_path), &cache)?.display().to_string();
@@ -400,12 +402,6 @@ pub fn uncompressed_kernel(path: &Path, cache: &Path) -> Result<PathBuf, String>
 
 /// Checks the parts of the configuration this backend supports.
 pub fn validate(vm: &VmConfig) -> Result<(), String> {
-    if let Some(nitro) = &vm.nitro
-        && nitro.mode != "direct"
-        && nitro.mode != "confidential"
-    {
-        return Err(format!("vm.nitro.mode must be direct or confidential (got {:?})", nitro.mode));
-    }
     if vm.cpus < 1 || vm.cpus > 1024 {
         return Err(format!("invalid vm cpu count for the firecracker backend: {}", vm.cpus));
     }
@@ -443,34 +439,19 @@ pub struct ConfigArgs<'a> {
     pub console: bool,
 }
 
-/// Whether the debug console is worth its cost: in confidential mode it zeroes
-/// the attestation PCRs. On only when someone reads the boot log
-/// ([`crate::qemu::boot_log_wanted`]); the session boots the kernel `quiet`
-/// otherwise ([`crate::qemu::quiet_boot`]).
+/// Whether the Nitro debug console is enabled: on only when someone reads the
+/// boot log ([`crate::qemu::boot_log_wanted`]); the session boots the kernel
+/// `quiet` otherwise ([`crate::qemu::quiet_boot`]).
 pub fn wants_console(vm: &VmConfig, protocol_debug: bool) -> bool {
     crate::qemu::boot_log_wanted(vm, protocol_debug)
 }
 
-/// Why a guest that never connected (within `secs`) most likely failed. In
-/// confidential mode that is a guest kernel without the DMB virtio patches:
-/// its disk I/O never completes, so the boot stalls before the helpers start.
-pub fn guest_deadline_message(
-    nitro: Option<&gondolin_proto::session::NitroConfig>,
-    secs: u64,
-) -> String {
-    if nitro.is_some_and(|n| n.mode == "confidential") {
-        format!(
-            "the guest did not connect within {secs} s; Nitro confidential mode needs a guest \
-             kernel with the DMB virtio patches (Gondolin's images use Alpine's linux-virt, which \
-             lacks them, and stall at the first disk access); use mode direct or an image with \
-             such a kernel (docs/nitro.md#modes)"
-        )
-    } else {
-        format!(
-            "the guest did not connect within {secs} s; images for vmm=firecracker need the guest \
-             helpers' vsock transport (built with this version of Gondolin)"
-        )
-    }
+/// Why a guest that never connected (within `secs`) most likely failed.
+pub fn guest_deadline_message(secs: u64) -> String {
+    format!(
+        "the guest did not connect within {secs} s; images for vmm=firecracker need the guest \
+         helpers' vsock transport (built with this version of Gondolin)"
+    )
 }
 
 /// The Firecracker configuration file for `vm` (after `rootdisk::prepare_raw`).
@@ -532,23 +513,17 @@ pub fn config(vm: &VmConfig, args: &ConfigArgs<'_>) -> Result<Value, String> {
             "uds_path": args.vsock_uds.display().to_string(),
         },
     });
-    let mut entropy = true;
-    if let Some(nitro) = &vm.nitro {
-        let direct = nitro.mode == "direct";
+    if is_nitro(vm) {
         config.insert(
             "enclave",
             gondolin_wire::value!({
                 "debug_mode": debug,
-                "direct_mode": direct,
+                "direct_mode": true,
                 "cpu_overcommit": true,
             }),
         );
-        // the Nitro System rejects virtio-rng in confidential mode
-        entropy = direct;
     }
-    if entropy {
-        config.insert("entropy", gondolin_wire::value!({}));
-    }
+    config.insert("entropy", gondolin_wire::value!({}));
     Ok(config)
 }
 
@@ -635,12 +610,8 @@ pub fn jailed(
     let config_path =
         jail.write("firecracker.json", gondolin_wire::json::to_string(&config).as_bytes())?;
     let log_path = jail.write("firecracker.log", b"")?;
-    let limits = crate::jailer::cgroup_limits(
-        vm.cpus,
-        memory_mib(vm)?,
-        vm.nitro.is_some(),
-        &settings.controllers,
-    );
+    let limits =
+        crate::jailer::cgroup_limits(vm.cpus, memory_mib(vm)?, is_nitro(vm), &settings.controllers);
     let (program, args) =
         jail.command(&args(Path::new(&config_path), Path::new(&log_path)), &limits);
     Ok(Jailed { jail, program, args })
@@ -724,7 +695,7 @@ pub fn args(config_path: &Path, log_path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gondolin_proto::session::{NitroConfig, RootDisk};
+    use gondolin_proto::session::RootDisk;
 
     #[test]
     fn nitro_pool_check() {
@@ -860,7 +831,7 @@ mod tests {
             }),
             memory: "1G".into(),
             cpus: 2,
-            nitro: Some(NitroConfig { mode: "direct".into() }),
+            nitro: Some(true),
             console: None,
             qemu_path: String::new(),
             ..crate::tests::test_vm()
@@ -929,24 +900,8 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_that_never_connects_gets_a_mode_specific_reason() {
-        let mode = |m: &str| NitroConfig { mode: m.into() };
-        assert!(guest_deadline_message(None, 30).contains("vsock transport"));
-        assert!(guest_deadline_message(Some(&mode("direct")), 30).contains("vsock transport"));
-        let confidential = guest_deadline_message(Some(&mode("confidential")), 30);
-        assert!(
-            confidential.contains("within 30 s") && confidential.contains("DMB virtio patches")
-        );
-    }
-
-    #[test]
-    fn confidential_mode_has_no_entropy_device() {
-        let mut vm = vm();
-        vm.nitro = Some(NitroConfig { mode: "confidential".into() });
-        let uds = PathBuf::from("/s/v.sock");
-        let config = config(&vm, &args(&uds)).unwrap();
-        assert_eq!(config["enclave"]["direct_mode"].as_bool(), Some(false));
-        assert!(config.get("entropy").is_none());
+    fn a_guest_that_never_connects_explains_vsock() {
+        assert!(guest_deadline_message(30).contains("vsock transport"));
     }
 
     #[test]
@@ -980,16 +935,13 @@ mod tests {
         assert_eq!(check_host().is_ok(), cfg!(target_os = "linux"));
         assert!(validate(&vm()).is_ok());
         let mut v = vm();
-        v.nitro = None;
+        v.nitro = Some(false);
         assert!(validate(&v).is_ok(), "KVM");
-        let mut v = vm();
-        v.nitro = Some(NitroConfig { mode: "fast".into() });
-        assert!(validate(&v).unwrap_err().contains("direct or confidential"));
         let mut v = vm();
         v.memory = "32M".into();
         assert!(validate(&v).unwrap_err().contains("64 MiB"));
         let mut v = vm();
-        v.nitro = None;
+        v.nitro = Some(false);
         v.cpus = 3;
         assert!(validate(&v).is_ok(), "odd vCPU counts are fine on KVM");
         let mut v = vm();
@@ -1020,7 +972,7 @@ mod tests {
     #[test]
     fn kvm_config_has_no_enclave_block() {
         let mut vm = vm();
-        vm.nitro = None;
+        vm.nitro = Some(false);
         let uds = PathBuf::from("/s/v.sock");
         let config = config(&vm, &args(&uds)).unwrap();
         assert!(config.get("enclave").is_none());
@@ -1030,24 +982,21 @@ mod tests {
 
     #[test]
     fn target_selection() {
-        let direct = Some(NitroConfig { mode: "direct".into() });
-        let pick = |nitro: Option<NitroConfig>, kvm, dev| {
+        let pick = |nitro: Option<bool>, kvm, dev| {
             let mut v = vm();
             v.nitro = nitro;
             select_target(&mut v, kvm, dev).map(|()| v.nitro)
         };
         assert_eq!(
             pick(None, true, true).unwrap(),
-            direct,
+            Some(true),
             "a Nitro Sandbox when the host is ready"
         );
-        assert_eq!(pick(None, true, false).unwrap(), None, "else a KVM microVM");
-        assert_eq!(pick(None, false, true).unwrap(), direct);
-        let chosen = Some(NitroConfig { mode: "confidential".into() });
-        assert_eq!(pick(chosen.clone(), true, false).unwrap(), chosen, "explicit Nitro stays");
-        let off = Some(NitroConfig { mode: "off".into() });
-        assert_eq!(pick(off.clone(), true, true).unwrap(), None, "mode off: KVM");
-        assert!(pick(off, false, true).unwrap_err().contains("KVM microVM was requested"));
+        assert_eq!(pick(None, true, false).unwrap(), Some(false), "else a KVM microVM");
+        assert_eq!(pick(None, false, true).unwrap(), Some(true));
+        assert_eq!(pick(Some(true), true, false).unwrap(), Some(true), "explicit Nitro stays");
+        assert_eq!(pick(Some(false), true, true).unwrap(), Some(false), "false: KVM");
+        assert!(pick(Some(false), false, true).unwrap_err().contains("KVM microVM was requested"));
         assert!(pick(None, false, false).unwrap_err().contains("/dev/kvm"));
 
         // ready for Nitro: the device and a reserved pool (or no counters)

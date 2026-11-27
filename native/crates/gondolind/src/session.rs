@@ -1614,10 +1614,8 @@ impl Session {
             return;
         }
         let Some(child) = self.vm.child.as_mut() else { return };
-        let message = crate::firecracker::guest_deadline_message(
-            self.configured.as_ref().and_then(|c| c.vm.nitro.as_ref()),
-            FIRECRACKER_GUEST_DEADLINE.as_secs(),
-        );
+        let message =
+            crate::firecracker::guest_deadline_message(FIRECRACKER_GUEST_DEADLINE.as_secs());
         gondolin_log::warn!("{message}");
         self.vm.exit_reason = Some(message);
         self.vm.manual_stop = true;
@@ -1743,7 +1741,7 @@ impl Session {
         let hint = self.log_tail.format_hint_for(self.vmm_label());
         let mut message = format!("{base}{hint}");
         // Nitro Sandbox resource errors: what ran out and how to fix it
-        if self.configured.as_ref().is_some_and(|c| c.vm.nitro.is_some())
+        if self.configured.as_ref().is_some_and(|c| crate::firecracker::is_nitro(&c.vm))
             && let Some(extra) = crate::firecracker::nitro_failure_hint(&hint)
         {
             message.push_str(": ");

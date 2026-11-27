@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use gondolin_assets::{Arch, Assets, ProgressEvent, ResolvedImage, RootfsMode};
-use gondolin_proto::session::{NitroConfig, RootDisk, VmConfig};
+use gondolin_proto::session::{RootDisk, VmConfig};
 use gondolin_wire::Value as Json;
 use gondolin_wire::Value;
 
@@ -267,12 +267,16 @@ pub async fn prepare(
     prepare_with_image(common, resume, image, &|name: &str| std::env::var(name))
 }
 
-/// The Nitro Sandbox settings from `GONDOLIN_NITRO_MODE` (`env_opt`: trimmed,
-/// `None` when unset or empty), normalised as the SDK does: set selects a
-/// Nitro Sandbox (mode `off`: KVM); unset: `None`, the daemon picks.
-fn nitro_from_env(env_opt: &dyn Fn(&str) -> Option<String>) -> Option<NitroConfig> {
-    let mode = env_opt("GONDOLIN_NITRO_MODE").map(|v| v.to_lowercase())?;
-    Some(NitroConfig { mode })
+/// The Nitro Sandbox toggle from `GONDOLIN_NITRO` (`env_opt`: trimmed, `None`
+/// when unset or empty), normalised as the SDK does: `1`/`true`/`yes`/`on`
+/// forces Nitro, `0`/`false`/`no`/`off` forces KVM, unset lets the daemon pick.
+fn nitro_from_env(env_opt: &dyn Fn(&str) -> Option<String>) -> Result<Option<bool>, String> {
+    let Some(raw) = env_opt("GONDOLIN_NITRO") else { return Ok(None) };
+    match raw.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => Err(format!("invalid GONDOLIN_NITRO: {raw:?} (expected 1/true/on or 0/false/off)")),
+    }
 }
 
 /// [`prepare`] with an already resolved image and an explicit environment.
@@ -337,9 +341,8 @@ pub fn prepare_with_image(
         vmm: Some(vmm.clone()),
         krun_runner_path: krun.then(|| detected_runner.unwrap_or_else(krun_runner_path)),
         firecracker_path: if firecracker { env_opt("GONDOLIN_FIRECRACKER") } else { None },
-        // a Nitro Sandbox when either setting is given (mode `off`: KVM),
-        // else the daemon picks (a Nitro Sandbox when the host supports them)
-        nitro: if firecracker { nitro_from_env(&env_opt) } else { None },
+        // true: Nitro Sandbox, false: KVM, None: daemon picks (Nitro when ready)
+        nitro: if firecracker { nitro_from_env(&env_opt)? } else { None },
         qemu_path: if krun || firecracker { String::new() } else { qemu_path },
         image: None,
         arch: None,
@@ -573,19 +576,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nitro_settings_from_the_environment() {
+    fn nitro_setting_from_the_environment() {
         let with = |vars: &[(&str, &str)]| {
             nitro_from_env(&|name: &str| {
                 vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.trim().to_string())
             })
         };
-        assert_eq!(with(&[]), None);
-        for (value, mode) in
-            [("Off", "off"), (" DIRECT ", "direct"), ("Confidential", "confidential")]
-        {
-            let nitro = with(&[("GONDOLIN_NITRO_MODE", value)]).unwrap();
-            assert_eq!(nitro.mode.as_str(), mode);
+        assert_eq!(with(&[]), Ok(None));
+        for value in ["1", "true", " TRUE ", "yes", "on"] {
+            assert_eq!(with(&[("GONDOLIN_NITRO", value)]), Ok(Some(true)));
         }
+        for value in ["0", "false", " Off ", "no"] {
+            assert_eq!(with(&[("GONDOLIN_NITRO", value)]), Ok(Some(false)));
+        }
+        assert!(with(&[("GONDOLIN_NITRO", "fast")]).is_err());
     }
 
     #[test]

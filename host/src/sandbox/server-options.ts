@@ -53,21 +53,6 @@ export type ImagePath = string | GuestAssets;
 /** vm backend implementation */
 export type SandboxVmm = "qemu" | "krun" | "firecracker";
 
-/** AWS Nitro Sandbox settings (`vmm: "firecracker"`) */
-export type NitroOptions = {
-  /**
-   * `direct` (default: the parent instance can read guest memory, no
-   * attestation) or `confidential` (needs a guest kernel with the DMB virtio
-   * patches)
-   */
-  mode?: "direct" | "confidential";
-};
-
-/** Resolved {@link NitroOptions}; mode `off`: a KVM microVM was requested */
-export type ResolvedNitroOptions = {
-  mode: "direct" | "confidential" | "off";
-};
-
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
@@ -97,14 +82,12 @@ export type SandboxServerOptions = {
    */
   firecrackerPath?: string;
   /**
-   * run the `vmm: "firecracker"` VM as an AWS Nitro Sandbox with these
-   * settings (default: `GONDOLIN_NITRO_MODE`; setting it also selects a Nitro
-   * Sandbox; with an object, `GONDOLIN_NITRO_MODE=off` does not apply), or
-   * `false` for a KVM microVM (`GONDOLIN_NITRO_MODE=off`). Unset: a Nitro
-   * Sandbox when the daemon's host is set up for them (`/dev/nitro_enclaves`
-   * and a memory pool), else a KVM microVM.
+   * AWS Nitro Sandbox toggle for `vmm: "firecracker"` (default:
+   * `GONDOLIN_NITRO`). `true` runs an AWS Nitro Sandbox, `false` runs a KVM
+   * microVM, unset runs a Nitro Sandbox when the daemon's host is set up for
+   * them (`/dev/nitro_enclaves` and a memory pool), else a KVM microVM.
    */
-  nitro?: NitroOptions | false;
+  nitro?: boolean;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -220,7 +203,7 @@ export type ResolvedSandboxServerOptions = {
    * Nitro Sandbox settings (`vmm: "firecracker"`; unset: the daemon picks
    * KVM or a Nitro Sandbox)
    */
-  nitro?: ResolvedNitroOptions;
+  nitro?: boolean;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -378,29 +361,25 @@ function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
 }
 
 /**
- * {@link NitroOptions} with the `GONDOLIN_NITRO_*` defaults applied, or
- * `undefined` when neither the options nor the variables ask for a Nitro
- * Sandbox
+ * Resolves `sandbox.nitro` with `GONDOLIN_NITRO` as default (`1`/`true`/`yes`/`on`
+ * for Nitro, `0`/`false`/`no`/`off` for KVM, unset to let the daemon pick).
  */
 function resolveNitroOptions(
-  options: NitroOptions | false | undefined,
-): ResolvedNitroOptions | undefined {
-  const envMode = process.env.GONDOLIN_NITRO_MODE?.trim().toLowerCase();
-  if (options === false || (options === undefined && envMode === "off")) {
-    return { mode: "off" };
+  options: boolean | undefined,
+): boolean | undefined {
+  if (options !== undefined) return options;
+  const raw = process.env.GONDOLIN_NITRO?.trim();
+  if (!raw) return undefined;
+  const lower = raw.toLowerCase();
+  if (lower === "1" || lower === "true" || lower === "yes" || lower === "on") {
+    return true;
   }
-  if (options === undefined && !envMode) return undefined;
-  // an explicit `nitro` object asks for a Nitro Sandbox: the environment
-  // only supplies its defaults, so its `off` does not apply
-  const envDefault = envMode === "off" ? undefined : envMode;
-  const mode = options?.mode ?? (envDefault || "direct");
-  if (mode !== "direct" && mode !== "confidential") {
-    throw new Error(
-      `invalid Nitro Sandbox mode: ${String(mode)} (expected "direct" or "confidential"; ` +
-        `nitro: false or GONDOLIN_NITRO_MODE=off runs a KVM microVM instead)`,
-    );
+  if (lower === "0" || lower === "false" || lower === "no" || lower === "off") {
+    return false;
   }
-  return { mode };
+  throw new Error(
+    `invalid GONDOLIN_NITRO: ${raw} (expected 1/true/on or 0/false/off)`,
+  );
 }
 
 function normalizeArch(
@@ -1178,7 +1157,7 @@ export function resolveSandboxServerOptions(
     qemuPath,
     krunRunnerPath,
     firecrackerPath,
-    ...(nitro ? { nitro } : {}),
+    ...(nitro !== undefined ? { nitro } : {}),
     kernelPath,
     initrdPath,
     rootfsPath,
