@@ -171,9 +171,9 @@ export {
   type IngressHookResponsePatch,
 } from "./ingress.ts";
 
-export {
-  type LocalEndpoint,
-  type LocalEndpointInput,
+export type {
+  LocalEndpoint,
+  LocalEndpointInput,
 } from "./local-endpoint.ts";
 
 // Session registry

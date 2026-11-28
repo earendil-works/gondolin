@@ -15,6 +15,10 @@
 pub mod core;
 pub mod error;
 pub mod hooks;
+#[cfg(unix)]
+pub mod host;
+#[cfg(windows)]
+#[path = "host_windows.rs"]
 pub mod host;
 pub mod layers;
 pub mod memory;
@@ -22,12 +26,14 @@ pub mod object;
 pub mod provider;
 pub mod router;
 pub mod rpc;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod rpc_tests;
+#[cfg(unix)]
 mod sys;
 pub mod types;
+#[cfg(unix)]
 pub mod virtiofs;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod virtiofs_tests;
 
 use std::collections::HashMap;
@@ -115,7 +121,15 @@ fn build_mount(
     objects: &mut HashMap<u32, Arc<object::ObjectProvider>>,
 ) -> VfsResult<DynProvider> {
     let mut provider: DynProvider = match &cfg.source {
+        #[cfg(unix)]
         MountSource::Host { root } => Arc::new(host::HostProvider::new(root)?),
+        #[cfg(windows)]
+        MountSource::Host { .. } => {
+            return Err(VfsError::new(
+                errno::ENOSYS,
+                "native host mounts are not supported on Windows; use a controller RealFSProvider mount",
+            ));
+        }
         MountSource::Memory {} => Arc::new(memory::MemoryProvider::new()),
         MountSource::Static { files } => Arc::new(memory::MemoryProvider::with_files(
             files.iter().map(|(p, d)| (p.as_str(), d.as_slice())),

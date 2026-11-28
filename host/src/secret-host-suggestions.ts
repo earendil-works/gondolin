@@ -79,11 +79,7 @@ async function runTrufflehogSecretDetection(
 ): Promise<TrufflehogFinding[]> {
   const binaryPath = await ensureTrufflehogBinary();
   const tmpRoot = fs.mkdtempSync(
-<<<<<<< HEAD
-    path.join(process.env.TMPDIR ?? "/tmp", "gondolin-secret-detect-"),
-=======
     path.join(process.env.TMPDIR ?? os.tmpdir(), "gondolin-secret-detect-"),
->>>>>>> 69a9153 (fix: respect TMPDIR before falling back to os.tmpdir on Windows)
   );
   const filePath = path.join(tmpRoot, "secret.txt");
 

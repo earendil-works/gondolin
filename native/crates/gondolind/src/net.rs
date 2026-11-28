@@ -8,6 +8,7 @@
 //! hooks go out as `hook_call` / `body_pull` / `ssh_hook_call` requests, and
 //! open guest flows are reported as activity (no idle pause while connected).
 
+use crate::local::Stream as LocalStream;
 use gondolin_egress::{ControllerLink, Egress, RemoteHooks};
 use gondolin_netstack::{FlowHandler, NetStack, TcpFlow};
 use gondolin_proto::net::{
@@ -18,7 +19,6 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixStream;
 
 use crate::controller::{CallError, Controller, ControllerHandler};
 use crate::session::ActivityHandle;
@@ -365,7 +365,7 @@ impl NetBackend for Net {
         Some(guest_net_arg(&self.stack))
     }
 
-    fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()> {
+    fn serve<'a>(&'a self, stream: LocalStream) -> crate::BoxFuture<'a, ()> {
         Box::pin(async move {
             match crate::panics::CatchUnwind::new(self.stack.serve(stream)).await {
                 Ok(Ok(())) => {}

@@ -20,7 +20,11 @@ function writeStubCommand(binDir: string, name: string, body: string): void {
   });
 }
 
-test("postBuild: mounts procfs before running chroot commands", () => {
+test("postBuild: mounts procfs before running chroot commands", (t) => {
+  if (process.platform === "win32")
+    return t.skip(
+      "requires POSIX executable shell stubs; Windows builds use a Linux container",
+    );
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-postbuild-"));
   const rootfsDir = path.join(tmp, "rootfs");
   const binDir = path.join(tmp, "bin");
@@ -81,7 +85,11 @@ test("postBuild: mounts procfs before running chroot commands", () => {
   }
 });
 
-test("postBuild: unmounts procfs even when a command fails", () => {
+test("postBuild: unmounts procfs even when a command fails", (t) => {
+  if (process.platform === "win32")
+    return t.skip(
+      "requires POSIX executable shell stubs; Windows builds use a Linux container",
+    );
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-postbuild-"));
   const rootfsDir = path.join(tmp, "rootfs");
   const binDir = path.join(tmp, "bin");
@@ -151,7 +159,11 @@ test("postBuild: unmounts procfs even when a command fails", () => {
   }
 });
 
-test("postBuild: accepts /bin/sh absolute symlinks inside rootfs", () => {
+test("postBuild: accepts /bin/sh absolute symlinks inside rootfs", (t) => {
+  if (process.platform === "win32")
+    return t.skip(
+      "requires POSIX executable shell stubs; Windows builds use a Linux container",
+    );
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-postbuild-"));
   const rootfsDir = path.join(tmp, "rootfs");
   const binDir = path.join(tmp, "bin");

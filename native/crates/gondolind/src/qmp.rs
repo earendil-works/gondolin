@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use gondolin_wire::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 pub const QMP_COMMAND_TIMEOUT: Duration = Duration::from_millis(2000);
 
@@ -59,7 +58,7 @@ pub async fn execute(socket: &Path, command: &str) -> Result<Json, QmpError> {
 async fn run(socket: &Path, command: &str, sent: &mut bool) -> Result<Json, QmpError> {
     let err =
         |reason, message: String, sent: bool| QmpError { reason, message, command_sent: sent };
-    let stream = UnixStream::connect(socket)
+    let stream = crate::local::connect(socket)
         .await
         .map_err(|e| err(QmpErrorReason::SocketError, e.to_string(), false))?;
     let (read, mut write) = stream.into_split();
@@ -143,7 +142,7 @@ pub fn running_from_status(result: &Json) -> Option<bool> {
     }
 }
 
-async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, cmd: &str) -> std::io::Result<()> {
+async fn send(write: &mut crate::local::OwnedWriteHalf, cmd: &str) -> std::io::Result<()> {
     let line = format!("{}\r\n", gondolin_wire::value!({ "execute": cmd }));
     write.write_all(line.as_bytes()).await
 }
@@ -151,7 +150,6 @@ async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, cmd: &str) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::UnixListener;
 
     #[tokio::test]
     async fn command_round_trip() {
@@ -160,7 +158,7 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("qmp.sock");
             let _ = std::fs::remove_file(&path);
-            let listener = UnixListener::bind(&path).unwrap();
+            let (listener, endpoint) = crate::local::bind(&path).unwrap();
             let server = tokio::spawn(async move {
                 for answer in [
                     r#"{"return": {"running": false, "status": "paused"}}"#,
@@ -179,9 +177,9 @@ mod tests {
                     w.write_all(b"\r\n").await.unwrap();
                 }
             });
-            let ret = execute(&path, "query-status").await.unwrap();
+            let ret = execute(&endpoint, "query-status").await.unwrap();
             assert_eq!(running_from_status(&ret), Some(false));
-            let e = execute(&path, "stop").await.unwrap_err();
+            let e = execute(&endpoint, "stop").await.unwrap_err();
             assert_eq!(e.reason, QmpErrorReason::QmpError);
             assert_eq!(e.message, "qmp stop failed (GenericError): nope");
             assert!(!e.unknown_outcome());

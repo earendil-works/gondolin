@@ -1466,7 +1466,7 @@ fi
       this.ensureStartupGeneration(startupGeneration);
     }
 
-    const { socketPath } = registerSession({
+    const { endpoint } = registerSession({
       id: this.id,
       label: this.sessionLabel,
     });
@@ -1474,7 +1474,7 @@ fi
     let sessionIpc: SessionIpcServer | null = null;
     try {
       sessionIpc = new SessionIpcServer(
-        socketPath,
+        endpoint,
         (onMessage, onClose) => {
           const server = this.server;
           if (!server) {
@@ -1503,7 +1503,8 @@ fi
         this.ensureStartupGeneration(startupGeneration);
       }
 
-      sessionIpc.start();
+      await sessionIpc.start();
+      registerSession({ id: this.id, label: this.sessionLabel, endpoint });
 
       if (startupGeneration !== undefined) {
         this.ensureStartupGeneration(startupGeneration);

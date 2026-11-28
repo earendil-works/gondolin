@@ -326,6 +326,12 @@ fn sweep(parent: &Path, cgroups: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
     // SAFETY: signal 0 only checks that the process exists.
@@ -335,6 +341,12 @@ fn process_alive(pid: u32) -> bool {
 
 /// Never follows a symlink: some of these paths sit in directories the jail's
 /// user can write to.
+#[cfg(windows)]
+pub fn chown(_path: &Path, _uid: u32, _gid: u32) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(unix)]
 pub fn chown(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     std::os::unix::fs::lchown(path, Some(uid), Some(gid))
 }
@@ -344,6 +356,15 @@ pub fn chown(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
 /// owns its directory, so a compromised VMM can have replaced it with a
 /// symlink or a hard link to a host file, which a root daemon must not hand
 /// over. `Ok(false)`: there is no listener at `path` (the channel is off).
+#[cfg(windows)]
+pub fn hand_over_listener(
+    _path: &Path,
+    _chown: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> Result<bool, String> {
+    Err("Firecracker jailer is not supported on Windows".into())
+}
+
+#[cfg(unix)]
 pub fn hand_over_listener(
     path: &Path,
     chown: &dyn Fn(&Path) -> std::io::Result<()>,
@@ -367,6 +388,12 @@ pub fn hand_over_listener(
 
 /// Whether the jail's uid (neither the owner nor in the group of `path`) can
 /// read, and if `write` write, `path`: its "other" permission bits.
+#[cfg(windows)]
+pub fn others_may(_path: &Path, _write: bool) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub fn others_may(path: &Path, write: bool) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Ok(meta) = std::fs::metadata(path) else { return false };
@@ -374,7 +401,7 @@ pub fn others_may(path: &Path, write: bool) -> bool {
     mode & 0o004 != 0 && (!write || mode & 0o002 != 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

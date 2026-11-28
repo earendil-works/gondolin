@@ -152,7 +152,8 @@ function resolveWindowsCommandPath(
   const platform = deps.platform ?? process.platform;
   const existsSync = deps.existsSync ?? fs.existsSync;
   const pathEnv = getEnvValue(env, "PATH", platform) ?? "";
-  const pathExt = getEnvValue(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD";
+  const pathExt =
+    getEnvValue(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD";
   // Always resolve using Windows path semantics (`;`-delimited PATH,
   // `\`-or-`/` separators), regardless of the host OS actually running this
   // code - deps.platform lets callers (and tests) simulate Windows path

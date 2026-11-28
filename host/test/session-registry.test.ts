@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ClientMessage } from "../src/sandbox/control-protocol.ts";
-import {
-  SessionIpcServer,
-  connectToSession,
-} from "../src/session-registry.ts";
+import { SessionIpcServer, connectToSession } from "../src/session-registry.ts";
 
 test("SessionIpcServer accepts tcp endpoints for attach IPC", async () => {
   const endpoint = {

@@ -9,14 +9,6 @@ import {
   resolveSandboxServerOptions,
 } from "../src/sandbox/server-options.ts";
 
-function skipWindowsKrun(t: { skip: (message?: string) => void }): boolean {
-  if (process.platform === "win32") {
-    t.skip("krun is not supported on Windows hosts");
-    return true;
-  }
-  return false;
-}
-
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
   options: { includeKrunAssets?: boolean; splitAssetDirs?: boolean } = {},
@@ -148,7 +140,7 @@ test("resolveDefaultQemuPath falls back to standard Program Files install on Win
   const resolved = serverOptionsTest.resolveDefaultQemuPath("x64", {
     platform: "win32",
     env: { ProgramFiles: "C:\\Program Files" } as NodeJS.ProcessEnv,
-    existsSync: (candidate: string) => candidate === qemuPath,
+    existsSync: (candidate) => candidate === qemuPath,
     probeQemuBinary: (candidate: string) => candidate === qemuPath,
   });
 
@@ -193,8 +185,7 @@ test("resolveSandboxServerOptions applies GONDOLIN_CPU with explicit override pr
   }
 });
 
-test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions fails fast on guest/krun host arch mismatch", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const otherArch = hostArch === "aarch64" ? "x86_64" : "aarch64";
   const dir = makeTempAssetsDir(otherArch);
@@ -246,8 +237,7 @@ test("resolveSandboxServerOptions rejects removed sandbox.rootDiskSnapshot", () 
   }
 });
 
-test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { includeKrunAssets: false });
 
@@ -265,8 +255,7 @@ test("resolveSandboxServerOptions requires manifest krunKernel for vmm=krun", (t
   }
 });
 
-test("resolveSandboxServerOptions rejects qemu-only options for krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions rejects qemu-only options for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   try {
@@ -287,8 +276,7 @@ test("resolveSandboxServerOptions rejects qemu-only options for krun", (t) => {
   }
 });
 
-test("resolveSandboxServerOptions rejects single qemu-only option for krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions rejects single qemu-only option for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   try {
@@ -306,8 +294,7 @@ test("resolveSandboxServerOptions rejects single qemu-only option for krun", (t)
   }
 });
 
-test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
 
@@ -335,8 +322,7 @@ test("resolveSandboxServerOptions uses manifest krunKernel/krunInitrd when vmm=k
   }
 });
 
-test("resolveSandboxServerOptions supports split manifest asset directories for krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions supports split manifest asset directories for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch, { splitAssetDirs: true });
 
@@ -354,8 +340,7 @@ test("resolveSandboxServerOptions supports split manifest asset directories for 
   }
 });
 
-test("resolveSandboxServerOptions keeps explicit asset object for krun", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions keeps explicit asset object for krun", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
 
@@ -378,8 +363,7 @@ test("resolveSandboxServerOptions keeps explicit asset object for krun", (t) => 
   }
 });
 
-test("resolveSandboxServerOptions auto-detects local krun runner path", (t) => {
-  if (skipWindowsKrun(t)) return;
+test("resolveSandboxServerOptions auto-detects local krun runner path", () => {
   const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
   const dir = makeTempAssetsDir(hostArch);
   const tempRoot = fs.mkdtempSync(

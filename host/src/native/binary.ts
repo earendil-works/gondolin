@@ -32,7 +32,7 @@ import { getAssetVersion } from "../assets.ts";
 import { gondolinCacheDir } from "../cache.ts";
 
 /** Operating system of a `gondolind` binary */
-export type NativePlatform = "darwin" | "linux";
+export type NativePlatform = "darwin" | "linux" | "win32";
 /** CPU architecture of a `gondolind` binary (node naming) */
 export type NativeArch = "arm64" | "x64";
 
@@ -52,7 +52,12 @@ export type NativeBinary = {
 };
 
 /** Executable names in order of preference (multi-call first) */
-const BINARY_NAMES = ["gondolin", "gondolind"] as const;
+const BINARY_NAMES = [
+  "gondolin",
+  "gondolind",
+  "gondolin.exe",
+  "gondolind.exe",
+] as const;
 
 /**
  * Arguments that start the daemon from `binary`: none for a `gondolind`
@@ -60,7 +65,7 @@ const BINARY_NAMES = ["gondolin", "gondolind"] as const;
  * for the multi-call `gondolin`.
  */
 export function nativeDaemonArgs(binary: string): string[] {
-  return path.basename(binary).startsWith("gondolind") ? [] : ["daemon"];
+  return path.win32.basename(binary).startsWith("gondolind") ? [] : ["daemon"];
 }
 
 /** The daemon command line for `binary` */
@@ -77,6 +82,7 @@ const RUST_TARGETS: Record<string, string> = {
   "darwin-x64": "x86_64-apple-darwin",
   "linux-arm64": "aarch64-unknown-linux-musl",
   "linux-x64": "x86_64-unknown-linux-musl",
+  "win32-x64": "x86_64-pc-windows-msvc",
 };
 
 const require = createRequire(import.meta.url);
@@ -104,6 +110,7 @@ export function nativeRustTarget(target: NativeBinaryTarget): string {
 function hostTarget(): NativeBinaryTarget | null {
   const platform = process.platform;
   const arch = process.arch;
+  if (platform === "win32" && arch === "x64") return { platform, arch };
   if (
     (platform === "darwin" || platform === "linux") &&
     (arch === "arm64" || arch === "x64")
@@ -127,8 +134,18 @@ export function describeNativeExecutable(
     return null;
   }
   try {
-    const buf = Buffer.alloc(20);
-    if (fs.readSync(fd, buf, 0, buf.length, 0) < buf.length) return null;
+    const buf = Buffer.alloc(64);
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    if (bytesRead < 20) return null;
+    if (bytesRead >= 64 && buf.readUInt16LE(0) === 0x5a4d) {
+      const offset = buf.readUInt32LE(60);
+      if (offset < 64 || offset > 1024 * 1024) return null;
+      const pe = Buffer.alloc(6);
+      if (fs.readSync(fd, pe, 0, pe.length, offset) !== pe.length) return null;
+      return pe.readUInt32LE(0) === 0x00004550 && pe.readUInt16LE(4) === 0x8664
+        ? { platform: "win32", arch: "x64" }
+        : null;
+    }
     if (buf.readUInt32BE(0) === 0x7f454c46) {
       const machine = buf.readUInt16LE(18);
       if (machine === 0xb7) return { platform: "linux", arch: "arm64" };

@@ -38,15 +38,10 @@ async function runSshCommand(args: string[]): Promise<string> {
   while (Date.now() < deadline) {
     try {
       return await new Promise<string>((resolve, reject) => {
-        execFile(
-          "ssh",
-          args,
-          { timeout: sshExecTimeoutMs },
-          (err, stdout) => {
-            if (err) reject(err);
-            else resolve(stdout);
-          },
-        );
+        execFile("ssh", args, { timeout: sshExecTimeoutMs }, (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout);
+        });
       });
     } catch (err) {
       lastError = err;
@@ -88,32 +83,32 @@ test("enableSsh exposes a localhost port that can run ssh commands", {
 
       const access = await vm.enableSsh();
 
-        const stdout = await runSshCommand([
-          "-n",
-          "-p",
-          String(access.port),
-          "-i",
-          access.identityFile,
-          "-o",
-          "StrictHostKeyChecking=no",
-          "-o",
-          "UserKnownHostsFile=/dev/null",
-          "-o",
-          "BatchMode=yes",
-          "-o",
-          `ConnectTimeout=${sshConnectTimeoutSeconds}`,
-          "-o",
-          "IdentitiesOnly=yes",
-          "-o",
-          "ForwardAgent=no",
-          "-o",
-          "ClearAllForwardings=yes",
-          "-o",
-          "LogLevel=ERROR",
-          `${access.user}@${access.host}`,
-          "echo",
-          "ssh-ok",
-        ]);
+      const stdout = await runSshCommand([
+        "-n",
+        "-p",
+        String(access.port),
+        "-i",
+        access.identityFile,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        `ConnectTimeout=${sshConnectTimeoutSeconds}`,
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "LogLevel=ERROR",
+        `${access.user}@${access.host}`,
+        "echo",
+        "ssh-ok",
+      ]);
 
       assert.equal(stdout.trim(), "ssh-ok");
 

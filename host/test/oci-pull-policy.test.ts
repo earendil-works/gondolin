@@ -132,10 +132,9 @@ function restoreEnv(name: string, value: string | undefined): void {
   process.env[name] = value;
 }
 
-test(
-  "oci pullPolicy never: fails when requested platform is not local",
-  { skip: skipWindowsOciPullPolicyTests },
-  () => {
+test("oci pullPolicy never: fails when requested platform is not local", {
+  skip: skipWindowsOciPullPolicyTests,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
   );
@@ -189,13 +188,11 @@ test(
     restoreEnv("LOCAL_PLATFORM", oldLocalPlatform);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-},
-);
+});
 
-test(
-  "oci pullPolicy if-not-present: pulls when requested platform is not local",
-  { skip: skipWindowsOciPullPolicyTests },
-  () => {
+test("oci pullPolicy if-not-present: pulls when requested platform is not local", {
+  skip: skipWindowsOciPullPolicyTests,
+}, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-pull-auto-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -252,13 +249,11 @@ test(
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-},
-);
+});
 
-test(
-  "oci pullPolicy never: export create uses --pull=never",
-  { skip: skipWindowsOciPullPolicyTests },
-  () => {
+test("oci pullPolicy never: export create uses --pull=never", {
+  skip: skipWindowsOciPullPolicyTests,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-pull-never-"),
   );
@@ -314,13 +309,11 @@ test(
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-},
-);
+});
 
-test(
-  "oci export: returns resolved image digest metadata",
-  { skip: skipWindowsOciPullPolicyTests },
-  () => {
+test("oci export: returns resolved image digest metadata", {
+  skip: skipWindowsOciPullPolicyTests,
+}, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-digest-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -361,13 +354,11 @@ test(
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-},
-);
+});
 
-test(
-  "oci export: fails when runtime does not report RepoDigests",
-  { skip: skipWindowsOciPullPolicyTests },
-  () => {
+test("oci export: fails when runtime does not report RepoDigests", {
+  skip: skipWindowsOciPullPolicyTests,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-digest-missing-"),
   );
@@ -407,5 +398,4 @@ test(
     restoreEnv("FAKE_REPO_DIGEST", oldRepoDigest);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-},
-);
+});

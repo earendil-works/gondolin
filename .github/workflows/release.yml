@@ -169,7 +169,7 @@ jobs:
           npm publish --access public --provenance
 
   build-native:
-    name: Build native binaries (all platforms)
+    name: Build native binaries (Unix platforms)
     needs: [create-release]
     # Cross-compiles every target from one machine: darwin via Xcode, the
     # static linux-musl builds via `zig cc` (native/scripts/).
@@ -219,10 +219,40 @@ jobs:
           path: native/target/dist/
           if-no-files-found: error
 
+  build-native-windows:
+    name: Build Windows x64 daemon
+    needs: [create-release]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build standalone daemon with static CRT
+        working-directory: native
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --release --locked -p gondolind --target x86_64-pc-windows-msvc
+      - name: Stage daemon
+        run: |
+          New-Item -ItemType Directory -Force native/target/dist/x86_64-pc-windows-msvc | Out-Null
+          Copy-Item native/target/x86_64-pc-windows-msvc/release/gondolind.exe native/target/dist/x86_64-pc-windows-msvc/
+          & native/target/dist/x86_64-pc-windows-msvc/gondolind.exe --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gondolind-windows-dist
+          path: native/target/dist/
+          if-no-files-found: error
+
   publish-native:
     name: Publish native package (${{ matrix.package_name }})
-    needs: [create-release, build-native, publish-sandbox-helpers]
+    needs: [create-release, build-native, build-native-windows, publish-sandbox-helpers]
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: read
       id-token: write
@@ -242,6 +272,10 @@ jobs:
           - runner: ubuntu-latest
             package_dir: packages/gondolin-native-linux-x64
             package_name: '@earendil-works/gondolin-native-linux-x64'
+          - runner: windows-latest
+            package_dir: packages/gondolin-native-win32-x64
+            package_name: '@earendil-works/gondolin-native-win32-x64'
+            artifact: gondolind-windows-dist
     steps:
       - uses: actions/checkout@v7
         with:
@@ -256,7 +290,7 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:
-          name: gondolind-dist
+          name: ${{ matrix.artifact || 'gondolind-dist' }}
           path: native/target/dist/
 
       - name: Prepare package payload
@@ -289,10 +323,14 @@ jobs:
           cd "$TMP_DIR"
           npm init -y >/dev/null
           npm install "$PKG_PATH" >/dev/null
-          # npm bin alias of the multi-call binary (argv[0] gondolind = daemon)
-          ./node_modules/.bin/gondolind --version | grep -q '^gondolind '
-          ./node_modules/${{ matrix.package_name }}/bin/gondolin daemon --version | grep -q '^gondolind '
-          ./node_modules/${{ matrix.package_name }}/bin/gondolin --version | grep -q ' (static)$'
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./node_modules/${{ matrix.package_name }}/bin/gondolind.exe --version | grep -q '^gondolind '
+          else
+            # npm bin alias of the multi-call binary (argv[0] gondolind = daemon)
+            ./node_modules/.bin/gondolind --version | grep -q '^gondolind '
+            ./node_modules/${{ matrix.package_name }}/bin/gondolin daemon --version | grep -q '^gondolind '
+            ./node_modules/${{ matrix.package_name }}/bin/gondolin --version | grep -q ' (static)$'
+          fi
 
       - name: Publish native package (with provenance)
         run: |

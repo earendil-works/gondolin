@@ -79,16 +79,18 @@ and cached locally (default: `alpine-base:latest`).
 | macOS, Intel                         | QEMU       | `brew install qemu node`                                   |
 | Linux arm64 (Debian/Ubuntu)          | QEMU       | `sudo apt install qemu-system-arm nodejs npm`              |
 | Linux x86_64 without `/dev/kvm`      | QEMU (TCG) | `sudo apt install qemu-system-x86 nodejs npm`              |
+| Windows x64                         | QEMU       | Node.js + QEMU; [WHPX setup](docs/windows-showcase.md)       |
 
 Node.js 22.19 or newer. `npm install @earendil-works/gondolin` also installs
 the platform packages with the Gondolin daemon (`gondolind`, macOS and Linux on
-arm64 and x64) and, on macOS arm64 and Linux x86_64, the krun runner. VMs run
+arm64 and x64, Windows x64) and, on macOS arm64 and Linux x86_64, the krun runner. VMs run
 on libkrun where it can (Apple silicon, Linux x86_64 with read/write
 `/dev/kvm`) and on QEMU otherwise, so QEMU is only needed on the other hosts
 or when you select the `qemu` backend. See
 [Installation](https://earendil-works.github.io/gondolin/install/) for the
 details, krun on Linux arm64, the static CLI without Node.js, and building
-from a checkout.
+from a checkout. Windows uses the Node.js CLI and native daemon with QEMU;
+its loopback transports require a trusted local host (see the Windows guide).
 
 ## Feature Highlights
 

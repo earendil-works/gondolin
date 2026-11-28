@@ -125,8 +125,14 @@ impl Session {
                 let path = import_path();
                 // private: the checkpoint is the guest's disk
                 let open = {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    options.open(&path)
                 };
                 match open {
                     Ok(file) => self.ckpt.importing = Some((id, file, path)),

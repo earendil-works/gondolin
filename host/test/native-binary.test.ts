@@ -20,8 +20,13 @@ import {
 
 /** Minimal executable header for `target` (enough for the header check). */
 function fakeBinary(target: NativeBinaryTarget): Buffer {
-  const buf = Buffer.alloc(64);
-  if (target.platform === "linux") {
+  const buf = Buffer.alloc(128);
+  if (target.platform === "win32") {
+    buf.writeUInt16LE(0x5a4d, 0);
+    buf.writeUInt32LE(64, 60);
+    buf.writeUInt32LE(0x00004550, 64);
+    buf.writeUInt16LE(0x8664, 68);
+  } else if (target.platform === "linux") {
     buf.writeUInt32BE(0x7f454c46, 0);
     buf.writeUInt16LE(target.arch === "arm64" ? 0xb7 : 0x3e, 18);
   } else {
@@ -50,8 +55,9 @@ function fakeCheckout(files: Record<string, Buffer>): string {
 }
 
 const host: NativeBinaryTarget | null =
-  (process.platform === "darwin" || process.platform === "linux") &&
-  (process.arch === "arm64" || process.arch === "x64")
+  ((process.platform === "darwin" || process.platform === "linux") &&
+    (process.arch === "arm64" || process.arch === "x64")) ||
+  (process.platform === "win32" && process.arch === "x64")
     ? { platform: process.platform, arch: process.arch }
     : null;
 
@@ -68,9 +74,17 @@ test("native binary: names and rust targets", () => {
     nativeRustTarget({ platform: "darwin", arch: "x64" }),
     "x86_64-apple-darwin",
   );
+  assert.equal(
+    nativePackageName({ platform: "win32", arch: "x64" }),
+    "@earendil-works/gondolin-native-win32-x64",
+  );
+  assert.equal(
+    nativeRustTarget({ platform: "win32", arch: "x64" }),
+    "x86_64-pc-windows-msvc",
+  );
   assert.throws(
-    () => nativePackageName({ platform: "win32" as never, arch: "x64" }),
-    /unsupported gondolind platform win32-x64/,
+    () => nativePackageName({ platform: "win32", arch: "arm64" }),
+    /unsupported gondolind platform win32-arm64/,
   );
 });
 
@@ -81,6 +95,7 @@ test("native binary: executable headers", () => {
     { platform: "linux", arch: "x64" },
     { platform: "darwin", arch: "arm64" },
     { platform: "darwin", arch: "x64" },
+    { platform: "win32", arch: "x64" },
   ] as NativeBinaryTarget[]) {
     const file = path.join(dir, `${target.platform}-${target.arch}`);
     fs.writeFileSync(file, fakeBinary(target));
@@ -146,9 +161,31 @@ test("native binary: remote targets come from the checkout's dist dir", () => {
   );
 });
 
+test("native binary: Windows dist resolves the daemon exe without a static CLI", () => {
+  const target: NativeBinaryTarget = { platform: "win32", arch: "x64" };
+  const root = fakeCheckout({
+    "dist/x86_64-pc-windows-msvc/gondolind.exe": fakeBinary(target),
+  });
+  assert.deepEqual(
+    getNativeBinaryPath(target, {
+      start: path.join(root, "host", "src"),
+      version: "0.0.0-test",
+    }),
+    {
+      path: path.join(
+        root,
+        "native/target/dist/x86_64-pc-windows-msvc/gondolind.exe",
+      ),
+      args: [],
+    },
+  );
+});
+
 test("native binary: daemon arguments follow the binary name", () => {
   assert.deepEqual(nativeDaemonArgs("/x/gondolin"), ["daemon"]);
   assert.deepEqual(nativeDaemonArgs("/x/gondolind"), []);
+  assert.deepEqual(nativeDaemonArgs("C:\\bin\\gondolind.exe"), []);
+  assert.deepEqual(nativeDaemonArgs("C:\\bin\\gondolin.exe"), ["daemon"]);
   assert.deepEqual(nativeDaemonCommand("/x/gondolin"), [
     "/x/gondolin",
     "daemon",
@@ -246,7 +283,10 @@ test("native binary: ensureNativeBinary fetches and caches the package", async (
       args: ["daemon"],
     });
     assert.deepEqual(describeNativeExecutable(file), target);
-    assert.equal(fs.statSync(file).mode & 0o777, 0o755);
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(file).mode & 0o777, 0o755);
+    }
+    assert.deepEqual(fs.readFileSync(file), fakeBinary(target));
     assert.deepEqual(requests, [
       "https://registry.test/@earendil-works%2fgondolin-native-linux-arm64/9.9.9",
       "https://registry.test/pkg.tgz",

@@ -359,7 +359,12 @@ for (const backend of backends) {
         { timeout: 20000 },
         (err, stdout, stderr) => {
           if (err) {
-            reject(new Error(`${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`, { cause: err }));
+            reject(
+              new Error(
+                `${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`,
+                { cause: err },
+              ),
+            );
           } else resolve(stdout);
         },
       );

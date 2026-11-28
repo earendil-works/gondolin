@@ -1,8 +1,8 @@
-import crypto from "crypto";
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 
 /** local IPC endpoint description */
 export type LocalEndpoint =
@@ -60,8 +60,7 @@ export function createDefaultLocalEndpoint(
     };
   }
 
-  const tmpDir =
-    deps.tmpDir ?? (platform === "darwin" ? "/tmp" : os.tmpdir());
+  const tmpDir = deps.tmpDir ?? (platform === "darwin" ? "/tmp" : os.tmpdir());
   const randomId = deps.randomId ?? (() => crypto.randomUUID().slice(0, 8));
 
   return {
@@ -80,7 +79,7 @@ export function normalizeLocalEndpoint(
   if (typeof value === "string") {
     if (platform === "win32") {
       throw new Error(
-        `${fieldName} must use an explicit { transport: \"tcp\", host, port } endpoint on Windows`,
+        `${fieldName} must use an explicit { transport: "tcp", host, port } endpoint on Windows`,
       );
     }
 
@@ -96,7 +95,7 @@ export function normalizeLocalEndpoint(
 
   if (value.transport === "unix") {
     if (platform === "win32") {
-      throw new Error(`${fieldName} must use transport \"tcp\" on Windows`);
+      throw new Error(`${fieldName} must use transport "tcp" on Windows`);
     }
     if (typeof value.path !== "string" || value.path.length === 0) {
       throw new Error(`${fieldName}.path must be a non-empty string`);
@@ -117,11 +116,7 @@ export function normalizeLocalEndpoint(
       );
     }
 
-    if (
-      !Number.isInteger(value.port) ||
-      value.port < 0 ||
-      value.port > 65535
-    ) {
+    if (!Number.isInteger(value.port) || value.port < 0 || value.port > 65535) {
       throw new Error(`${fieldName}.port must be a valid tcp port`);
     }
 
@@ -129,7 +124,7 @@ export function normalizeLocalEndpoint(
     return value;
   }
 
-  throw new Error(`${fieldName}.transport must be \"unix\" or \"tcp\"`);
+  throw new Error(`${fieldName}.transport must be "unix" or "tcp"`);
 }
 
 export function describeLocalEndpoint(endpoint: LocalEndpoint): string {

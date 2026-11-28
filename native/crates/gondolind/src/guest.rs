@@ -13,9 +13,9 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::local::Stream as LocalStream;
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -195,7 +195,7 @@ impl GuestPort {
         handler: Arc<dyn PortHandler>,
     ) -> std::io::Result<Self> {
         let _ = std::fs::remove_file(path);
-        let listener = UnixListener::bind(path)?;
+        let (listener, endpoint) = crate::local::bind(path)?;
         let task_outbox = outbox.clone();
         let accept_task = tokio::spawn(async move {
             // aborted with the accept task (dropping a JoinHandle would detach it)
@@ -219,7 +219,7 @@ impl GuestPort {
                 ))));
             }
         });
-        Ok(GuestPort { name, path: path.to_path_buf(), outbox, accept_task })
+        Ok(GuestPort { name, path: endpoint, outbox, accept_task })
     }
 
     /// Stops listening and drops the connection and queued frames.
@@ -236,7 +236,7 @@ impl Drop for GuestPort {
     }
 }
 
-async fn serve_connection(stream: UnixStream, outbox: Arc<Outbox>, handler: Arc<dyn PortHandler>) {
+async fn serve_connection(stream: LocalStream, outbox: Arc<Outbox>, handler: Arc<dyn PortHandler>) {
     let (read, mut write) = stream.into_split();
     let reader = async {
         let mut read = tokio::io::BufReader::with_capacity(64 * 1024, read);
@@ -368,7 +368,7 @@ mod tests {
                 GuestPort::listen("test", &path, outbox.clone(), Arc::new(Collect(tx))).unwrap();
 
             assert!(outbox.send_frame(gondolin_wire::frame(b"early").unwrap()));
-            let mut a = UnixStream::connect(&path).await.unwrap();
+            let mut a = crate::local::connect(&port.path).await.unwrap();
             let mut buf = [0u8; 9];
             tokio::io::AsyncReadExt::read_exact(&mut a, &mut buf).await.unwrap();
             assert_eq!(&buf[4..], b"early");
@@ -384,7 +384,7 @@ mod tests {
             );
 
             // a new connection takes over
-            let mut b = UnixStream::connect(&path).await.unwrap();
+            let mut b = crate::local::connect(&port.path).await.unwrap();
             assert!(outbox.send_frame(gondolin_wire::frame(b"later").unwrap()));
             let mut buf = [0u8; 9];
             tokio::io::AsyncReadExt::read_exact(&mut b, &mut buf).await.unwrap();

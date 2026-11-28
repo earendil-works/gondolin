@@ -13,6 +13,12 @@ import {
   updateAlpineBuildCache,
 } from "../src/build/cache.ts";
 
+// Git's GNU tar treats a drive-letter path as a remote host; use Windows bsdtar.
+const TAR =
+  process.platform === "win32"
+    ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe")
+    : "tar";
+
 function createIndexArchive(tmp: string, version: string): Buffer {
   const sourceDir = path.join(tmp, `index-${version}`);
   const archivePath = path.join(tmp, `index-${version}.tar.gz`);
@@ -21,7 +27,7 @@ function createIndexArchive(tmp: string, version: string): Buffer {
     path.join(sourceDir, "APKINDEX"),
     `P:linux-virt\nV:${version}\nT:Linux lts kernel\n\nP:busybox\nV:1.0-r0\nT:Utilities\n`,
   );
-  child_process.execFileSync("tar", [
+  child_process.execFileSync(TAR, [
     "-czf",
     archivePath,
     "-C",
@@ -141,7 +147,7 @@ test("build cache: installPackages refreshes stale indexes on 404", async () => 
   fs.mkdirSync(path.join(apkDir, "etc"), { recursive: true });
   fs.writeFileSync(path.join(apkDir, "etc/busybox-version"), "1.1\n");
   const apkPath = path.join(tmp, "busybox.apk");
-  child_process.execFileSync("tar", ["-czf", apkPath, "-C", apkDir, "etc"]);
+  child_process.execFileSync(TAR, ["-czf", apkPath, "-C", apkDir, "etc"]);
   const apk = fs.readFileSync(apkPath);
 
   // Upstream index after busybox was updated to 1.1-r0
@@ -152,7 +158,7 @@ test("build cache: installPackages refreshes stale indexes on 404", async () => 
     "P:busybox\nV:1.1-r0\nT:Utilities\n",
   );
   const freshArchive = path.join(tmp, "fresh.tar.gz");
-  child_process.execFileSync("tar", [
+  child_process.execFileSync(TAR, [
     "-czf",
     freshArchive,
     "-C",
@@ -220,7 +226,7 @@ function setupAgedIndexFixture() {
     fs.mkdirSync(path.join(apkDir, "etc"), { recursive: true });
     fs.writeFileSync(path.join(apkDir, "etc/busybox-version"), `${version}\n`);
     const apkPath = path.join(tmp, `busybox-${version}.apk`);
-    child_process.execFileSync("tar", ["-czf", apkPath, "-C", apkDir, "etc"]);
+    child_process.execFileSync(TAR, ["-czf", apkPath, "-C", apkDir, "etc"]);
     return fs.readFileSync(apkPath);
   };
 
@@ -231,7 +237,7 @@ function setupAgedIndexFixture() {
     "P:busybox\nV:1.1-r0\nT:Utilities\n",
   );
   const freshArchive = path.join(tmp, "fresh.tar.gz");
-  child_process.execFileSync("tar", [
+  child_process.execFileSync(TAR, [
     "-czf",
     freshArchive,
     "-C",

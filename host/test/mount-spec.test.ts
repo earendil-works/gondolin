@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 
-import {
-  normalizeCliHostPath,
-  parseMountSpec,
-} from "../src/cli/mount-spec.ts";
+import { normalizeCliHostPath, parseMountSpec } from "../src/cli/mount-spec.ts";
 
 let cygpathAvailable: boolean | null = null;
 
@@ -72,31 +69,29 @@ test("parseMountSpec recovers Git Bash path-list rewritten mount specs", () => {
   assert.equal(calls.length, 1);
 });
 
-test(
-  "parseMountSpec recovers Git Bash path-list specs via a real cygpath binary",
-  { skip: !hasRealCygpath() },
-  () => {
-    // Same scenario as above, but exercising defaultRunCygpath's real
-    // `execFileSync("cygpath", ...)` call end-to-end (no runCygpath mock),
-    // so a real change in cygpath's output format would actually be caught.
-    const parsed = parseMountSpec(
-      "C:\\CodeBlocks\\gondolin\\demo;C:\\Users\\Test User\\my workspace;ro",
-      {
-        platform: "win32",
-        env: { MSYSTEM: "MINGW64" } as NodeJS.ProcessEnv,
-      },
-    );
+test("parseMountSpec recovers Git Bash path-list specs via a real cygpath binary", {
+  skip: !hasRealCygpath(),
+}, () => {
+  // Same scenario as above, but exercising defaultRunCygpath's real
+  // `execFileSync("cygpath", ...)` call end-to-end (no runCygpath mock),
+  // so a real change in cygpath's output format would actually be caught.
+  const parsed = parseMountSpec(
+    "C:\\CodeBlocks\\gondolin\\demo;C:\\Users\\Test User\\my workspace;ro",
+    {
+      platform: "win32",
+      env: { MSYSTEM: "MINGW64" } as NodeJS.ProcessEnv,
+    },
+  );
 
-    assert.equal(parsed.readonly, true);
-    // cygpath's own POSIX root mount can vary by installation, so assert on
-    // structure rather than the exact string: both paths were recovered
-    // (not left semicolon-joined), stayed absolute, and kept the embedded
-    // space intact.
-    assert.ok(!parsed.hostPath.includes(";"));
-    assert.ok(!parsed.guestPath.includes(";"));
-    assert.match(parsed.guestPath, /Test User.my workspace$/);
-  },
-);
+  assert.equal(parsed.readonly, true);
+  // cygpath's own POSIX root mount can vary by installation, so assert on
+  // structure rather than the exact string: both paths were recovered
+  // (not left semicolon-joined), stayed absolute, and kept the embedded
+  // space intact.
+  assert.ok(!parsed.hostPath.includes(";"));
+  assert.ok(!parsed.guestPath.includes(";"));
+  assert.match(parsed.guestPath, /Test User.my workspace$/);
+});
 
 test("parseMountSpec preserves standard Windows mount specs", () => {
   const parsed = parseMountSpec("C:/CodeBlocks/gondolin/demo:/workspace:ro", {

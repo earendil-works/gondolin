@@ -24,6 +24,7 @@ pub mod idle;
 pub mod image;
 pub mod jailer;
 pub mod krun;
+pub mod local;
 pub mod mitm_ca;
 pub mod net;
 mod netlog;
@@ -41,7 +42,9 @@ pub mod timing;
 pub mod util;
 pub mod vfs;
 pub mod vfs_port;
+#[cfg_attr(windows, path = "vmm_windows.rs")]
 pub mod vmm;
+pub mod whpx;
 
 #[cfg(test)]
 mod tests;
@@ -143,6 +146,11 @@ pub fn main_with_args(args: Vec<String>) {
                 }
             });
         }
+        Some("--probe-whpx") => {
+            let available = args.get(1).is_some_and(|qemu| whpx::available(qemu));
+            println!("{}", if available { "whpx" } else { "tcg" });
+            return;
+        }
         Some(other) => {
             eprintln!("gondolind: unknown argument {other}");
             eprintln!("{USAGE}");
@@ -154,6 +162,7 @@ pub fn main_with_args(args: Vec<String>) {
     // report panics (they are contained where possible, see `panics.rs`)
     panics::install_hook();
     // SAFETY: ignoring SIGPIPE so writes to a closed pipe fail with EPIPE.
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }

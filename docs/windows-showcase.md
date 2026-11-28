@@ -1,7 +1,8 @@
 # Windows QEMU showcase (Git Bash)
 
 This walkthrough demonstrates the end-user Windows x64 path for Gondolin's
-QEMU backend from a local checkout.
+QEMU backend from a local checkout. The TypeScript SDK and Node.js CLI drive the
+Rust `gondolind.exe` daemon; there is no in-process TypeScript VM engine.
 
 It is written for **Git Bash on Windows** and exercises the most relevant
 features in one flow:
@@ -22,9 +23,11 @@ features in one flow:
 ## Prerequisites
 
 - Windows x64
-- Node.js `>= 23.6`
-- A QEMU build with `whpx` support
-- This repo checked out locally
+- Node.js 24 recommended (minimum 22.19)
+- A recent QEMU build with `whpx` and stream-netdev support
+- This repo checked out locally, with pnpm
+- For source builds: stable Rust's MSVC toolchain and Visual Studio C++ Build Tools
+  (`cargo build` must be able to find the Windows linker)
 
 Useful Windows references:
 
@@ -45,7 +48,8 @@ From the repo root:
 
 ```bash
 pnpm install
-pnpm build
+(cd native && cargo build --release --locked -p gondolind)
+pnpm --filter @earendil-works/gondolin run build
 qemu-system-x86_64 -accel help
 ```
 
@@ -66,15 +70,46 @@ This does not change Linux KVM's `microvm` or ARM64's `virt` machine selection.
 Check the selected runtime accelerator from this checkout:
 
 ```bash
-node --input-type=module -e 'import { selectAccel } from "./host/src/sandbox/controller.ts"; console.log(selectAccel("x64", "qemu-system-x86_64"));'
+native/target/release/gondolind.exe --probe-whpx qemu-system-x86_64
 ```
 
-On native Windows x64 this prints `whpx` when the runtime probe succeeds, or
-`tcg` when WHPX is unavailable. Cross-architecture guests use TCG. The CLI warns
+The probe requires a QMP greeting and successful capabilities negotiation, then
+terminates the paused probe process. A timeout is a failure, not a successful
+initialization. On native Windows x64 it prints `whpx` when that handshake
+succeeds, or `tcg` when WHPX is unavailable. Cross-architecture guests use TCG. The CLI warns
 when it falls back to software emulation; a successful guest command alone is
 not evidence of hardware acceleration. To validate a guest without allowing
 fallback, explicitly set `sandbox: { accel: "whpx" }` in `VM.create()`; startup
 then fails rather than silently using TCG if WHPX cannot initialize.
+
+### Native Windows runtime details and limitations
+
+- The SDK discovers the newest local `gondolind.exe` build automatically;
+  `GONDOLIN_NATIVE_BIN` can select an explicit executable. Published installs
+  use `@earendil-works/gondolin-native-win32-x64`. The standalone Rust CLI is
+  Unix-only; use `pnpm gondolin` or the npm package's Node.js CLI on Windows.
+- Windows x64 defaults to QEMU/q35 and probes WHPX on the daemon's host.
+  Explicit accelerator, CPU, and machine settings are respected. There is
+  no WHPX probe for ARM64/cross-architecture guests, or for Linux/macOS hosts.
+- Guest channels, networking, QMP, and session attach use loopback TCP instead
+  of Unix sockets. Guest-channel and network listeners are bound before QEMU
+  starts; QMP's server is owned by QEMU. These endpoints are **not authenticated
+  against other local users**. Use a trusted, single-user Windows host; do not
+  expose or forward these ports to an untrusted network.
+- Windows uses sandboxfs, not vhost-user virtio-fs. Host-directory providers
+  run through the SDK's object adapter, retaining its containment, readonly,
+  and shadow checks. Direct native `host` mounts and explicit virtio-fs fail
+  with an unsupported-platform error; they do not use a weaker path resolver.
+- QEMU is placed in a kill-on-close Windows Job Object. Closing a session or
+  the daemon terminates the VMM and its descendants.
+- The krun and Firecracker VMMs, Linux jailer, and Unix SSH-agent sockets are
+  unavailable locally. Windows OpenSSH named-pipe agents are supported.
+- Creating filesystem symlinks (including native image-ref symlinks) may need
+  Developer Mode or appropriate Windows privileges. The SDK image store uses
+  directory junctions for refs. Linux guest-image assembly uses a Linux container.
+- `make check` uses a POSIX PTY runner. On Windows, run host typechecking/builds
+  directly and use `cargo test -p gondolind` / `cargo clippy -p gondolind` in
+  `native/`; CI also runs the unchanged Unix workspace checks on Linux.
 
 ## 1. Prepare a demo workspace
 

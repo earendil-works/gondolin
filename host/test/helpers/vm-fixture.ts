@@ -4,7 +4,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 import { buildQemuFamilyCandidates } from "../../src/qemu/locate-binary.ts";
-import { buildAccelProbeArgs } from "../../src/qemu/accel-probe.ts";
+import {
+  nativeDaemonCommand,
+  resolveNativeBinary,
+} from "../../src/native/binary.ts";
 import type { LocalEndpoint } from "../../src/local-endpoint.ts";
 
 /**
@@ -33,31 +36,15 @@ function hasWindowsWhpx(): boolean {
 
   for (const candidate of candidates) {
     try {
-      const output = execFileSync(candidate, ["-accel", "help"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
+      // Exercise the runtime's exact q35/QMP handshake, not -accel help or
+      // process liveness. A timeout is never evidence of WHPX availability.
+      const [binary, ...args] = nativeDaemonCommand(resolveNativeBinary());
+      const probe = spawnSync(binary!, [...args, "--probe-whpx", candidate], {
+        timeout: 10000,
         windowsHide: true,
+        encoding: "utf8",
       });
-      const supported = output
-        .split(/\r?\n/)
-        .map((line) => line.trim().toLowerCase());
-      if (!supported.includes("whpx")) {
-        continue;
-      }
-
-      const probe = spawnSync(
-        candidate,
-        buildAccelProbeArgs("whpx"),
-        {
-          timeout: 1500,
-          windowsHide: true,
-          encoding: "utf8",
-        },
-      );
-      const timedOut = probe.error?.code === "ETIMEDOUT";
-      if (timedOut || probe.status === 0) {
-        return true;
-      }
+      if (probe.status === 0 && probe.stdout.trim() === "whpx") return true;
     } catch {
       // Try next candidate.
     }

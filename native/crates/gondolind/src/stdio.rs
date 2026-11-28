@@ -3,6 +3,7 @@
 //! by the runtime's reactor; tokio's `stdin()`/`stdout()` would hand every read
 //! and write to a blocking thread (two thread switches per frame).
 
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 
@@ -11,12 +12,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub type Reader = Pin<Box<dyn AsyncRead + Send>>;
 pub type Writer = Pin<Box<dyn AsyncWrite + Send>>;
 
+#[cfg(unix)]
 enum Kind {
     Socket,
     Fifo,
     Other,
 }
 
+#[cfg(unix)]
 fn kind(fd: RawFd) -> Kind {
     // SAFETY: fstat on a descriptor we own for the process lifetime.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -32,6 +35,7 @@ fn kind(fd: RawFd) -> Kind {
 
 /// Takes ownership of `fd` (a duplicate, so fds 0/1 stay valid for anything
 /// else that writes to them, e.g. panic output goes to stderr anyway).
+#[cfg(unix)]
 fn dup_owned(fd: RawFd) -> Option<OwnedFd> {
     // SAFETY: dup returns a new descriptor we own.
     let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
@@ -40,6 +44,7 @@ fn dup_owned(fd: RawFd) -> Option<OwnedFd> {
 
 /// The controller input (stdin).
 pub fn reader() -> Reader {
+    #[cfg(unix)]
     match kind(0) {
         Kind::Socket => {
             if let Some(fd) = dup_owned(0) {
@@ -65,6 +70,7 @@ pub fn reader() -> Reader {
 
 /// The controller output (stdout).
 pub fn writer() -> Writer {
+    #[cfg(unix)]
     match kind(1) {
         Kind::Socket => {
             if let Some(fd) = dup_owned(1) {

@@ -19,9 +19,13 @@ use gondolin_vfs::{BoxFuture, EventSink, ObjectBackend, VfsError, VfsResult, Vfs
 use gondolin_wire::{RawEnvelope, Value};
 
 use crate::controller::{CallError, Controller, ControllerHandler};
-use crate::subsystem::{FsReply, SubsystemContext, VfsBackend, VirtioFsService};
+#[cfg(unix)]
+use crate::subsystem::VirtioFsService;
+use crate::subsystem::{FsReply, SubsystemContext, VfsBackend};
 use gondolin_proto::vfs::VfsTransport;
+#[cfg(unix)]
 use gondolin_vfs::virtiofs::VirtioFs;
+#[cfg(unix)]
 use gondolin_virtiofs::fuse::{CachePolicy, FuseServer};
 
 /// Forwards object-tier calls and hooks to the controller.
@@ -56,18 +60,23 @@ impl ObjectBackend for ControllerObjects {
 /// The native VFS backend of a session.
 pub struct NativeVfs {
     service: Arc<VfsService>,
+    #[cfg(unix)]
     transport: VfsTransport,
+    #[cfg(unix)]
     virtio_fs: std::sync::OnceLock<Arc<VirtioFsDevice>>,
+    #[cfg(unix)]
     queues: usize,
 }
 
 /// The mount table as a vhost-user-fs backend.
+#[cfg(unix)]
 struct VirtioFsDevice {
     server: Arc<FuseServer<VirtioFs>>,
     queues: usize,
     required: bool,
 }
 
+#[cfg(unix)]
 impl VirtioFsService for VirtioFsDevice {
     fn serve(&self, conn: std::os::unix::net::UnixStream) {
         // queue 0: high priority (FORGET etc.), 1..: requests
@@ -107,6 +116,7 @@ impl VfsBackend for NativeVfs {
         })
     }
 
+    #[cfg(unix)]
     fn virtio_fs(&self) -> Option<Arc<dyn VirtioFsService>> {
         if self.transport == VfsTransport::Sandboxfs {
             return None;
@@ -198,6 +208,10 @@ impl ControllerHandler for InvalidateHandler {
 pub fn build(config: &Value, ctx: &SubsystemContext) -> Result<Arc<dyn VfsBackend>, String> {
     let cfg: VfsConfig = gondolin_wire::from_value(config.clone())
         .map_err(|e| format!("invalid vfs config: {e}"))?;
+    #[cfg(windows)]
+    if cfg.transport == VfsTransport::Virtiofs {
+        return Err("virtio-fs is not supported on Windows; select sandboxfs or auto".into());
+    }
     let backend: Arc<dyn ObjectBackend> = Arc::new(ControllerObjects { ctl: ctx.ctl.clone() });
     let events = if cfg.hooks.events {
         let (sink, mut rx) = EventSink::channel(gondolin_vfs::EVENT_QUEUE);
@@ -218,11 +232,13 @@ pub fn build(config: &Value, ctx: &SubsystemContext) -> Result<Arc<dyn VfsBacken
     ctx.dispatcher.register(types::FS_CALL, Arc::new(FsCallHandler { service: service.clone() }));
     ctx.dispatcher
         .register(types::VFS_INVALIDATE, Arc::new(InvalidateHandler { service: service.clone() }));
-    let queues = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 4);
     Ok(Arc::new(NativeVfs {
         service,
+        #[cfg(unix)]
         transport: cfg.transport,
+        #[cfg(unix)]
         virtio_fs: std::sync::OnceLock::new(),
-        queues,
+        #[cfg(unix)]
+        queues: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 4),
     }))
 }

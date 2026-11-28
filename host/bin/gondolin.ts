@@ -15,6 +15,10 @@ import {
   type MountSpec,
 } from "../src/cli/mount-spec.ts";
 
+import {
+  normalizeLocalEndpoint,
+  type LocalEndpointInput,
+} from "../src/local-endpoint.ts";
 import { VmCheckpoint } from "../src/checkpoint.ts";
 import { gondolinCacheDir } from "../src/cache.ts";
 import { parseDiskSizeToBytes } from "../src/vm/disk.ts";
@@ -165,11 +169,7 @@ function resolveResumeCheckpoint(resume: string): string {
     return resolvedPath;
   }
 
-  if (
-    value.includes(path.sep) ||
-    value.includes("/") ||
-    value.includes("\\")
-  ) {
+  if (value.includes(path.sep) || value.includes("/") || value.includes("\\")) {
     throw new Error(`checkpoint not found: ${rawValue}`);
   }
 
@@ -252,29 +252,6 @@ function renderCliError(err: unknown) {
 
   const message = errorMessage(err);
   console.error(message);
-}
-
-function renderCliBackendWarnings(vm: VM) {
-  if (process.platform !== "win32") return;
-
-  const backend = vm.getBackendInfo();
-  const accelName = backend.accel?.split(",", 1)[0]?.trim().toLowerCase();
-  if (backend.vmm !== "qemu" || accelName !== "tcg") {
-    return;
-  }
-
-  console.error(
-    `[gondolin] warning: using QEMU TCG software emulation on Windows (${backend.qemuPath}).`,
-  );
-  console.error(
-    "[gondolin] WHPX acceleration was not selected; startup and runtime performance will be much slower.",
-  );
-  console.error(
-    "[gondolin] WHPX docs: https://www.qemu.org/docs/master/system/whpx.html",
-  );
-  console.error(
-    "[gondolin] Enable Hypervisor Platform: DISM /online /Enable-Feature /FeatureName:HypervisorPlatform /All",
-  );
 }
 
 function usage() {
@@ -1554,8 +1531,6 @@ async function runExecVm(args: ExecArgs) {
     vm = await VM.create({
       ...vmOptions,
     });
-    renderCliBackendWarnings(vm);
-
     for (const command of args.commands) {
       const result = await vm.exec([command.cmd, ...command.argv], {
         env: command.env.length > 0 ? command.env : undefined,
@@ -1591,7 +1566,7 @@ async function runExecVm(args: ExecArgs) {
 
 const EXEC_OUTPUT_WINDOW_BYTES = 1024 * 1024;
 
-function runExecSocket(args: ExecArgs, sockPath: string) {
+function runExecSocket(args: ExecArgs, sockPath: LocalEndpointInput) {
   // The session socket uses the 5-byte framed JSON/binary IPC protocol, not virtio CBOR.
   let currentIndex = 0;
   let inflightId: number | null = null;
@@ -1691,7 +1666,32 @@ function runExecSocket(args: ExecArgs, sockPath: string) {
 }
 
 /** Resolve `--sock` as a socket path, falling back to a session id (or prefix) */
-async function resolveExecSocketPath(value: string): Promise<string> {
+async function resolveExecSocketPath(
+  value: string,
+): Promise<LocalEndpointInput> {
+  if (value.startsWith("tcp://")) {
+    const url = new URL(value);
+    if (
+      !url.port ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.pathname && url.pathname !== "/")
+    ) {
+      throw new Error(
+        "--sock TCP endpoint must be tcp://<loopback-host>:<port>",
+      );
+    }
+    return normalizeLocalEndpoint(
+      {
+        transport: "tcp",
+        host: url.hostname.replace(/^\[|\]$/g, ""),
+        port: Number(url.port),
+      },
+      "--sock",
+    );
+  }
   if (value.includes("/") || fs.existsSync(value)) return value;
   await gcSessions().catch(() => {
     // ignore
@@ -1700,7 +1700,7 @@ async function resolveExecSocketPath(value: string): Promise<string> {
   if (!session?.alive) {
     throw new Error(`session not found or not running: ${value}`);
   }
-  return session.socketPath;
+  return session.endpoint;
 }
 
 async function runExec(argv: string[] = process.argv.slice(2)) {
@@ -2083,8 +2083,6 @@ async function runBash(argv: string[]) {
         ...vmOptions,
       });
     }
-    renderCliBackendWarnings(vm);
-
     if (args.ssh) {
       const access = await vm.enableSsh({
         user: args.sshUser,
@@ -3338,9 +3336,7 @@ async function runImage(argv: string[]) {
         throw new Error("image import requires <ASSET_DIR>");
       }
 
-      const imported = importImageFromDirectory(
-        normalizeCliHostPath(assetDir),
-      );
+      const imported = importImageFromDirectory(normalizeCliHostPath(assetDir));
       console.log(`Imported buildId: ${imported.buildId}`);
       console.log(`  arch: ${imported.arch}`);
       console.log(`  object: ${imported.assetDir}`);

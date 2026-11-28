@@ -316,7 +316,24 @@ pub fn select_accel(target_arch: &str, host: &HostInfo) -> &'static str {
     if host.is_darwin() {
         return "hvf";
     }
+    if host.os == "windows" && target_arch == "x64" {
+        return "whpx";
+    }
     "tcg"
+}
+
+/// Resolves only an implicit Windows QEMU accelerator; other platforms and
+/// explicit accelerators bypass the WHPX probe entirely.
+pub fn resolve_windows_accel(
+    vm: &VmConfig,
+    host: &HostInfo,
+    probe: impl FnOnce(&str) -> bool,
+) -> Option<&'static str> {
+    if host.os != "windows" || !uses_qemu(vm) || vm.accel.is_some() {
+        return None;
+    }
+    let native_x64 = host.arch == "x64" && detect_target_arch(&vm.qemu_path, host) == "x64";
+    Some(if native_x64 && probe(&vm.qemu_path) { "whpx" } else { "tcg" })
 }
 
 /// `selectMachineType`.
@@ -346,6 +363,9 @@ pub fn select_cpu(target_arch: &str, accel: Option<&str>, host: &HostInfo) -> &'
     }
     if host.is_darwin() {
         return if name == "hvf" { "host" } else { "max" };
+    }
+    if host.os == "windows" && target_arch == "x64" && name == "whpx" {
+        return "qemu64";
     }
     "max"
 }
@@ -447,11 +467,14 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
     };
 
     args.push("-object".into());
-    args.push(if cfg.host.os == "windows" {
-        "rng-builtin,id=rng0"
-    } else {
-        "rng-random,filename=/dev/urandom,id=rng0"
-    }.into());
+    args.push(
+        if cfg.host.os == "windows" {
+            "rng-builtin,id=rng0"
+        } else {
+            "rng-random,filename=/dev/urandom,id=rng0"
+        }
+        .into(),
+    );
     args.push("-device".into());
     args.push(format!("{rng_dev},rng=rng0"));
     let chardevs = [
@@ -462,7 +485,13 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
     ];
     for (id, path) in chardevs {
         args.push("-chardev".into());
-        args.push(format!("socket,id={id},path={},server=off", path.display()));
+        args.push(if cfg.host.os == "windows" {
+            let endpoint = path.to_str().expect("loopback endpoint");
+            let (host, port) = endpoint.rsplit_once(':').expect("loopback endpoint with port");
+            format!("socket,id={id},host={host},port={port},server=off")
+        } else {
+            format!("socket,id={id},path={},server=off", path.display())
+        });
     }
     args.push("-device".into());
     args.push(format!("{serial_dev},id=virtio-serial0"));
@@ -478,7 +507,12 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
 
     if let Some(net) = cfg.net_socket {
         args.push("-netdev".into());
-        args.push(format!("stream,id=net0,server=off,addr.type=unix,addr.path={net}"));
+        args.push(if cfg.host.os == "windows" {
+            let (host, port) = net.rsplit_once(':').expect("loopback netdev endpoint with port");
+            format!("stream,id=net0,server=off,addr.type=inet,addr.host={host},addr.port={port}")
+        } else {
+            format!("stream,id=net0,server=off,addr.type=unix,addr.path={net}")
+        });
         let mac = vm.mac.as_deref().unwrap_or(DEFAULT_MAC);
         args.push("-device".into());
         args.push(format!("{net_dev},netdev=net0,mac={mac}"));
@@ -486,7 +520,8 @@ pub fn build_qemu_args(cfg: &QemuArgs<'_>) -> Vec<String> {
 
     if let Some(qmp) = cfg.qmp_socket {
         args.push("-qmp".into());
-        args.push(format!("unix:{qmp},server=on,wait=off"));
+        let transport = if cfg.host.os == "windows" { "tcp" } else { "unix" };
+        args.push(format!("{transport}:{qmp},server=on,wait=off"));
     }
 
     args
@@ -826,6 +861,70 @@ fn has_zig_frame(t: &str) -> bool {
 mod tests {
     use super::*;
     use gondolin_proto::session::RootDisk;
+
+    #[test]
+    fn windows_acceleration_is_runtime_probed_only_for_native_x64() {
+        let win = HostInfo { os: "windows".into(), arch: "x64".into(), kvm_available: false };
+        let mut vm = vm();
+        vm.qemu_path = "qemu-system-x86_64.exe".into();
+        assert_eq!(resolve_windows_accel(&vm, &win, |_| true), Some("whpx"));
+        assert_eq!(resolve_windows_accel(&vm, &win, |_| false), Some("tcg"));
+        assert_eq!(select_cpu("x64", Some("whpx"), &win), "qemu64");
+        assert_eq!(select_cpu("x64", Some("tcg"), &win), "max");
+        let no_probe = |_: &str| -> bool { panic!("must not probe WHPX") };
+        for accel in ["whpx", "tcg", "whpx,kernel-irqchip=off"] {
+            vm.accel = Some(accel.into());
+            assert_eq!(resolve_windows_accel(&vm, &win, no_probe), None);
+        }
+        vm.accel = None;
+        assert_eq!(resolve_windows_accel(&vm, &mac_arm(), no_probe), None);
+        let linux = HostInfo { os: "linux".into(), arch: "x64".into(), kvm_available: true };
+        assert_eq!(resolve_windows_accel(&vm, &linux, no_probe), None);
+        let arm = HostInfo { arch: "arm64".into(), ..win.clone() };
+        assert_eq!(resolve_windows_accel(&vm, &arm, no_probe), Some("tcg"));
+        vm.qemu_path = "qemu-system-aarch64.exe".into();
+        assert_eq!(resolve_windows_accel(&vm, &win, no_probe), Some("tcg"));
+        assert_eq!(resolve_windows_accel(&vm, &arm, no_probe), Some("tcg"));
+    }
+
+    #[test]
+    fn windows_q35_uses_loopback_transports_and_builtin_rng() {
+        let mut vm = vm();
+        vm.qemu_path = "qemu-system-x86_64.exe".into();
+        let c = ChardevPaths {
+            control: "127.0.0.1:41001".into(),
+            fs: "127.0.0.1:41002".into(),
+            ssh: "127.0.0.1:41003".into(),
+            ingress: "127.0.0.1:41004".into(),
+        };
+        let host = HostInfo { os: "windows".into(), arch: "x64".into(), kvm_available: false };
+        let build = |vm: &VmConfig| {
+            build_qemu_args(&QemuArgs {
+                vm,
+                append: "console=ttyS0",
+                chardevs: &c,
+                net_socket: Some("127.0.0.1:41005"),
+                qmp_socket: Some("127.0.0.1:41006"),
+                virtiofs: None,
+                host: &host,
+            })
+            .join(" ")
+        };
+        let args = build(&vm);
+        assert!(args.contains("-machine q35 -accel whpx -cpu qemu64"), "{args}");
+        assert!(args.contains("socket,id=virtiocon0,host=127.0.0.1,port=41001,server=off"));
+        assert!(args.contains("addr.type=inet,addr.host=127.0.0.1,addr.port=41005"));
+        assert!(args.contains("-qmp tcp:127.0.0.1:41006,server=on,wait=off"));
+        assert!(args.contains("rng-builtin,id=rng0"));
+        assert!(!args.contains("/dev/urandom") && !args.contains("microvm"));
+        vm.machine_type = Some("pc".into());
+        vm.accel = Some("tcg".into());
+        vm.cpu = Some("max".into());
+        assert!(build(&vm).contains("-machine pc -accel tcg -cpu max"));
+        vm.machine_type = None;
+        vm.qemu_path = "qemu-system-aarch64.exe".into();
+        assert!(build(&vm).contains("-machine virt -accel tcg -cpu max"));
+    }
 
     #[test]
     fn prepended_lines_are_the_hint_only_without_stderr() {

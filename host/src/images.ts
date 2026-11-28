@@ -1,4 +1,3 @@
-import child_process from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";

@@ -380,7 +380,15 @@ export class NativeSandboxServer extends EventEmitter {
       });
     });
     transport.onMessage("log", (p) => {
-      this.emitDebug(p.component as DebugComponent, String(p.message ?? ""));
+      if (p.component === "warning") {
+        // Runtime backend decisions belong to the daemon, including remote
+        // hosts; warnings must remain visible even with debug logging off
+        process.emitWarning(String(p.message ?? ""), {
+          code: "GONDOLIN_WARNING",
+        });
+      } else {
+        this.emitDebug(p.component as DebugComponent, String(p.message ?? ""));
+      }
     });
     transport.onMessage("exit", (p) => {
       this.emit("exit", {

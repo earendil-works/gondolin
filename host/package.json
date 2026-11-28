@@ -57,7 +57,8 @@
     "@earendil-works/gondolin-native-darwin-arm64": "0.14.0",
     "@earendil-works/gondolin-native-darwin-x64": "0.14.0",
     "@earendil-works/gondolin-native-linux-arm64": "0.14.0",
-    "@earendil-works/gondolin-native-linux-x64": "0.14.0"
+    "@earendil-works/gondolin-native-linux-x64": "0.14.0",
+    "@earendil-works/gondolin-native-win32-x64": "0.14.0"
   },
   "devDependencies": {
     "@types/node": "22.19.21",

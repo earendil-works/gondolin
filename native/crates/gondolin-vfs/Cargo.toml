@@ -11,8 +11,10 @@ gondolin-wire.workspace = true
 gondolin-proto.workspace = true
 tokio.workspace = true
 gondolin-log.workspace = true
-gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 libc = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }

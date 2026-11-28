@@ -44,8 +44,11 @@ test("resolveFromQemuFamilyCandidates skips explicit paths that don't exist and 
 });
 
 test("resolveFromQemuFamilyCandidates falls back to the first candidate when nothing probes successfully", () => {
-  const resolved = resolveFromQemuFamilyCandidates(["qemu-img", "qemu-img.exe"], {
-    probeBinary: () => false,
-  });
+  const resolved = resolveFromQemuFamilyCandidates(
+    ["qemu-img", "qemu-img.exe"],
+    {
+      probeBinary: () => false,
+    },
+  );
   assert.equal(resolved, "qemu-img");
 });

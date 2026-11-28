@@ -50,27 +50,26 @@ test.after(() => {
   scheduleForceExit();
 });
 
-test(
-  "VM.getHostPid exposes a pid that can be sampled by host process tools",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async () => {
-    const vm = await VM.create({
-      startTimeoutMs,
-      sandbox: { console: "none" },
-    });
+test("VM.getHostPid exposes a pid that can be sampled by host process tools", {
+  skip: skipVmTests,
+  timeout: timeoutMs,
+}, async () => {
+  const vm = await VM.create({
+    startTimeoutMs,
+    sandbox: { console: "none" },
+  });
 
-    try {
-      await vm.start();
+  try {
+    await vm.start();
 
-      const pid = vm.getHostPid();
-      assert.equal(typeof pid, "number");
-      assert.ok(pid > 0, "expected a positive host pid");
+    const pid = vm.getHostPid();
+    assert.equal(typeof pid, "number");
+    assert.ok(pid !== null && pid > 0, "expected a positive host pid");
 
-      const stats = readHostPidStats(pid);
-      console.log(`host process stats for VM host pid ${pid}:\n${stats}`);
-      assertHostPidStats(stats, pid);
-    } finally {
-      await vm.close();
-    }
-  },
-);
+    const stats = readHostPidStats(pid);
+    console.log(`host process stats for VM host pid ${pid}:\n${stats}`);
+    assertHostPidStats(stats, pid);
+  } finally {
+    await vm.close();
+  }
+});

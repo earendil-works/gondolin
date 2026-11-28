@@ -252,7 +252,9 @@ function applyTarMetaEntry(
 }
 
 /** Parse PAX extended header records into a key/value map */
-export function parsePaxHeaders(content: Buffer | null): Record<string, string> {
+export function parsePaxHeaders(
+  content: Buffer | null,
+): Record<string, string> {
   if (!content || content.length === 0) {
     return {};
   }
@@ -382,7 +384,11 @@ function extractPreparedTarEntry(
   }
 
   if (entry.type === 1) {
-    const linkTarget = resolveSafeTarLinkTarget(absRoot, destDir, entry.linkName);
+    const linkTarget = resolveSafeTarLinkTarget(
+      absRoot,
+      destDir,
+      entry.linkName,
+    );
     if (!linkTarget || !fs.existsSync(linkTarget)) {
       return;
     }
@@ -608,7 +614,11 @@ class StreamingTarExtractor extends Writable {
     clearPendingTarEntryMetadata(this.metadata);
 
     if (entry.type === 5) {
-      const target = resolveSafeTarTarget(this.absRoot, this.destDir, entry.name);
+      const target = resolveSafeTarTarget(
+        this.absRoot,
+        this.destDir,
+        entry.name,
+      );
       if (target) {
         prepareTarget(target, true);
         fs.mkdirSync(target, { recursive: true });
@@ -624,7 +634,11 @@ class StreamingTarExtractor extends Writable {
     }
 
     if (entry.type === 2) {
-      const target = resolveSafeTarTarget(this.absRoot, this.destDir, entry.name);
+      const target = resolveSafeTarTarget(
+        this.absRoot,
+        this.destDir,
+        entry.name,
+      );
       if (target) {
         prepareTarget(target, false);
         fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -647,7 +661,11 @@ class StreamingTarExtractor extends Writable {
     }
 
     if (entry.type === 1) {
-      const target = resolveSafeTarTarget(this.absRoot, this.destDir, entry.name);
+      const target = resolveSafeTarTarget(
+        this.absRoot,
+        this.destDir,
+        entry.name,
+      );
       const linkTarget = resolveSafeTarLinkTarget(
         this.absRoot,
         this.destDir,
@@ -731,7 +749,7 @@ class StreamingTarExtractor extends Writable {
   }
 
   private closeCurrentFile(current = this.current): void {
-    if (!current || current.kind !== "file" || current.fd === null) {
+    if (current?.kind !== "file" || current.fd === null) {
       return;
     }
 

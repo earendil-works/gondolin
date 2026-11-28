@@ -239,6 +239,8 @@ importers:
 
   packages/gondolin-native-linux-x64: {}
 
+  packages/gondolin-native-win32-x64: {}
+
 packages:
 
   '@biomejs/biome@2.5.15':

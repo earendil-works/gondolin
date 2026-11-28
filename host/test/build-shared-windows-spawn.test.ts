@@ -32,9 +32,13 @@ test("quoteCmdArg refuses arguments containing a literal double quote", () => {
 });
 
 test("resolveWindowsCommandPath returns the command unchanged when it already looks like a path", () => {
-  const resolved = resolveWindowsCommandPath("C:\\tools\\docker.exe", undefined, {
-    platform: "win32",
-  });
+  const resolved = resolveWindowsCommandPath(
+    "C:\\tools\\docker.exe",
+    undefined,
+    {
+      platform: "win32",
+    },
+  );
   assert.equal(resolved, "C:\\tools\\docker.exe");
 });
 
@@ -60,7 +64,12 @@ test("resolveWindowsCommandPath finds a .cmd shim on PATH", () => {
 });
 
 test("resolveSpawnCommand is a no-op off Windows", () => {
-  const resolved = resolveSpawnCommand("docker", ["run"], {}, { platform: "linux" });
+  const resolved = resolveSpawnCommand(
+    "docker",
+    ["run"],
+    {},
+    { platform: "linux" },
+  );
   assert.deepEqual(resolved, { command: "docker", args: ["run"] });
 });
 
@@ -71,7 +80,10 @@ test("resolveSpawnCommand passes non-.bat/.cmd commands through unmodified on Wi
     {},
     { platform: "win32" },
   );
-  assert.deepEqual(resolved, { command: "C:\\tools\\docker.exe", args: ["run", "--rm"] });
+  assert.deepEqual(resolved, {
+    command: "C:\\tools\\docker.exe",
+    args: ["run", "--rm"],
+  });
 });
 
 test("resolveSpawnCommand reroutes .cmd files through cmd.exe without `call`, wrapped for /s", () => {
@@ -91,9 +103,13 @@ test("resolveSpawnCommand reroutes .cmd files through cmd.exe without `call`, wr
   assert.match(inner, /amp\^&ersand/);
 });
 
-test.describe("resolveSpawnCommand end-to-end via real cmd.exe", { skip: process.platform !== "win32" }, () => {
+test.describe("resolveSpawnCommand end-to-end via real cmd.exe", {
+  skip: process.platform !== "win32",
+}, () => {
   test("delivers arguments with spaces and metacharacters to a real .cmd script intact", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-cmd-spawn-test-"));
+    const dir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-cmd-spawn-test-"),
+    );
     const scriptPath = path.join(dir, "echoargs.cmd");
     fs.writeFileSync(
       scriptPath,
@@ -107,7 +123,13 @@ test.describe("resolveSpawnCommand end-to-end via real cmd.exe", { skip: process
       ].join("\r\n"),
     );
 
-    const cases = ["simple", "has space", "amp&ersand", "pipe|char", "trailing\\backslash\\"];
+    const cases = [
+      "simple",
+      "has space",
+      "amp&ersand",
+      "pipe|char",
+      "trailing\\backslash\\",
+    ];
     const resolved = resolveSpawnCommand(scriptPath, cases, {});
 
     const output = await new Promise<string>((resolve, reject) => {
@@ -121,7 +143,7 @@ test.describe("resolveSpawnCommand end-to-end via real cmd.exe", { skip: process
       child.on("close", () => resolve(out));
     });
 
-    const expected = cases.map((c) => `ARG=[${c}]`).join("\r\n") + "\r\n";
+    const expected = `${cases.map((c) => `ARG=[${c}]`).join("\r\n")}\r\n`;
     assert.equal(output, expected);
   });
 });

@@ -3,7 +3,10 @@
 use std::path::Path;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+#[cfg(unix)]
+use tokio::net::UnixStream as AgentStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::NamedPipeClient as AgentStream;
 
 use super::Error;
 use super::wire::{Reader, Writer};
@@ -83,7 +86,7 @@ pub async fn write_message<S: tokio::io::AsyncWrite + Unpin>(
 }
 
 pub struct AgentClient {
-    stream: UnixStream,
+    stream: AgentStream,
 }
 
 fn io(e: std::io::Error) -> Error {
@@ -92,7 +95,11 @@ fn io(e: std::io::Error) -> Error {
 
 impl AgentClient {
     pub async fn connect(path: &Path) -> std::io::Result<AgentClient> {
-        Ok(AgentClient { stream: UnixStream::connect(path).await? })
+        #[cfg(unix)]
+        let stream = AgentStream::connect(path).await?;
+        #[cfg(windows)]
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(path)?;
+        Ok(AgentClient { stream })
     }
 
     async fn call(&mut self, request: &[u8]) -> Result<Vec<u8>, Error> {

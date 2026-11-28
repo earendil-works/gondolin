@@ -1,7 +1,5 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 
@@ -1063,12 +1061,6 @@ export function resolveSandboxServerOptions(
       ? (detectedKrunRunnerPath ?? resolveDefaultKrunRunnerPathFn())
       : "gondolin-krun-runner");
 
-  if (vmm !== "qemu" && process.platform === "win32") {
-    throw new Error(
-      `vmm=${vmm} is not supported on Windows hosts; use vmm=qemu instead.`,
-    );
-  }
-
   if (vmm === "krun" || vmm === "firecracker") {
     const unsupported: string[] = [];
     if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
@@ -1183,12 +1175,9 @@ export function resolveSandboxServerOptions(
     maxQueuedStdinBytes,
   );
 
-  const resolvedQemuTargetArch =
-    guestFromManifest?.arch ?? detectQemuArch(qemuPath) ?? hostArchNormalized;
-  const resolvedAccel =
-    vmm === "qemu" && resolvedQemuTargetArch
-      ? (options.accel ?? selectAccel(resolvedQemuTargetArch, qemuPath))
-      : options.accel;
+  // Runtime acceleration is resolved by the daemon on the VMM's host,
+  // which may differ from the SDK's host for remote sessions
+  const resolvedAccel = options.accel;
 
   return {
     vmm,
