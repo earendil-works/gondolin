@@ -69,7 +69,11 @@ file operations) out of JavaScript.
   build never shadows a fresh one), else the optional dependency
   `@earendil-works/gondolin-native-<platform>-<arch>` (`bin/gondolin`;
   darwin-arm64, darwin-x64, linux-arm64, linux-x64; Linux builds are static
-  musl). Packages are built by `make native-release` and staged with
+  musl). Windows x64 uses `bin/gondolind.exe` in `gondolin-native-win32-x64`
+  and the Node.js CLI (the static CLI remains Unix-only); discovery recognizes
+  PE/COFF headers and `.exe` local builds. The Windows release runner builds
+  `gondolind` with MSVC and a static CRT. Unix packages are built by
+  `make native-release`; all platform packages are staged with
   `scripts/prepare-native-package.mjs`; release builds use fat LTO (12%
   smaller than thin at the same throughput; `opt-level = "s"` would save
   another 25% but costs ~20% HTTPS throughput).
@@ -319,7 +323,8 @@ Integration points for the VFS and network subsystems (`subsystem.rs`):
   sandboxfs op goes to the backend (one request at a time per connection).
   No backend (`vfs: null`): `ENOSYS`. `virtio_fs()` offers
   the same filesystem as a vhost-user-fs device (see "Filesystem tiers").
-- `trait NetBackend { async fn serve(&self, stream: UnixStream); async fn close(&self) }`
+- `trait NetBackend { async fn serve(&self, stream: LocalStream); async fn close(&self) }`
+  (`LocalStream` is a Unix stream on Unix, a loopback TCP stream on Windows)
   (`NetSetup::Native`; `NetSetup::None` without a network device): the core
   listens on `net.sock` in the private socket
   directory, QEMU's stream netdev connects there and each connection is served
@@ -603,10 +608,32 @@ Envelope: `{ v: 1, t: <type>, id?: <u64>, p: <payload map> }`.
 | c→d | `activity` | `{ source, active }`: guest activity observed by the controller (idle pause) |
 | c→d | `shutdown` | stop the VM, answer `shutdown_result`, exit |
 
-The daemon exits when stdin closes (SIGKILLing the VMM). If the daemon itself
+The daemon exits when stdin closes, terminating the VMM. If the daemon itself
 dies, the VMM follows: on Linux via `PR_SET_PDEATHSIG`, on macOS via a tiny
 watchdog (`gondolind --vmm-watchdog <pid>`, kqueue `NOTE_EXIT` on the VMM and
-EOF on a pipe from the daemon). `configure` carries:
+EOF on a pipe from the daemon). Windows assigns QEMU to a non-inherited,
+kill-on-close Job Object; failure to assign kills/reaps the child and fails the
+spawn. Stop/drop terminates the job (including descendants); a waiter drains
+stdout/stderr before reporting exit, without a Tokio process reactor.
+
+Windows supports the QEMU backend only. Its guest channels and netdev bind
+OS-assigned loopback TCP listeners before spawning QEMU; QMP is a QEMU-owned
+loopback TCP server. Unix socket transport and its directory permissions are
+unchanged on Unix. Windows loopback channels do not authenticate local users:
+a trusted, single-user host is required, and these ports must not be forwarded
+to untrusted networks. The SDK's session registry publishes the bound endpoint
+only after listening, and the CLI accepts session IDs or `tcp://127.0.0.1:port`.
+
+Implicit Windows x64 acceleration is decided on the daemon host: a paused
+`q35`/`qemu64` WHPX-only probe must complete a QMP capabilities handshake within
+5 seconds. A timeout/exit/malformed reply means unavailable, never success.
+Failure selects TCG and emits a `log` with component `warning`, which the SDK
+surfaces as a Node.js warning independently of debug flags. Explicit accelerators
+bypass probing; cross-architecture and Windows ARM64 targets select TCG without
+probing. Linux KVM/microvm and macOS HVF defaults are unchanged. QEMU Windows
+uses `rng-builtin`, not the Unix `/dev/urandom` RNG backend.
+
+`configure` carries:
 
 - `vm`: `vmm?: qemu|krun`, `qemu_path`, `krun_runner_path?`, `image?`,
   `arch?`, `kernel_path`, `initrd_path`, `root_disk?: { path, format:
@@ -721,7 +748,11 @@ rename/link is `EXDEV`). Kinds:
   `RealFSProvider`
   (follow-style ops fail `ENOENT` for escaping or dangling links;
   lstat/readlink/unlink/rmdir/rename act on the link); setuid/setgid dropped
-  on chmod.
+  on chmod. This native provider is Unix-only: direct `host` configurations
+  fail on Windows rather than using an unhardened path-based substitute. The
+  SDK translates local Windows `RealFSProvider`/`nativeMounts.host` mounts
+  (and readonly/shadow wrappers) through its object adapter, preserving their
+  policy checks. Windows uses sandboxfs; explicit virtio-fs requests fail.
 - `memory {}`: in-daemon memory filesystem (`MemoryProvider` semantics).
 - `static { files: { path: bytes } }`: read-only synthetic files (MITM CA).
 - `object { mount_id, writable, enumeration: list|materialized|none,

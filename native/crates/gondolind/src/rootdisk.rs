@@ -105,9 +105,7 @@ impl Overlay {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
-        std::fs::File::open(&self.path)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| format!("cannot sync {}: {e}", self.path.display()))?;
+        sync_file(&self.path).map_err(|e| format!("cannot sync {}: {e}", self.path.display()))?;
         if std::fs::rename(&self.path, dest).is_err() {
             replace_by_copy(&self.path, dest)?;
             let _ = std::fs::remove_file(&self.path);
@@ -121,6 +119,12 @@ impl Overlay {
 
 /// Whether `path` is a block device (the only special file allowed, as the
 /// controller's own raw root disk).
+#[cfg(windows)]
+fn is_block_device(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn is_block_device(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
@@ -158,6 +162,11 @@ fn block_device_size(path: &Path) -> Result<u64, String> {
     }
 }
 
+/// FlushFileBuffers requires a writable file handle on Windows.
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new().read(true).write(cfg!(windows)).open(path)?.sync_all()
+}
+
 /// Best-effort fsync of a directory, so a rename in it survives a crash.
 fn sync_dir(dir: &Path) {
     if let Ok(d) = std::fs::File::open(dir) {
@@ -171,7 +180,7 @@ fn replace_by_copy(src: &Path, dest: &Path) -> Result<(), String> {
     let tmp = dest.with_file_name(format!(".{name}.partial-{}", std::process::id()));
     let res = (|| {
         std::fs::copy(src, &tmp)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        sync_file(&tmp)?;
         std::fs::rename(&tmp, dest)
     })();
     res.map_err(|e| {
@@ -665,11 +674,16 @@ mod tests {
 
     #[test]
     fn relative_rootfs_paths_become_absolute_backing_names() {
-        let t = TempDir::new("relative");
+        let cwd = std::env::current_dir().unwrap();
+        // Windows runners keep the checkout on D: and TEMP on C:. Relative
+        // paths cannot cross volumes; create this fixture under the cwd.
+        let dir = cwd.join(format!(".gondolind-rootdisk-relative-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let t = TempDir(dir);
         let rootfs = t.0.join("rootfs.ext4");
         std::fs::write(&rootfs, vec![0u8; 65536]).unwrap();
-        let cwd = std::env::current_dir().unwrap();
         let rel = pathdiff(&rootfs, &cwd);
+        assert!(!Path::new(&rel).is_absolute());
         let mut vm = crate::tests::test_vm();
         vm.root_disk = Some(disk(Some("cow"), Path::new(&rel), "raw"));
         let overlay = prepare(&mut vm, &t.0, true, None).unwrap().unwrap();
@@ -792,10 +806,12 @@ mod tests {
 
     /// A block device of this machine, if any (metadata only; opening it
     /// usually needs root).
+    #[cfg(unix)]
     fn some_block_device() -> Option<PathBuf> {
         std::fs::read_dir("/dev").ok()?.flatten().map(|e| e.path()).find(|p| is_block_device(p))
     }
 
+    #[cfg(unix)]
     #[test]
     fn block_devices_only_as_own_raw_disks() {
         let t = TempDir::new("blockdev");
@@ -872,11 +888,12 @@ mod tests {
         let mid = t.0.join("mid.qcow2");
         craft_qcow2(&mid, 1 << 20, Some((&raw_name, "raw")), data_file);
         let mid_name = mid.display().to_string();
+        let non_regular = if cfg!(windows) { t.0.as_path() } else { Path::new("/dev/null") };
         let cases = [
             ((raw_name.as_str(), ""), "without a backing format"),
             ((raw_name.as_str(), "vmdk"), "unsupported backing format"),
             (("nbd:localhost:10809", "raw"), "not a file path"),
-            (("/dev/null", "raw"), "not a regular file"),
+            ((non_regular.to_str().unwrap(), "raw"), "not a regular file"),
             ((mid_name.as_str(), "qcow2"), "external data file"),
         ];
         for ((name, format), want) in cases {

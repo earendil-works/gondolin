@@ -144,6 +144,12 @@ pub fn check_binary(vm: &VmConfig) -> Result<(), String> {
 
 /// Firecracker requires running the daemon as root (for the per-VM network
 /// namespace, tap device and jailer).
+#[cfg(windows)]
+pub fn require_root() -> Result<(), String> {
+    Err("vmm=firecracker requires Linux".into())
+}
+
+#[cfg(unix)]
 pub fn require_root() -> Result<(), String> {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -621,8 +627,10 @@ pub fn jailed(
 }
 
 /// Lines kept from the end of a Firecracker log file.
+#[cfg(unix)]
 const LOG_TAIL_LINES: usize = 20;
 /// Bytes read from the end of a Firecracker log file.
+#[cfg(unix)]
 const LOG_TAIL_BYTES: u64 = 16 * 1024;
 
 /// The last problem lines of the Firecracker log file at `path`
@@ -634,6 +642,12 @@ const LOG_TAIL_BYTES: u64 = 16 * 1024;
 /// VMM's file sits in a directory the jail's user can write, so a compromised
 /// VMM may have replaced it: only a regular file with a single link is read
 /// (not through a symlink, nor a FIFO that would block), and only its end.
+#[cfg(windows)]
+pub fn read_log_tail(_path: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
 pub fn read_log_tail(path: &Path) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -676,6 +690,7 @@ pub fn read_log_tail(path: &Path) -> Vec<String> {
 /// panic, an error or a failure, but not the guest kernel probing I/O ports
 /// with no device behind them (`vcpu: IO read @ 0x3e9:0x1 failed: Failed to
 /// find address range.`, its serial port probes on every boot).
+#[cfg(unix)]
 fn is_problem_log_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     let problem = ["panic", "error", "fail"].iter().any(|w| lower.contains(w));
@@ -719,6 +734,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_log_tail_is_read_from_a_plain_file_only() {
         let dir = std::env::temp_dir().join(format!("gondolin-fclog-{}", std::process::id()));

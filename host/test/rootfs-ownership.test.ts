@@ -8,6 +8,11 @@ import test from "node:test";
 import { createRootfsImage } from "../src/alpine/utils.ts";
 import type { RootfsOwnershipEntry } from "../src/alpine/types.ts";
 
+const skipWindowsRootfsOwnershipTest =
+  process.platform === "win32"
+    ? "rootfs ownership tests require POSIX shell/ext4 tool semantics"
+    : false;
+
 function writeStubCommand(binDir: string, name: string, body: string): string {
   const commandPath = path.join(binDir, name);
   fs.writeFileSync(commandPath, `#!/bin/sh\nset -eu\n${body}\n`, {
@@ -51,7 +56,9 @@ function captureDebugfsCommandFileScript(): string {
   ].join("\n");
 }
 
-test("rootfs image: applies OCI ownership metadata with debugfs for non-root builds", () => {
+test("rootfs image: applies OCI ownership metadata with debugfs for non-root builds", {
+  skip: skipWindowsRootfsOwnershipTest,
+}, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-rootfs-owners-"));
   const binDir = path.join(tmp, "bin");
   const rootfsDir = path.join(tmp, "rootfs");
@@ -137,7 +144,9 @@ test("rootfs image: applies OCI ownership metadata with debugfs for non-root bui
   }
 });
 
-test("rootfs image: ignores large debugfs stdout while applying OCI ownership metadata", () => {
+test("rootfs image: ignores large debugfs stdout while applying OCI ownership metadata", {
+  skip: skipWindowsRootfsOwnershipTest,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-debugfs-stdout-"),
   );
@@ -200,7 +209,9 @@ test("rootfs image: ignores large debugfs stdout while applying OCI ownership me
   }
 });
 
-test("rootfs image: includes debugfs stderr when ownership metadata fails", () => {
+test("rootfs image: includes debugfs stderr when ownership metadata fails", {
+  skip: skipWindowsRootfsOwnershipTest,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-debugfs-stderr-"),
   );

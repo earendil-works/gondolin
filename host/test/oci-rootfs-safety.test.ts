@@ -17,6 +17,16 @@ import {
 } from "../src/alpine/rootfs.ts";
 import { syncKernelModules } from "../src/alpine/kernel-modules.ts";
 
+const skipWindowsOciRuntimeTests =
+  process.platform === "win32"
+    ? "OCI docker runtime tests require POSIX shell/tar semantics"
+    : false;
+
+const skipWindowsAbsoluteSymlinkRewriteTest =
+  process.platform === "win32"
+    ? "Windows host symlink APIs rewrite absolute targets differently"
+    : false;
+
 interface TarFixtureEntry {
   /** tar entry path */
   name: string;
@@ -255,7 +265,9 @@ test("oci rootfs: tar ownership parser preserves uid/gid metadata", () => {
   }
 });
 
-test("oci rootfs: pullPolicy always tolerates large pull output", () => {
+test("oci rootfs: pullPolicy always tolerates large pull output", {
+  skip: skipWindowsOciRuntimeTests,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-large-pull-"),
   );
@@ -297,7 +309,9 @@ test("oci rootfs: pullPolicy always tolerates large pull output", () => {
   }
 });
 
-test("oci rootfs: pullPolicy never propagates non-missing runtime errors", () => {
+test("oci rootfs: pullPolicy never propagates non-missing runtime errors", {
+  skip: skipWindowsOciRuntimeTests,
+}, () => {
   const tmp = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-oci-runtime-fail-"),
   );
@@ -350,7 +364,9 @@ test("oci rootfs: hardenExtractedRootfs rejects escaping relative symlinks", () 
   }
 });
 
-test("oci rootfs: hardenExtractedRootfs rewrites absolute symlinks", () => {
+test("oci rootfs: hardenExtractedRootfs rewrites absolute symlinks", {
+  skip: skipWindowsAbsoluteSymlinkRewriteTest,
+}, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-symlink-"));
   const rootfsDir = path.join(tmp, "rootfs");
 

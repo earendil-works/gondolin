@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stages the multi-call `gondolin` (the static CLI; `gondolin daemon` or a
 // `gondolind` symlink is the daemon) into one of the packages/gondolin-native-*
-// packages.
+// packages. Windows ships the daemon-only `gondolind.exe` with the Node CLI.
 //
 // usage: node scripts/prepare-native-package.mjs --package <dir> [--binary <path>]
 //
@@ -17,6 +17,7 @@ const RUST_TARGETS = {
   "darwin-x64": "x86_64-apple-darwin",
   "linux-arm64": "aarch64-unknown-linux-musl",
   "linux-x64": "x86_64-unknown-linux-musl",
+  "win32-x64": "x86_64-pc-windows-msvc",
 };
 
 function parseArgs(argv) {
@@ -34,7 +35,22 @@ function parseArgs(argv) {
 
 /** `{ platform, arch, staticLinux }` from an executable's header. */
 function describeExecutable(buf) {
-  if (buf.length >= 20 && buf.readUInt32BE(0) === 0x7f454c46) {
+  if (buf.length >= 64 && buf.readUInt16LE(0) === 0x5a4d) {
+    const offset = buf.readUInt32LE(60);
+    if (
+      offset < 64 ||
+      offset + 6 > buf.length ||
+      buf.readUInt32LE(offset) !== 0x00004550
+    )
+      return null;
+    const machine = buf.readUInt16LE(offset + 4);
+    return {
+      platform: "win32",
+      arch: machine === 0x8664 ? "x64" : `pe-${machine}`,
+      staticLinux: false,
+    };
+  }
+  if (buf.length >= 64 && buf.readUInt32BE(0) === 0x7f454c46) {
     const machine = buf.readUInt16LE(18);
     const arch =
       machine === 0xb7 ? "arm64" : machine === 0x3e ? "x64" : `elf-${machine}`;
@@ -80,7 +96,9 @@ function main() {
     fs.rmSync(path.join(binDir, entry), { recursive: true, force: true });
   }
   const staged = [];
-  for (const [name, explicit] of [["gondolin", binaryPath]]) {
+  for (const [name, explicit] of [
+    [platform === "win32" ? "gondolind.exe" : "gondolin", binaryPath],
+  ]) {
     const source = path.resolve(
       explicit ?? path.join("native", "target", "dist", rustTarget, name),
     );

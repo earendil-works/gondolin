@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows-support]
   pull_request:
     branches: [main]
 
@@ -94,6 +94,103 @@ jobs:
           path: |
             native/target/release/gondolind
             native/target/release/gondolin
+          retention-days: 7
+
+  windows:
+    name: Windows x64 (native daemon + QEMU)
+    needs: [build-guest]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v3
+        with:
+          install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Install QEMU
+        run: |
+          choco install qemu --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:ProgramFiles\qemu" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build SDK
+        run: |
+          pnpm --filter @earendil-works/gondolin exec tsc --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --filter @earendil-works/gondolin run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node host/dist/bin/gondolin.js --help
+      - name: Check and test Windows native runtime
+        working-directory: native
+        env:
+          GONDOLIN_REQUIRE_QEMU_IMG: '1'
+        run: |
+          cargo clippy --locked -p gondolind --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p gondolind -p gondolin-qcow2 -p gondolin-assets -p gondolin-vfs -p gondolin-netstack -p gondolin-sshproxy --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p gondolin-qcow2 --test qemu
+      - name: Build Windows daemon
+        working-directory: native
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --release --locked -p gondolind --target x86_64-pc-windows-msvc
+      - uses: actions/download-artifact@v8
+        with:
+          name: gondolin-guest-x64
+          path: guest-artifact
+      - name: Prepare guest and daemon
+        run: |
+          New-Item -ItemType Directory -Force guest/image/out | Out-Null
+          tar -xzf guest-artifact/gondolin-guest-x64.tar.gz -C guest/image/out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "GONDOLIN_GUEST_DIR=$pwd/guest/image/out" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "GONDOLIN_NATIVE_BIN=$pwd/native/target/x86_64-pc-windows-msvc/release/gondolind.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Smoke test an explicitly selected accelerator
+        working-directory: host
+        run: |
+          $accel = & $env:GONDOLIN_NATIVE_BIN --probe-whpx qemu-system-x86_64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "QEMU runtime accelerator: $accel (q35/QMP probe)"
+          $env:GONDOLIN_TEST_ACCEL = $accel.Trim()
+          @'
+          import assert from 'node:assert/strict';
+          import { VM } from './src/vm/core.ts';
+          const accel = process.env.GONDOLIN_TEST_ACCEL;
+          assert.ok(accel === 'whpx' || accel === 'tcg');
+          const vm = await VM.create({ startTimeoutMs: 90000, sandbox: { accel, console: 'none' } });
+          try {
+            const result = await vm.exec(['/bin/sh', '-c', 'echo WINDOWS_NATIVE_OK; uname -m']);
+            assert.equal(result.exitCode, 0, result.stderr);
+            assert.match(result.stdout, /WINDOWS_NATIVE_OK\nx86_64/);
+            console.log(`${accel}-only guest execution passed (no accelerator fallback configured)`);
+          } finally { await vm.close(); }
+          '@ | node --input-type=module
+      - name: Run host tests
+        working-directory: host
+        env:
+          WS_TIMEOUT: '120000'
+        run: node --test --test-concurrency=1 test/*.test.ts
+      - name: Stage and smoke-test Windows package
+        run: |
+          node scripts/prepare-native-package.mjs --package packages/gondolin-native-win32-x64 --binary $env:GONDOLIN_NATIVE_BIN
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & packages/gondolin-native-win32-x64/bin/gondolind.exe --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gondolin-native-win32-x64
+          path: packages/gondolin-native-win32-x64/bin/gondolind.exe
+          if-no-files-found: error
           retention-days: 7
 
   native-deps:

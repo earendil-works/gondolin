@@ -503,6 +503,7 @@ dependencies = [
  "libc",
  "ring",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

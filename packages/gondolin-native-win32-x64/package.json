@@ -1,0 +1,18 @@
+{
+  "name": "@earendil-works/gondolin-native-win32-x64",
+  "version": "0.14.0",
+  "description": "Prebuilt Gondolin native engine daemon for Windows x64 (use the Node.js CLI)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/earendil-works/gondolin.git",
+    "directory": "packages/gondolin-native-win32-x64"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

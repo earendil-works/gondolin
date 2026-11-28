@@ -171,11 +171,38 @@ pub trait Storage {
 
 impl Storage for File {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        std::os::unix::fs::FileExt::read_at(self, buf, offset)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::FileExt::read_at(self, buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::FileExt::seek_read(self, buf, offset)
+        }
     }
 
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            let mut written = 0;
+            while written < buf.len() {
+                match std::os::windows::fs::FileExt::seek_write(
+                    self,
+                    &buf[written..],
+                    offset + written as u64,
+                ) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(n) => written += n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
     }
 
     fn len(&mut self) -> io::Result<u64> {
@@ -258,6 +285,18 @@ pub struct Info {
 /// specification (`nbd:...`, `json:{...}`) instead of a file path: a `:`
 /// before any `/` (`path_has_protocol`).
 pub fn has_protocol_prefix(name: &str) -> bool {
+    #[cfg(windows)]
+    if name.contains(':') {
+        use std::path::{Component, Prefix};
+        let path = Path::new(name);
+        // QEMU recognizes absolute drive paths, including canonical Win32
+        // verbatim paths. Do not admit URI schemes, drive-relative paths or
+        // NTFS alternate data streams as an exception to the protocol guard.
+        return !(path.is_absolute()
+            && name.bytes().filter(|b| *b == b':').count() == 1
+            && matches!(path.components().next(), Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))));
+    }
     name.find(':').is_some_and(|i| !name[..i].contains('/'))
 }
 
@@ -598,8 +637,18 @@ mod tests {
         assert!(has_protocol_prefix("json:{\"driver\":\"file\"}"));
         assert!(has_protocol_prefix("nbd:localhost:10809"));
         assert!(has_protocol_prefix("file:rootfs.ext4"));
-        assert!(!has_protocol_prefix("/img/a:b.qcow2"));
-        assert!(!has_protocol_prefix("dir/a:b"));
+        assert_eq!(has_protocol_prefix("/img/a:b.qcow2"), cfg!(windows));
+        assert_eq!(has_protocol_prefix("dir/a:b"), cfg!(windows));
+        for drive_path in
+            [r"C:\images\base.qcow2", "C:/images/base.qcow2", r"\\?\C:\images\base.qcow2"]
+        {
+            assert_eq!(has_protocol_prefix(drive_path), !cfg!(windows));
+        }
+        for unsafe_path in
+            ["nbd:localhost:10809", "C:relative.qcow2", r"C:\base.qcow2:stream", "json:{}"]
+        {
+            assert!(has_protocol_prefix(unsafe_path));
+        }
         assert!(!has_protocol_prefix("rootfs.ext4"));
     }
 

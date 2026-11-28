@@ -607,7 +607,7 @@ export class NativeVfs {
         ...args: never[]
       ) => unknown)
     ) {
-      return this.remote;
+      return this.remote || process.platform === "win32";
     }
     return false;
   }
@@ -735,6 +735,7 @@ export class NativeVfs {
             layers: [],
           };
         case "host":
+          if (!this.remote && process.platform === "win32") return null;
           this.daemonPaths.push(mark.root);
           return { source: { kind: "host", root: mark.root }, layers: [] };
         default:
@@ -771,7 +772,9 @@ export class NativeVfs {
         ...args: never[]
       ) => unknown)
     ) {
-      if (this.remote) return null;
+      // The native host provider uses Unix descriptor-relative operations.
+      // Preserve the Windows RealFSProvider's containment checks via RPC.
+      if (this.remote || process.platform === "win32") return null;
       return {
         source: {
           kind: "host",

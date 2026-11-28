@@ -89,7 +89,7 @@ test("image build: guest mount points and resolv.conf on /run", () => {
     }
     assert.equal(
       fs.readlinkSync(path.join(root, "etc/resolv.conf")),
-      "/run/resolv.conf",
+      path.resolve("/run/resolv.conf"),
     );
 
     // an image's own resolv.conf (OCI rootfs) is left alone

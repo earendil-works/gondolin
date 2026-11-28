@@ -27,6 +27,7 @@ pub trait FrameSocket: Send + Sync + 'static {
     }
 }
 
+#[cfg(unix)]
 impl FrameSocket for tokio::net::UnixDatagram {
     fn poll_recv_frame(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut rb = tokio::io::ReadBuf::new(buf);

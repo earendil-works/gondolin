@@ -813,7 +813,10 @@ async fn a_failed_spawn_is_reported_to_every_client() {
     let dir = std::env::temp_dir().join(format!("gondolind-spawn-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let vmm = dir.join("qemu-system-x86_64");
+    let vmm = dir.join(if cfg!(windows) { "qemu-system-x86_64.exe" } else { "qemu-system-x86_64" });
+    #[cfg(windows)]
+    std::fs::copy(std::env::var_os("ComSpec").expect("Windows command processor"), &vmm).unwrap();
+    #[cfg(unix)]
     std::fs::copy("/usr/bin/true", &vmm).unwrap();
     let vm = VmConfig { qemu_path: vmm.display().to_string(), ..test_vm() };
     let mut h = Harness::with_vm(Limits::default(), vm);
@@ -914,7 +917,6 @@ async fn checkpoint_export_waits_for_a_stopping_vmm() {
 /// Uploaded checkpoints are private files (mode 0600, not 0666 & umask).
 #[test]
 fn uploaded_checkpoints_are_private() {
-    use std::os::unix::fs::PermissionsExt;
     let mut h = Harness::new(Limits::default());
     h.msg("checkpoint_import", 9, map(vec![]));
     h.msg(
@@ -926,8 +928,12 @@ fn uploaded_checkpoints_are_private() {
     let res = frames.iter().find(|f| f.t == "checkpoint_import_result").unwrap();
     assert_eq!(Fields::of(&res.p).bool("ok"), Some(true));
     let path = h.s.ckpt.imported.clone().unwrap();
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     drop(h);
     assert!(!path.exists(), "an upload is removed with the session");
 }

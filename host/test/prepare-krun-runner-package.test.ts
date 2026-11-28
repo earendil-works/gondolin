@@ -12,7 +12,14 @@ const scriptPath = path.join(
   "prepare-krun-runner-package.mjs",
 );
 
-test("prepare-krun-runner-package materializes SONAME aliases for npm pack", () => {
+const skipWindowsKrunPackageTest =
+  process.platform === "win32"
+    ? "krun runner packaging is only relevant on Linux/macOS hosts"
+    : false;
+
+test("prepare-krun-runner-package materializes SONAME aliases for npm pack", {
+  skip: skipWindowsKrunPackageTest,
+}, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-package-test-"));
 
   try {

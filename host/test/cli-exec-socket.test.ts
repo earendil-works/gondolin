@@ -13,6 +13,24 @@ import {
 } from "../src/sandbox/control-protocol.ts";
 
 const hostDir = path.join(import.meta.dirname, "..");
+const endpoints = new Map<string, string>();
+
+async function listenSession(
+  server: net.Server,
+  socketPath: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    if (process.platform === "win32") server.listen(0, "127.0.0.1", resolve);
+    else server.listen(socketPath, resolve);
+  });
+  if (process.platform === "win32") {
+    endpoints.set(
+      socketPath,
+      `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`,
+    );
+  }
+}
 
 function runCli(args: string[]): Promise<{
   status: number | null;
@@ -20,11 +38,15 @@ function runCli(args: string[]): Promise<{
   stderr: string;
 }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["bin/gondolin.ts", ...args], {
-      cwd: hostDir,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      process.execPath,
+      ["bin/gondolin.ts", ...args.map((arg) => endpoints.get(arg) ?? arg)],
+      {
+        cwd: hostDir,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
@@ -103,11 +125,21 @@ test("cli exec --sock rejects unknown session ids", async () => {
 test("cli exec --sock reports connect failures", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-cli-exec-"));
   const socketPath = path.join(dir, "missing.sock");
+  if (process.platform === "win32") {
+    const server = net.createServer();
+    await listenSession(server, socketPath);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 1);
     assert.equal(result.stdout, "");
-    assert.match(result.stderr, /socket error: connect ENOENT/);
+    assert.match(
+      result.stderr,
+      process.platform === "win32"
+        ? /socket error: connect ECONNREFUSED/
+        : /socket error: connect ENOENT/,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -122,7 +154,7 @@ test("cli exec --sock fails when the session closes during an exec", async () =>
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 1);
@@ -249,7 +281,7 @@ test("cli exec --sock replenishes credits for large stdout and stderr", async ()
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli([
       "exec",
@@ -295,7 +327,7 @@ test("cli exec --sock ignores buffered output after its response", async () => {
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli(["exec", "--sock", socketPath, "--", "true"]);
     assert.equal(result.status, 0);
@@ -332,7 +364,7 @@ test("cli exec --sock ignores stale errors from a previous command", async () =>
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli([
       "exec",
@@ -399,7 +431,7 @@ test("cli exec --sock ignores stale frames from a previous command", async () =>
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli([
       "exec",
@@ -441,7 +473,7 @@ test("cli exec --sock runs commands sequentially and preserves the first failure
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  await listenSession(server, socketPath);
   try {
     const result = await runCli([
       "exec",

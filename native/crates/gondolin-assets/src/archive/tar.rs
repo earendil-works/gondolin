@@ -422,6 +422,7 @@ pub struct Stats {
 /// normalized (0644/0755 for files, 0755 for directories), ownership, times
 /// and extended attributes are not restored.
 pub fn extract<R: Read>(reader: R, dest: &Path, limits: Limits) -> io::Result<Stats> {
+    #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut archive = Archive::new(reader, limits);
     let mut stats = Stats::default();
@@ -443,6 +444,7 @@ pub fn extract<R: Read>(reader: R, dest: &Path, limits: Limits) -> io::Result<St
                     Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::create_dir(&path)?,
                     Err(e) => return Err(e),
                 }
+                #[cfg(unix)]
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
                 stats.dirs += 1;
             }
@@ -454,18 +456,29 @@ pub fn extract<R: Read>(reader: R, dest: &Path, limits: Limits) -> io::Result<St
                     )));
                 }
                 replace_non_dir(&path)?;
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(target, &path)?;
+                #[cfg(windows)]
+                {
+                    // Windows requires link type at creation, and permission to
+                    // create symlinks. Propagate errors rather than copying an
+                    // unchecked target or silently dropping the archive entry.
+                    if path.parent().unwrap().join(target).is_dir() {
+                        std::os::windows::fs::symlink_dir(target, &path)?;
+                    } else {
+                        std::os::windows::fs::symlink_file(target, &path)?;
+                    }
+                }
                 stats.symlinks += 1;
             }
             EntryKind::File => {
                 replace_non_dir(&path)?;
-                let mode = if entry.mode & 0o111 != 0 { 0o755 } else { 0o644 };
                 // create_new: never writes through a symlink planted meanwhile
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(mode)
-                    .open(&path)?;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                options.mode(if entry.mode & 0o111 != 0 { 0o755 } else { 0o644 });
+                let mut file = options.open(&path)?;
                 let mut written = 0u64;
                 loop {
                     let n = archive.read_content(&mut buf)?;

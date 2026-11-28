@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
+use crate::local::Stream as LocalStream;
 use gondolin_wire::Value;
-use tokio::net::UnixStream;
 
 use crate::controller::{Controller, Dispatcher};
 use crate::fields::Fields;
@@ -76,9 +76,11 @@ pub trait VfsBackend: Send + Sync + 'static {
 pub trait VirtioFsService: Send + Sync + 'static {
     /// Serves one vhost-user connection until the frontend disconnects
     /// (blocking; runs on its own thread).
+    #[cfg(unix)]
     fn serve(&self, conn: std::os::unix::net::UnixStream);
     /// Serves one FUSE-over-socket connection (`gondolin_virtiofs::socket`)
     /// until the VMM disconnects (blocking; runs on its own thread).
+    #[cfg(unix)]
     fn serve_socket(&self, conn: std::os::unix::net::UnixStream);
     /// Number of request queues (the device also has a high-priority queue).
     fn request_queues(&self) -> usize;
@@ -93,7 +95,7 @@ pub trait NetBackend: Send + Sync + 'static {
     /// Serves one QEMU stream-netdev connection until it closes. A new
     /// connection (QEMU restart) is served by a new call; the previous one is
     /// dropped first.
-    fn serve<'a>(&'a self, stream: UnixStream) -> crate::BoxFuture<'a, ()>;
+    fn serve<'a>(&'a self, stream: LocalStream) -> crate::BoxFuture<'a, ()>;
     /// Serves raw frames (Firecracker: a packet socket on the VM's tap) as
     /// one network session (flows, DHCP and ARP state) until the guest's
     /// side goes away (`Ok`), the socket fails (`Err`, the reason) or the

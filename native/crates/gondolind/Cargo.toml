@@ -13,7 +13,6 @@ gondolin-qcow2.workspace = true
 gondolin-proto.workspace = true
 gondolin-assets.workspace = true
 gondolin-vfs.workspace = true
-gondolin-virtiofs = { path = "../gondolin-virtiofs" }
 gondolin-netstack.workspace = true
 gondolin-egress.workspace = true
 gondolin-sshproxy.workspace = true
@@ -22,6 +21,13 @@ bytes.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 libc = "0.2"
 ring = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+gondolin-virtiofs = { path = "../gondolin-virtiofs" }
+
+[target.'cfg(windows)'.dependencies]
+# Already part of tokio's Windows dependency graph
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
 
 [features]
 default = ["djs-hooks"]

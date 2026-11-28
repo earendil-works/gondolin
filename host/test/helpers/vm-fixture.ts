@@ -1,12 +1,62 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
+import { buildQemuFamilyCandidates } from "../../src/qemu/locate-binary.ts";
+import {
+  nativeDaemonCommand,
+  resolveNativeBinary,
+} from "../../src/native/binary.ts";
+import type { LocalEndpoint } from "../../src/local-endpoint.ts";
+
+/**
+ * Build a LocalEndpoint for test fixtures: a unix socket at `posixPath` off
+ * Windows, or a reserved-by-the-OS ephemeral loopback TCP endpoint on
+ * Windows (where a bare unix path isn't valid - see local-endpoint.ts). This
+ * is the one place tests should branch on win32 vs unix transport for a
+ * throwaway test endpoint; call sites that need the socket at a specific
+ * path (e.g. inside a temp dir they clean up themselves) pass that path in.
+ */
+export function makeTestEndpoint(posixPath: string): LocalEndpoint {
+  return process.platform === "win32"
+    ? { transport: "tcp", host: "127.0.0.1", port: 0 }
+    : { transport: "unix", path: posixPath };
+}
+
+function hasWindowsWhpx(): boolean {
+  if (process.arch !== "x64") {
+    return false;
+  }
+
+  const candidates = buildQemuFamilyCandidates([
+    "qemu-system-x86_64",
+    "qemu-system-x86_64w",
+  ]);
+
+  for (const candidate of candidates) {
+    try {
+      // Exercise the runtime's exact q35/QMP handshake, not -accel help or
+      // process liveness. A timeout is never evidence of WHPX availability.
+      const [binary, ...args] = nativeDaemonCommand(resolveNativeBinary());
+      const probe = spawnSync(binary!, [...args, "--probe-whpx", candidate], {
+        timeout: 10000,
+        windowsHide: true,
+        encoding: "utf8",
+      });
+      if (probe.status === 0 && probe.stdout.trim() === "whpx") return true;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return false;
+}
 
 /**
  * Check if hardware virtualization is available.
  * On Linux, this checks for KVM. On macOS, HVF is always available.
+ * On Windows x64, this checks whether an installed QEMU can initialize WHPX.
  * Returns false for other platforms or when acceleration is unavailable.
  */
 export function hasHardwareAccel(): boolean {
@@ -20,6 +70,9 @@ export function hasHardwareAccel(): boolean {
     } catch {
       return false;
     }
+  }
+  if (process.platform === "win32") {
+    return hasWindowsWhpx();
   }
   return false;
 }

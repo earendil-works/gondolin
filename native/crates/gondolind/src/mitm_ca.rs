@@ -58,15 +58,17 @@ pub fn load_or_create(dir: &Path) -> Result<MitmCaPem, String> {
 
 fn write_atomic(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(windows)]
+    let _ = mode;
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let res = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(mode);
+        let mut f = options.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)

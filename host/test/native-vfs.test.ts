@@ -73,23 +73,33 @@ test("native vfs translates providers into native mounts", (t) => {
   });
   const m = mountsOf(vfs);
   const real = fs.realpathSync(dir);
-  assert.deepEqual(m.get("/host"), {
-    path: "/host",
-    kind: "host",
-    root: real,
-    layers: [],
-  });
-  assert.deepEqual(m.get("/ro-host")!.layers, [{ kind: "readonly" }]);
-  assert.equal(m.get("/hidden")!.kind, "host");
-  assert.deepEqual(m.get("/hidden")!.layers, [
-    {
-      kind: "hide",
-      paths: ["/node_modules", "/.env"],
-      write_mode: "tmpfs",
-      deny_write_errno: "EACCES",
-      deny_symlink_bypass: true,
-    },
-  ]);
+  if (process.platform === "win32") {
+    // Windows keeps containment, readonly and hide policy in the SDK providers
+    for (const name of ["/host", "/ro-host", "/hidden"]) {
+      assert.equal(m.get(name)!.kind, "object");
+      assert.deepEqual(m.get(name)!.layers, []);
+      assert.equal(m.get(name)!.cache.revalidate_open, true);
+    }
+    assert.equal(m.get("/ro-host")!.writable, false);
+  } else {
+    assert.deepEqual(m.get("/host"), {
+      path: "/host",
+      kind: "host",
+      root: real,
+      layers: [],
+    });
+    assert.deepEqual(m.get("/ro-host")!.layers, [{ kind: "readonly" }]);
+    assert.equal(m.get("/hidden")!.kind, "host");
+    assert.deepEqual(m.get("/hidden")!.layers, [
+      {
+        kind: "hide",
+        paths: ["/node_modules", "/.env"],
+        write_mode: "tmpfs",
+        deny_write_errno: "EACCES",
+        deny_symlink_bypass: true,
+      },
+    ]);
+  }
   // an arbitrary predicate cannot be evaluated natively
   assert.equal(m.get("/custom")!.kind, "object");
   // user-visible memory providers stay the source of truth
@@ -110,7 +120,7 @@ test("native vfs translates providers into native mounts", (t) => {
   assert.ok(vfs.servedByDaemon("/scratch/x"));
   assert.ok(vfs.servedByDaemon("/objects"));
   assert.ok(!vfs.servedByDaemon("/shared/x"));
-  assert.ok(!vfs.servedByDaemon("/host/x"));
+  assert.equal(vfs.servedByDaemon("/host/x"), process.platform === "win32");
 });
 
 test("native vfs keeps controller-local paths out of remote sessions", (t) => {

@@ -316,8 +316,8 @@ impl Store {
         let tmp = link.with_file_name(format!("{arch}.tmp-{}", random_suffix()));
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &tmp).map_err(|e| AssetsError::io(&tmp, e))?;
-        #[cfg(not(unix))]
-        return Err(AssetsError::invalid("image refs require symlink support"));
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target, &tmp).map_err(|e| AssetsError::io(&tmp, e))?;
         fs::rename(&tmp, &link).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             AssetsError::io(&link, e)

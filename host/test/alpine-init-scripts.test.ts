@@ -17,6 +17,8 @@ test("rootfs init uses current uv system certificates environment variable", () 
 });
 
 test("rootfs init creates standard /dev symlinks idempotently", (t) => {
+  if (process.platform === "win32")
+    return t.skip("requires POSIX /proc symlinks");
   const start = ROOTFS_INIT_SCRIPT.indexOf("for dev_link in");
   const end = ROOTFS_INIT_SCRIPT.indexOf("done\n", start) + "done\n".length;
   assert.ok(start >= 0 && end > start);
@@ -206,6 +208,8 @@ for (const [name, script] of [
   ["initramfs", INITRAMFS_INIT_SCRIPT],
 ] as const) {
   test(`${name} init parses gondolin.vsock like the guest helpers`, (t) => {
+    if (process.platform === "win32")
+      return t.skip("requires POSIX shell PATH stubs");
     const cases: [string, string][] = [
       ["console=ttyS0 initramfs_async=1", "0"],
       ["console=ttyS0 gondolin.vsock", "1"],

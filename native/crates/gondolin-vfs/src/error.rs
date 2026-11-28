@@ -148,7 +148,32 @@ pub mod errno {
         {
             host
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            // raw_os_error is a Win32 status, not a CRT/POSIX errno.
+            use std::io::{Error, ErrorKind};
+            match Error::from_raw_os_error(host).kind() {
+                ErrorKind::NotFound => ENOENT,
+                ErrorKind::PermissionDenied => EACCES,
+                ErrorKind::AlreadyExists => EEXIST,
+                ErrorKind::WouldBlock => EAGAIN,
+                ErrorKind::InvalidInput | ErrorKind::InvalidData => EINVAL,
+                ErrorKind::NotADirectory => ENOTDIR,
+                ErrorKind::IsADirectory => EISDIR,
+                ErrorKind::DirectoryNotEmpty => ENOTEMPTY,
+                ErrorKind::StorageFull => ENOSPC,
+                ErrorKind::ReadOnlyFilesystem => EROFS,
+                ErrorKind::CrossesDevices => EXDEV,
+                ErrorKind::FileTooLarge => EFBIG,
+                ErrorKind::BrokenPipe => EPIPE,
+                ErrorKind::TimedOut => ETIMEDOUT,
+                ErrorKind::Interrupted => EINTR,
+                ErrorKind::Unsupported => ENOSYS,
+                ErrorKind::OutOfMemory => ENOMEM,
+                _ => EIO,
+            }
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             use libc as l;
             let table: &[(i32, i32)] = &[
@@ -262,10 +287,32 @@ impl fmt::Display for VfsError {
 
 impl std::error::Error for VfsError {}
 
+#[cfg(unix)]
 impl From<crate::sys::Errno> for VfsError {
     fn from(err: crate::sys::Errno) -> Self {
         let value = errno::from_host(err.raw_os_error());
         VfsError::new(value, errno::name(value))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn win32_errors_are_not_posix_errno_values() {
+        for (win32, linux) in [
+            (2, errno::ENOENT),
+            (3, errno::ENOENT),
+            (5, errno::EACCES),
+            (80, errno::EEXIST),
+            (112, errno::ENOSPC),
+            (145, errno::ENOTEMPTY),
+        ] {
+            assert_eq!(
+                VfsError::from_io(&io::Error::from_raw_os_error(win32), "open", "/file").errno,
+                linux
+            );
+        }
     }
 }
 

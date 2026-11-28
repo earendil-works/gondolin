@@ -190,10 +190,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@earendil-works/gondolin':
-        specifier: workspace:*
-        version: link:host
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.15
@@ -242,6 +238,8 @@ importers:
   packages/gondolin-native-linux-arm64: {}
 
   packages/gondolin-native-linux-x64: {}
+
+  packages/gondolin-native-win32-x64: {}
 
 packages:
 

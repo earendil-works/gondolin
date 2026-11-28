@@ -1,11 +1,20 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 
 import { getHostNodeArchCached, normalizeArchitecture } from "../host/arch.ts";
+import {
+  createDefaultLocalEndpoint,
+  normalizeLocalEndpoint,
+  type LocalEndpoint,
+  type LocalEndpointInput,
+} from "../local-endpoint.ts";
+import {
+  buildQemuFamilyCandidates,
+  resolveFromQemuFamilyCandidates,
+  type ResolveQemuFamilyBinaryDeps,
+} from "../qemu/locate-binary.ts";
 import {
   debugFlagsToArray,
   parseDebugEnv,
@@ -94,17 +103,17 @@ export type SandboxServerOptions = {
   memory?: string;
   /** vm cpu count */
   cpus?: number;
-  /** virtio-serial control socket path */
-  virtioSocketPath?: string;
-  /** virtiofs/vfs socket path */
-  virtioFsSocketPath?: string;
-  /** virtio-serial ssh socket path */
-  virtioSshSocketPath?: string;
+  /** virtio-serial control endpoint */
+  virtioSocketPath?: LocalEndpointInput;
+  /** virtiofs/vfs endpoint */
+  virtioFsSocketPath?: LocalEndpointInput;
+  /** virtio-serial ssh endpoint */
+  virtioSshSocketPath?: LocalEndpointInput;
 
-  /** virtio-serial ingress socket path */
-  virtioIngressSocketPath?: string;
-  /** qemu net socket path */
-  netSocketPath?: string;
+  /** virtio-serial ingress endpoint */
+  virtioIngressSocketPath?: LocalEndpointInput;
+  /** qemu net backend endpoint */
+  netSocketPath?: LocalEndpointInput;
   /** guest mac address */
   netMac?: string;
   /** whether to enable networking */
@@ -222,17 +231,17 @@ export type ResolvedSandboxServerOptions = {
   memory: string;
   /** vm cpu count */
   cpus: number;
-  /** virtio-serial control socket path */
-  virtioSocketPath: string;
-  /** virtiofs/vfs socket path */
-  virtioFsSocketPath: string;
-  /** virtio-serial ssh socket path */
-  virtioSshSocketPath: string;
+  /** virtio-serial control endpoint */
+  virtioSocketPath: LocalEndpoint;
+  /** virtiofs/vfs endpoint */
+  virtioFsSocketPath: LocalEndpoint;
+  /** virtio-serial ssh endpoint */
+  virtioSshSocketPath: LocalEndpoint;
 
-  /** virtio-serial ingress socket path */
-  virtioIngressSocketPath: string;
-  /** qemu net socket path */
-  netSocketPath: string;
+  /** virtio-serial ingress endpoint */
+  virtioIngressSocketPath: LocalEndpoint;
+  /** qemu net backend endpoint */
+  netSocketPath: LocalEndpoint;
   /** guest mac address */
   netMac: string;
   /** whether networking is enabled */
@@ -414,6 +423,7 @@ function normalizeQemuIdlePauseMs(value: number): number | undefined {
 function resolveQemuIdlePauseMs(
   options: SandboxServerOptions,
   vmm: SandboxVmm,
+  accel?: string,
 ): number | undefined {
   if (options.qemuIdlePauseMs !== undefined) {
     return normalizeQemuIdlePauseMs(options.qemuIdlePauseMs);
@@ -423,7 +433,7 @@ function resolveQemuIdlePauseMs(
     return undefined;
   }
 
-  const accelName = (options.accel ?? "")
+  const accelName = (accel ?? options.accel ?? "")
     .split(",", 1)[0]!
     .trim()
     .toLowerCase();
@@ -432,6 +442,34 @@ function resolveQemuIdlePauseMs(
   }
 
   return DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS;
+}
+
+type ResolveDefaultQemuPathDeps = ResolveQemuFamilyBinaryDeps & {
+  /** @deprecated use `probeBinary` */
+  probeQemuBinary?: (candidatePath: string) => boolean;
+};
+
+function buildDefaultQemuCandidates(
+  targetArch: "arm64" | "x64",
+  deps: ResolveDefaultQemuPathDeps = {},
+): string[] {
+  const platform = deps.platform ?? process.platform;
+  const archName = targetArch === "arm64" ? "aarch64" : "x86_64";
+  const baseName = `qemu-system-${archName}`;
+  const names = platform === "win32" ? [baseName, `${baseName}w`] : [baseName];
+
+  return buildQemuFamilyCandidates(names, deps);
+}
+
+function resolveDefaultQemuPath(
+  targetArch: "arm64" | "x64",
+  deps: ResolveDefaultQemuPathDeps = {},
+): string {
+  const candidates = buildDefaultQemuCandidates(targetArch, deps);
+  return resolveFromQemuFamilyCandidates(candidates, {
+    ...deps,
+    probeBinary: deps.probeBinary ?? deps.probeQemuBinary,
+  });
 }
 
 function resolveLocalKrunRunnerPath(): string | null {
@@ -894,6 +932,8 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
  * @param assets Optional pre-resolved guest assets (from ensureGuestAssets)
  */
 type ResolveSandboxServerOptionsDeps = {
+  /** test-only override for default qemu binary resolution */
+  resolveDefaultQemuPath?: (targetArch: "arm64" | "x64") => string;
   /** test-only override for default krun runner resolution */
   resolveDefaultKrunRunnerPath?: () => string;
   /** override for the installed krun runner used by default backend selection (`null`: none) */
@@ -946,36 +986,22 @@ export function resolveSandboxServerOptions(
   const baseInitrdPath = resolvedAssets.initrdPath;
   const rootfsPath = resolvedAssets.rootfsPath;
 
-  // we are running into length limits on macos on the default temp dir
-  const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
-  const defaultVirtio = path.resolve(
-    tmpDir,
-    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`,
+  const defaultVirtio = createDefaultLocalEndpoint("gondolin-virtio");
+  const defaultVirtioFs = createDefaultLocalEndpoint("gondolin-virtio-fs");
+  const defaultVirtioSsh = createDefaultLocalEndpoint("gondolin-virtio-ssh");
+  const defaultVirtioIngress = createDefaultLocalEndpoint(
+    "gondolin-virtio-ingress",
   );
-  const defaultVirtioFs = path.resolve(
-    tmpDir,
-    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioSsh = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioIngress = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultNetSock = path.resolve(
-    tmpDir,
-    `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
-  );
+  const defaultNetSock = createDefaultLocalEndpoint("gondolin-net");
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
   const hostArchNormalized = normalizeArch(hostArch);
-  const defaultQemuForHostArch =
-    hostArchNormalized === "arm64"
-      ? "qemu-system-aarch64"
-      : "qemu-system-x86_64";
+  const resolveDefaultQemuPathFn =
+    deps.resolveDefaultQemuPath ?? resolveDefaultQemuPath;
+  const defaultQemuForHostArch = resolveDefaultQemuPathFn(
+    hostArchNormalized === "arm64" ? "arm64" : "x64",
+  );
   const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
@@ -1097,10 +1123,7 @@ export function resolveSandboxServerOptions(
     options.qemuPath === undefined &&
     guestFromManifest !== null
   ) {
-    qemuPath =
-      guestFromManifest.arch === "arm64"
-        ? "qemu-system-aarch64"
-        : "qemu-system-x86_64";
+    qemuPath = resolveDefaultQemuPathFn(guestFromManifest.arch);
   }
 
   if (vmm === "qemu") {
@@ -1152,6 +1175,10 @@ export function resolveSandboxServerOptions(
     maxQueuedStdinBytes,
   );
 
+  // Runtime acceleration is resolved by the daemon on the VMM's host,
+  // which may differ from the SDK's host for remote sessions
+  const resolvedAccel = options.accel;
+
   return {
     vmm,
     qemuPath,
@@ -1166,22 +1193,36 @@ export function resolveSandboxServerOptions(
     rootDiskReadOnly,
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 2,
-    virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
-    virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
-    virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
-    virtioIngressSocketPath:
+    virtioSocketPath: normalizeLocalEndpoint(
+      options.virtioSocketPath ?? defaultVirtio,
+      "sandbox.virtioSocketPath",
+    ),
+    virtioFsSocketPath: normalizeLocalEndpoint(
+      options.virtioFsSocketPath ?? defaultVirtioFs,
+      "sandbox.virtioFsSocketPath",
+    ),
+    virtioSshSocketPath: normalizeLocalEndpoint(
+      options.virtioSshSocketPath ?? defaultVirtioSsh,
+      "sandbox.virtioSshSocketPath",
+    ),
+    virtioIngressSocketPath: normalizeLocalEndpoint(
       options.virtioIngressSocketPath ?? defaultVirtioIngress,
-    netSocketPath: options.netSocketPath ?? defaultNetSock,
+      "sandbox.virtioIngressSocketPath",
+    ),
+    netSocketPath: normalizeLocalEndpoint(
+      options.netSocketPath ?? defaultNetSock,
+      "sandbox.netSocketPath",
+    ),
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
     allowWebSockets: options.allowWebSockets ?? true,
     debug,
     machineType: options.machineType,
-    accel: options.accel,
+    accel: resolvedAccel,
     cpu,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
-    qemuIdlePauseMs: resolveQemuIdlePauseMs(options, vmm),
+    qemuIdlePauseMs: resolveQemuIdlePauseMs(options, vmm, resolvedAccel),
     append: options.append,
     tmpfs:
       options.tmpfs === undefined
@@ -1230,6 +1271,7 @@ export async function resolveSandboxServerOptionsAsync(
 }
 
 export const __test = {
+  resolveDefaultQemuPath,
   probeKrunRunnerCandidate,
   resolvePackagedKrunRunnerPath,
   resolveDefaultKrunRunnerPath,

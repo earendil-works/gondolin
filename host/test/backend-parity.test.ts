@@ -101,6 +101,11 @@ async function skipIfBackendUnavailable(
   t: test.TestContext,
   backend: BackendName,
 ): Promise<boolean> {
+  if (process.platform === "win32" && backend === "krun") {
+    t.skip("krun is not supported on Windows hosts");
+    return true;
+  }
+
   if (shouldSkipVmTests()) {
     t.skip("hardware virtualization unavailable");
     return true;
@@ -325,6 +330,8 @@ for (const backend of backends) {
       execFile(
         "ssh",
         [
+          // This command has no stdin; do not leave OpenSSH waiting on the pipe
+          "-n",
           "-p",
           String(access.port),
           "-i",
@@ -350,9 +357,15 @@ for (const backend of backends) {
           "ssh-ok",
         ],
         { timeout: 20000 },
-        (err, stdout) => {
-          if (err) reject(err);
-          else resolve(stdout);
+        (err, stdout, stderr) => {
+          if (err) {
+            reject(
+              new Error(
+                `${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`,
+                { cause: err },
+              ),
+            );
+          } else resolve(stdout);
         },
       );
     });

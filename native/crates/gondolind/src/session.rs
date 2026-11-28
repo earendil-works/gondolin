@@ -166,6 +166,7 @@ impl Drop for VirtioFsRuntime {
 /// Listens for the VMM's virtio-fs connection (one at a time; a restarted
 /// VMM reconnects) and serves it on a dedicated thread: vhost-user for QEMU,
 /// FUSE over the socket (`fuse_socket`) for krun.
+#[cfg(unix)]
 fn spawn_virtiofs(
     path: &std::path::Path,
     service: Arc<dyn crate::subsystem::VirtioFsService>,
@@ -632,6 +633,20 @@ impl Session {
     }
 
     pub(crate) fn apply_configure(&mut self, mut cfg: Configure) -> Result<(), String> {
+        if self.host.os == "windows" && !qemu::uses_qemu(&cfg.vm) {
+            return Err("Windows hosts require vmm=qemu".into());
+        }
+        if let Some(accel) =
+            qemu::resolve_windows_accel(&cfg.vm, &self.host, crate::whpx::available)
+        {
+            if accel == "tcg" {
+                self.ctl.send(ps::LOG, 0, &ps::Log {
+                    component: "warning".into(),
+                    message: "Using QEMU TCG software emulation on Windows (WHPX unavailable or cross-architecture guest); startup and execution will be slower. See https://www.qemu.org/docs/master/system/whpx.html".into(),
+                });
+            }
+            cfg.vm.accel = Some(accel.into());
+        }
         match cfg.vm.vmm.as_deref() {
             None | Some("qemu") => {
                 if cfg.vm.qemu_path.is_empty() {
@@ -825,6 +840,14 @@ impl Session {
             );
             forwarders.push(fwd);
         }
+        // Windows listeners bind ephemeral loopback ports rather than the
+        // requested Unix paths. Pass the bound endpoints to QEMU.
+        let chardevs = ChardevPaths {
+            control: ports[0].path.clone(),
+            fs: ports[1].path.clone(),
+            ssh: ports[2].path.clone(),
+            ingress: ports[3].path.clone(),
+        };
         let dispatch =
             Arc::new(FwdDispatch { ssh: forwarders[0].clone(), ingress: forwarders[1].clone() });
         for t in [
@@ -859,7 +882,7 @@ impl Session {
             }
             NetSetup::Native(backend) => {
                 let p = path("net.sock");
-                let listener = tokio::net::UnixListener::bind(&p)
+                let (listener, p) = crate::local::bind(&p)
                     .map_err(|e| format!("cannot listen on the netdev socket: {e}"))?;
                 let backend = backend.clone();
                 let task = tokio::spawn(async move {
@@ -877,7 +900,11 @@ impl Session {
             }
             _ => (None, None),
         };
-        let qmp_path = self.idle.enabled().then(|| path("qmp.sock"));
+        let qmp_path = if self.idle.enabled() {
+            Some(crate::local::qmp_endpoint(&path("qmp.sock")).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
         let virtiofs = self.setup_virtiofs(&path("virtiofs.sock"))?;
         self.runtime = Some(Runtime {
             chardevs,
@@ -902,6 +929,12 @@ impl Session {
     /// Serves the VFS over virtio-fs when the backend offers it and the QEMU
     /// binary supports vhost-user-fs with shared RAM; otherwise the guest
     /// keeps using sandboxfs over virtio-serial.
+    #[cfg(windows)]
+    fn setup_virtiofs(&self, _sock: &std::path::Path) -> Result<Option<VirtioFsRuntime>, String> {
+        Ok(None)
+    }
+
+    #[cfg(unix)]
     fn setup_virtiofs(&self, sock: &std::path::Path) -> Result<Option<VirtioFsRuntime>, String> {
         let Some(service) = self.vfs.as_ref().and_then(|v| v.virtio_fs()) else {
             return Ok(None);
@@ -1905,6 +1938,7 @@ fn next_tap_id() -> u32 {
 
 /// Creates the private socket directory (mode 0700). macOS uses `/tmp`
 /// because of the short `sun_path` limit.
+#[cfg(unix)]
 fn make_socket_dir() -> std::io::Result<SocketDir> {
     let base: PathBuf = if cfg!(target_os = "macos") {
         PathBuf::from("/tmp")
@@ -1924,4 +1958,22 @@ fn make_socket_dir() -> std::io::Result<SocketDir> {
     // SAFETY: mkdtemp only replaced the XXXXXX with filename characters.
     let path = PathBuf::from(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(bytes) });
     Ok(SocketDir(path))
+}
+
+#[cfg(windows)]
+fn make_socket_dir() -> std::io::Result<SocketDir> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let random = SystemRandom::new();
+    for _ in 0..32 {
+        let mut nonce = [0u8; 16];
+        random.fill(&mut nonce).map_err(|_| std::io::Error::other("secure random failed"))?;
+        let suffix: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("gondolind-{suffix}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(SocketDir(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("cannot allocate private session directory"))
 }

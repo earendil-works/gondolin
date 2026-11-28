@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
+import {
+  __test as serverOptionsTest,
+  resolveSandboxServerOptions,
+} from "../src/sandbox/server-options.ts";
 
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
@@ -100,18 +103,48 @@ test("resolveSandboxServerOptions auto-selects qemu binary from guest image arch
   const dir = makeTempAssetsDir(guestArch);
 
   try {
-    const resolved = resolveSandboxServerOptions({
-      imagePath: dir,
-      vmm: "qemu",
-    });
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        vmm: "qemu",
+      },
+      undefined,
+      {
+        resolveDefaultQemuPath: (targetArch) =>
+          targetArch === "arm64" ? "chosen-aarch64" : "chosen-x86_64",
+      },
+    );
 
     assert.equal(
       resolved.qemuPath,
-      guestArch === "aarch64" ? "qemu-system-aarch64" : "qemu-system-x86_64",
+      guestArch === "aarch64" ? "chosen-aarch64" : "chosen-x86_64",
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveDefaultQemuPath prefers Windows w-suffixed PATH binary when available", () => {
+  const resolved = serverOptionsTest.resolveDefaultQemuPath("x64", {
+    platform: "win32",
+    env: { ProgramFiles: "C:\\Program Files" } as NodeJS.ProcessEnv,
+    existsSync: () => false,
+    probeQemuBinary: (candidate: string) => candidate === "qemu-system-x86_64w",
+  });
+
+  assert.equal(resolved, "qemu-system-x86_64w");
+});
+
+test("resolveDefaultQemuPath falls back to standard Program Files install on Windows", () => {
+  const qemuPath = "C:\\Program Files\\qemu\\qemu-system-x86_64.exe";
+  const resolved = serverOptionsTest.resolveDefaultQemuPath("x64", {
+    platform: "win32",
+    env: { ProgramFiles: "C:\\Program Files" } as NodeJS.ProcessEnv,
+    existsSync: (candidate) => candidate === qemuPath,
+    probeQemuBinary: (candidate: string) => candidate === qemuPath,
+  });
+
+  assert.equal(resolved, qemuPath);
 });
 
 test("resolveSandboxServerOptions allows matching guest/qemu arch", () => {

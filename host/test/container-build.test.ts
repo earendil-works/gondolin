@@ -15,6 +15,11 @@ const SANDBOX_HELPER_NAMES = [
   "sandboxingress",
 ] as const;
 
+const skipWindowsContainerBuildTests =
+  process.platform === "win32"
+    ? "container build stub tests require POSIX shell/docker semantics"
+    : false;
+
 function createSandboxHelpersDir(root: string): string {
   const helpersDir = path.join(root, "helpers");
   const binDir = path.join(helpersDir, "bin");
@@ -37,7 +42,9 @@ function setEnv(name: string, value: string | undefined): void {
   }
 }
 
-test("builder: container build stages helpers and does not install Zig", async () => {
+test("builder: container build stages helpers and does not install Zig", {
+  skip: skipWindowsContainerBuildTests,
+}, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -221,7 +228,9 @@ process.exit(0);
   }
 });
 
-test("builder: container build uses --privileged when postBuild commands are configured", async () => {
+test("builder: container build uses --privileged when postBuild commands are configured", {
+  skip: skipWindowsContainerBuildTests,
+}, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -350,7 +359,9 @@ process.exit(0);
   }
 });
 
-test("builder: container build stages postBuild.copy sources under /work", async () => {
+test("builder: container build stages postBuild.copy sources under /work", {
+  skip: skipWindowsContainerBuildTests,
+}, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
@@ -498,7 +509,9 @@ process.exit(0);
   }
 });
 
-test("builder: container build preserves postBuild.copy symlinks", async () => {
+test("builder: container build preserves postBuild.copy symlinks", {
+  skip: skipWindowsContainerBuildTests,
+}, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-docker-stub-"));
   const stubDir = path.join(tmp, "bin");
   fs.mkdirSync(stubDir, { recursive: true });
