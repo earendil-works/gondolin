@@ -132,6 +132,8 @@ jobs:
           node host/dist/bin/gondolin.js --help
       - name: Check and test Windows native runtime
         working-directory: native
+        env:
+          GONDOLIN_REQUIRE_QEMU_IMG: '1'
         run: |
           cargo clippy --locked -p gondolind --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

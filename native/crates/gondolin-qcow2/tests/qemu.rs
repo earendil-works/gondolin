@@ -10,7 +10,8 @@ use gondolin_qcow2::{self as qcow2, Format};
 
 fn tool(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
+    let name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    std::env::split_paths(&path).map(|d| d.join(&name)).find(|p| p.is_file())
 }
 
 /// Skips the test when a tool is missing, or fails it with
@@ -353,10 +354,14 @@ fn grow_matches_qemu() {
 fn set_backing_like_rebase_unsafe() {
     need!("qemu-img");
     let dir = tempfile::tempdir().unwrap();
-    // a long but real backing path (~900 bytes)
+    // A long but real backing path. QEMU's Windows build caps backing names
+    // at MAX_PATH; still exercise growing/shrinking names there, and retain
+    // the ~900-byte interop case on Unix. Header capacity is tested below
+    // with a separate oversized name on every platform.
     let mut long = dir.path().to_path_buf();
-    while long.as_os_str().len() < 850 {
-        long = long.join("d".repeat(100));
+    let (min_len, component_len) = if cfg!(windows) { (180, 32) } else { (850, 100) };
+    while long.as_os_str().len() < min_len {
+        long = long.join("d".repeat(component_len));
     }
     std::fs::create_dir_all(&long).unwrap();
     let backing = long.join("rootfs.ext4");
@@ -420,7 +425,8 @@ fn set_backing_like_rebase_unsafe() {
         ],
     );
     let before = std::fs::read(&small).unwrap();
-    let err = qcow2::set_backing(&small, Some((s(&backing), Format::Raw))).unwrap_err();
+    let oversized = format!("{}/rootfs.ext4", "/oversized".repeat(85));
+    let err = qcow2::set_backing(&small, Some((&oversized, Format::Raw))).unwrap_err();
     assert!(err.message.contains("first cluster"), "{err}");
     assert!(std::fs::read(&small).unwrap() == before);
 }
