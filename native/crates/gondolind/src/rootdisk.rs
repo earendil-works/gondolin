@@ -674,11 +674,16 @@ mod tests {
 
     #[test]
     fn relative_rootfs_paths_become_absolute_backing_names() {
-        let t = TempDir::new("relative");
+        let cwd = std::env::current_dir().unwrap();
+        // Windows runners keep the checkout on D: and TEMP on C:. Relative
+        // paths cannot cross volumes; create this fixture under the cwd.
+        let dir = cwd.join(format!(".gondolind-rootdisk-relative-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let t = TempDir(dir);
         let rootfs = t.0.join("rootfs.ext4");
         std::fs::write(&rootfs, vec![0u8; 65536]).unwrap();
-        let cwd = std::env::current_dir().unwrap();
         let rel = pathdiff(&rootfs, &cwd);
+        assert!(!Path::new(&rel).is_absolute());
         let mut vm = crate::tests::test_vm();
         vm.root_disk = Some(disk(Some("cow"), Path::new(&rel), "raw"));
         let overlay = prepare(&mut vm, &t.0, true, None).unwrap().unwrap();
